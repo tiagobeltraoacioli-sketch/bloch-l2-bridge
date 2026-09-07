@@ -16,9 +16,19 @@
 //! * **cross-branch credit dedup**: a DURABLE, branch-independent
 //!   `credited` set records every deposit_id ever announced
 //!   [`WatcherUpdate::Creditable`]. It is NEVER cleared on rewind, so a
-//!   reorg + re-mine of the same deposit tx (new `l1_block_hash`, new
-//!   sourceHash) can NOT re-emit `Creditable` — one deposit_id, one
-//!   credit, ever (the reorg ALARM still fires; see below);
+//!   reorg + re-mine of the same deposit tx (new `l1_block_hash`) can NOT
+//!   re-emit `Creditable` — one deposit_id, one credit, ever (the reorg
+//!   ALARM still fires; see below). This set is DEFENCE IN DEPTH, not the
+//!   only barrier: the L2 mint's own identity MUST be derived from
+//!   `deposit_id` ([`DepositEvent::deposit_id`]) alone — never from the
+//!   block hash — so that the derivation rule is idempotent per deposit by
+//!   construction and a lost or rolled-back watcher state cannot, on its
+//!   own, mint twice;
+//! * **zero-recipient rule**: an envelope naming the all-zero L2 address is
+//!   treated as NO valid envelope (layer no-op). Minting to `address(0)` is
+//!   an unrecoverable burn on L2 while the BLCH sits in the vault as an
+//!   ownerless surplus; refusing it here leaves the vault payment under
+//!   §5's published refund policy, like any envelope-less payment;
 //! * **persistence**: the whole watcher state is serde-serializable
 //!   ([`WatcherState`], [`DepositWatcher::state`] /
 //!   [`DepositWatcher::from_state`]) so a HOST can persist it across
@@ -206,6 +216,15 @@ pub enum WatcherUpdate {
     /// at most once per deposit_id EVER — the durable, branch-independent
     /// `credited` set survives rewinds, so a reorg + re-mine of the same
     /// deposit can never mint twice. NOT finality (§5).
+    ///
+    /// HOST CONTRACT: the L2 credit minted against this MUST be idempotent
+    /// on [`DepositEvent::deposit_id`] (txid, vout) — never keyed on
+    /// `l1_block_hash`. With that, either persistence order is safe:
+    /// persisting [`DepositWatcher::state`] before acting cannot lose the
+    /// credit (the mint is retried by id), and persisting after acting
+    /// cannot double-mint (the mint is deduped by id). Without it, this
+    /// watcher's `credited` set is the ONLY thing standing between a
+    /// reorg + re-mine and a second mint.
     Creditable { deposit: DepositEvent },
     /// An OperatorReview-tier deposit reached its minimum depth: parked
     /// for the disclosed operator-review step. Never auto-credited here.
@@ -298,7 +317,11 @@ pub enum WatcherRestoreError {
 impl core::fmt::Display for WatcherRestoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::DepositHeightBeyondTip { deposit, height, journal_len } => write!(
+            Self::DepositHeightBeyondTip {
+                deposit,
+                height,
+                journal_len,
+            } => write!(
                 f,
                 "watcher restore: tracked deposit {deposit:?} claims height {height} \
                  but the journal only spans {journal_len} blocks (0..{journal_len})"
@@ -315,7 +338,10 @@ impl core::fmt::Display for WatcherRestoreError {
                  there (unrewindable zombie deposit)"
             ),
             Self::DuplicateDeposit { deposit } => {
-                write!(f, "watcher restore: duplicate deposit_id {deposit:?} in tracked set")
+                write!(
+                    f,
+                    "watcher restore: duplicate deposit_id {deposit:?} in tracked set"
+                )
             }
         }
     }
@@ -507,9 +533,7 @@ impl DepositWatcher {
         let dropped: Vec<DepositId> = self
             .tracked
             .iter()
-            .filter(|(_, t)| {
-                t.event.l1_block_height == height && t.event.l1_block_hash == hash
-            })
+            .filter(|(_, t)| t.event.l1_block_height == height && t.event.l1_block_hash == hash)
             .map(|(id, _)| *id)
             .collect();
         for id in dropped {
@@ -534,6 +558,13 @@ impl DepositWatcher {
             };
             if envelope.l2_chain_id != self.l2_chain_id {
                 continue; // someone else's L2: no-op for this watcher
+            }
+            if envelope.l2_recipient == [0u8; 20] {
+                // Zero-recipient rule (module docs): minting to address(0)
+                // is an unrecoverable L2 burn with the BLCH left ownerless
+                // in the vault. Treat as no valid envelope → §5 refund
+                // policy applies to the vault payment. Layer no-op.
+                continue;
             }
             // amount := sum of outputs paying disclosed vault addresses;
             // vout of the FIRST vault-paying output is the deposit_id tail.
@@ -623,7 +654,9 @@ impl DepositWatcher {
                         updates.push(WatcherUpdate::Creditable { deposit: t.event });
                     }
                 }
-                ConfirmationRequirement::OperatorReview { min_depth } if depth >= min_depth as u64 => {
+                ConfirmationRequirement::OperatorReview { min_depth }
+                    if depth >= min_depth as u64 =>
+                {
                     t.phase = DepositPhase::AwaitingOperatorReview;
                     updates.push(WatcherUpdate::NeedsOperatorReview { deposit: t.event });
                 }
@@ -718,13 +751,20 @@ mod tests {
         let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
         let updates = w.sync(&src);
         assert_eq!(updates.len(), 1);
-        let WatcherUpdate::Observed { deposit, requirement } = updates[0] else {
+        let WatcherUpdate::Observed {
+            deposit,
+            requirement,
+        } = updates[0]
+        else {
             panic!("expected Observed, got {updates:?}");
         };
         assert_eq!(deposit.amount_atoms, 5 * ATOMS_PER_BLCH);
         assert_eq!(deposit.vout, 0);
         assert_eq!(deposit.l1_block_height, 3);
-        assert_eq!(requirement, ConfirmationRequirement::Automatic { depth: 24 });
+        assert_eq!(
+            requirement,
+            ConfirmationRequirement::Automatic { depth: 24 }
+        );
 
         // 22 more blocks: depth 23, still pending
         for _ in 0..22 {
@@ -1175,14 +1215,16 @@ mod tests {
         let tip = w.tip_height().unwrap();
 
         // same chain, plus one block that does not link to the served tip
-        let mut blocks: Vec<L1Block> = (0..=tip)
-            .map(|h| src.block_at(h).unwrap())
-            .collect();
+        let mut blocks: Vec<L1Block> = (0..=tip).map(|h| src.block_at(h).unwrap()).collect();
         blocks.push(block(tip + 1, "X", hash(b"not-the-tip"), vec![]));
         let mixed = RawSource(blocks);
 
         assert_eq!(w.sync(&mixed), vec![]);
-        assert_eq!(w.tip_height(), Some(tip), "unlinkable block must not be folded in");
+        assert_eq!(
+            w.tip_height(),
+            Some(tip),
+            "unlinkable block must not be folded in"
+        );
         assert!(w.credit_reorg_alarms().is_empty(), "no spurious §0.1 alarm");
         assert_eq!(w.tracked().count(), 1);
     }
@@ -1222,5 +1264,42 @@ mod tests {
         }
         // the untampered state still restores
         assert!(DepositWatcher::from_state(w.state()).is_ok());
+    }
+
+    /// Zero-recipient rule: a well-formed envelope naming `address(0)` is a
+    /// layer no-op (the vault payment falls under the refund policy), so
+    /// nothing is observed, tracked, or ever credited for it.
+    #[test]
+    fn zero_recipient_envelope_is_a_layer_no_op() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(31, ATOMS_PER_BLCH, [0u8; 20], CHAIN_ID)],
+        );
+        for _ in 0..30 {
+            extend(&mut src, "main", vec![]);
+        }
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(w.sync(&src), vec![]);
+        assert_eq!(w.tracked().count(), 0);
+        assert!(w.credited().is_empty());
+    }
+
+    #[test]
+    fn deposit_id_is_txid_and_first_vault_vout() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(32, ATOMS_PER_BLCH, [0x32; 20], CHAIN_ID)],
+        );
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        let updates = w.sync(&src);
+        let WatcherUpdate::Observed { deposit, .. } = updates[0] else {
+            panic!("expected Observed");
+        };
+        assert_eq!(deposit.deposit_id(), (txid(32), 0));
+        assert!(w.tracked().any(|(id, _)| *id == deposit.deposit_id()));
     }
 }

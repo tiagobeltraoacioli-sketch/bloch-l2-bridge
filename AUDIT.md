@@ -22,9 +22,20 @@ what the code exists to be reused for. Nothing here changes the crate's
 own claim: it is unaudited in the third-party sense, and this document is
 an internal review, not that audit.
 
-**Baseline / result.** 114 tests green before; 118 green after (4 regression
-tests added, 2 defects fixed, 1 parity pin added). Clippy: 2 pre-existing
-style lints, no new ones.
+**Baseline / result.** 114 tests green before the review. Two rounds of
+work followed on this branch:
+
+* *Round 1 (audit):* the two confirmed defects fixed with regression tests
+  and the golden leaf hash pinned — 118 tests.
+* *Round 2 (remediation):* every open recommendation implemented (see
+  "Remediation" below), plus one NEW finding (M-4) surfaced when a pinned
+  solc 0.8.24 was obtained: the withdrawal predeploy source did not
+  compile. Result: 132 tests green, `cargo clippy --all-targets` clean,
+  `cargo doc` warning-free, `cargo fmt --check` clean, all three contracts
+  compile under the pinned solc, and every bytecode pin in
+  `deploy/testnet.json` (WBLCH and both design contracts) is REAL and
+  test-enforced whenever that compiler is present (`REQUIRE_SOLC=1` makes
+  its absence a failure).
 
 ---
 
@@ -32,23 +43,24 @@ style lints, no new ones.
 
 | ID | Severity | Area | Title | Status |
 |---|---|---|---|---|
-| M-1 | Medium | `watcher::sync` | Non-termination (and unbounded memory) on an internally inconsistent `BlockSource` | **Fixed** + tests |
-| M-2 | Medium | `watcher::from_state` | Restore accepts an unrewindable "zombie" deposit (hash not in journal) | **Fixed** + test |
-| M-3 | Medium | design (deposit dedup) | Double-mint protection on reorg+re-mine lives only in an off-chain set | Open (design rec.) |
-| L-1 | Low | `status::step` | `ReleaseAuthorized` is amount-agnostic; the K(amount) fix has no counterpart here | Open (design rec.) |
-| L-2 | Low | `release::prove` | Cannot prove against a historical (anchored) root | Open (API rec.) |
-| L-3 | Low | `release::NullifierLog`, `L1ReleaseVerifier.released` | Nullifier keyed by bare `nonce`; no chain-id domain separation in the leaf | Open (design rec.) |
-| L-4 | Low | `release::WithdrawalQueue::initiate` | Does not mirror the predeploy's invariants (zero amount, non-monotonic epoch) | Open |
-| L-5 | Low | `harness::validate` | `source_path` not confined to `base_dir` | Open |
-| L-6 | Low | tests / CI | Bytecode-pin test passes silently without solc; design-section source pins unenforced | Open |
-| I-1 | Info | `merkle` | Root does not commit to leaf count: zero leaf provable at any unfilled index | Documented |
-| I-2 | Info | `watcher` | Duplicate §0.1 alarm entries for one deposit across successive reorgs | Documented |
+| M-1 | Medium | `watcher::sync` | Non-termination (and unbounded memory) on an internally inconsistent `BlockSource` | **Fixed** + tests (round 1) |
+| M-2 | Medium | `watcher::from_state` | Restore accepts an unrewindable "zombie" deposit (hash not in journal) | **Fixed** + test (round 1) |
+| M-3 | Medium | design (deposit dedup) | Double-mint protection on reorg+re-mine lives only in an off-chain set | **Mitigated in-crate**: `DepositEvent::deposit_id` + host contract documented; L2-side rule is out of crate |
+| M-4 | Medium | `L2BlochBridge.sol` | The withdrawal predeploy did not compile under the pinned solc (invalid EIP-55 checksum literal) | **Fixed**; all contracts now compiled + hash-pinned + test-enforced |
+| L-1 | Low | `status::step` | `ReleaseAuthorized` was amount-agnostic; the K(amount) fix had no counterpart here | **Fixed**: state carries `amount_atoms`, gate derived; review tier needs attestation |
+| L-2 | Low | `release::prove` | Could not prove against a historical (anchored) root | **Fixed**: `root_at` / `prove_at` (+ `ReferenceTree::root_at` / `proof_at`) |
+| L-3 | Low | `release::NullifierLog`, `L1ReleaseVerifier.released` | Nullifier keyed by bare `nonce`; no chain-id domain separation in the leaf | **Fixed** (nullifier keyed by LEAF, Rust + Solidity); chain-id in the leaf preimage stays a spec-level recommendation |
+| L-4 | Low | `release::WithdrawalQueue::initiate` | Did not mirror the predeploy's invariants | **Fixed**: zero amount / zero recipient / epoch regression refused (initiate + restore) |
+| L-5 | Low | `harness::validate` | `source_path` not confined to `base_dir` | **Fixed**: `resolve_source_path` + `SourceEscapesBaseDir` |
+| L-6 | Low | tests / CI | Bytecode-pin test passed silently without solc; design-section pins unenforced | **Fixed**: `REQUIRE_SOLC` gate; design pins (source always, bytecode with solc) test-enforced; WBLCH pin VERIFIED |
+| I-1 | Info | `merkle` | Root does not commit to leaf count: zero leaf provable at any unfilled index | Documented on `verify_inclusion` + pinned by test |
+| I-2 | Info | `watcher` | Duplicate §0.1 alarm entries for one deposit across successive reorgs | Documented (kept as an event log) |
 | I-3 | Info | `watcher` | `journal` / `credited` grow without bound | Documented |
-| I-4 | Info | Solidity | CEI order in `withdrawWBLCH`; append-only roots; zero recipients; WETH9 quirks | Documented |
+| I-4 | Info | Solidity | CEI order in `withdrawWBLCH`; append-only roots; zero recipients; WETH9 quirks | **Partly fixed**: reentrancy lock on `withdrawWBLCH`; zero `l1Recipient` refused (Solidity + Rust queue); zero L2 recipient a watcher no-op. Append-only roots and WETH9 quirks documented |
 | I-5 | Info | Solidity | `WithdrawalInitiated` alone cannot reconstruct the leaf | Documented |
-| I-6 | Info | tooling | Clippy `manual_is_multiple_of` ×2; rustdoc `[n]` link warnings | Documented |
-| I-7 | Info | tests | Golden leaf HASH was pinned only in Python/Solidity comments | **Fixed** (Rust pin added) |
-| I-8 | Info | `watcher::VaultSet` | Assumes script_pubkey == raw 20-byte key hash | Documented |
+| I-6 | Info | tooling | Clippy `manual_is_multiple_of` ×2; rustdoc `[n]` link warnings; not fmt-clean | **Fixed**: MSRV declared (`rust-version = "1.87"`), lints applied, doc numbering escaped, `cargo fmt` applied crate-wide |
+| I-7 | Info | tests | Golden leaf HASH was pinned only in Python/Solidity comments | **Fixed** (Rust pin added, round 1) |
+| I-8 | Info | `watcher::VaultSet` | Assumes script_pubkey == raw 20-byte key hash | Documented (validate against the node before wiring RPC) |
 
 ---
 
@@ -120,7 +132,35 @@ height, journal_hash, deposit_hash }`; `from_state` refuses any tracked
 deposit whose recorded hash is not the journal's entry at its height.
 Regression test: `from_state_rejects_deposit_hash_not_in_journal`.
 
-### M-3 — Double-mint protection on reorg + re-mine lives only in an off-chain set (design, open)
+### M-4 — The withdrawal predeploy source did not compile (confirmed, fixed)
+
+**Where.** `contracts/bridge/L2BlochBridge.sol`, the `SYSTEM_CALLER`
+constant.
+
+**What.** The address literal `0xDeaDDEaDDeAdDEADDEadDEAdDeaDDeAdDEAd0001`
+has an invalid EIP-55 mixed-case checksum; solc 0.8.24 rejects it as a
+hard error ("This looks like an address but has an invalid checksum").
+The file therefore had never been compiled by the pinned compiler: its
+"LEAF PARITY IS NORMATIVE" claim was backed only by the Python re-
+implementation of `abi.encode`, and its all-zero bytecode placeholder in
+`deploy/testnet.json` could not have been filled. Found in round 2 when a
+solc 0.8.24 static binary was obtained; missed in round 1 because no solc
+was available (exactly the blind spot L-6 describes).
+
+**Impact.** Scaffold-quality rather than fund-safety (nothing is deployed),
+but the normative withdrawal contract was undeployable as written, and
+nothing in CI could have noticed.
+
+**Fix.** Literal corrected to the checksummed form
+`0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAd0001` (same 20 bytes — the OP-Stack
+depositor alias). All three contracts now compile under solc 0.8.24 with
+the pinned settings; their runtime-bytecode keccaks are pinned as REAL
+values in `deploy/testnet.json` (`placeholder: false`) and enforced by
+`design_contract_pins_match_on_disk_and_compile` whenever the pinned solc
+is present (source pins always). The WBLCH pin was also verified for the
+first time in this environment.
+
+### M-3 — Double-mint protection on reorg + re-mine lives only in an off-chain set (design, mitigated in-crate)
 
 **Where.** `src/watcher.rs` (`credited`), and the L2 derivation rule this
 crate documents but does not contain.
@@ -144,6 +184,13 @@ requires the same idempotency to avoid a double mint. Either way the L2
 side must be idempotent; the crate should say so where it documents
 `WatcherUpdate::Creditable`.
 
+**Remediation (round 2).** `DepositEvent::deposit_id()` added as the one
+identity downstream code may key on, with the host contract spelled out on
+`WatcherUpdate::Creditable` and in the module docs (persist-before-act and
+persist-after-act are both safe iff the mint is idempotent on
+`deposit_id`). The L2 derivation rule itself is outside this crate, so
+the sourceHash change remains a recommendation to that component.
+
 ### L-1 — `WithdrawalStatus::step` accepts any `required_depth ≥ 1` (confirmed, open)
 
 **Where.** `src/status.rs`, `ReleaseAuthorized { required_depth }` arms of `step`.
@@ -159,12 +206,15 @@ emitting `ReleaseAuthorized` is an operator judgement, so this is a
 footgun rather than a soundness bug, but the two halves of the crate now
 disagree about who owns K(amount).
 
-**Recommendation.** Carry `amount_atoms` (or the `ConfirmationRequirement`)
-in `Queued`/`Provable`/`ReleaseEligible` and derive the gate inside `step`,
-refusing `ReleaseAuthorized` for the OperatorReview tier unless the event
-carries an explicit operator-review attestation. The existing invariant
-tests (`release_eligible_is_only_reachable_above_its_required_depth`) would
-then pin the real rule.
+**Remediation (round 2).** Done as recommended: every non-halted state
+carries `amount_atoms`; `ReleaseAuthorized { operator_reviewed }` carries
+no depth at all and `step` derives the gate from `confirmation_depth`;
+the OperatorReview tier requires the attestation (and a later
+re-authorization without it demotes). Pinned by
+`release_eligible_is_only_reachable_above_its_derived_depth`,
+`release_gate_derives_from_amount_not_from_caller`,
+`operator_review_tier_requires_attestation` and
+`amount_is_carried_through_every_transition`.
 
 ### L-2 — `WithdrawalQueue::prove` cannot prove against a historical root (confirmed, open)
 
@@ -180,13 +230,15 @@ anchored (proven) root")`). The only workaround through the public API is
 `WithdrawalQueue::from_messages(messages[..count_at_epoch_end])` followed
 by `prove`, which is O(n) per proof and undocumented.
 
-**Recommendation.** Add `prove_at(index, leaf_count)` (the `ReferenceTree`
-already retains leaves; truncating its view is trivial) and record per-epoch
-`leaf_count` alongside the anchored root, so release agents generate proofs
-against the root that was actually anchored. Also document the epoch
-binding: a withdrawal initiated in epoch E is present in every root from E
-onward, but both the checklist and `L1ReleaseVerifier.checkWithdrawal`
-accept only the epoch-E root (conservative and consistent; just not obvious).
+**Remediation (round 2).** `WithdrawalQueue::root_at(leaf_count)` and
+`prove_at(index, leaf_count)` added (backed by `ReferenceTree::root_at` /
+`proof_at` over a shared fold); `prove` is now `prove_at(_, len())`.
+Pinned by `prove_at_reproduces_the_anchored_epoch_root` (release),
+`root_at_and_proof_at_match_the_tree_frozen_at_that_count` (merkle) and
+the extended `withdrawal_bundle_and_checklist_end_to_end` flow. Hosts
+should record each epoch's closing `leaf_count` next to its anchored root.
+The strict epoch binding (only the epoch-E root is accepted) is unchanged
+and documented.
 
 ### L-3 — Nullifier keyed by bare `nonce`; leaf has no chain-id domain separator (open)
 
@@ -200,10 +252,14 @@ or, worse, mark a new bridge's nonce 0 as already paid. The leaf itself
 carries no chain id, so identical `(nonce, sender, recipient, amount,
 epoch)` tuples on two deployments hash to the same leaf.
 
-**Recommendation.** Key the nullifier by the leaf hash and include a
-domain separator (the L2 chain id, and ideally the bridge address) in the
-leaf preimage — a consensus-format change, so do it before anything is
-pinned further.
+**Remediation (round 2).** `NullifierLog` is now keyed by the withdrawal
+LEAF (`record_paid(&message)` / `is_paid(&message)`, plus `_leaf` forms),
+and `L1ReleaseVerifier.released` is `mapping(bytes32 => bool)` with
+`markReleased(bytes32 leaf)`; pinned by
+`nullifier_is_keyed_by_leaf_not_by_nonce`. The chain-id domain separator
+in the LEAF PREIMAGE is deliberately NOT done here: it changes the
+normative §5 leaf format pinned across Rust, Python, Solidity and the
+design spec, and belongs to a spec revision — flagged, not smuggled in.
 
 ### L-4 — `WithdrawalQueue::initiate` accepts histories the predeploy could never produce (open)
 
@@ -216,16 +272,27 @@ such messages passes `from_messages` validation. Not exploitable in the
 crate, but a mirror-fidelity gap in a module whose purpose is to pin the
 contract's behaviour.
 
+**Remediation (round 2).** `initiate` now refuses `ZeroAmount`,
+`ZeroRecipient` (mirroring the new Solidity check) and `EpochRegression`;
+`from_messages` / serde restore inherit the refusals. Pinned by
+`queue_mirrors_predeploy_refusals`.
+
 ### L-5 — `harness::validate` does not confine `source_path` (open)
 
 **Where.** `src/harness.rs`, `validate` and `verify_deployed_bytecode`
 (`base_dir.join(&p.source_path)`).
 
 **What.** `Path::join` with an absolute `source_path` replaces `base_dir`
-entirely, and `../` segments escape it (the test suite itself uses a
+entirely, and `../` segments escape it (the test suite itself used a
 `../../…` path). The config is in-repo and trusted today, so this is
-hardening only; if the harness is ever pointed at a downloaded or shared
-config, canonicalize the joined path and require `starts_with(base_dir)`.
+hardening only.
+
+**Remediation (round 2).** `harness::resolve_source_path` refuses absolute
+paths, `..` and prefix components with the typed
+`HarnessError::SourceEscapesBaseDir`, and both `validate` and
+`verify_deployed_bytecode` go through it. Pinned by
+`resolve_source_path_confines_to_base_dir` and
+`validation_rejects_source_path_escaping_crate_root`.
 
 ### L-6 — Silent-skip bytecode test; design-section pins unenforced (open)
 
@@ -240,11 +307,16 @@ notice drift. The `source_keccak256` pins for `L2BlochBridge.sol` and
 `L1ReleaseVerifier.sol` sit in a section serde ignores; no test reads them.
 (I recomputed all three source pins by hand: all MATCH at this commit.)
 
-**Recommendation.** A CI job with pinned solc (or `REQUIRE_SOLC=1` making
-absence a failure), and a test that walks `bridge_contracts_design` and
-checks each `source_keccak256`.
+**Remediation (round 2).** `REQUIRE_SOLC` gate added (absence or version
+mismatch is a failure when set; a loud skip otherwise), and
+`design_contract_pins_match_on_disk_and_compile` walks
+`bridge_contracts_design`, confines and hashes every source, requires the
+`placeholder` flag to be truthful, and — with the pinned solc — recompiles
+each design contract and asserts its deployed-bytecode hash. Both design
+contracts now carry REAL compiled hashes. The WBLCH pin was verified with
+solc 0.8.24 in this environment (it matched).
 
-### I-1 — Root does not commit to leaf count (confirmed, documented)
+### I-1 — Root does not commit to leaf count (confirmed, documented + tested)
 
 Unlike the eth2 deposit contract (which mixes `deposit_count` into the
 root), this tree's root is a pure function of the leaves, so
@@ -254,8 +326,9 @@ verify_inclusion`, `WithdrawalProofBundle::verify`,
 `L1ReleaseVerifier.checkWithdrawal`) recomputes the leaf from the message,
 so a zero leaf is unreachable there; only the raw `merkle::verify_inclusion`
 and the public `L1ReleaseVerifier.verifyInclusion(bytes32 leaf, …)` accept
-a caller-chosen leaf. Document it; if the root is ever consumed by anything
-that trusts leaves, mix in the count.
+a caller-chosen leaf. Now documented on `merkle::verify_inclusion` and
+pinned by `zero_leaf_is_provable_at_unfilled_positions`; if the root is
+ever consumed by anything that trusts leaves, mix in the count first.
 
 ### I-2 — Duplicate §0.1 alarm entries (confirmed)
 
@@ -275,13 +348,18 @@ finite depth is finality" stance) while `credited` must stay permanent.
 
 * `L2BlochBridge.withdrawWBLCH` updates state after two external calls
   (CEI order inverted). Safe only because `WBLCH` is a trusted predeploy
-  and `receive()` is gated to it; keep that gate load-bearing in reviews.
-  The exact-equality balance check is correct within one transaction.
+  and `receive()` is gated to it. *Round 2:* a `nonReentrant` lock (0 =
+  unlocked, so it needs no constructor — this is a genesis predeploy) now
+  guards the path regardless. The exact-equality balance check is correct
+  within one transaction.
 * `L1ReleaseVerifier.postWithdrawalsRoot` is append-only per epoch with no
   correction path; a mis-posted root is permanent for that epoch.
 * Neither `withdraw(bytes20(0))` nor an L2D0 envelope with a zero
-  `l2_recipient` is refused: funds are burned/minted to an unusable
-  recipient and the PoR liability drifts. Consider refusing both.
+  `l2_recipient` was refused: funds burned/minted to an unusable recipient
+  and the PoR liability drifts. *Round 2:* `_initiate` refuses a zero
+  `l1Recipient` (mirrored by `QueueError::ZeroRecipient`), and the watcher
+  treats a zero `l2_recipient` as no valid envelope (layer no-op → §5
+  refund policy), pinned by `zero_recipient_envelope_is_a_layer_no_op`.
 * `WBLCH` inherits the WETH9 quirks: forced native transfers (coinbase,
   same-tx selfdestruct) inflate `totalSupply()` without a holder; `approve`
   has the standard race. Its `withdraw` correctly updates state before the
@@ -295,14 +373,15 @@ The §5 normative event has four fields; the leaf has five. Off-chain
 reconstruction must read `WithdrawalLeafAppended` (which carries the leaf
 and epoch) — fine, but the spec's event is not self-sufficient.
 
-### I-6 — Tooling
+### I-6 — Tooling (fixed)
 
-Two clippy `manual_is_multiple_of` lints (`atoms.rs`, `hex.rs`; the
-suggested method needs Rust ≥ 1.87, so fix only once an MSRV is declared).
-`cargo doc` emits ~20 "unresolved link to `1`…`7`" warnings because the
-checklist numbering `[n]` in doc comments parses as intra-doc links; escape
-as `\[n\]`. The repository is not `cargo fmt`-clean (pre-existing; left
-untouched here to keep the diff reviewable).
+Two clippy `manual_is_multiple_of` lints (`atoms.rs`, `hex.rs`) and ~20
+rustdoc "unresolved link to `1`…`7`" warnings (checklist numbering `[n]`
+parsed as intra-doc links); the repository was not `cargo fmt`-clean.
+*Round 2:* `rust-version = "1.87"` declared, the lints applied, the
+numbering escaped as `\[n\]`, and `cargo fmt` applied crate-wide, so
+`cargo clippy --all-targets`, `cargo doc` and `cargo fmt --check` are all
+clean and usable as CI gates.
 
 ### I-7 — Golden leaf hash pinned in Rust (fixed)
 
@@ -355,11 +434,34 @@ serialization before wiring the RPC source.
 
 ## Changes made in this branch
 
+### Round 1 — audit
+
 | File | Change |
 |---|---|
 | `src/watcher.rs` | M-1 fix in `sync` (re-check the source before rewinding on a linkage break; stop on an inconsistent view). M-2 fix in `from_state` (+ `WatcherRestoreError::DepositHashNotInJournal`). Three regression tests. |
 | `src/withdrawal.rs` | I-7: `golden_leaf_hash_vector` pins the leaf hash. |
-| `AUDIT.md` | This report. |
-| `README.md` | Pointer to this report. |
+| `AUDIT.md`, `README.md` | This report and a pointer to it. |
 
-Not changed (recommendations only): M-3, L-1…L-6, I-1…I-6, I-8.
+### Round 2 — remediation ("corrigido e mais robusto")
+
+| File | Change |
+|---|---|
+| `src/status.rs` | L-1: `WithdrawalStatus` carries `amount_atoms` in every non-halted state; `ReleaseAuthorized { operator_reviewed }` replaces the caller-supplied `required_depth`; `step` derives the gate from `confirmation_depth`; `queued()`, `amount_atoms()`, `requirement()` helpers; `DepositEvent::deposit_id()` (M-3); `ConfirmationRequirement::needs_operator_review()`. Tests rewritten to pin the derived gate, the attestation rule and amount carriage. |
+| `src/release.rs` | L-2: `root_at` / `prove_at`; L-3: `NullifierLog` keyed by leaf; L-4: `QueueError::{ZeroAmount, ZeroRecipient, EpochRegression}` enforced in `initiate` (and thus restore); checklist item \[4\] by leaf. Tests for each. |
+| `src/merkle.rs` | L-2: shared `fold`, `ReferenceTree::root_at` / `proof_at`; I-1: caveat documented on `verify_inclusion` and pinned by test. |
+| `src/watcher.rs` | I-4: zero-recipient envelopes are a layer no-op; M-3: idempotency contract documented on `Creditable` and in the module docs. Tests. |
+| `src/harness.rs` | L-5: `resolve_source_path` + `HarnessError::SourceEscapesBaseDir`, used by `validate` and `verify_deployed_bytecode`. Test. |
+| `contracts/bridge/L2BlochBridge.sol` | M-4: checksummed `SYSTEM_CALLER` literal (now compiles); I-4: `nonReentrant` on `withdrawWBLCH`, zero `l1Recipient` refused. |
+| `contracts/l1/L1ReleaseVerifier.sol` | L-3: `released` keyed by leaf (`bytes32`), `markReleased(bytes32 leaf)` refuses the zero leaf. |
+| `deploy/testnet.json` | Both design contracts: updated source pins, REAL deployed-bytecode hashes under the pinned solc (`placeholder: false`, compiler block added), notes/honesty text updated to say so. |
+| `tests/harness_config.rs` | L-6: `REQUIRE_SOLC` gate; `design_contract_pins_match_on_disk_and_compile`; `validation_rejects_source_path_escaping_crate_root`; missing-source test now uses an in-crate path. |
+| `tests/vectors.rs`, `tests/bridge_flow.rs` | Updated to the amount-carrying status machine, the leaf-keyed nullifier, and `prove_at` in the end-to-end flow. |
+| `Cargo.toml`, `src/atoms.rs`, `src/hex.rs`, all `src/*.rs` | I-6: `rust-version = "1.87"`, `is_multiple_of`, `\[n\]` doc escapes, crate-wide `cargo fmt`. |
+| `README.md` | Module table, stubbed-list and build instructions updated to match. |
+
+Still open (deliberately, spec-level): the chain-id / bridge-address
+domain separator in the LEAF PREIMAGE (L-3 second half) and the L2
+derivation rule keying its mint on `deposit_id` (M-3) — both belong to the
+design spec and the L2 component, not to this crate. Documented, not
+changed: I-2, I-3, I-5, I-8, the append-only root posting and the WETH9
+quirks in I-4.

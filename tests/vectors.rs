@@ -22,7 +22,9 @@ fn l2d0_golden_vector_is_pinned() {
         l2_recipient: hex::decode_array::<20>("00112233445566778899aabbccddeeff00112233").unwrap(),
     };
     // magic | version | op | chain_id LE | recipient — exactly 34 bytes
-    let golden = "4c3244300001" .to_string() + "63b10a0000000000" + "00112233445566778899aabbccddeeff00112233";
+    let golden = "4c3244300001".to_string()
+        + "63b10a0000000000"
+        + "00112233445566778899aabbccddeeff00112233";
     let encoded = envelope.encode();
     assert_eq!(encoded.len(), 34);
     assert_eq!(hex::encode(&encoded), golden);
@@ -143,16 +145,29 @@ fn withdrawal_lifecycle_and_inclusion_end_to_end() {
     );
 
     // Drive the status machine: Queued -> Provable -> ReleaseEligible.
-    // The 3-BLCH amount sits in the K=24 tier, so authorization carries
-    // required_depth = 24 (derived from confirmation_depth, not invented).
-    let s = WithdrawalStatus::Queued;
+    // The machine carries the withdrawal's amount (3 BLCH, the K=24 tier)
+    // and DERIVES required_depth = 24 from it — the authorizing event
+    // carries no depth a caller could weaken.
+    let s = WithdrawalStatus::queued(msg.amount_atoms);
     let s = s.step(WithdrawalEvent::AnchorObserved {
         commit_txid: [0xcc; 32],
         depth: 1,
     });
     let s = s.step(WithdrawalEvent::AnchorDepthReported { depth: 24 });
     assert!(matches!(s, WithdrawalStatus::Provable { depth: 24, .. }));
-    let s = s.step(WithdrawalEvent::ReleaseAuthorized { required_depth: 24 });
+    // one block short: refused
+    let shallow = s
+        .step(WithdrawalEvent::AnchorDepthReported { depth: 23 })
+        .step(WithdrawalEvent::ReleaseAuthorized {
+            operator_reviewed: false,
+        });
+    assert!(matches!(
+        shallow,
+        WithdrawalStatus::Provable { depth: 23, .. }
+    ));
+    let s = s.step(WithdrawalEvent::ReleaseAuthorized {
+        operator_reviewed: false,
+    });
     assert!(matches!(
         s,
         WithdrawalStatus::ReleaseEligible {
@@ -161,14 +176,12 @@ fn withdrawal_lifecycle_and_inclusion_end_to_end() {
             ..
         }
     ));
+    assert_eq!(s.amount_atoms(), Some(msg.amount_atoms));
 
     // Now the message verifies under the real anchored root...
     assert!(msg.verify_inclusion(index, &branch, &root).is_included());
     // ...but a fork observation still halts on a deep reorg (safety wins).
-    assert_eq!(
-        s.step(WithdrawalEvent::DeepReorg),
-        WithdrawalStatus::Halted
-    );
+    assert_eq!(s.step(WithdrawalEvent::DeepReorg), WithdrawalStatus::Halted);
 }
 
 /// Depth-32 zero cascade: pin the empty root through the externally-known

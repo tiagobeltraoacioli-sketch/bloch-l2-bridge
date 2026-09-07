@@ -6,8 +6,9 @@
 use std::path::Path;
 
 use bloch_l2_bridge::harness::{
-    default_config_path, find_solc, load_config, solc_version, validate, verify_deployed_bytecode,
-    HarnessError, TESTNET_CHAIN_ID, WBLCH_PREDEPLOY_ADDRESS,
+    compile_deployed_bytecode, default_config_path, find_solc, load_config, resolve_source_path,
+    solc_version, validate, verify_deployed_bytecode, CompilerConfig, HarnessError,
+    TESTNET_CHAIN_ID, WBLCH_PREDEPLOY_ADDRESS,
 };
 use bloch_l2_bridge::hex;
 use bloch_l2_bridge::merkle::keccak256;
@@ -22,24 +23,101 @@ fn crate_root() -> &'static Path {
 /// means the compile assertion is skipped (loudly) rather than run against
 /// a compiler that would legitimately produce different bytes. Set `$SOLC`
 /// to a solc 0.8.24 binary to enforce the assertion.
+///
+/// CI GATE: with `REQUIRE_SOLC` set in the environment, a missing or
+/// mismatched solc is a hard FAILURE instead of a skip — a compile job that
+/// silently degraded to "source pin only" would otherwise never be noticed.
 fn pinned_solc() -> Option<std::path::PathBuf> {
-    let config = load_config(&default_config_path()).ok()?;
+    let config = load_config(&default_config_path()).expect("deploy/testnet.json must parse");
     let want = &config.predeploys[0].compiler.solc_version_exact;
-    let solc = find_solc()?;
+    let require = std::env::var_os("REQUIRE_SOLC").is_some();
+    let skip = |why: String| -> Option<std::path::PathBuf> {
+        if require {
+            panic!("REQUIRE_SOLC is set but the pinned solc {want} is unusable: {why}");
+        }
+        eprintln!("SKIP compile assertion: {why}");
+        None
+    };
+    let Some(solc) = find_solc() else {
+        return skip(format!(
+            "no solc on PATH and $SOLC unset (set $SOLC to a solc {want} binary to enforce)"
+        ));
+    };
     match solc_version(&solc) {
         Ok(v) if &v == want => Some(solc),
-        Ok(v) => {
-            eprintln!(
-                "SKIP compile assertion: found solc {v}, pin wants {want} \
-                 (set $SOLC to a solc {want} binary to enforce)"
-            );
-            None
-        }
-        Err(e) => {
-            eprintln!("SKIP compile assertion: cannot query solc: {e}");
-            None
-        }
+        Ok(v) => skip(format!(
+            "found solc {v}, pin wants {want} (set $SOLC to a solc {want} binary to enforce)"
+        )),
+        Err(e) => skip(format!("cannot query solc: {e}")),
     }
+}
+
+/// The `bridge_contracts_design` section of deploy/testnet.json is
+/// deliberately outside the typed `DeployConfig` (serde ignores it), so its
+/// pins would otherwise be enforced by nothing. This test walks the raw JSON
+/// and checks, for every design contract: the referenced source exists
+/// INSIDE the crate, its keccak256 equals `source_keccak256`, and its
+/// deployed-bytecode pin is honestly labelled (`placeholder` iff all-zero).
+/// With the pinned solc present it also recompiles each contract under the
+/// pinned settings and asserts the deployed-bytecode hash.
+#[test]
+fn design_contract_pins_match_on_disk_and_compile() {
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(default_config_path()).unwrap()).unwrap();
+    let design = raw["bridge_contracts_design"]
+        .as_object()
+        .expect("bridge_contracts_design section present");
+    let solc = pinned_solc();
+    let mut checked = 0;
+    for (key, entry) in design {
+        let Some(obj) = entry.as_object() else {
+            continue; // `_comment`
+        };
+        let name = obj["name"].as_str().expect("name");
+        let source_path = obj["source_path"].as_str().expect("source_path");
+        let pinned_source = obj["source_keccak256"].as_str().expect("source_keccak256");
+        let pinned_bytecode = obj["deployed_bytecode_keccak256"]
+            .as_str()
+            .expect("deployed_bytecode_keccak256");
+        let placeholder = obj["placeholder"].as_bool().expect("placeholder flag");
+
+        let path =
+            resolve_source_path(crate_root(), source_path).unwrap_or_else(|e| panic!("{key}: {e}"));
+        assert!(path.is_file(), "{key}: {} must exist", path.display());
+        let actual_source = hex::encode_prefixed(&keccak256(&std::fs::read(&path).unwrap()));
+        assert_eq!(
+            actual_source,
+            pinned_source.to_lowercase(),
+            "{key}: source_keccak256 drifted for {source_path} (update deploy/testnet.json if the \
+             contract legitimately changed)"
+        );
+
+        let bytecode_pin = hex::decode(pinned_bytecode).unwrap();
+        assert_eq!(
+            bytecode_pin.len(),
+            32,
+            "{key}: bytecode pin must be 32 bytes"
+        );
+        let is_zero = bytecode_pin == vec![0u8; 32];
+        assert_eq!(
+            placeholder, is_zero,
+            "{key}: placeholder flag must be true iff the bytecode hash is all-zero"
+        );
+
+        if let (Some(solc), false) = (&solc, is_zero) {
+            let cfg: CompilerConfig = serde_json::from_value(obj["compiler"].clone())
+                .unwrap_or_else(|e| panic!("{key}: compiler block required for a real pin: {e}"));
+            let bytecode = compile_deployed_bytecode(solc, name, &path, &cfg)
+                .unwrap_or_else(|e| panic!("{key}: compile failed: {e}"));
+            assert_eq!(
+                hex::encode_prefixed(&keccak256(&bytecode)),
+                pinned_bytecode.to_lowercase(),
+                "{key}: deployed-bytecode hash drifted (compiled under the pinned solc)"
+            );
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "both design contracts must be pinned");
 }
 
 #[test]
@@ -226,11 +304,34 @@ fn validation_rejects_moved_wblch_address() {
 #[test]
 fn validation_rejects_missing_source() {
     let mut config = load_config(&default_config_path()).unwrap();
-    config.predeploys[0].source_path = "../../contracts/wblch/DOES_NOT_EXIST.sol".to_string();
+    config.predeploys[0].source_path = "contracts/wblch/DOES_NOT_EXIST.sol".to_string();
     assert!(matches!(
         validate(&config, crate_root()),
         Err(HarnessError::SourceMissing { .. })
     ));
+}
+
+/// A `source_path` that would resolve outside the crate root (`..`
+/// traversal or an absolute path) is refused BEFORE any file is read —
+/// even when it would point at an existing file.
+#[test]
+fn validation_rejects_source_path_escaping_crate_root() {
+    let real = crate_root().join("contracts/wblch/WBLCH.sol");
+    for escaping in [
+        "../bloch-l2-bridge/contracts/wblch/WBLCH.sol".to_string(),
+        "../../etc/passwd".to_string(),
+        real.to_string_lossy().into_owned(), // absolute path to the real file
+    ] {
+        let mut config = load_config(&default_config_path()).unwrap();
+        config.predeploys[0].source_path = escaping.clone();
+        assert!(
+            matches!(
+                validate(&config, crate_root()),
+                Err(HarnessError::SourceEscapesBaseDir { .. })
+            ),
+            "{escaping} must be refused"
+        );
+    }
 }
 
 #[test]

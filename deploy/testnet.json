@@ -20,24 +20,38 @@
     }
   ],
   "bridge_contracts_design": {
-    "_comment": "DESIGN-STAGE section, deliberately OUTSIDE 'predeploys': the Rust harness (src/harness.rs) requires every 'predeploys' entry to carry a REAL non-zero deployed-bytecode hash, and these contracts have not been compiled under the pinned solc yet (no solc 0.8.24 in this environment). Serde ignores this section by construction; it documents the sources and pins them by source keccak until they graduate into 'predeploys' with real compiled hashes. SCAFFOLD, UNAUDITED, NOT DEPLOYED.",
+    "_comment": "DESIGN-STAGE section, deliberately OUTSIDE 'predeploys': L1ReleaseVerifier is not a predeploy (it has a constructor and no home chain) and L2BlochBridge has no derivation rule to advance its epoch yet, so neither belongs in the genesis alloc list the Rust harness validates. Serde ignores this section by construction; the harness test design_contract_pins_match_on_disk_and_compile enforces it instead: every entry's source_keccak256 always, and its deployed_bytecode_keccak256 by recompiling under the pinned solc whenever that compiler is present (REQUIRE_SOLC=1 makes its absence a failure). Both hashes below are REAL, compiled under solc 0.8.24 with the same pinned settings as WBLCH (placeholder=false). SCAFFOLD, UNAUDITED, NOT DEPLOYED.",
     "l2_bloch_bridge": {
       "name": "L2BlochBridge",
       "address": "0x4200000000000000000000000000000000000010",
       "source_path": "contracts/bridge/L2BlochBridge.sol",
-      "source_keccak256": "0x0444119562a0c6086781763888d6d2e30b242119a8ac50ecafccb6c7a414006e",
-      "deployed_bytecode_keccak256": "0x0000000000000000000000000000000000000000000000000000000000000000",
-      "placeholder": true,
-      "notes": "Withdrawal predeploy per section 5: burns native gas-BLCH (or unwraps WBLCH first), appends leaf = keccak256(abi.encode(uint64 nonce, address l2Sender, bytes20 l1Recipient, uint64 amountAtoms, uint64 epochNumber)) to a depth-32 keccak incremental Merkle tree. Leaf is byte-identical to the Rust encoder in src/withdrawal.rs — pinned by contracts/verify_leaf.py (golden leaf 0x0b0f4ac6fd0554ae9b750f72fa2e028753b3985d4faecd52fc2995dd3e3f789a). deployed_bytecode_keccak256 is an HONEST all-zero placeholder until compiled under the pinned solc."
+      "source_keccak256": "0xab2476171d6b030946a67d7dd7dde087757cf23c1a07c9efb5504895254af361",
+      "deployed_bytecode_keccak256": "0x84fcf403889c585671779f140a90b52828469ffc02ab897ddc5e2707db9a0ef7",
+      "placeholder": false,
+      "notes": "Withdrawal predeploy per section 5: burns native gas-BLCH (or unwraps WBLCH first), appends leaf = keccak256(abi.encode(uint64 nonce, address l2Sender, bytes20 l1Recipient, uint64 amountAtoms, uint64 epochNumber)) to a depth-32 keccak incremental Merkle tree; refuses a zero l1Recipient; the WBLCH path is reentrancy-locked (belt-and-braces over the WBLCH-gated receive()). Leaf is byte-identical to the Rust encoder in src/withdrawal.rs — pinned by contracts/verify_leaf.py (golden leaf 0x0b0f4ac6fd0554ae9b750f72fa2e028753b3985d4faecd52fc2995dd3e3f789a). deployed_bytecode_keccak256 is the REAL keccak-256 of the runtime bytecode solc 0.8.24 emits under the pinned settings (same compiler block as WBLCH); the harness test design_contract_pins_match_on_disk_and_compile recompiles and asserts it whenever the pinned solc is present, and always enforces the source pin.",
+      "compiler": {
+        "solc_version_exact": "0.8.24",
+        "optimizer_enabled": true,
+        "optimizer_runs": 200,
+        "evm_version": "shanghai",
+        "metadata_bytecode_hash": "none"
+      }
     },
     "l1_release_verifier": {
       "name": "L1ReleaseVerifier",
       "address": null,
       "source_path": "contracts/l1/L1ReleaseVerifier.sol",
-      "source_keccak256": "0x5f7e4974fe8825f87fa1364b5a15ca83fdf852d178d8cdf6b557aeb73015e16b",
-      "deployed_bytecode_keccak256": "0x0000000000000000000000000000000000000000000000000000000000000000",
-      "placeholder": true,
-      "notes": "NOT a predeploy and NOT deployable on Bloch L1 (Bloch has no EVM). Reference/design stub for release-checklist item [3]: depth-32 Merkle inclusion vs an OPERATOR-POSTED withdrawals root, with the all-zero unanchored-root refusal mirrored from src/withdrawal.rs. v1 release is CUSTODIAL, full stop — the operator posts roots; this contract adds zero trustlessness and moves no value. Address null because it has no home chain today; a test-EVM deploy for cross-checking the Rust reference is its only intended use."
+      "source_keccak256": "0xa3f737e430eca767903e5b639726a0ce97d7bd12359fa9ff9ac624e772108fae",
+      "deployed_bytecode_keccak256": "0x1d75b5d604cdc92640d492bdd10d69d12b424d5314a35b8ff4f25a10a1613e3f",
+      "placeholder": false,
+      "notes": "NOT a predeploy and NOT deployable on Bloch L1 (Bloch has no EVM). Reference/design stub for release-checklist item [3]: depth-32 Merkle inclusion vs an OPERATOR-POSTED withdrawals root, with the all-zero unanchored-root refusal mirrored from src/withdrawal.rs; its `released` nullifier is keyed by the withdrawal LEAF (bytes32), mirroring src/release.rs NullifierLog, never by the bare nonce. v1 release is CUSTODIAL, full stop — the operator posts roots; this contract adds zero trustlessness and moves no value. Address null because it has no home chain today; a test-EVM deploy for cross-checking the Rust reference is its only intended use. deployed_bytecode_keccak256 is the REAL keccak-256 of the runtime bytecode solc 0.8.24 emits under the pinned settings (the constructor's immutable `operator` appears as its zero placeholder in runtime bytecode, so the hash is deterministic); enforced by the harness test whenever the pinned solc is present, source pin always.",
+      "compiler": {
+        "solc_version_exact": "0.8.24",
+        "optimizer_enabled": true,
+        "optimizer_runs": 200,
+        "evm_version": "shanghai",
+        "metadata_bytecode_hash": "none"
+      }
     }
   },
   "uniswap_v2": {
@@ -56,5 +70,5 @@
       "placeholder": true
     }
   },
-  "honesty": "SCAFFOLD, UNAUDITED, not a working L2. This file DESCRIBES a would-be testnet deploy; nothing reads it to deploy anything. The v1 L1 vault is CUSTODY, full stop - nothing here moves value. chain_id 700771 is a placeholder pending ethereum-lists/chains registration. The WBLCH deployed_bytecode_keccak256 IS a real compiled hash (solc 0.8.24, pinned settings) that the harness test enforces; the Uniswap factory/router artifact hashes remain labelled placeholders (placeholder=true) until those unchanged 0.5.16/0.6.6 mainnet artifacts are vendored and byte-matched - out of scope for the WBLCH compile item. The bridge_contracts_design section (L2BlochBridge withdrawal predeploy, L1ReleaseVerifier reference stub) is source-pinned only: bytecode hashes there are labelled all-zero placeholders until compiled under the pinned solc, and the L1 release path is CUSTODIAL (operator posts roots; keyholders enforce the section-5 checklist off-chain; no trustlessness is claimed). Testnet / zero-value until the POSTERNDEX-BRIDGE-DESIGN section 0 gates clear."
+  "honesty": "SCAFFOLD, UNAUDITED, not a working L2. This file DESCRIBES a would-be testnet deploy; nothing reads it to deploy anything. The v1 L1 vault is CUSTODY, full stop - nothing here moves value. chain_id 700771 is a placeholder pending ethereum-lists/chains registration. The WBLCH deployed_bytecode_keccak256 IS a real compiled hash (solc 0.8.24, pinned settings) that the harness test enforces; the Uniswap factory/router artifact hashes remain labelled placeholders (placeholder=true) until those unchanged 0.5.16/0.6.6 mainnet artifacts are vendored and byte-matched - out of scope for the WBLCH compile item. The bridge_contracts_design section (L2BlochBridge withdrawal predeploy, L1ReleaseVerifier reference stub) carries REAL source and deployed-bytecode hashes compiled under the pinned solc 0.8.24 and enforced by the harness tests (bytecode whenever the pinned solc is present), and the L1 release path is CUSTODIAL (operator posts roots; keyholders enforce the section-5 checklist off-chain; no trustlessness is claimed). Testnet / zero-value until the POSTERNDEX-BRIDGE-DESIGN section 0 gates clear."
 }

@@ -100,7 +100,10 @@ pub fn check_reserves(s: &ReserveStatement) -> ReserveCheck {
 /// pending withdrawals EXACTLY equals the confirmed vault balance.
 /// `false` on any mismatch, including a non-aligned supply or overflow.
 pub fn is_exactly_backed(s: &ReserveStatement) -> bool {
-    matches!(check_reserves(s), ReserveCheck::Covered { surplus_atoms: 0 })
+    matches!(
+        check_reserves(s),
+        ReserveCheck::Covered { surplus_atoms: 0 }
+    )
 }
 
 #[cfg(test)]
@@ -125,7 +128,10 @@ mod tests {
             atoms_to_wei(90 * ATOMS_PER_BLCH),
             10 * ATOMS_PER_BLCH as u128,
         );
-        assert_eq!(check_reserves(&s), ReserveCheck::Covered { surplus_atoms: 0 });
+        assert_eq!(
+            check_reserves(&s),
+            ReserveCheck::Covered { surplus_atoms: 0 }
+        );
         assert!(is_exactly_backed(&s));
         assert!(check_reserves(&s).is_covered());
     }
@@ -154,7 +160,10 @@ mod tests {
             atoms_to_wei(90 * ATOMS_PER_BLCH),
             10 * ATOMS_PER_BLCH as u128,
         );
-        assert_eq!(check_reserves(&s), ReserveCheck::Shortfall { deficit_atoms: 1 });
+        assert_eq!(
+            check_reserves(&s),
+            ReserveCheck::Shortfall { deficit_atoms: 1 }
+        );
         assert!(!is_exactly_backed(&s));
     }
 
@@ -179,7 +188,10 @@ mod tests {
     #[test]
     fn empty_bridge_is_exactly_backed() {
         let s = stmt(0, 0, 0);
-        assert_eq!(check_reserves(&s), ReserveCheck::Covered { surplus_atoms: 0 });
+        assert_eq!(
+            check_reserves(&s),
+            ReserveCheck::Covered { surplus_atoms: 0 }
+        );
         assert!(is_exactly_backed(&s));
     }
 

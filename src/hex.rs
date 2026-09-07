@@ -20,7 +20,7 @@ pub fn encode_prefixed(bytes: &[u8]) -> String {
 /// Decode a hex string (case-insensitive, optional `0x` prefix).
 pub fn decode(s: &str) -> Result<Vec<u8>, HexError> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(HexError::OddLength(s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

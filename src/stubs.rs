@@ -13,7 +13,11 @@ pub struct NotImplemented(pub &'static str);
 
 impl core::fmt::Display for NotImplemented {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "SCAFFOLD: {} is not implemented — this is not a working L2", self.0)
+        write!(
+            f,
+            "SCAFFOLD: {} is not implemented — this is not a working L2",
+            self.0
+        )
     }
 }
 
@@ -94,7 +98,9 @@ pub struct Deployer;
 
 impl Deployer {
     pub fn deploy(&self, _config: &crate::harness::DeployConfig) -> Result<(), NotImplemented> {
-        Err(NotImplemented("Deployer::deploy — config-only harness, no live deploys"))
+        Err(NotImplemented(
+            "Deployer::deploy — config-only harness, no live deploys",
+        ))
     }
 }
 

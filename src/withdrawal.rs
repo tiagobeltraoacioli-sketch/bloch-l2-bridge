@@ -120,7 +120,7 @@ impl WithdrawalMessage {
     /// runs FIRST — an all-zero `root` is refused and the inclusion check is
     /// never even run — then the depth-32 walk over `self.leaf()` decides
     /// membership. This is the message-level check a release-agent performs
-    /// (item [3] of the §5 release checklist); it never moves value.
+    /// (item \[3\] of the §5 release checklist); it never moves value.
     pub fn verify_inclusion(
         &self,
         index: u64,
@@ -214,7 +214,11 @@ mod tests {
             },
         ];
         for v in variants {
-            assert_ne!(v.leaf(), base.leaf(), "changed field must change leaf: {v:?}");
+            assert_ne!(
+                v.leaf(),
+                base.leaf(),
+                "changed field must change leaf: {v:?}"
+            );
         }
     }
 
@@ -301,9 +305,7 @@ mod tests {
                 m.verify_inclusion(i as u64, &branch, &root),
                 WithdrawalInclusion::Included
             );
-            assert!(m
-                .verify_inclusion(i as u64, &branch, &root)
-                .is_included());
+            assert!(m.verify_inclusion(i as u64, &branch, &root).is_included());
         }
     }
 
