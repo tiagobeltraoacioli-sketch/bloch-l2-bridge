@@ -179,6 +179,18 @@ mod tests {
         assert_eq!(m.leaf(), sample().leaf());
     }
 
+    /// Pins the golden LEAF HASH itself (not just the encoding) so the three
+    /// implementations — this encoder, `contracts/verify_leaf.py`, and the
+    /// Solidity `computeLeaf` docstring / `deploy/testnet.json` — can never
+    /// drift apart silently. Any change to the leaf is a consensus break.
+    #[test]
+    fn golden_leaf_hash_vector() {
+        assert_eq!(
+            crate::hex::encode(&sample().leaf()),
+            "0b0f4ac6fd0554ae9b750f72fa2e028753b3985d4faecd52fc2995dd3e3f789a"
+        );
+    }
+
     #[test]
     fn every_field_affects_the_leaf() {
         let base = sample();

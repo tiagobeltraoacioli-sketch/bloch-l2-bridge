@@ -281,6 +281,16 @@ pub enum WatcherRestoreError {
         height: u64,
         journal_len: usize,
     },
+    /// A tracked deposit's recorded `l1_block_hash` is not the journal's
+    /// entry at its height: such a deposit can never be rewound (`rewind_one`
+    /// matches on height AND hash), so it would age into a `Creditable` that
+    /// no reorg can ever drop or alarm on — a zombie credit.
+    DepositHashNotInJournal {
+        deposit: DepositId,
+        height: u64,
+        journal_hash: [u8; 32],
+        deposit_hash: [u8; 32],
+    },
     /// The same `deposit_id` appears more than once in `tracked`.
     DuplicateDeposit { deposit: DepositId },
 }
@@ -292,6 +302,17 @@ impl core::fmt::Display for WatcherRestoreError {
                 f,
                 "watcher restore: tracked deposit {deposit:?} claims height {height} \
                  but the journal only spans {journal_len} blocks (0..{journal_len})"
+            ),
+            Self::DepositHashNotInJournal {
+                deposit,
+                height,
+                journal_hash,
+                deposit_hash,
+            } => write!(
+                f,
+                "watcher restore: tracked deposit {deposit:?} records block hash \
+                 {deposit_hash:?} at height {height} but the journal holds {journal_hash:?} \
+                 there (unrewindable zombie deposit)"
             ),
             Self::DuplicateDeposit { deposit } => {
                 write!(f, "watcher restore: duplicate deposit_id {deposit:?} in tracked set")
@@ -336,7 +357,10 @@ impl DepositWatcher {
     /// tracked deposits are inconsistent with the journal — otherwise a
     /// truncated write could leave a Pending deposit claiming a height beyond
     /// the tip, and `age_deposits` would underflow-wrap `depth` into a
-    /// spurious `Creditable` that permanently poisons the durable dedup set.
+    /// spurious `Creditable` that permanently poisons the durable dedup set;
+    /// and a deposit whose `(height, hash)` is not the journal's entry would
+    /// be an unrewindable zombie (see
+    /// [`WatcherRestoreError::DepositHashNotInJournal`]).
     pub fn from_state(state: WatcherState) -> Result<Self, WatcherRestoreError> {
         let journal_len = state.journal.len();
         let mut tracked = BTreeMap::new();
@@ -349,6 +373,20 @@ impl DepositWatcher {
                     deposit: id,
                     height: t.event.l1_block_height,
                     journal_len,
+                });
+            }
+            // ...and its recorded block hash must BE the journal's entry there.
+            // `rewind_one` drops a deposit only when both height and hash match
+            // the popped journal entry, so a deposit whose hash is not in the
+            // journal is unrewindable: it would age into `Creditable` and no
+            // reorg could ever drop it or raise the §0.1 alarm for it.
+            let journal_hash = state.journal[t.event.l1_block_height as usize];
+            if t.event.l1_block_hash != journal_hash {
+                return Err(WatcherRestoreError::DepositHashNotInJournal {
+                    deposit: id,
+                    height: t.event.l1_block_height,
+                    journal_hash,
+                    deposit_hash: t.event.l1_block_hash,
                 });
             }
             if tracked.insert(id, t).is_some() {
@@ -418,12 +456,33 @@ impl DepositWatcher {
                 if block.height != next {
                     break; // source lied about the height; refuse
                 }
-                if let Some(prev) = self.journal.last() {
-                    if block.parent_hash != *prev {
-                        // linkage break BELOW the reported tip: our tail is
-                        // stale after all — rewind one and retry.
-                        self.rewind_one(&mut updates);
-                        continue;
+                if let Some(prev) = self.journal.last().copied() {
+                    if block.parent_hash != prev {
+                        // Linkage break BELOW the reported tip. Two causes:
+                        //  (a) our tail went stale between step 1 and here
+                        //      (the node reorged mid-sync) — the source no
+                        //      longer serves `prev` at `next - 1`: rewind one
+                        //      and retry (the cascade walks down to the fork
+                        //      point, one distinct height per iteration);
+                        //  (b) the SOURCE's own view is inconsistent — it
+                        //      still serves `prev` at `next - 1` yet a block
+                        //      at `next` that does not link to it (a node
+                        //      serving a mixed view, a caching layer, a bug).
+                        //      Rewinding here would pop `prev`, re-fetch and
+                        //      re-push the very same block, fail the same
+                        //      linkage check again and SPIN FOREVER, emitting
+                        //      an unbounded Dropped/Observed stream (and a
+                        //      spurious permanent §0.1 alarm for any announced
+                        //      deposit in `prev`). Refuse to act on such a
+                        //      view: stop, stay safe; the next `sync` on a
+                        //      settled view resumes cleanly.
+                        match source.block_at(next - 1) {
+                            Some(b) if b.hash == prev => break, // (b) inconsistent source
+                            _ => {
+                                self.rewind_one(&mut updates); // (a) stale tail
+                                continue;
+                            }
+                        }
                     }
                 }
                 self.scan_block(&block, &mut updates);
@@ -1029,5 +1088,139 @@ mod tests {
         assert!(src.push(bad_height).is_err());
         let bad_parent = block(2, "main", [0xEE; 32], vec![]);
         assert!(src.push(bad_parent).is_err());
+    }
+
+    /// An in-memory [`BlockSource`] WITHOUT linkage checks, to model a node
+    /// serving an internally inconsistent view (mid-reorg mixed answers, a
+    /// caching layer, a bug). `MemorySource` deliberately cannot build one.
+    struct RawSource(Vec<L1Block>);
+    impl BlockSource for RawSource {
+        fn tip_height(&self) -> Option<u64> {
+            self.0.len().checked_sub(1).map(|h| h as u64)
+        }
+        fn block_at(&self, height: u64) -> Option<L1Block> {
+            self.0.get(height as usize).cloned()
+        }
+    }
+
+    /// REGRESSION (audit M-1): a source whose block `h+1` does not link to
+    /// the block it serves at `h` used to make `sync` spin forever (pop `h`,
+    /// re-fetch the same `h`, re-push, fail the same linkage check, ...),
+    /// growing `updates` without bound. It must now return, leave the
+    /// consistent prefix folded in, emit nothing for the unlinkable suffix,
+    /// and NOT spuriously drop or alarm deposits in the still-served block.
+    #[test]
+    fn sync_terminates_on_internally_inconsistent_source() {
+        let a0 = block(0, "A", [0u8; 32], vec![]);
+        let a1 = block(
+            1,
+            "A",
+            a0.hash,
+            vec![deposit_tx(21, ATOMS_PER_BLCH, [0x21; 20], CHAIN_ID)],
+        );
+        // height 2 claims a parent the source does not serve at height 1
+        let b2 = block(2, "B", hash(b"B:1"), vec![]);
+        let mixed = RawSource(vec![a0.clone(), a1, b2]);
+
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        // must return (the old code never did): only the linkable prefix is
+        // folded in, and its deposit is observed exactly once.
+        let updates = w.sync(&mixed);
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert!(matches!(updates[0], WatcherUpdate::Observed { .. }));
+        assert_eq!(w.tip_height(), Some(1));
+        assert_eq!(w.tracked().count(), 1);
+
+        // replaying the same inconsistent view is a no-op: no Dropped /
+        // Observed churn, no spurious §0.1 alarm.
+        assert_eq!(w.sync(&mixed), vec![]);
+        assert_eq!(w.tip_height(), Some(1));
+        assert!(w.credit_reorg_alarms().is_empty());
+
+        // once the source settles on a consistent chain (B replaces A from
+        // height 1), the watcher rewinds the stale A1 and converges.
+        let b1 = block(1, "B", a0.hash, vec![]);
+        let b2 = block(2, "B", b1.hash, vec![]);
+        let settled = RawSource(vec![a0, b1, b2]);
+        let updates = w.sync(&settled);
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, WatcherUpdate::Dropped { .. })),
+            "{updates:?}"
+        );
+        assert_eq!(w.tip_height(), Some(2));
+        assert_eq!(w.tracked().count(), 0);
+    }
+
+    /// REGRESSION (audit M-1, announced case): the same inconsistent view
+    /// over an already-ANNOUNCED deposit must not fabricate a permanent §0.1
+    /// alarm — the source is refused, not believed.
+    #[test]
+    fn inconsistent_source_does_not_fabricate_credit_reorg_alarm() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(22, ATOMS_PER_BLCH, [0x22; 20], CHAIN_ID)],
+        );
+        for _ in 0..30 {
+            extend(&mut src, "main", vec![]);
+        }
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert!(w
+            .sync(&src)
+            .iter()
+            .any(|u| matches!(u, WatcherUpdate::Creditable { .. })));
+        let tip = w.tip_height().unwrap();
+
+        // same chain, plus one block that does not link to the served tip
+        let mut blocks: Vec<L1Block> = (0..=tip)
+            .map(|h| src.block_at(h).unwrap())
+            .collect();
+        blocks.push(block(tip + 1, "X", hash(b"not-the-tip"), vec![]));
+        let mixed = RawSource(blocks);
+
+        assert_eq!(w.sync(&mixed), vec![]);
+        assert_eq!(w.tip_height(), Some(tip), "unlinkable block must not be folded in");
+        assert!(w.credit_reorg_alarms().is_empty(), "no spurious §0.1 alarm");
+        assert_eq!(w.tracked().count(), 1);
+    }
+
+    /// REGRESSION (audit M-2): `from_state` must refuse a tracked deposit
+    /// whose `l1_block_hash` is not the journal's entry at its height. Such a
+    /// deposit is unrewindable (`rewind_one` matches on height AND hash): it
+    /// would age into `Creditable`, and a later reorg below it would neither
+    /// drop it nor raise the §0.1 alarm — a zombie credit.
+    #[test]
+    fn from_state_rejects_deposit_hash_not_in_journal() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(23, ATOMS_PER_BLCH, [0x23; 20], CHAIN_ID)],
+        );
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(w.sync(&src).len(), 1);
+
+        let mut state = w.state();
+        let height = state.tracked[0].1.event.l1_block_height;
+        let journal_hash = state.journal[height as usize];
+        state.tracked[0].1.event.l1_block_hash = [0xEE; 32];
+        match DepositWatcher::from_state(state) {
+            Err(WatcherRestoreError::DepositHashNotInJournal {
+                height: h,
+                journal_hash: j,
+                deposit_hash: d,
+                ..
+            }) => {
+                assert_eq!(h, height);
+                assert_eq!(j, journal_hash);
+                assert_eq!(d, [0xEE; 32]);
+            }
+            other => panic!("expected DepositHashNotInJournal, got {other:?}"),
+        }
+        // the untampered state still restores
+        assert!(DepositWatcher::from_state(w.state()).is_ok());
     }
 }

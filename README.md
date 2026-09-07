@@ -66,6 +66,13 @@ tests before anything real is built.
   SCOPE: v1 is WBLCH only, per `contracts/wblch/`.
 * Any actual contract compilation, deployment, or chain interaction.
 
+## Internal review
+
+[`AUDIT.md`](AUDIT.md) records a full internal code review of this crate
+(2026-09-07): every finding, what was fixed with regression tests, and the
+open design recommendations. It is an internal review, NOT the third-party
+audit the §0 gates require — the crate remains UNAUDITED in that sense.
+
 ## Build / test
 
 ```sh
