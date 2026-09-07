@@ -255,7 +255,8 @@ impl ReferenceTree {
     /// agent needs once the queue has grown past an anchored epoch. `None`
     /// unless `index < leaf_count <= leaf_count()`.
     pub fn proof_at(&self, index: u64, leaf_count: u64) -> Option<[[u8; 32]; TREE_DEPTH]> {
-        self.root_and_proof_at(index, leaf_count).map(|(_, branch)| branch)
+        self.root_and_proof_at(index, leaf_count)
+            .map(|(_, branch)| branch)
     }
 
     /// Compute a historical root and proof in one bottom-up pass. Returning

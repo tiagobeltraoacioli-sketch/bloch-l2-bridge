@@ -49,3 +49,12 @@ jobs:
           cargo doc --locked --no-deps
       - name: Independent ABI and Keccak vector
         run: python3 contracts/verify_leaf.py
+      - name: Install checksum-pinned Foundry
+        run: |
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/foundry-rs/foundry/releases/download/v1.3.1/foundry_v1.3.1_linux_amd64.tar.gz \
+            --output /tmp/bloch-audit-tools/foundry.tar.gz
+          echo 'baad3e1b06d6f310d210c93e95258a03d923fe610f8d0742138f2245f94abd7c  /tmp/bloch-audit-tools/foundry.tar.gz' | sha256sum --check
+          tar -xzf /tmp/bloch-audit-tools/foundry.tar.gz -C /tmp/bloch-audit-tools forge
+      - name: EVM security regressions and fuzz tests
+        run: /tmp/bloch-audit-tools/forge test --use "$SOLC" -vv

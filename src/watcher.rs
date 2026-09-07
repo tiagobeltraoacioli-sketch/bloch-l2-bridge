@@ -337,7 +337,10 @@ pub enum WatcherRestoreError {
     /// Snapshot configuration disagrees with the host's trusted configuration.
     ConfigurationMismatch,
     /// A derived field or deposit fact violates the watcher invariants.
-    InvalidDeposit { deposit: DepositId, reason: &'static str },
+    InvalidDeposit {
+        deposit: DepositId,
+        reason: &'static str,
+    },
     /// A tracked deposit's containing-block height is not inside the journal
     /// (`height >= journal.len()`): internally inconsistent state that would
     /// let `age_deposits` underflow-wrap `depth` into a spurious `Creditable`.
@@ -442,7 +445,10 @@ impl DepositWatcher {
         let journal_len = state.journal.len();
         let mut tracked = BTreeMap::new();
         for (id, t) in state.tracked {
-            let invalid = |reason| WatcherRestoreError::InvalidDeposit { deposit: id, reason };
+            let invalid = |reason| WatcherRestoreError::InvalidDeposit {
+                deposit: id,
+                reason,
+            };
             if id != t.event.deposit_id() {
                 return Err(invalid("map key differs from deposit_id"));
             }
@@ -493,10 +499,14 @@ impl DepositWatcher {
                 DepositPhase::Creditable
             };
             if t.phase != expected_phase {
-                return Err(invalid("phase inconsistent with tier or current confirmations"));
+                return Err(invalid(
+                    "phase inconsistent with tier or current confirmations",
+                ));
             }
             if t.phase == DepositPhase::Creditable && !state.credited.contains(&id) {
-                return Err(invalid("creditable deposit missing from durable credit log"));
+                return Err(invalid(
+                    "creditable deposit missing from durable credit log",
+                ));
             }
             if requirement.needs_operator_review() && state.credited.contains(&id) {
                 return Err(invalid("operator-review deposit in automatic credit log"));
@@ -605,11 +615,13 @@ impl DepositWatcher {
         }
         let tip = source.tip_height().ok_or(WatcherSyncError::EmptySource)?;
         let read = |height| {
-            let block = source.block_at(height)
+            let block = source
+                .block_at(height)
                 .ok_or(WatcherSyncError::MissingBlock { height })?;
             if block.height != height {
                 return Err(WatcherSyncError::WrongHeight {
-                    requested: height, received: block.height,
+                    requested: height,
+                    received: block.height,
                 });
             }
             Ok(block)
@@ -652,7 +664,9 @@ impl DepositWatcher {
             parent = Some(block.hash);
             staged.push(block);
             // No representable successor to u64::MAX; never wrap to genesis.
-            let Some(successor) = next.checked_add(1) else { break };
+            let Some(successor) = next.checked_add(1) else {
+                break;
+            };
             next = successor;
         }
 
@@ -1356,7 +1370,10 @@ mod tests {
         let b2 = block(2, "B", b1.hash, vec![]);
         let settled = RawSource(vec![a0, b1, b2]);
         let updates = w.sync(&settled);
-        assert!(updates.is_empty(), "uncommitted observations cannot be dropped");
+        assert!(
+            updates.is_empty(),
+            "uncommitted observations cannot be dropped"
+        );
         assert_eq!(w.tip_height(), Some(2));
         assert_eq!(w.tracked().count(), 0);
     }
@@ -1394,10 +1411,18 @@ mod tests {
         let before = w.state();
         let updates = w.sync(&mixed);
         assert_eq!(updates, vec![], "no Dropped/Observed churn: {updates:?}");
-        assert_eq!(w.state(), before, "refused view cannot change durable state");
+        assert_eq!(
+            w.state(),
+            before,
+            "refused view cannot change durable state"
+        );
         assert!(w.credit_reorg_alarms().is_empty(), "no spurious §0.1 alarm");
         assert_eq!(w.tracked().count(), 1);
-        assert_eq!(w.creditable().count(), 0, "failed sync disables mint retries");
+        assert_eq!(
+            w.creditable().count(),
+            0,
+            "failed sync disables mint retries"
+        );
     }
 
     /// Run `sync` on another thread with a deadline, so a regression back

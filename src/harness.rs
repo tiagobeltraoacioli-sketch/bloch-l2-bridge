@@ -354,7 +354,9 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
             ));
         }
         if address == [0; 20] || p.name.trim().is_empty() {
-            return Err(HarnessError::InvalidPredeploy("zero address or empty name".to_string()));
+            return Err(HarnessError::InvalidPredeploy(
+                "zero address or empty name".to_string(),
+            ));
         }
         if p.name == "WBLCH" {
             saw_wblch = true;
@@ -367,9 +369,9 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
         if p.name == "L2BlochBridge" {
             saw_bridge = true;
             if !p.address.eq_ignore_ascii_case(BRIDGE_PREDEPLOY_ADDRESS) {
-                return Err(HarnessError::InvalidPredeploy(
-                    format!("L2BlochBridge must sit at {BRIDGE_PREDEPLOY_ADDRESS}"),
-                ));
+                return Err(HarnessError::InvalidPredeploy(format!(
+                    "L2BlochBridge must sit at {BRIDGE_PREDEPLOY_ADDRESS}"
+                )));
             }
         }
         let source_path = resolve_source_path(base_dir, &p.source_path)?;
@@ -427,7 +429,9 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
         return Err(HarnessError::WblchMissing);
     }
     if !saw_bridge {
-        return Err(HarnessError::InvalidPredeploy("missing L2BlochBridge".to_string()));
+        return Err(HarnessError::InvalidPredeploy(
+            "missing L2BlochBridge".to_string(),
+        ));
     }
 
     // External artifacts: address syntax + honest placeholder labelling.
