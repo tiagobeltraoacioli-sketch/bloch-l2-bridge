@@ -96,7 +96,10 @@ pub enum WithdrawalStatus {
     /// release is still an operator action against a custodial vault
     /// (§5, disclosed). Carries its anchor so a later, LOWER depth report
     /// (reorg) can DEMOTE it back to `Provable` instead of cementing a
-    /// stale depth.
+    /// stale depth. For an `OperatorReview`-tier amount this state is
+    /// reachable ONLY via `ReleaseAuthorized { operator_reviewed: true }` —
+    /// a caller attestation the crate cannot verify (see
+    /// [`WithdrawalEvent::ReleaseAuthorized`]).
     ReleaseEligible {
         /// Bloch txid of the anchoring COMMIT envelope this eligibility
         /// was granted against.
@@ -200,9 +203,19 @@ pub enum WithdrawalEvent {
     /// requires `operator_reviewed == true` — the attestation that the
     /// disclosed human review step happened. Automatic tiers ignore the
     /// flag.
+    ///
+    /// HONESTY: the flag is the caller's DISCLOSED ATTESTATION. This crate
+    /// cannot verify that a review happened — the same stance
+    /// [`crate::release`] takes by keeping checklist item \[2\] `Scaffold`
+    /// for that tier. A review-tier `ReleaseEligible` therefore records that
+    /// the operator SAID the review was done (derivable from the state:
+    /// [`WithdrawalStatus::requirement`] is `OperatorReview` ⇒ eligibility
+    /// required the attestation); it is not a protocol guarantee, and no
+    /// state of this machine releases anything.
     ReleaseAuthorized {
         /// Attestation that the §5 operator review was performed. Required
-        /// (and only meaningful) for the OperatorReview tier.
+        /// (and only meaningful) for the OperatorReview tier; unverifiable
+        /// by this crate — a disclosed operator claim.
         operator_reviewed: bool,
     },
     /// A Bloch fork was observed at/below the anchor's inclusion height:
@@ -929,6 +942,27 @@ mod tests {
                 amount_atoms: LARGE,
             }
         );
+        // re-observing the SAME anchor: deeper keeps eligibility with the
+        // new depth; shallower (below the derived gate) demotes.
+        assert_eq!(
+            s.step(WithdrawalEvent::AnchorObserved {
+                commit_txid: [7u8; 32],
+                depth: 400
+            }),
+            WithdrawalStatus::ReleaseEligible {
+                commit_txid: [7u8; 32],
+                depth: 400,
+                required_depth: 288,
+                amount_atoms: LARGE,
+            }
+        );
+        assert_eq!(
+            s.step(WithdrawalEvent::AnchorObserved {
+                commit_txid: [7u8; 32],
+                depth: 100
+            }),
+            provable(7, 100, LARGE)
+        );
     }
 
     #[test]
@@ -937,6 +971,14 @@ mod tests {
         let q = WithdrawalStatus::queued(SMALL);
         assert_eq!(q.step(AUTH), q);
         assert_eq!(q.step(AUTH_REVIEWED), q);
+        // a fork freezes even a not-yet-anchored withdrawal, amount carried
+        assert_eq!(
+            q.step(WithdrawalEvent::ForkObserved { fork_point: 3 }),
+            WithdrawalStatus::Frozen {
+                fork_point: 3,
+                amount_atoms: SMALL,
+            }
+        );
         assert_eq!(
             q.step(WithdrawalEvent::AnchorDepthReported { depth: 99 }),
             q

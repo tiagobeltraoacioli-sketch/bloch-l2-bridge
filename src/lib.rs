@@ -13,7 +13,8 @@
 //! checklist (`release`, no keys, no quorum crypto), the
 //! proof-of-reserves predicate (`reserves`, DETECTS-not-PREVENTS), and a
 //! WBLCH / Uniswap-v2 deploy **harness config** (no deploys, no chain
-//! interaction, no compilation).
+//! interaction; the only compiler it ever invokes is a pinned solc 0.8.24,
+//! when present, to compile-and-hash the contract sources it pins).
 //!
 //! Honesty invariants, mirrored from the spec and non-negotiable:
 //! * Bloch today is k=4, low-hashrate, 51%-attackable, unaudited. No finite

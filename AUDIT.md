@@ -22,7 +22,7 @@ what the code exists to be reused for. Nothing here changes the crate's
 own claim: it is unaudited in the third-party sense, and this document is
 an internal review, not that audit.
 
-**Baseline / result.** 114 tests green before the review. Two rounds of
+**Baseline / result.** 114 tests green before the review. Three rounds of
 work followed on this branch:
 
 * *Round 1 (audit):* the two confirmed defects fixed with regression tests
@@ -36,6 +36,18 @@ work followed on this branch:
   `deploy/testnet.json` (WBLCH and both design contracts) is REAL and
   test-enforced whenever that compiler is present (`REQUIRE_SOLC=1` makes
   its absence a failure).
+* *Round 3 (adversarial review of the PR):* an independent five-reviewer
+  panel (Rust logic, Solidity, docs/honesty, tests, adversarial) reviewed
+  the PR diff, every candidate finding was put to three refuters with
+  distinct lenses, and a completeness critic swept what the panel missed.
+  30 candidates → 17 confirmed + 4 from the critic, 13 refuted. All 21
+  were acted on (see "Round 3" below): one real robustness gap closed
+  (M-1's per-request-changing source), one Solidity hardening completed
+  (the lock now covers both entry points), several honesty overclaims in
+  the round-2 docs corrected, weak tests replaced by discriminating ones,
+  and L2BlochBridge graduated into `predeploys` with typed validation.
+  Result: 137 tests green; clippy, rustdoc and fmt clean; all 15 harness
+  tests run for real under the pinned solc.
 
 ---
 
@@ -105,9 +117,19 @@ prefix folded once; replay is a no-op; converges when the source settles)
 and `inconsistent_source_does_not_fabricate_credit_reorg_alarm` (an
 announced deposit in the still-served tip gets no spurious alarm).
 
-**Residual.** A source that changes *between every call* can still keep
-`sync` busy, but that is a live-source liveness property, not a
-deterministic spin; each rewind now requires an actually observed change.
+**Residual (round 1) and closure (round 3).** Round 1 left one gap: a
+source that answers differently on *every request* (a malicious RPC, or a
+load balancer alternating between nodes on different branches) could still
+push/pop the same height within one call, growing `updates` without bound.
+Round 3's adversarial review confirmed this (it is deterministic for such a
+source, not a mere liveness property). Fix: the roll-forward now carries a
+per-call rewind budget of `journal.len() + 1` — enough for every honest
+mid-sync cascade (one distinct height per rewind) — and stops, stays safe,
+when it is spent; pushes were already bounded by the tip read once per
+call. `sync` therefore always returns, whatever the source does; pinned by
+`source_alternating_every_request_cannot_spin_sync` (with a deadline, so a
+regression fails instead of hanging) and the honest branch by
+`mid_sync_reorg_rewinds_stale_tail_and_converges`.
 
 ### M-2 — `from_state` restores an unrewindable "zombie" deposit (confirmed, fixed)
 
@@ -184,14 +206,21 @@ requires the same idempotency to avoid a double mint. Either way the L2
 side must be idempotent; the crate should say so where it documents
 `WatcherUpdate::Creditable`.
 
-**Remediation (round 2).** `DepositEvent::deposit_id()` added as the one
-identity downstream code may key on, with the host contract spelled out on
-`WatcherUpdate::Creditable` and in the module docs (persist-before-act and
-persist-after-act are both safe iff the mint is idempotent on
-`deposit_id`). The L2 derivation rule itself is outside this crate, so
-the sourceHash change remains a recommendation to that component.
+**Remediation (round 2, corrected round 3).** `DepositEvent::deposit_id()`
+added as the one identity downstream code may key on, with the host contract
+spelled out on `WatcherUpdate::Creditable` and in the module docs. Round 3's
+review caught an overclaim in that contract: idempotency makes a retry
+SAFE but does not make one HAPPEN — the watcher never re-emits `Creditable`
+for an id already in its persisted `credited` set, so persist-before-act
+loses the credit silently on a crash unless the host re-drives its mint on
+restart. The contract now says exactly that, and
+`DepositWatcher::creditable()` exposes the restart worklist (tracked
+deposits in `DepositPhase::Creditable`), pinned by
+`creditable_worklist_lists_announced_tracked_deposits`. The L2 derivation
+rule itself is outside this crate, so the sourceHash change remains a
+recommendation to that component.
 
-### L-1 — `WithdrawalStatus::step` accepts any `required_depth ≥ 1` (confirmed, open)
+### L-1 — `WithdrawalStatus::step` accepted any `required_depth ≥ 1` (confirmed round 1, fixed round 2)
 
 **Where.** `src/status.rs`, `ReleaseAuthorized { required_depth }` arms of `step`.
 
@@ -216,7 +245,7 @@ re-authorization without it demotes). Pinned by
 `operator_review_tier_requires_attestation` and
 `amount_is_carried_through_every_transition`.
 
-### L-2 — `WithdrawalQueue::prove` cannot prove against a historical root (confirmed, open)
+### L-2 — `WithdrawalQueue::prove` could not prove against a historical root (confirmed round 1, fixed round 2)
 
 **Where.** `src/release.rs`, `prove`; checklist item [3] in
 `evaluate_release_checklist`.
@@ -240,7 +269,7 @@ should record each epoch's closing `leaf_count` next to its anchored root.
 The strict epoch binding (only the epoch-E root is accepted) is unchanged
 and documented.
 
-### L-3 — Nullifier keyed by bare `nonce`; leaf has no chain-id domain separator (open)
+### L-3 — Nullifier keyed by bare `nonce`; leaf has no chain-id domain separator (nullifier fixed round 2; domain separator open, spec-level)
 
 **Where.** `src/release.rs` `NullifierLog`; `L1ReleaseVerifier.released`;
 `src/withdrawal.rs` `abi_encode`.
@@ -252,16 +281,25 @@ or, worse, mark a new bridge's nonce 0 as already paid. The leaf itself
 carries no chain id, so identical `(nonce, sender, recipient, amount,
 epoch)` tuples on two deployments hash to the same leaf.
 
-**Remediation (round 2).** `NullifierLog` is now keyed by the withdrawal
-LEAF (`record_paid(&message)` / `is_paid(&message)`, plus `_leaf` forms),
-and `L1ReleaseVerifier.released` is `mapping(bytes32 => bool)` with
-`markReleased(bytes32 leaf)`; pinned by
-`nullifier_is_keyed_by_leaf_not_by_nonce`. The chain-id domain separator
-in the LEAF PREIMAGE is deliberately NOT done here: it changes the
+**Remediation (round 2, docs corrected round 3).** `NullifierLog` is now
+keyed by the withdrawal LEAF (`record_paid(&message)` / `is_paid(&message)`,
+plus `_leaf` forms), and `L1ReleaseVerifier.released` is
+`mapping(bytes32 => bool)` with `markReleased(bytes32 leaf)`; pinned by
+`nullifier_is_keyed_by_leaf_not_by_nonce`. Round 3's review caught the
+round-2 docs overclaiming that this makes a reset / second L2
+"collision-free": it does not — IDENTICAL tuples still hash to the same
+leaf (all epochs are 0 today, so a genesis re-alloc reproduces nonce 0 /
+epoch 0 exactly) and are refused fail-closed. The README, module docs,
+`NullifierLog` docs, test docstring and the Solidity comment now say so,
+and the residual is pinned in the same test. The persisted format changed
+(`BTreeSet<u64>` → `BTreeSet<[u8; 32]>`); `NullifierLog::from_messages`
+is the migration path, pinned by
+`nullifier_from_messages_rebuilds_the_leaf_keyed_log`. The chain-id domain
+separator in the LEAF PREIMAGE is deliberately NOT done here: it changes the
 normative §5 leaf format pinned across Rust, Python, Solidity and the
 design spec, and belongs to a spec revision — flagged, not smuggled in.
 
-### L-4 — `WithdrawalQueue::initiate` accepts histories the predeploy could never produce (open)
+### L-4 — `WithdrawalQueue::initiate` accepted histories the predeploy could never produce (fixed round 2)
 
 **Where.** `src/release.rs`, `initiate`.
 
@@ -277,7 +315,7 @@ contract's behaviour.
 `from_messages` / serde restore inherit the refusals. Pinned by
 `queue_mirrors_predeploy_refusals`.
 
-### L-5 — `harness::validate` does not confine `source_path` (open)
+### L-5 — `harness::validate` did not confine `source_path` (fixed round 2)
 
 **Where.** `src/harness.rs`, `validate` and `verify_deployed_bytecode`
 (`base_dir.join(&p.source_path)`).
@@ -294,16 +332,16 @@ paths, `..` and prefix components with the typed
 `resolve_source_path_confines_to_base_dir` and
 `validation_rejects_source_path_escaping_crate_root`.
 
-### L-6 — Silent-skip bytecode test; design-section pins unenforced (open)
+### L-6 — Silent-skip bytecode test; design-section pins unenforced (fixed round 2)
 
 **Where.** `tests/harness_config.rs`
 (`wblch_deployed_bytecode_matches_pinned_hash`); `deploy/testnet.json`
 `bridge_contracts_design`.
 
-**What.** The "THE acceptance check" test passes when solc 0.8.24 is absent
-(it prints SKIP to stderr), so the pinned `deployed_bytecode_keccak256`
-was **not verified in this environment** and CI without solc would never
-notice drift. The `source_keccak256` pins for `L2BlochBridge.sol` and
+**What (round 1).** The "THE acceptance check" test passed when solc 0.8.24
+was absent (it printed SKIP to stderr), so at the time of the round-1 review
+the pinned `deployed_bytecode_keccak256` had **not been verified in this
+environment** and CI without solc would never notice drift. The `source_keccak256` pins for `L2BlochBridge.sol` and
 `L1ReleaseVerifier.sol` sit in a section serde ignores; no test reads them.
 (I recomputed all three source pins by hand: all MATCH at this commit.)
 
@@ -349,9 +387,12 @@ finite depth is finality" stance) while `credited` must stay permanent.
 * `L2BlochBridge.withdrawWBLCH` updates state after two external calls
   (CEI order inverted). Safe only because `WBLCH` is a trusted predeploy
   and `receive()` is gated to it. *Round 2:* a `nonReentrant` lock (0 =
-  unlocked, so it needs no constructor — this is a genesis predeploy) now
-  guards the path regardless. The exact-equality balance check is correct
-  within one transaction.
+  unlocked, so it needs no constructor — this is a genesis predeploy) was
+  put on `withdrawWBLCH`. *Round 3:* the review noted the lock did not
+  cover `withdraw()`, which shares `_initiate`, so a non-conforming WBLCH
+  could still have re-entered through it; both entry points now share the
+  lock, making the "safe regardless" wording true. The exact-equality
+  balance check is correct within one transaction.
 * `L1ReleaseVerifier.postWithdrawalsRoot` is append-only per epoch with no
   correction path; a mis-posted root is permanent for that epoch.
 * Neither `withdraw(bytes20(0))` nor an L2D0 envelope with a zero
@@ -458,6 +499,38 @@ serialization before wiring the RPC source.
 | `tests/vectors.rs`, `tests/bridge_flow.rs` | Updated to the amount-carrying status machine, the leaf-keyed nullifier, and `prove_at` in the end-to-end flow. |
 | `Cargo.toml`, `src/atoms.rs`, `src/hex.rs`, all `src/*.rs` | I-6: `rust-version = "1.87"`, `is_multiple_of`, `\[n\]` doc escapes, crate-wide `cargo fmt`. |
 | `README.md` | Module table, stubbed-list and build instructions updated to match. |
+
+### Round 3 — adversarial review of the PR (ultracode panel)
+
+Method: five independent reviewers over the PR diff (one dimension each),
+three refuters per candidate finding with distinct lenses (reproduce, spec
+& intent, impact; majority rules), then a completeness critic. Refuted
+candidates (13) are listed in the workflow journal, not here; two examples
+of what was rightly refuted: "the ReleaseEligible demotion arms trust the
+stored `required_depth`" (only reachable by hand-building a state the
+machine cannot produce) and "`resolve_source_path` is lexical, so an
+in-tree symlink escapes" (true, and documented as lexical; the harness
+reads in-repo sources).
+
+| Panel finding | Severity | Action |
+|---|---|---|
+| `sync` had no per-call work bound: a source answering differently on every request could push/pop the same height forever (M-1 residual was understated) | low → fixed | Per-call rewind budget `journal.len() + 1`; tests `source_alternating_every_request_cannot_spin_sync`, `mid_sync_reorg_rewinds_stale_tail_and_converges` (both with a deadline). |
+| `WatcherUpdate::Creditable` HOST CONTRACT overclaimed: persist-before-act "cannot lose the credit" — nothing in the crate retries; a restored watcher never re-emits | medium → fixed | Contract rewritten (host must re-drive on restart); `DepositWatcher::creditable()` restart worklist added and tested; `credited` field doc and FIX-1 test docstring de-sourceHash'd. |
+| Nullifier docs claimed leaf keying makes a bridge reset / second L2 "collision-free"; identical tuples still collide (all epochs are 0 today) | medium → fixed | README, module docs, `NullifierLog` docs, test docstring and `L1ReleaseVerifier.sol` comment reworded; residual pinned in `nullifier_is_keyed_by_leaf_not_by_nonce`. |
+| Persisted formats changed (`WithdrawalStatus::Queued` unit → struct; `NullifierLog` `u64` → leaf) with no migration note | nit → fixed | Format-change note on `NullifierLog`; `NullifierLog::from_messages` migration helper, tested. |
+| "Safe regardless" reentrancy claim: only `withdrawWBLCH` was locked, `withdraw()` shares `_initiate` | low → fixed | `nonReentrant` on both entry points; docs updated; L2BlochBridge pins recomputed. |
+| `operator_reviewed` is an unverifiable caller bool while release.rs keeps the same tier `Scaffold` — the two halves disagreed again | low → fixed (docs) | `ReleaseAuthorized` / `ReleaseEligible` docs and README now state the flag is the operator's disclosed attestation the crate cannot verify, derivable from the state's `requirement()`. |
+| `inconsistent_source_does_not_fabricate_credit_reorg_alarm` never exercised the alarm-fabrication path (unlinkable block far above the deposit block) | low → fixed | Fixture rebuilt with the unlinkable block directly above the announced deposit's block. |
+| Branch (a) of the linkage-break handling (honest stale-tail rewind) was untested with any fixed source | low → fixed | `FlippingSource` test (interior-mutable source that reorgs between step 1 and the roll-forward). |
+| `ReleaseEligible` + `AnchorObserved` with the SAME commit never pinned to an exact successor; `Queued` + `ForkObserved` unpinned | low → fixed | Exact pins added. |
+| AUDIT.md headings said "(open)" for L-1…L-6 while the table said Fixed; L-6 body said the WBLCH pin "was not verified" | low → fixed | Headings and wording corrected. |
+| Stale "paid-nonce" on `ReleaseObservation::nullifiers` (×3 reviewers) | nit → fixed | Reworded. |
+| `credited` field doc still described the off-chain set as THE barrier with the block-hash sourceHash | low → fixed | Reworded to defence-in-depth. |
+| README "`sync` always terminates" stronger than round 2 guaranteed | low → fixed | Now true (per-call budget) and stated with its reason. |
+| Design-pin test never checked each entry's own `solc_version_exact` | nit → fixed | Per-entry version assertion before compiling. |
+| `REQUIRE_SOLC` message said "$SOLC unset" when it was set to a non-file | nit → fixed | Message distinguishes the two. |
+| Crate-doc mirrors (`Cargo.toml` header, `lib.rs`, README line 10) still said "no compilation" | nit → fixed | Reworded consistently. |
+| L2BlochBridge met the file's own graduation criterion ("until compiled") but stayed in the design section under a swapped rationale | nit → fixed | Graduated into `predeploys` (typed `validate()`, address pinned at `0x42…0010`, bytecode enforced by the generalized predeploy tests); `L1ReleaseVerifier` stays design-stage for the real reason (constructor, no home chain). |
 
 Still open (deliberately, spec-level): the chain-id / bridge-address
 domain separator in the LEAF PREIMAGE (L-3 second half) and the L2

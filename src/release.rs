@@ -13,9 +13,13 @@
 //!   this crate's `verify_inclusion`);
 //! * [`NullifierLog`]: the paid-LEAF set of checklist item \[4\] — keyed by
 //!   the withdrawal leaf hash (which commits to nonce, sender, recipient,
-//!   amount and epoch), never by the bare nonce, so a bridge reset or a
-//!   second L2 on the same vault cannot collide with it; a paid leaf can
-//!   never be recorded twice;
+//!   amount and epoch), never by the bare nonce, so a same-nonce withdrawal
+//!   that differs in ANY other field can never be confused with a paid one.
+//!   IDENTICAL tuples on two deployments (a bridge reset, a second L2 on the
+//!   same vault) still hash to the same leaf and are refused fail-closed
+//!   until the leaf preimage carries a chain-id/bridge domain separator — a
+//!   normative format change left to a spec revision; a paid leaf can never
+//!   be recorded twice;
 //! * [`evaluate_release_checklist`]: the seven §5 items as a typed
 //!   [`ReleaseChecklist`], where items \[2\] anchor depth, \[3\] Merkle
 //!   inclusion, \[4\] nullifier, \[5\] reorg freeze and \[6\] post-payout
@@ -294,10 +298,16 @@ impl WithdrawalQueue {
 ///
 /// Keyed by the withdrawal LEAF hash ([`WithdrawalMessage::leaf`]), which
 /// commits to nonce, sender, recipient, amount and epoch — NOT by the bare
-/// nonce. Nonces restart at 0 on any bridge reset (a testnet genesis
-/// re-alloc) and are shared by any two L2s that might use the same vault,
-/// so a nonce-keyed log would either collide or mark a fresh bridge's
-/// nonce 0 as already paid. `L1ReleaseVerifier.released` mirrors this
+/// nonce, so a same-nonce withdrawal that differs in any other field can
+/// never be mistaken for a paid one (a nonce-keyed log would confuse them,
+/// since nonces restart at 0 on a bridge reset and are shared by any two
+/// L2s on one vault). What leaf keying does NOT buy: two deployments that
+/// produce the IDENTICAL tuple (a testnet genesis re-alloc restarts nonces
+/// AND epochs at 0; a second L2 on the same vault shares the nonce space)
+/// hash to the same leaf and are refused as already paid — fail-closed —
+/// until the leaf preimage carries a chain-id/bridge-address domain
+/// separator, a normative format change deliberately left to a spec
+/// revision (AUDIT.md L-3). `L1ReleaseVerifier.released` mirrors this log
 /// (`mapping(bytes32 => bool)`).
 ///
 /// Serde: fully serializable/restorable so a host restart can never clear
@@ -306,6 +316,11 @@ impl WithdrawalQueue {
 /// Operational ordering the host MUST keep: record the leaf here and
 /// persist it BEFORE broadcasting the payout, never after (a crash between
 /// payout and record is otherwise a double-pay on restart).
+///
+/// PERSISTED FORMAT CHANGE: this log serializes as a set of 32-byte leaves.
+/// A log persisted by the earlier nonce-keyed form (a set of `u64`) does not
+/// deserialize; rebuild it with [`NullifierLog::from_messages`] from the
+/// paid withdrawals' messages (kept in [`WithdrawalQueue::messages`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NullifierLog {
     paid: BTreeSet<[u8; 32]>,
@@ -325,6 +340,16 @@ impl NullifierLog {
     pub fn from_paid(paid: impl IntoIterator<Item = [u8; 32]>) -> Self {
         NullifierLog {
             paid: paid.into_iter().collect(),
+        }
+    }
+
+    /// Rebuild a log from the MESSAGES of already-paid withdrawals (their
+    /// leaves are recomputed here). This is the migration path from the
+    /// earlier nonce-keyed persisted form: look each paid nonce up in the
+    /// persisted [`WithdrawalQueue::messages`] and feed those messages here.
+    pub fn from_messages<'a>(paid: impl IntoIterator<Item = &'a WithdrawalMessage>) -> Self {
+        NullifierLog {
+            paid: paid.into_iter().map(WithdrawalMessage::leaf).collect(),
         }
     }
 
@@ -501,7 +526,8 @@ pub struct ReleaseObservation<'a> {
     pub bundle: &'a WithdrawalProofBundle,
     /// The anchored epoch (root + epoch + depth, bound to ONE anchor).
     pub anchor: AnchoredEpochView,
-    /// The agent's paid-nonce log.
+    /// The agent's paid-LEAF log ([`NullifierLog`], keyed by the withdrawal
+    /// leaf — checklist item \[4\]).
     pub nullifiers: &'a NullifierLog,
     /// Whether the agent's reorg sentinel currently has a freeze active
     /// (or not yet aged W blocks past resolution).
@@ -900,8 +926,10 @@ mod tests {
     }
 
     /// The log is keyed by LEAF, not nonce: paying nonce 5 of one history
-    /// does not mark nonce 5 of a different history (a reset bridge, another
-    /// L2 on the same vault, a different amount/recipient/epoch) as paid.
+    /// does not mark a nonce-5 message with a different epoch or amount as
+    /// paid. The honest residual is pinned too: an IDENTICAL tuple (as after
+    /// a genesis re-alloc, or on a second L2 sharing the vault) still
+    /// collides, because the leaf carries no chain-id domain separator.
     #[test]
     fn nullifier_is_keyed_by_leaf_not_by_nonce() {
         let mut log = NullifierLog::new();
@@ -919,6 +947,28 @@ mod tests {
         assert!(!log.is_paid(&same_nonce_other_amount));
         log.record_paid(&same_nonce_other_epoch).unwrap();
         assert_eq!(log.len(), 2);
+        // residual (L-3, open): the identical tuple from "another deployment"
+        // is indistinguishable and is refused fail-closed.
+        let identical_tuple_elsewhere = WithdrawalMessage { ..paid };
+        assert!(log.is_paid(&identical_tuple_elsewhere));
+    }
+
+    /// Migration path from the nonce-keyed persisted form: rebuilding from
+    /// the paid withdrawals' messages yields exactly the leaf-keyed log.
+    #[test]
+    fn nullifier_from_messages_rebuilds_the_leaf_keyed_log() {
+        let (q, _bundles) = queue_of(4);
+        let paid_nonces = [0u64, 2, 3]; // what an old nonce-keyed log held
+        let rebuilt =
+            NullifierLog::from_messages(paid_nonces.iter().map(|&n| &q.messages()[n as usize]));
+        let mut expected = NullifierLog::new();
+        for n in paid_nonces {
+            expected.record_paid(&q.messages()[n as usize]).unwrap();
+        }
+        assert_eq!(rebuilt, expected);
+        assert!(rebuilt.is_paid(&q.messages()[2]));
+        assert!(!rebuilt.is_paid(&q.messages()[1]));
+        assert_eq!(NullifierLog::from_messages([]), NullifierLog::new());
     }
 
     // ---- checklist ----

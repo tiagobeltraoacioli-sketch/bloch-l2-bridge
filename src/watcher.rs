@@ -219,12 +219,23 @@ pub enum WatcherUpdate {
     ///
     /// HOST CONTRACT: the L2 credit minted against this MUST be idempotent
     /// on [`DepositEvent::deposit_id`] (txid, vout) — never keyed on
-    /// `l1_block_hash`. With that, either persistence order is safe:
-    /// persisting [`DepositWatcher::state`] before acting cannot lose the
-    /// credit (the mint is retried by id), and persisting after acting
-    /// cannot double-mint (the mint is deduped by id). Without it, this
-    /// watcher's `credited` set is the ONLY thing standing between a
-    /// reorg + re-mine and a second mint.
+    /// `l1_block_hash`. Idempotency makes a RETRY safe; it does not make one
+    /// happen: this watcher announces each deposit_id at most once, EVER,
+    /// and a restored watcher never re-emits `Creditable` for an id already
+    /// in its persisted `credited` set. So the host must pick one of:
+    /// * persist-after-act: mint (idempotently), then persist
+    ///   [`DepositWatcher::state`] — a crash in between re-emits on restart
+    ///   and the id-keyed mint dedups it; or
+    /// * persist-before-act: persist, then mint — and on EVERY restart
+    ///   re-drive the idempotent mint for each announced-but-unconfirmed
+    ///   deposit, rebuilt from [`DepositWatcher::creditable`] (tracked
+    ///   deposits in [`DepositPhase::Creditable`]) or the host's own durable
+    ///   pending-mint list. Without that re-drive, a crash between persist
+    ///   and mint loses the credit SILENTLY (BLCH in the vault, no L2 mint).
+    ///
+    /// Without an id-keyed idempotent mint at all, this watcher's `credited`
+    /// set is the ONLY thing standing between a reorg + re-mine and a second
+    /// mint.
     Creditable { deposit: DepositEvent },
     /// An OperatorReview-tier deposit reached its minimum depth: parked
     /// for the disclosed operator-review step. Never auto-credited here.
@@ -251,12 +262,12 @@ pub struct DepositWatcher {
     journal: Vec<[u8; 32]>,
     tracked: BTreeMap<DepositId, TrackedDeposit>,
     /// DURABLE, BRANCH-INDEPENDENT credit log: every deposit_id ever
-    /// announced [`WatcherUpdate::Creditable`]. NEVER cleared on rewind —
-    /// this is what makes a reorg + re-mine of the same deposit tx unable
-    /// to double-credit (each branch would give it a fresh
-    /// `l1_block_hash` → fresh sourceHash → a second L2 mint). One
-    /// deposit_id is announced creditable AT MOST ONCE, ever; the §0.1
-    /// reorg ALARM still fires.
+    /// announced [`WatcherUpdate::Creditable`]. NEVER cleared on rewind, so
+    /// this WATCHER announces each deposit_id at most once, ever — a reorg +
+    /// re-mine of the same deposit tx re-ages silently (the §0.1 reorg ALARM
+    /// still fires). Defence in depth only: the L2 mint itself must be
+    /// idempotent on `deposit_id` and never keyed on the block hash (module
+    /// docs; HOST CONTRACT on [`WatcherUpdate::Creditable`]).
     credited: BTreeSet<DepositId>,
     /// §0.1 alarm log: announced deposits later reorged away (never
     /// cleared — the whole point is that this cannot be undone here).
@@ -436,6 +447,20 @@ impl DepositWatcher {
         &self.credited
     }
 
+    /// Tracked deposits currently in [`DepositPhase::Creditable`] under this
+    /// watcher's view — the host's pending-mint WORKLIST after a restart (see
+    /// the HOST CONTRACT on [`WatcherUpdate::Creditable`]): the watcher never
+    /// re-emits `Creditable` for an id it has already announced, so a host
+    /// that persists before acting must re-drive its idempotent mint from
+    /// here. A deposit reorged away after announcement is no longer here; it
+    /// is in [`Self::credit_reorg_alarms`].
+    pub fn creditable(&self) -> impl Iterator<Item = &DepositEvent> {
+        self.tracked
+            .values()
+            .filter(|t| t.phase == DepositPhase::Creditable)
+            .map(|t| &t.event)
+    }
+
     /// Height the watcher has folded in up to (its tip), if any.
     pub fn tip_height(&self) -> Option<u64> {
         self.journal.len().checked_sub(1).map(|h| h as u64)
@@ -469,8 +494,20 @@ impl DepositWatcher {
             }
         }
 
-        // 2. Roll forward with parent-linkage checks.
+        // 2. Roll forward with parent-linkage checks. Work per call is
+        //    BOUNDED whatever the source does: pushes by `tip` (read once,
+        //    here) and rewinds by the budget below — so `sync` always
+        //    returns.
         if let Some(tip) = source.tip_height() {
+            // Rewind budget for THIS call. An honest mid-sync reorg pops at
+            // most the tail we started with (one distinct height per rewind),
+            // so `journal.len() + 1` covers every legitimate cascade. A source
+            // that answers differently on every request (a malicious RPC, a
+            // load balancer alternating between nodes on different branches)
+            // could otherwise push/pop the same height forever, growing
+            // `updates` without bound; once the budget is spent we stop, stay
+            // safe, and let the next `sync` resume on a settled view.
+            let mut rewind_budget = self.journal.len() + 1;
             loop {
                 let next = self.journal.len() as u64;
                 if next > tip {
@@ -505,7 +542,12 @@ impl DepositWatcher {
                         match source.block_at(next - 1) {
                             Some(b) if b.hash == prev => break, // (b) inconsistent source
                             _ => {
-                                self.rewind_one(&mut updates); // (a) stale tail
+                                // (a) stale tail — within this call's budget
+                                if rewind_budget == 0 {
+                                    break; // source keeps changing; stop, stay safe
+                                }
+                                rewind_budget -= 1;
+                                self.rewind_one(&mut updates);
                                 continue;
                             }
                         }
@@ -978,9 +1020,10 @@ mod tests {
 
     /// FIX-1 pin (the I2/T3 breaker): a deposit announced Creditable, then
     /// reorged away, then RE-MINED on the new branch (same txid, new
-    /// l1_block_hash → would-be new sourceHash) and re-aged past K must
-    /// emit `Creditable` exactly ONCE over the whole history. The reorg
-    /// alarm still fires; only the second credit is suppressed.
+    /// l1_block_hash — exactly what an L2 mint wrongly keyed on the block
+    /// hash would treat as a fresh deposit) and re-aged past K must emit
+    /// `Creditable` exactly ONCE over the whole history. The reorg alarm
+    /// still fires; only the second credit is suppressed.
     #[test]
     fn reorged_and_remined_deposit_is_credited_exactly_once() {
         let tx = deposit_tx(11, ATOMS_PER_BLCH, [0x99; 20], CHAIN_ID);
@@ -1193,9 +1236,12 @@ mod tests {
         assert_eq!(w.tracked().count(), 0);
     }
 
-    /// REGRESSION (audit M-1, announced case): the same inconsistent view
-    /// over an already-ANNOUNCED deposit must not fabricate a permanent §0.1
-    /// alarm — the source is refused, not believed.
+    /// REGRESSION (audit M-1, announced case): an inconsistent view whose
+    /// unlinkable block sits DIRECTLY above the block holding an already-
+    /// ANNOUNCED deposit must not fabricate a permanent §0.1 alarm. This is
+    /// the discriminating fixture: the pre-fix loop popped that very block
+    /// (alarm + Dropped), re-pushed it (Observed) and spun; the fix refuses
+    /// the view instead of believing it.
     #[test]
     fn inconsistent_source_does_not_fabricate_credit_reorg_alarm() {
         let mut src = chain("main", 1);
@@ -1203,7 +1249,7 @@ mod tests {
             &mut src,
             "main",
             vec![deposit_tx(22, ATOMS_PER_BLCH, [0x22; 20], CHAIN_ID)],
-        );
+        ); // deposit at height 1
         for _ in 0..30 {
             extend(&mut src, "main", vec![]);
         }
@@ -1212,21 +1258,187 @@ mod tests {
             .sync(&src)
             .iter()
             .any(|u| matches!(u, WatcherUpdate::Creditable { .. })));
-        let tip = w.tip_height().unwrap();
+        assert_eq!(w.creditable().count(), 1);
 
-        // same chain, plus one block that does not link to the served tip
-        let mut blocks: Vec<L1Block> = (0..=tip).map(|h| src.block_at(h).unwrap()).collect();
-        blocks.push(block(tip + 1, "X", hash(b"not-the-tip"), vec![]));
-        let mixed = RawSource(blocks);
+        // The source now serves only blocks 0 and 1 (the deposit block is
+        // its tip) plus a block 2 that does not link to block 1.
+        let b0 = src.block_at(0).unwrap();
+        let b1 = src.block_at(1).unwrap();
+        let mixed = RawSource(vec![b0, b1, block(2, "X", hash(b"not-b1"), vec![])]);
 
-        assert_eq!(w.sync(&mixed), vec![]);
-        assert_eq!(
-            w.tip_height(),
-            Some(tip),
-            "unlinkable block must not be folded in"
-        );
+        let updates = w.sync(&mixed);
+        assert_eq!(updates, vec![], "no Dropped/Observed churn: {updates:?}");
+        assert_eq!(w.tip_height(), Some(1), "unlinkable block not folded in");
         assert!(w.credit_reorg_alarms().is_empty(), "no spurious §0.1 alarm");
         assert_eq!(w.tracked().count(), 1);
+        assert_eq!(w.creditable().count(), 1, "still announced, still tracked");
+    }
+
+    /// Run `sync` on another thread with a deadline, so a regression back
+    /// into a non-terminating loop FAILS the test instead of hanging CI.
+    fn sync_with_deadline<S: BlockSource + Send + 'static>(
+        w: DepositWatcher,
+        source: S,
+    ) -> (DepositWatcher, Vec<WatcherUpdate>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut w = w;
+            let updates = w.sync(&source);
+            tx.send((w, updates)).ok();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .expect("sync must return within the deadline (non-terminating loop?)")
+    }
+
+    /// A source that serves chain A until height 2 is first requested, then
+    /// chain B (sharing block 0) — a node that reorgs BETWEEN step 1 and the
+    /// roll-forward. Exercises branch (a) of the linkage-break handling: the
+    /// stale A tail is rewound (Dropped) and the watcher converges on B.
+    struct FlippingSource {
+        a: Vec<L1Block>,
+        b: Vec<L1Block>,
+        flipped: std::cell::Cell<bool>,
+    }
+    impl BlockSource for FlippingSource {
+        fn tip_height(&self) -> Option<u64> {
+            Some(3)
+        }
+        fn block_at(&self, height: u64) -> Option<L1Block> {
+            if height == 2 {
+                self.flipped.set(true);
+            }
+            let chain = if self.flipped.get() { &self.b } else { &self.a };
+            chain.get(height as usize).cloned()
+        }
+    }
+
+    #[test]
+    fn mid_sync_reorg_rewinds_stale_tail_and_converges() {
+        let a0 = block(0, "A", [0u8; 32], vec![]);
+        let a1 = block(
+            1,
+            "A",
+            a0.hash,
+            vec![deposit_tx(41, ATOMS_PER_BLCH, [0x41; 20], CHAIN_ID)],
+        );
+        let b1 = block(1, "B", a0.hash, vec![]);
+        let b2 = block(2, "B", b1.hash, vec![]);
+        let b3 = block(3, "B", b2.hash, vec![]);
+
+        // pre-sync on chain A up to height 1 (deposit Observed)
+        let mut pre = MemorySource::new();
+        pre.push(a0.clone()).unwrap();
+        pre.push(a1.clone()).unwrap();
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(w.sync(&pre).len(), 1);
+        assert_eq!(w.tip_height(), Some(1));
+
+        let flipping = FlippingSource {
+            a: vec![a0.clone(), a1, block(2, "A", hash(b"A:1"), vec![])],
+            b: vec![a0, b1, b2, b3],
+            flipped: std::cell::Cell::new(false),
+        };
+        let (w, updates) = sync_with_deadline(w, flipping);
+        // step 1 saw A1 (no flip yet); the roll-forward hit B2, re-fetched
+        // height 1, found B1 != A1 -> branch (a): rewind A1, converge on B.
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert!(matches!(updates[0], WatcherUpdate::Dropped { .. }));
+        assert_eq!(w.tip_height(), Some(3));
+        assert_eq!(w.tracked().count(), 0);
+        assert!(w.credit_reorg_alarms().is_empty());
+    }
+
+    /// A source that alternates between two branches on EVERY request (a
+    /// malicious RPC or a load balancer fronting nodes on different
+    /// branches). `sync` must still return, with bounded work per call, and
+    /// converge once the source settles.
+    struct AlternatingSource {
+        a: Vec<L1Block>,
+        b: Vec<L1Block>,
+        calls: std::cell::Cell<usize>,
+    }
+    impl BlockSource for AlternatingSource {
+        fn tip_height(&self) -> Option<u64> {
+            Some(3)
+        }
+        fn block_at(&self, height: u64) -> Option<L1Block> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            let chain = if n.is_multiple_of(2) {
+                &self.a
+            } else {
+                &self.b
+            };
+            chain.get(height as usize).cloned()
+        }
+    }
+
+    #[test]
+    fn source_alternating_every_request_cannot_spin_sync() {
+        let g0 = block(0, "G", [0u8; 32], vec![]);
+        let mk = |tag: &str, deposit_tag: u8| {
+            let b1 = block(
+                1,
+                tag,
+                g0.hash,
+                vec![deposit_tx(
+                    deposit_tag,
+                    ATOMS_PER_BLCH,
+                    [deposit_tag; 20],
+                    CHAIN_ID,
+                )],
+            );
+            let b2 = block(2, tag, b1.hash, vec![]);
+            let b3 = block(3, tag, b2.hash, vec![]);
+            vec![g0.clone(), b1, b2, b3]
+        };
+        let alternating = AlternatingSource {
+            a: mk("A", 51),
+            b: mk("B", 52),
+            calls: std::cell::Cell::new(0),
+        };
+        let w = DepositWatcher::new(vaults(), CHAIN_ID);
+        let (w, updates) = sync_with_deadline(w, alternating);
+        // bounded: a handful of Observed/Dropped at most, never unbounded
+        assert!(
+            updates.len() <= 8,
+            "work per call must be bounded: {updates:?}"
+        );
+        assert!(w.credit_reorg_alarms().is_empty());
+        // once the source settles on B, the watcher converges cleanly
+        let settled = RawSource(mk("B", 52));
+        let (w, _) = sync_with_deadline(w, settled);
+        assert_eq!(w.tip_height(), Some(3));
+        assert_eq!(w.tracked().count(), 1);
+        let (_, id) = (0, w.tracked().next().unwrap().0);
+        assert_eq!(*id, (txid(52), 0));
+    }
+
+    /// `creditable()` is the restart worklist: Pending deposits are not in
+    /// it, announced ones are, and it survives a state round-trip.
+    #[test]
+    fn creditable_worklist_lists_announced_tracked_deposits() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(61, ATOMS_PER_BLCH, [0x61; 20], CHAIN_ID)],
+        );
+        let mut w = DepositWatcher::new(vaults(), CHAIN_ID);
+        w.sync(&src);
+        assert_eq!(w.creditable().count(), 0, "Pending is not creditable");
+        for _ in 0..30 {
+            extend(&mut src, "main", vec![]);
+        }
+        w.sync(&src);
+        let listed: Vec<_> = w.creditable().collect();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].deposit_id(), (txid(61), 0));
+        // a restored watcher exposes the same worklist even though it will
+        // never re-emit Creditable for it
+        let mut restored = DepositWatcher::from_state(w.state()).unwrap();
+        assert_eq!(restored.sync(&src), vec![]);
+        assert_eq!(restored.creditable().count(), 1);
     }
 
     /// REGRESSION (audit M-2): `from_state` must refuse a tracked deposit

@@ -22,8 +22,11 @@ pragma solidity ^0.8.24;
 ///   * NOTHING HERE MOVES VALUE. `markReleased` is a bookkeeping nullifier
 ///     mirror of the keyholders' shared paid-LEAF log (src/release.rs
 ///     NullifierLog, keyed by the withdrawal leaf hash, never by the bare
-///     nonce — nonces restart at 0 on any bridge reset and are shared by
-///     any two L2s on one vault); it transfers nothing and cannot.
+///     nonce, so a same-nonce withdrawal differing in any other field is
+///     never confused with a paid one; IDENTICAL tuples on two deployments
+///     still collide until the leaf preimage carries a chain-id domain
+///     separator — a spec-level change left open); it transfers nothing
+///     and cannot.
 ///
 /// WHERE IT COULD RUN: a test EVM (anvil/hardhat) for cross-checking the
 /// Rust implementation, or — much later, out of scope — a foreign EVM chain

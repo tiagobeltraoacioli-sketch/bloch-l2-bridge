@@ -40,7 +40,7 @@ pragma solidity ^0.8.24;
 ///     proof-of-reserves inequality counts it as burned.
 ///   * As a genesis predeploy this contract's constructor never runs; all
 ///     state starts zero, which is exactly the empty incremental tree (and
-///     the unlocked reentrancy guard).
+///     the unlocked reentrancy guard, shared by both entry points).
 ///   * withdraw() REFUSES a zero `l1Recipient`: nobody could ever be paid
 ///     for it, so it would only ever inflate the pending-withdrawal
 ///     liability of the §5 proof-of-reserves inequality.
@@ -93,12 +93,15 @@ contract L2BlochBridge {
     /// @notice Native wei burned (locked here forever) by withdrawals.
     uint256 public totalBurnedWei;
 
-    /// @dev Reentrancy lock for the WBLCH path. 0 == unlocked, so a genesis
-    ///      predeploy (whose constructor never runs) starts unlocked; the
-    ///      usual 1/2 pattern would need constructor initialisation.
-    ///      Belt-and-braces: receive() is already gated to WBLCH_ADDRESS,
-    ///      and WBLCH is a trusted predeploy — this makes the effects-after-
-    ///      external-calls ordering in withdrawWBLCH safe regardless.
+    /// @dev Reentrancy lock shared by BOTH withdrawal entry points
+    ///      (withdraw and withdrawWBLCH), so no re-entry through either can
+    ///      run _initiate a second time inside one withdrawal — including
+    ///      the cross-function path where the WBLCH unwrap would call
+    ///      withdraw{value} instead of the bare send that receive() accepts.
+    ///      0 == unlocked, so a genesis predeploy (whose constructor never
+    ///      runs) starts unlocked; the usual 1/2 pattern would need
+    ///      constructor initialisation. Belt-and-braces over receive() being
+    ///      gated to WBLCH_ADDRESS and WBLCH being a trusted predeploy.
     uint256 private _entered;
 
     // ---------------------------------------------------------------------
@@ -136,7 +139,7 @@ contract L2BlochBridge {
     /// @notice Burn `msg.value` native gas-BLCH and queue a withdrawal of
     ///         the equivalent atoms to `l1Recipient` — the raw 20-byte Bloch
     ///         key hash (SHA3-256(pubkey)[..20]), NOT an EVM address.
-    function withdraw(bytes20 l1Recipient) external payable {
+    function withdraw(bytes20 l1Recipient) external payable nonReentrant {
         _initiate(msg.sender, l1Recipient, msg.value);
     }
 

@@ -7,8 +7,9 @@
 #   * withdrawal message leaf + keccak256 depth-32 incremental Merkle tree
 #     (Ethereum-deposit-contract construction) + inclusion-proof verify
 #   * DepositEvent / WithdrawalStatus type set + K(amount) depth schedule
-#   * WBLCH / Uniswap-v2 deploy HARNESS CONFIG (config + validation only —
-#     no compilation, no deployment, no chain interaction)
+#   * WBLCH / L2BlochBridge / Uniswap-v2 deploy HARNESS CONFIG (config +
+#     validation, plus compile-and-hash of the pinned sources when a solc
+#     0.8.24 is present — no deployment, no chain interaction)
 #
 # HONESTY (non-negotiable, mirrored in the crate docs): the v1 L1 vault is
 # CUSTODY, full stop — nothing here moves value. Bloch today is k=4,
