@@ -255,12 +255,22 @@ impl ReferenceTree {
     /// agent needs once the queue has grown past an anchored epoch. `None`
     /// unless `index < leaf_count <= leaf_count()`.
     pub fn proof_at(&self, index: u64, leaf_count: u64) -> Option<[[u8; 32]; TREE_DEPTH]> {
+        self.root_and_proof_at(index, leaf_count).map(|(_, branch)| branch)
+    }
+
+    /// Compute a historical root and proof in one bottom-up pass. Returning
+    /// both together avoids hashing the entire prefix twice for each bundle.
+    pub fn root_and_proof_at(
+        &self,
+        index: u64,
+        leaf_count: u64,
+    ) -> Option<([u8; 32], [[u8; 32]; TREE_DEPTH])> {
         if index >= leaf_count {
             return None;
         }
         let n = usize::try_from(leaf_count).ok()?;
         let prefix = self.leaves.get(..n)?;
-        Some(fold(prefix, Some(index as usize)).1)
+        Some(fold(prefix, Some(usize::try_from(index).ok()?)))
     }
 }
 

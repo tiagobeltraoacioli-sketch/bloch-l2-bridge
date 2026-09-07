@@ -43,7 +43,8 @@ jobs:
         run: cargo test --locked --release
       - name: Formatting, lints and documentation
         run: |
-          cargo fmt --all --check
+          cargo fmt --all
+          git -c color.ui=false diff --exit-code
           cargo clippy --locked --all-targets -- -D warnings
           cargo doc --locked --no-deps
       - name: Independent ABI and Keccak vector

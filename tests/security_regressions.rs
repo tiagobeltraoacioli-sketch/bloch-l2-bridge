@@ -158,3 +158,142 @@ fn genesis_validator_refuses_duplicate_predeploys_and_address_aliases() {
         assert!(validate(&config, root).is_err());
     }
 }
+
+#[test]
+fn restore_and_failed_sync_require_fresh_view_before_mint_retry() {
+    let (watcher, source) = fixture(1, 24);
+    let mut restored = DepositWatcher::from_state(watcher.state()).unwrap();
+    assert_eq!(restored.creditable().count(), 0);
+    assert!(restored.try_sync(&source).unwrap().is_empty());
+    assert_eq!(restored.creditable().count(), 1);
+    assert!(restored.try_sync(&MissingSource).is_err());
+    assert_eq!(restored.creditable().count(), 0);
+    restored.try_sync(&source).unwrap();
+    assert_eq!(restored.creditable().count(), 1);
+}
+
+#[test]
+fn restore_binds_independently_trusted_configuration() {
+    let (watcher, _) = fixture(1, 24);
+    assert!(DepositWatcher::from_state_for(watcher.state(), &VaultSet::new([VAULT]), CHAIN).is_ok());
+    assert!(DepositWatcher::from_state_for(watcher.state(), &VaultSet::new([[0xbb; 20]]), CHAIN).is_err());
+    assert!(DepositWatcher::from_state_for(watcher.state(), &VaultSet::new([VAULT]), CHAIN + 1).is_err());
+}
+
+#[test]
+fn demoted_deposit_reages_without_second_credit_and_restores() {
+    use bloch_l2_bridge::watcher::WatcherUpdate;
+    let (mut watcher, full) = fixture(1, 24);
+    let mut short = full.clone();
+    short.reorg_to(1);
+    let updates = watcher.try_sync(&short).unwrap();
+    assert!(matches!(updates.as_slice(), [WatcherUpdate::ConfirmationsLost { .. }]));
+    let mut restored = DepositWatcher::from_state(watcher.state()).unwrap();
+    assert!(restored.try_sync(&full).unwrap().is_empty());
+    assert_eq!(restored.creditable().count(), 1);
+    assert_eq!(restored.credited().len(), 1);
+}
+
+#[test]
+fn demoted_previously_credited_deposit_still_alarms_when_removed() {
+    use bloch_l2_bridge::watcher::WatcherUpdate;
+    let (mut watcher, mut source) = fixture(1, 24);
+    source.reorg_to(1);
+    watcher.try_sync(&source).unwrap();
+    let mut fork = MemorySource::new();
+    fork.push(L1Block { height: 0, hash: [0xff; 32], parent_hash: [0; 32], txs: vec![] }).unwrap();
+    let updates = watcher.try_sync(&fork).unwrap();
+    assert!(matches!(updates.as_slice(), [WatcherUpdate::CreditableReorged { .. }]));
+    assert_eq!(watcher.credit_reorg_alarms().len(), 1);
+    assert_eq!(watcher.credited().len(), 1);
+}
+
+#[test]
+fn empty_source_is_unavailable_not_proof_of_entire_chain_reorg() {
+    let (mut watcher, _) = fixture(1, 24);
+    let before = watcher.state();
+    assert!(watcher.try_sync(&MemorySource::new()).is_err());
+    assert_eq!(watcher.state(), before);
+}
+
+#[test]
+fn deep_rewind_requires_explicit_work_budget_without_partial_mutation() {
+    let (mut watcher, mut source) = fixture(1, 24);
+    source.reorg_to(1);
+    let before = watcher.state();
+    assert!(watcher.try_sync_with_limit(&source, 8).is_err());
+    assert_eq!(watcher.state(), before);
+    watcher.try_sync_with_limit(&source, 24).unwrap();
+    assert_eq!(watcher.tip_height(), Some(0));
+    assert!(watcher.try_sync_with_limit(&source, 0).is_err());
+}
+
+#[test]
+fn catchup_is_chunked_and_only_ages_at_verified_local_depth() {
+    let (_, source) = fixture(1, 24);
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    watcher.try_sync_with_limit(&source, 8).unwrap();
+    assert_eq!(watcher.tip_height(), Some(7));
+    assert_eq!(watcher.creditable().count(), 0);
+    watcher.try_sync_with_limit(&source, 8).unwrap();
+    assert_eq!(watcher.tip_height(), Some(15));
+    assert_eq!(watcher.creditable().count(), 0);
+    watcher.try_sync_with_limit(&source, 8).unwrap();
+    assert_eq!(watcher.creditable().count(), 1);
+}
+
+struct FabricatedTip { calls: std::cell::Cell<usize> }
+impl BlockSource for FabricatedTip {
+    fn tip_height(&self) -> Option<u64> { Some(u64::MAX) }
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        self.calls.set(self.calls.get() + 1);
+        assert!(self.calls.get() <= 20, "sync exceeded the explicit request budget");
+        let mut hash = [0; 32];
+        hash[..8].copy_from_slice(&height.to_le_bytes());
+        let mut parent_hash = [0; 32];
+        parent_hash[..8].copy_from_slice(&height.saturating_sub(1).to_le_bytes());
+        Some(L1Block { height, hash, parent_hash, txs: vec![] })
+    }
+}
+
+#[test]
+fn arbitrary_u64_tip_cannot_force_unbounded_catchup() {
+    let source = FabricatedTip { calls: std::cell::Cell::new(0) };
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    watcher.try_sync_with_limit(&source, 8).unwrap();
+    assert_eq!(watcher.tip_height(), Some(7));
+    assert!(source.calls.get() <= 20);
+}
+
+struct WrongHeightSource(MemorySource);
+impl BlockSource for WrongHeightSource {
+    fn tip_height(&self) -> Option<u64> { self.0.tip_height() }
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        self.0.block_at(height).map(|mut block| { block.height += 1; block })
+    }
+}
+
+#[test]
+fn wrong_height_even_with_matching_hash_is_refused_atomically() {
+    let (mut watcher, source) = fixture(1, 24);
+    let before = watcher.state();
+    assert!(watcher.try_sync(&WrongHeightSource(source)).is_err());
+    assert_eq!(watcher.state(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_symlink_cannot_escape_crate_root() {
+    use bloch_l2_bridge::harness::resolve_source_path;
+    use std::os::unix::fs::symlink;
+    let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("bloch-source-{suffix}-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let root = dir.join("crate");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(dir.join("outside.sol"), "outside").unwrap();
+    symlink(dir.join("outside.sol"), root.join("linked.sol")).unwrap();
+    let result = resolve_source_path(&root, "linked.sol");
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(result.is_err());
+}

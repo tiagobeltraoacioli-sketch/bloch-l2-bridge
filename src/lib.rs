@@ -50,6 +50,6 @@ pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };
 pub use watcher::{
-    BlockSource, DepositWatcher, L1Block, L1Tx, VaultSet, WatcherState, WatcherUpdate,
+    BlockSource, DepositWatcher, L1Block, L1Tx, VaultSet, WatcherState, WatcherSyncError, WatcherUpdate,
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};

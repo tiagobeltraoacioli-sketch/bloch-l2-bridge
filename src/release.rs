@@ -282,8 +282,7 @@ impl WithdrawalQueue {
             return None;
         }
         let message = *self.messages.get(usize::try_from(index).ok()?)?;
-        let root = self.reference.root_at(leaf_count)?;
-        let branch = self.reference.proof_at(index, leaf_count)?;
+        let (root, branch) = self.reference.root_and_proof_at(index, leaf_count)?;
         Some(WithdrawalProofBundle {
             message,
             index,
@@ -519,7 +518,7 @@ pub struct AnchoredEpochView {
 /// [`evaluate_release_checklist`] from the §5 value-scaled schedule,
 /// [`confirmation_depth`]`(bundle.message.amount_atoms)` — a caller can no
 /// longer pass a weak scalar to under-gate a large withdrawal, and the
-/// >1000-BLCH tier can never auto-release.
+/// above-1000-BLCH tier can never auto-release.
 #[derive(Debug, Clone, Copy)]
 pub struct ReleaseObservation<'a> {
     /// The withdrawal + proof under evaluation.
