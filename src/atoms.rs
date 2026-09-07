@@ -63,7 +63,7 @@ pub fn wei_to_atoms(wei: u128) -> Result<u64, AtomConversionError> {
 /// The pure predicate behind the predeploy rule
 /// `withdraw() REVERTS unless msg.value % ATOM_SCALE == 0`.
 pub fn is_withdrawable_wei(wei: u128) -> bool {
-    wei % ATOM_SCALE == 0
+    wei.is_multiple_of(ATOM_SCALE)
 }
 
 #[cfg(test)]

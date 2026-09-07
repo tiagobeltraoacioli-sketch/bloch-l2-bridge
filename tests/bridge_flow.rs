@@ -14,7 +14,9 @@ use bloch_l2_bridge::release::{
     evaluate_release_checklist, AnchoredEpochView, ChecklistVerdict, NullifierLog,
     ReleaseObservation, WithdrawalQueue, F_ANCHOR_DEPTH_TESTNET_PLACEHOLDER,
 };
-use bloch_l2_bridge::reserves::{check_reserves, is_exactly_backed, ReserveCheck, ReserveStatement};
+use bloch_l2_bridge::reserves::{
+    check_reserves, is_exactly_backed, ReserveCheck, ReserveStatement,
+};
 use bloch_l2_bridge::status::ATOMS_PER_BLCH;
 use bloch_l2_bridge::watcher::{
     DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet, WatcherUpdate,
@@ -125,7 +127,11 @@ fn deposit_to_reserves_end_to_end() {
 fn reorg_drop_and_alarm_semantics() {
     let mut src = MemorySource::new();
     extend(&mut src, "main", vec![]);
-    extend(&mut src, "main", vec![deposit_tx(2, ATOMS_PER_BLCH, [0x22; 20])]);
+    extend(
+        &mut src,
+        "main",
+        vec![deposit_tx(2, ATOMS_PER_BLCH, [0x22; 20])],
+    );
 
     let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN_ID);
     assert_eq!(watcher.sync(&src).len(), 1);
@@ -134,7 +140,9 @@ fn reorg_drop_and_alarm_semantics() {
     src.reorg_to(1);
     extend(&mut src, "fork", vec![]);
     let updates = watcher.sync(&src);
-    assert!(updates.iter().any(|u| matches!(u, WatcherUpdate::Dropped { .. })));
+    assert!(updates
+        .iter()
+        .any(|u| matches!(u, WatcherUpdate::Dropped { .. })));
     assert!(watcher.credit_reorg_alarms().is_empty());
     assert_eq!(watcher.tracked().count(), 0);
 }
@@ -184,15 +192,36 @@ fn withdrawal_bundle_and_checklist_end_to_end() {
     };
     match evaluate_release_checklist(&obs).verdict() {
         ChecklistVerdict::ScaffoldBlocked { missing } => {
-            assert_eq!(missing.len(), 2, "FRI + rate limit stay scaffold: {missing:?}");
+            assert_eq!(
+                missing.len(),
+                2,
+                "FRI + rate limit stay scaffold: {missing:?}"
+            );
         }
         other => panic!("best verdict must be ScaffoldBlocked, got {other:?}"),
     }
 
+    // the queue keeps growing after the epoch-9 anchor (a withdrawal in
+    // epoch 10): the CURRENT-root bundle no longer matches the anchor, but
+    // the historical bundle for the anchored leaf count still passes [3].
+    queue
+        .initiate(WithdrawalMessage {
+            nonce: 3,
+            l2_sender: [0x33; 20],
+            l1_recipient: [0x44; 20],
+            amount_atoms: ATOMS_PER_BLCH,
+            epoch_number: 10,
+        })
+        .unwrap();
+    assert_ne!(queue.root(), anchored_root);
+    let historical = queue.prove_at(1, 3).expect("epoch 9 closed with 3 leaves");
+    assert_eq!(historical, bundle);
+    assert_eq!(queue.root_at(3), Some(anchored_root));
+
     // after a (hypothetical, out-of-crate) payout is recorded, the same
     // withdrawal can never pass item [4] again:
     let mut paid = NullifierLog::new();
-    paid.record_paid(1).unwrap();
+    paid.record_paid(&bundle.message).unwrap();
     let obs_replay = ReleaseObservation {
         nullifiers: &paid,
         ..obs

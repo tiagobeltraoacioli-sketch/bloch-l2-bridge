@@ -7,8 +7,9 @@
 #   * withdrawal message leaf + keccak256 depth-32 incremental Merkle tree
 #     (Ethereum-deposit-contract construction) + inclusion-proof verify
 #   * DepositEvent / WithdrawalStatus type set + K(amount) depth schedule
-#   * WBLCH / Uniswap-v2 deploy HARNESS CONFIG (config + validation only —
-#     no compilation, no deployment, no chain interaction)
+#   * WBLCH / L2BlochBridge / Uniswap-v2 deploy HARNESS CONFIG (config +
+#     validation, plus compile-and-hash of the pinned sources when a solc
+#     0.8.24 is present — no deployment, no chain interaction)
 #
 # HONESTY (non-negotiable, mirrored in the crate docs): the v1 L1 vault is
 # CUSTODY, full stop — nothing here moves value. Bloch today is k=4,
@@ -22,6 +23,8 @@
 name = "bloch-l2-bridge"
 version = "0.0.0-scaffold"
 edition = "2021"
+# Minimum supported Rust: `u128::is_multiple_of` / `let … else` / `div_ceil`.
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 publish = false
 description = "DESIGN SCAFFOLD — unaudited, not a working L2, nothing here moves value. L1<->L2 bridge types for the Bloch EVM L2 design: L2D0 deposit envelope codec, keccak256 depth-32 incremental withdrawal Merkle tree + proof verify, ATOM_SCALE conversion, confirmation-depth schedule, and a WBLCH/Uniswap-v2 deploy harness CONFIG (no deploys, no chain interaction). The v1 L1 vault is CUSTODY, full stop."

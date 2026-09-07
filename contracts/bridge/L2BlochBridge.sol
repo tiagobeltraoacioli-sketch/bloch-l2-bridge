@@ -39,7 +39,11 @@ pragma solidity ^0.8.24;
 ///     rule would additionally debit it from the native total supply so the
 ///     proof-of-reserves inequality counts it as burned.
 ///   * As a genesis predeploy this contract's constructor never runs; all
-///     state starts zero, which is exactly the empty incremental tree.
+///     state starts zero, which is exactly the empty incremental tree (and
+///     the unlocked reentrancy guard, shared by both entry points).
+///   * withdraw() REFUSES a zero `l1Recipient`: nobody could ever be paid
+///     for it, so it would only ever inflate the pending-withdrawal
+///     liability of the §5 proof-of-reserves inequality.
 interface IWBLCH {
     function transferFrom(address from, address to, uint256 wad) external returns (bool);
     function withdraw(uint256 wad) external;
@@ -57,7 +61,7 @@ contract L2BlochBridge {
     ///         caller allowed to advance `epochNumber`; on a real L2 this is
     ///         the derivation rule acting via a system transaction, never an
     ///         externally-owned account.
-    address public constant SYSTEM_CALLER = 0xDeaDDEaDDeAdDEADDEadDEAdDeaDDeAdDEAd0001;
+    address public constant SYSTEM_CALLER = 0xDeaDDEaDDeAdDeAdDEAdDEaddeAddEAdDEAd0001;
 
     /// @notice 10^(18-8): 8-decimal L1 atoms -> 18-decimal L2 wei
     ///         (src/atoms.rs ATOM_SCALE). withdraw() REVERTS on any amount
@@ -89,6 +93,17 @@ contract L2BlochBridge {
     /// @notice Native wei burned (locked here forever) by withdrawals.
     uint256 public totalBurnedWei;
 
+    /// @dev Reentrancy lock shared by BOTH withdrawal entry points
+    ///      (withdraw and withdrawWBLCH), so no re-entry through either can
+    ///      run _initiate a second time inside one withdrawal — including
+    ///      the cross-function path where the WBLCH unwrap would call
+    ///      withdraw{value} instead of the bare send that receive() accepts.
+    ///      0 == unlocked, so a genesis predeploy (whose constructor never
+    ///      runs) starts unlocked; the usual 1/2 pattern would need
+    ///      constructor initialisation. Belt-and-braces over receive() being
+    ///      gated to WBLCH_ADDRESS and WBLCH being a trusted predeploy.
+    uint256 private _entered;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -114,17 +129,24 @@ contract L2BlochBridge {
     // Withdrawal entry points
     // ---------------------------------------------------------------------
 
+    modifier nonReentrant() {
+        require(_entered == 0, "L2BlochBridge: reentrant");
+        _entered = 1;
+        _;
+        _entered = 0;
+    }
+
     /// @notice Burn `msg.value` native gas-BLCH and queue a withdrawal of
     ///         the equivalent atoms to `l1Recipient` — the raw 20-byte Bloch
     ///         key hash (SHA3-256(pubkey)[..20]), NOT an EVM address.
-    function withdraw(bytes20 l1Recipient) external payable {
+    function withdraw(bytes20 l1Recipient) external payable nonReentrant {
         _initiate(msg.sender, l1Recipient, msg.value);
     }
 
     /// @notice Convenience path: pull `wad` WBLCH from the caller, unwrap it
     ///         to native BLCH, and burn it exactly as `withdraw` does. The
     ///         caller must have approved this contract for `wad` first.
-    function withdrawWBLCH(uint256 wad, bytes20 l1Recipient) external {
+    function withdrawWBLCH(uint256 wad, bytes20 l1Recipient) external nonReentrant {
         uint256 balanceBefore = address(this).balance;
         require(
             IWBLCH(WBLCH_ADDRESS).transferFrom(msg.sender, address(this), wad),
@@ -146,6 +168,9 @@ contract L2BlochBridge {
 
     /// @dev Shared burn + leaf-append path.
     function _initiate(address l2Sender, bytes20 l1Recipient, uint256 burnWei) internal {
+        // A zero L1 recipient has no spendable owner: the burn would be a
+        // permanent, unpayable liability in the proof-of-reserves sum.
+        require(l1Recipient != bytes20(0), "L2BlochBridge: zero recipient");
         require(burnWei > 0, "L2BlochBridge: zero withdrawal");
         // The §5 dust rule: revert unless wei is atom-aligned (src/atoms.rs).
         require(burnWei % ATOM_SCALE == 0, "L2BlochBridge: not atom-aligned");

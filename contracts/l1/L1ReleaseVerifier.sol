@@ -20,8 +20,13 @@ pragma solidity ^0.8.24;
 ///     Solidity, byte-compatible with the Rust reference
 ///     (bloch-l2-bridge/src/merkle.rs + src/withdrawal.rs).
 ///   * NOTHING HERE MOVES VALUE. `markReleased` is a bookkeeping nullifier
-///     mirror of the keyholders' shared paid-nonce log; it transfers
-///     nothing and cannot.
+///     mirror of the keyholders' shared paid-LEAF log (src/release.rs
+///     NullifierLog, keyed by the withdrawal leaf hash, never by the bare
+///     nonce, so a same-nonce withdrawal differing in any other field is
+///     never confused with a paid one; IDENTICAL tuples on two deployments
+///     still collide until the leaf preimage carries a chain-id domain
+///     separator — a spec-level change left open); it transfers nothing
+///     and cannot.
 ///
 /// WHERE IT COULD RUN: a test EVM (anvil/hardhat) for cross-checking the
 /// Rust implementation, or — much later, out of scope — a foreign EVM chain
@@ -41,7 +46,7 @@ interface IL1ReleaseVerifier {
     function postWithdrawalsRoot(uint64 epoch, bytes32 root) external;
 
     // NOTE: the concrete contract also exposes `withdrawalsRoot(uint64)` and
-    // `released(uint64)` via public state-variable getters; they are left out
+    // `released(bytes32)` via public state-variable getters; they are left out
     // of the interface so no state-variable-override specifier is needed.
 
     function verifyInclusion(
@@ -81,12 +86,14 @@ contract L1ReleaseVerifier is IL1ReleaseVerifier {
     ///         means "never posted").
     mapping(uint64 => bytes32) public withdrawalsRoot;
 
-    /// @notice nonce => released bookkeeping nullifier (mirror of the
-    ///         keyholders' shared paid-nonce log; moves no value).
-    mapping(uint64 => bool) public released;
+    /// @notice leaf => released bookkeeping nullifier (mirror of the
+    ///         keyholders' shared paid-leaf log; moves no value). Keyed by
+    ///         the withdrawal LEAF, which commits to nonce, sender,
+    ///         recipient, amount and epoch — not by the bare nonce.
+    mapping(bytes32 => bool) public released;
 
     event WithdrawalsRootPosted(uint64 indexed epoch, bytes32 root);
-    event ReleasedMarked(uint64 indexed nonce);
+    event ReleasedMarked(bytes32 indexed leaf);
 
     constructor(address operator_) {
         require(operator_ != address(0), "L1ReleaseVerifier: zero operator");
@@ -107,12 +114,14 @@ contract L1ReleaseVerifier is IL1ReleaseVerifier {
         emit WithdrawalsRootPosted(epoch, root);
     }
 
-    /// @notice Bookkeeping only — marks a nonce as paid in the off-chain
-    ///         custodial flow. Transfers nothing.
-    function markReleased(uint64 nonce) external onlyOperator {
-        require(!released[nonce], "L1ReleaseVerifier: already released");
-        released[nonce] = true;
-        emit ReleasedMarked(nonce);
+    /// @notice Bookkeeping only — marks a withdrawal LEAF as paid in the
+    ///         off-chain custodial flow. Transfers nothing. The zero leaf is
+    ///         refused (no withdrawal message hashes to it).
+    function markReleased(bytes32 leaf) external onlyOperator {
+        require(leaf != bytes32(0), "L1ReleaseVerifier: zero leaf");
+        require(!released[leaf], "L1ReleaseVerifier: already released");
+        released[leaf] = true;
+        emit ReleasedMarked(leaf);
     }
 
     /// @notice The canonical withdrawal leaf — MUST stay byte-identical to

@@ -155,6 +155,13 @@ pub enum HarnessError {
     SourceMissing {
         path: PathBuf,
     },
+    /// `source_path` would resolve OUTSIDE the crate root: it is absolute
+    /// (`Path::join` would then REPLACE `base_dir`), or it contains a `..`
+    /// or a filesystem-prefix component. The harness only ever reads
+    /// sources that live inside the crate.
+    SourceEscapesBaseDir {
+        path: PathBuf,
+    },
     SourceHashMismatch {
         path: PathBuf,
         expected: String,
@@ -205,6 +212,11 @@ impl core::fmt::Display for HarnessError {
             HarnessError::SourceMissing { path } => {
                 write!(f, "referenced source missing: {}", path.display())
             }
+            HarnessError::SourceEscapesBaseDir { path } => write!(
+                f,
+                "source_path {} is absolute or contains `..`: it would resolve outside the crate root",
+                path.display()
+            ),
             HarnessError::SourceHashMismatch {
                 path,
                 expected,
@@ -262,6 +274,26 @@ pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
     hex::decode_array::<20>(s).map_err(|e| e.to_string())
 }
 
+/// Resolve a config `source_path` under `base_dir`, refusing anything that
+/// could escape it: absolute paths (`Path::join` would silently REPLACE
+/// `base_dir`), `..` components and filesystem prefixes. Purely lexical —
+/// the file need not exist yet, so a missing in-crate file is still
+/// reported by the caller as [`HarnessError::SourceMissing`].
+pub fn resolve_source_path(base_dir: &Path, source_path: &str) -> Result<PathBuf, HarnessError> {
+    use std::path::Component;
+    let rel = Path::new(source_path);
+    let confined = !source_path.is_empty()
+        && rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !confined {
+        return Err(HarnessError::SourceEscapesBaseDir {
+            path: rel.to_path_buf(),
+        });
+    }
+    Ok(base_dir.join(rel))
+}
+
 /// Load `deploy/testnet.json` (or any harness config) from disk.
 pub fn load_config(path: &Path) -> Result<DeployConfig, HarnessError> {
     let bytes = std::fs::read(path)?;
@@ -308,7 +340,7 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
                 });
             }
         }
-        let source_path = base_dir.join(&p.source_path);
+        let source_path = resolve_source_path(base_dir, &p.source_path)?;
         if !source_path.is_file() {
             return Err(HarnessError::SourceMissing { path: source_path });
         }
@@ -567,7 +599,7 @@ pub fn verify_deployed_bytecode(
             actual: found,
         });
     }
-    let source_path = base_dir.join(&predeploy.source_path);
+    let source_path = resolve_source_path(base_dir, &predeploy.source_path)?;
     let bytecode =
         compile_deployed_bytecode(solc, &predeploy.name, &source_path, &predeploy.compiler)?;
     let actual = keccak256(&bytecode);
@@ -608,6 +640,34 @@ mod tests {
         assert_eq!(a[0], 0x42);
         assert_eq!(a[19], 0x06);
         assert_eq!(&a[1..19], &[0u8; 18]);
+    }
+
+    #[test]
+    fn resolve_source_path_confines_to_base_dir() {
+        let base = Path::new("/crate");
+        assert_eq!(
+            resolve_source_path(base, "contracts/wblch/WBLCH.sol").unwrap(),
+            PathBuf::from("/crate/contracts/wblch/WBLCH.sol")
+        );
+        assert_eq!(
+            resolve_source_path(base, "./contracts/x.sol").unwrap(),
+            PathBuf::from("/crate/./contracts/x.sol")
+        );
+        for escaping in [
+            "../../contracts/wblch/WBLCH.sol",
+            "contracts/../../x.sol",
+            "/etc/passwd",
+            "/crate/contracts/wblch/WBLCH.sol", // absolute, even if inside
+            "",
+        ] {
+            assert!(
+                matches!(
+                    resolve_source_path(base, escaping),
+                    Err(HarnessError::SourceEscapesBaseDir { .. })
+                ),
+                "{escaping:?} must be refused"
+            );
+        }
     }
 
     #[test]

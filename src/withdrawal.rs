@@ -120,7 +120,7 @@ impl WithdrawalMessage {
     /// runs FIRST — an all-zero `root` is refused and the inclusion check is
     /// never even run — then the depth-32 walk over `self.leaf()` decides
     /// membership. This is the message-level check a release-agent performs
-    /// (item [3] of the §5 release checklist); it never moves value.
+    /// (item \[3\] of the §5 release checklist); it never moves value.
     pub fn verify_inclusion(
         &self,
         index: u64,
@@ -179,6 +179,18 @@ mod tests {
         assert_eq!(m.leaf(), sample().leaf());
     }
 
+    /// Pins the golden LEAF HASH itself (not just the encoding) so the three
+    /// implementations — this encoder, `contracts/verify_leaf.py`, and the
+    /// Solidity `computeLeaf` docstring / `deploy/testnet.json` — can never
+    /// drift apart silently. Any change to the leaf is a consensus break.
+    #[test]
+    fn golden_leaf_hash_vector() {
+        assert_eq!(
+            crate::hex::encode(&sample().leaf()),
+            "0b0f4ac6fd0554ae9b750f72fa2e028753b3985d4faecd52fc2995dd3e3f789a"
+        );
+    }
+
     #[test]
     fn every_field_affects_the_leaf() {
         let base = sample();
@@ -202,7 +214,11 @@ mod tests {
             },
         ];
         for v in variants {
-            assert_ne!(v.leaf(), base.leaf(), "changed field must change leaf: {v:?}");
+            assert_ne!(
+                v.leaf(),
+                base.leaf(),
+                "changed field must change leaf: {v:?}"
+            );
         }
     }
 
@@ -289,9 +305,7 @@ mod tests {
                 m.verify_inclusion(i as u64, &branch, &root),
                 WithdrawalInclusion::Included
             );
-            assert!(m
-                .verify_inclusion(i as u64, &branch, &root)
-                .is_included());
+            assert!(m.verify_inclusion(i as u64, &branch, &root).is_included());
         }
     }
 

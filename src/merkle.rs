@@ -138,8 +138,19 @@ impl IncrementalMerkleTree {
 
 /// Verify a depth-32 inclusion proof: walk from `leaf` at `index` up the
 /// tree, taking `branch[h]` as the sibling at height `h`, and compare the
-/// result to `root`. This is the check each release-agent runs (item [3]
+/// result to `root`. This is the check each release-agent runs (item \[3\]
 /// of the §5 release checklist) and what the Solidity verifier would do.
+///
+/// CAVEAT — the root does NOT commit to the leaf count (unlike the eth2
+/// deposit contract, which mixes `deposit_count` into its root). Every
+/// unfilled position holds the zero leaf `Z[0] = 0x00…00`, so a proof of
+/// the ZERO leaf at any index `>= leaf_count` verifies against a genuine
+/// root (tested: `zero_leaf_is_provable_at_unfilled_positions`). Callers
+/// MUST therefore never let a prover choose the leaf: the message-level
+/// paths ([`crate::withdrawal::WithdrawalMessage::verify_inclusion`],
+/// `L1ReleaseVerifier.checkWithdrawal`) recompute it from the withdrawal
+/// fields, and no withdrawal message hashes to zero. If this root is ever
+/// consumed by something that trusts leaves, mix the count into it first.
 pub fn verify_inclusion(
     leaf: &[u8; 32],
     index: u64,
@@ -169,6 +180,41 @@ pub struct ReferenceTree {
     leaves: Vec<[u8; 32]>,
 }
 
+/// Bottom-up fold of `leaves` with zero-subtree padding: returns the root
+/// and, when `index` is given, the sibling branch (height 0 → 31) for the
+/// leaf at that index. Shared by [`ReferenceTree::root_at`] and
+/// [`ReferenceTree::proof_at`] so the two can never disagree.
+fn fold(leaves: &[[u8; 32]], index: Option<usize>) -> ([u8; 32], [[u8; 32]; TREE_DEPTH]) {
+    let zeros = zero_hashes();
+    let mut branch = [[0u8; 32]; TREE_DEPTH];
+    let mut level: Vec<[u8; 32]> = leaves.to_vec();
+    let mut idx = index;
+    for (h, zero) in zeros.iter().enumerate().take(TREE_DEPTH) {
+        if let Some(i) = idx {
+            // a missing sibling at height h is the zero subtree Z[h]
+            branch[h] = level.get(i ^ 1).copied().unwrap_or(*zero);
+        }
+        let mut next = Vec::with_capacity(level.len().div_ceil(2).max(1));
+        let mut i = 0;
+        while i < level.len() {
+            let left = level[i];
+            let right = if i + 1 < level.len() {
+                level[i + 1]
+            } else {
+                *zero
+            };
+            next.push(hash_pair(&left, &right));
+            i += 2;
+        }
+        if next.is_empty() {
+            next.push(zeros[h + 1]);
+        }
+        level = next;
+        idx = idx.map(|i| i >> 1);
+    }
+    (level[0], branch)
+}
+
 impl ReferenceTree {
     pub fn new() -> Self {
         Self::default()
@@ -185,53 +231,36 @@ impl ReferenceTree {
 
     /// Root computed bottom-up with zero-subtree padding.
     pub fn root(&self) -> [u8; 32] {
-        let zeros = zero_hashes();
-        let mut level: Vec<[u8; 32]> = self.leaves.clone();
-        for (h, zero) in zeros.iter().enumerate().take(TREE_DEPTH) {
-            let mut next = Vec::with_capacity(level.len().div_ceil(2) .max(1));
-            let mut i = 0;
-            while i < level.len() {
-                let left = level[i];
-                let right = if i + 1 < level.len() { level[i + 1] } else { *zero };
-                next.push(hash_pair(&left, &right));
-                i += 2;
-            }
-            if next.is_empty() {
-                next.push(zeros[h + 1]);
-            }
-            level = next;
-        }
-        level[0]
+        fold(&self.leaves, None).0
     }
 
-    /// Sibling path for `index`, bottom (height 0) to top (height 31).
+    /// The root as it stood when the tree held only its first `leaf_count`
+    /// leaves (append-only ⇒ that prefix IS the historical tree). `None` if
+    /// `leaf_count` exceeds the current count. `root_at(leaf_count())` is
+    /// [`Self::root`]; `root_at(0)` is the empty root `Z[32]`.
+    pub fn root_at(&self, leaf_count: u64) -> Option<[u8; 32]> {
+        let n = usize::try_from(leaf_count).ok()?;
+        let prefix = self.leaves.get(..n)?;
+        Some(fold(prefix, None).0)
+    }
+
+    /// Sibling path for `index`, bottom (height 0) to top (height 31),
+    /// against the CURRENT root.
     pub fn proof(&self, index: u64) -> Option<[[u8; 32]; TREE_DEPTH]> {
-        if index >= self.leaf_count() {
+        self.proof_at(index, self.leaf_count())
+    }
+
+    /// Sibling path for `index` against the HISTORICAL root after the first
+    /// `leaf_count` leaves (see [`Self::root_at`]) — the proof a release
+    /// agent needs once the queue has grown past an anchored epoch. `None`
+    /// unless `index < leaf_count <= leaf_count()`.
+    pub fn proof_at(&self, index: u64, leaf_count: u64) -> Option<[[u8; 32]; TREE_DEPTH]> {
+        if index >= leaf_count {
             return None;
         }
-        let zeros = zero_hashes();
-        let mut branch = [[0u8; 32]; TREE_DEPTH];
-        let mut level: Vec<[u8; 32]> = self.leaves.clone();
-        let mut idx = index as usize;
-        for (h, zero) in zeros.iter().enumerate().take(TREE_DEPTH) {
-            let sibling_idx = idx ^ 1;
-            branch[h] = level.get(sibling_idx).copied().unwrap_or(*zero);
-            // build next level
-            let mut next = Vec::with_capacity(level.len().div_ceil(2).max(1));
-            let mut i = 0;
-            while i < level.len() {
-                let left = level[i];
-                let right = if i + 1 < level.len() { level[i + 1] } else { *zero };
-                next.push(hash_pair(&left, &right));
-                i += 2;
-            }
-            if next.is_empty() {
-                next.push(zeros[h + 1]);
-            }
-            level = next;
-            idx >>= 1;
-        }
-        Some(branch)
+        let n = usize::try_from(leaf_count).ok()?;
+        let prefix = self.leaves.get(..n)?;
+        Some(fold(prefix, Some(index as usize)).1)
     }
 }
 
@@ -387,5 +416,73 @@ mod tests {
         // ...but a fresh proof does.
         let fresh = reference.proof(0).unwrap();
         assert!(verify_inclusion(&leaf(0), 0, &fresh, &new_root));
+    }
+
+    #[test]
+    fn root_at_and_proof_at_match_the_tree_frozen_at_that_count() {
+        // The reference tree's historical views equal a fresh incremental
+        // tree of the same prefix, and every historical proof verifies
+        // against its own historical root — never against a later one.
+        let mut reference = ReferenceTree::new();
+        for i in 0..9u64 {
+            reference.push(leaf(i));
+        }
+        assert_eq!(reference.root_at(0), Some(zero_hashes()[TREE_DEPTH]));
+        for n in 1..=9u64 {
+            let mut frozen = IncrementalMerkleTree::new();
+            for i in 0..n {
+                frozen.insert(leaf(i)).unwrap();
+            }
+            let root_n = reference.root_at(n).expect("prefix exists");
+            assert_eq!(root_n, frozen.root(), "root_at({n})");
+            for i in 0..n {
+                let branch = reference.proof_at(i, n).expect("proof exists");
+                assert!(
+                    verify_inclusion(&leaf(i), i, &branch, &root_n),
+                    "leaf {i} of {n}"
+                );
+                if n < 9 {
+                    let later = reference.root_at(n + 1).unwrap();
+                    assert!(
+                        !verify_inclusion(&leaf(i), i, &branch, &later),
+                        "historical proof must not verify against a later root"
+                    );
+                }
+            }
+            // index must be below the count
+            assert!(reference.proof_at(n, n).is_none());
+        }
+        // count beyond the tree
+        assert!(reference.root_at(10).is_none());
+        assert!(reference.proof_at(0, 10).is_none());
+        // current-root convenience wrappers agree
+        assert_eq!(reference.root_at(9), Some(reference.root()));
+        assert_eq!(reference.proof_at(3, 9), reference.proof(3));
+    }
+
+    /// Documents the construction's known property (audit I-1): the root
+    /// does not commit to the leaf count, so the ZERO leaf is provable at
+    /// any unfilled position. This is why every message-level verifier
+    /// recomputes the leaf from the withdrawal fields and never accepts a
+    /// prover-chosen leaf.
+    #[test]
+    fn zero_leaf_is_provable_at_unfilled_positions() {
+        let mut inc = IncrementalMerkleTree::new();
+        let mut reference = ReferenceTree::new();
+        for i in 0..3u64 {
+            inc.insert(leaf(i)).unwrap();
+            reference.push(leaf(i));
+        }
+        let root = inc.root();
+        // appending the zero leaf does not change the root...
+        let mut padded = reference.clone();
+        padded.push([0u8; 32]);
+        assert_eq!(padded.root(), root);
+        // ...so its proof at the unfilled index 3 verifies against `root`.
+        let branch = padded.proof(3).unwrap();
+        assert!(verify_inclusion(&[0u8; 32], 3, &branch, &root));
+        // A real withdrawal leaf is a keccak output and is never zero.
+        assert_ne!(leaf(3), [0u8; 32]);
+        assert!(!verify_inclusion(&leaf(3), 3, &branch, &root));
     }
 }

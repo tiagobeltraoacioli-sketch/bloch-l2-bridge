@@ -4,17 +4,27 @@
 //!
 //! What is REAL here (pure, deterministic, tested):
 //! * [`WithdrawalQueue`]: the L2-side append path — strictly-increasing
-//!   nonces, leaf insertion into the depth-32 keccak tree, current root,
-//!   and [`WithdrawalProofBundle`] generation (the artifact an L1-side
-//!   verifier consumes and can check with nothing but this crate's
-//!   `verify_inclusion`);
-//! * [`NullifierLog`]: the paid-nonce set of checklist item [4] — a paid
-//!   nonce can never be recorded twice;
+//!   nonces, the predeploy's own refusals (zero amount, zero recipient,
+//!   epoch regression), leaf insertion into the depth-32 keccak tree, the
+//!   current root AND any historical root ([`WithdrawalQueue::root_at`]),
+//!   and [`WithdrawalProofBundle`] generation against either
+//!   ([`WithdrawalQueue::prove`] / [`WithdrawalQueue::prove_at`] — the
+//!   artifact an L1-side verifier consumes and can check with nothing but
+//!   this crate's `verify_inclusion`);
+//! * [`NullifierLog`]: the paid-LEAF set of checklist item \[4\] — keyed by
+//!   the withdrawal leaf hash (which commits to nonce, sender, recipient,
+//!   amount and epoch), never by the bare nonce, so a same-nonce withdrawal
+//!   that differs in ANY other field can never be confused with a paid one.
+//!   IDENTICAL tuples on two deployments (a bridge reset, a second L2 on the
+//!   same vault) still hash to the same leaf and are refused fail-closed
+//!   until the leaf preimage carries a chain-id/bridge domain separator — a
+//!   normative format change left to a spec revision; a paid leaf can never
+//!   be recorded twice;
 //! * [`evaluate_release_checklist`]: the seven §5 items as a typed
-//!   [`ReleaseChecklist`], where items [2] anchor depth, [3] Merkle
-//!   inclusion, [4] nullifier, [5] reorg freeze and [6] post-payout
+//!   [`ReleaseChecklist`], where items \[2\] anchor depth, \[3\] Merkle
+//!   inclusion, \[4\] nullifier, \[5\] reorg freeze and \[6\] post-payout
 //!   proof-of-reserves are CHECKED FOR REAL against the caller's observed
-//!   facts, and items [1] FRI proof verification and [7] per-key rate
+//!   facts, and items \[1\] FRI proof verification and \[7\] per-key rate
 //!   limit are honestly `Scaffold` — they CANNOT pass from this crate.
 //!
 //! Consequently [`ReleaseChecklist::verdict`] can never say "release" for
@@ -77,16 +87,29 @@ impl WithdrawalProofBundle {
     /// unanchored-root guard applies (an all-zero root is refused, never
     /// checked).
     pub fn verify(&self) -> WithdrawalInclusion {
-        self.message.verify_inclusion(self.index, &self.branch, &self.root)
+        self.message
+            .verify_inclusion(self.index, &self.branch, &self.root)
     }
 }
 
-/// Errors from [`WithdrawalQueue::initiate`].
+/// Errors from [`WithdrawalQueue::initiate`]. Every variant mirrors a
+/// `require` in the L2BlochBridge predeploy (`contracts/bridge/
+/// L2BlochBridge.sol`), so the queue can only ever hold a history the
+/// contract itself could have produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueError {
     /// The message's nonce is not the queue's next nonce (§5: strictly
     /// increasing per-bridge). `expected` is what it must be.
     NonceMismatch { expected: u64, got: u64 },
+    /// `amount_atoms == 0` (the predeploy's `zero withdrawal` revert).
+    ZeroAmount,
+    /// `l1_recipient` is the all-zero key hash (the predeploy's `zero
+    /// recipient` revert): nobody could ever be paid for it, so it would
+    /// only inflate the pending-withdrawal liability forever.
+    ZeroRecipient,
+    /// `epoch_number` is lower than the previous message's: the
+    /// predeploy's epoch is monotonic, so no real history regresses.
+    EpochRegression { last: u64, got: u64 },
     /// The underlying tree is full (2^32 - 1 leaves).
     TreeFull,
 }
@@ -97,6 +120,14 @@ impl core::fmt::Display for QueueError {
             QueueError::NonceMismatch { expected, got } => {
                 write!(f, "withdrawal nonce {got} != expected {expected}")
             }
+            QueueError::ZeroAmount => write!(f, "withdrawal amount is zero"),
+            QueueError::ZeroRecipient => write!(f, "withdrawal L1 recipient is the zero key hash"),
+            QueueError::EpochRegression { last, got } => {
+                write!(
+                    f,
+                    "withdrawal epoch {got} regresses below the previous {last}"
+                )
+            }
             QueueError::TreeFull => write!(f, "withdrawal tree is full"),
         }
     }
@@ -105,10 +136,14 @@ impl core::fmt::Display for QueueError {
 impl std::error::Error for QueueError {}
 
 /// The L2-side withdrawal append path: what the L2BlochBridge predeploy
-/// does on `withdraw()` — assign the next nonce, hash the leaf, append to
-/// the incremental tree — plus proof generation (which the Solidity
-/// original cannot do; here the [`ReferenceTree`] companion retains
-/// leaves for it). Deterministic and replayable.
+/// does on `withdraw()` — refuse what it refuses (zero amount, zero
+/// recipient, epoch regression), assign the next nonce, hash the leaf,
+/// append to the incremental tree — plus proof generation (which the
+/// Solidity original cannot do; here the [`ReferenceTree`] companion
+/// retains leaves for it), against the CURRENT root or against the root
+/// as it stood after any earlier leaf count ([`WithdrawalQueue::prove_at`]
+/// — the root an epoch anchor actually carried). Deterministic and
+/// replayable.
 ///
 /// Serde: serializes as its message list; deserializing REBUILDS both
 /// trees via [`WithdrawalQueue::from_messages`], so `next_nonce` and the
@@ -182,8 +217,11 @@ impl WithdrawalQueue {
     }
 
     /// Append a withdrawal. The message's `nonce` MUST equal
-    /// [`Self::next_nonce`] (strictly-increasing, gapless). Returns the
-    /// leaf index (== nonce for this queue).
+    /// [`Self::next_nonce`] (strictly-increasing, gapless); its amount and
+    /// L1 recipient must be non-zero and its epoch must not regress —
+    /// exactly the predeploy's own `require`s, so a restored or replayed
+    /// queue can never hold a history the contract could not have
+    /// produced. Returns the leaf index (== nonce for this queue).
     pub fn initiate(&mut self, message: WithdrawalMessage) -> Result<u64, QueueError> {
         let expected = self.next_nonce();
         if message.nonce != expected {
@@ -191,6 +229,20 @@ impl WithdrawalQueue {
                 expected,
                 got: message.nonce,
             });
+        }
+        if message.amount_atoms == 0 {
+            return Err(QueueError::ZeroAmount);
+        }
+        if message.l1_recipient == [0u8; 20] {
+            return Err(QueueError::ZeroRecipient);
+        }
+        if let Some(last) = self.messages.last() {
+            if message.epoch_number < last.epoch_number {
+                return Err(QueueError::EpochRegression {
+                    last: last.epoch_number,
+                    got: message.epoch_number,
+                });
+            }
         }
         let leaf = message.leaf();
         let index = self
@@ -203,67 +255,133 @@ impl WithdrawalQueue {
         Ok(index)
     }
 
+    /// The withdrawal-tree root as it stood after the first `leaf_count`
+    /// withdrawals — i.e. the root an epoch anchor carried if that epoch
+    /// closed with `leaf_count` leaves. `None` if `leaf_count` exceeds the
+    /// queue length. `root_at(len())` is [`Self::root`].
+    pub fn root_at(&self, leaf_count: u64) -> Option<[u8; 32]> {
+        self.reference.root_at(leaf_count)
+    }
+
     /// Produce the inclusion-proof bundle for withdrawal `index` against
     /// the CURRENT root. Bundles go stale when more withdrawals are
-    /// appended (regenerate against the root that actually gets anchored).
+    /// appended; to prove against the root an epoch anchor actually
+    /// carried, use [`Self::prove_at`] with that epoch's closing leaf count.
     pub fn prove(&self, index: u64) -> Option<WithdrawalProofBundle> {
+        self.prove_at(index, self.len())
+    }
+
+    /// Produce the inclusion-proof bundle for withdrawal `index` against
+    /// the HISTORICAL root after the first `leaf_count` withdrawals (see
+    /// [`Self::root_at`]). This is what a release agent needs: the anchored
+    /// epoch root is fixed at the epoch boundary while the queue keeps
+    /// growing, and the §5 checklist binds the bundle to THAT root. `None`
+    /// unless `index < leaf_count <= len()`.
+    pub fn prove_at(&self, index: u64, leaf_count: u64) -> Option<WithdrawalProofBundle> {
+        if index >= leaf_count {
+            return None;
+        }
         let message = *self.messages.get(usize::try_from(index).ok()?)?;
-        let branch = self.reference.proof(index)?;
+        let root = self.reference.root_at(leaf_count)?;
+        let branch = self.reference.proof_at(index, leaf_count)?;
         Some(WithdrawalProofBundle {
             message,
             index,
             branch,
-            root: self.root(),
+            root,
         })
     }
 }
 
-/// Checklist item [4]'s paid-nonce log. Append-only; recording an
-/// already-paid nonce is an error (the double-pay guard).
+/// Checklist item \[4\]'s paid-LEAF log. Append-only; recording an
+/// already-paid leaf is an error (the double-pay guard).
+///
+/// Keyed by the withdrawal LEAF hash ([`WithdrawalMessage::leaf`]), which
+/// commits to nonce, sender, recipient, amount and epoch — NOT by the bare
+/// nonce, so a same-nonce withdrawal that differs in any other field can
+/// never be mistaken for a paid one (a nonce-keyed log would confuse them,
+/// since nonces restart at 0 on a bridge reset and are shared by any two
+/// L2s on one vault). What leaf keying does NOT buy: two deployments that
+/// produce the IDENTICAL tuple (a testnet genesis re-alloc restarts nonces
+/// AND epochs at 0; a second L2 on the same vault shares the nonce space)
+/// hash to the same leaf and are refused as already paid — fail-closed —
+/// until the leaf preimage carries a chain-id/bridge-address domain
+/// separator, a normative format change deliberately left to a spec
+/// revision (AUDIT.md L-3). `L1ReleaseVerifier.released` mirrors this log
+/// (`mapping(bytes32 => bool)`).
 ///
 /// Serde: fully serializable/restorable so a host restart can never clear
 /// the paid set (a cleared set would re-open every past payout to a
 /// double-pay). This crate does no file I/O — persistence is the host's.
+/// Operational ordering the host MUST keep: record the leaf here and
+/// persist it BEFORE broadcasting the payout, never after (a crash between
+/// payout and record is otherwise a double-pay on restart).
+///
+/// PERSISTED FORMAT CHANGE: this log serializes as a set of 32-byte leaves.
+/// A log persisted by the earlier nonce-keyed form (a set of `u64`) does not
+/// deserialize; rebuild it with [`NullifierLog::from_messages`] from the
+/// paid withdrawals' messages (kept in [`WithdrawalQueue::messages`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NullifierLog {
-    paid: BTreeSet<u64>,
+    paid: BTreeSet<[u8; 32]>,
 }
 
-/// The double-pay refusal from [`NullifierLog::record_paid`].
+/// The double-pay refusal from [`NullifierLog::record_paid`] — carries the
+/// leaf that was already in the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AlreadyPaid(pub u64);
+pub struct AlreadyPaid(pub [u8; 32]);
 
 impl NullifierLog {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Restore from a persisted paid-nonce set.
-    pub fn from_paid(paid: impl IntoIterator<Item = u64>) -> Self {
+    /// Restore from a persisted paid-leaf set.
+    pub fn from_paid(paid: impl IntoIterator<Item = [u8; 32]>) -> Self {
         NullifierLog {
             paid: paid.into_iter().collect(),
         }
     }
 
-    /// The paid nonces (the log's persistable state).
-    pub fn paid(&self) -> &BTreeSet<u64> {
+    /// Rebuild a log from the MESSAGES of already-paid withdrawals (their
+    /// leaves are recomputed here). This is the migration path from the
+    /// earlier nonce-keyed persisted form: look each paid nonce up in the
+    /// persisted [`WithdrawalQueue::messages`] and feed those messages here.
+    pub fn from_messages<'a>(paid: impl IntoIterator<Item = &'a WithdrawalMessage>) -> Self {
+        NullifierLog {
+            paid: paid.into_iter().map(WithdrawalMessage::leaf).collect(),
+        }
+    }
+
+    /// The paid leaves (the log's persistable state).
+    pub fn paid(&self) -> &BTreeSet<[u8; 32]> {
         &self.paid
     }
 
-    /// Has this withdrawal nonce already been paid out?
-    pub fn is_paid(&self, nonce: u64) -> bool {
-        self.paid.contains(&nonce)
+    /// Has this withdrawal already been paid out? (By leaf.)
+    pub fn is_paid(&self, message: &WithdrawalMessage) -> bool {
+        self.is_paid_leaf(&message.leaf())
     }
 
-    /// Record a payout. Refuses a nonce that is already in the log.
-    pub fn record_paid(&mut self, nonce: u64) -> Result<(), AlreadyPaid> {
-        if !self.paid.insert(nonce) {
-            return Err(AlreadyPaid(nonce));
+    /// Has this leaf already been paid out?
+    pub fn is_paid_leaf(&self, leaf: &[u8; 32]) -> bool {
+        self.paid.contains(leaf)
+    }
+
+    /// Record a payout. Refuses a withdrawal whose leaf is already logged.
+    pub fn record_paid(&mut self, message: &WithdrawalMessage) -> Result<(), AlreadyPaid> {
+        self.record_paid_leaf(message.leaf())
+    }
+
+    /// Record a payout by leaf. Refuses a leaf that is already in the log.
+    pub fn record_paid_leaf(&mut self, leaf: [u8; 32]) -> Result<(), AlreadyPaid> {
+        if !self.paid.insert(leaf) {
+            return Err(AlreadyPaid(leaf));
         }
         Ok(())
     }
 
-    /// Number of paid nonces.
+    /// Number of paid leaves.
     pub fn len(&self) -> usize {
         self.paid.len()
     }
@@ -289,27 +407,27 @@ pub enum CheckOutcome {
 /// Field order matches the spec's numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReleaseChecklist {
-    /// [1] FRI-verify the epoch validity proof against the pinned vkey.
+    /// \[1\] FRI-verify the epoch validity proof against the pinned vkey.
     /// Always `Scaffold` from this crate: no verifier exists here.
     pub fri_proof_verified: CheckOutcome,
-    /// [2] Anchor tx depth on the agent's OWN node meets the K(amount)
+    /// \[2\] Anchor tx depth on the agent's OWN node meets the K(amount)
     /// requirement derived from the withdrawal's `amount_atoms` (and the
     /// root is actually anchored, i.e. not the all-zero sentinel, and
     /// depth > 0). Above 1000 BLCH this is `Scaffold` at best — operator
     /// review cannot pass from this crate.
     pub anchor_depth: CheckOutcome,
-    /// [3] Merkle inclusion of the leaf against the PROVEN withdrawal
+    /// \[3\] Merkle inclusion of the leaf against the PROVEN withdrawal
     /// root, BOUND to the anchor: bundle epoch must equal the anchored
     /// epoch, bundle root must equal the anchored root, then the walk.
     pub merkle_inclusion: CheckOutcome,
-    /// [4] Leaf not already paid (nullifier log).
+    /// \[4\] Leaf not already paid (the leaf-keyed nullifier log).
     pub not_already_paid: CheckOutcome,
-    /// [5] Reorg-freeze flag clear (the >= W aging is the caller's
+    /// \[5\] Reorg-freeze flag clear (the >= W aging is the caller's
     /// sentinel logic; this item consumes its verdict).
     pub reorg_freeze_clear: CheckOutcome,
-    /// [6] Post-payout proof-of-reserves inequality still holds.
+    /// \[6\] Post-payout proof-of-reserves inequality still holds.
     pub post_payout_reserves: CheckOutcome,
-    /// [7] Per-key rate limit not exceeded. Always `Scaffold` here: rate
+    /// \[7\] Per-key rate limit not exceeded. Always `Scaffold` here: rate
     /// accounting is keyholder-box state this crate does not have.
     pub rate_limit: CheckOutcome,
 }
@@ -318,13 +436,16 @@ pub struct ReleaseChecklist {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecklistVerdict {
     /// At least one REAL check failed. First failing item + reason.
-    Refused { item: &'static str, reason: &'static str },
+    Refused {
+        item: &'static str,
+        reason: &'static str,
+    },
     /// Every checkable item passed, but `Scaffold` items remain — this is
     /// the BEST outcome this crate can produce, and it is NOT a release
     /// authorization. Lists what is still scaffold.
     ScaffoldBlocked { missing: Vec<&'static str> },
     /// Every item passed for real. UNREACHABLE via
-    /// [`evaluate_release_checklist`] (items [1]/[7] are always scaffold
+    /// [`evaluate_release_checklist`] (items \[1\]/\[7\] are always scaffold
     /// there); the variant exists so the verdict type is total and so
     /// tests can pin that this crate never produces it.
     AllPass,
@@ -335,11 +456,20 @@ impl ReleaseChecklist {
     pub fn items(&self) -> [(&'static str, CheckOutcome); 7] {
         [
             ("[1] FRI proof verification", self.fri_proof_verified),
-            ("[2] anchor depth >= K(amount) on own node", self.anchor_depth),
+            (
+                "[2] anchor depth >= K(amount) on own node",
+                self.anchor_depth,
+            ),
             ("[3] Merkle inclusion vs proven root", self.merkle_inclusion),
-            ("[4] not already paid (nullifier log)", self.not_already_paid),
+            (
+                "[4] not already paid (nullifier log)",
+                self.not_already_paid,
+            ),
             ("[5] reorg-freeze flag clear", self.reorg_freeze_clear),
-            ("[6] post-payout proof-of-reserves", self.post_payout_reserves),
+            (
+                "[6] post-payout proof-of-reserves",
+                self.post_payout_reserves,
+            ),
             ("[7] per-key rate limit", self.rate_limit),
         ]
     }
@@ -372,7 +502,7 @@ impl ReleaseChecklist {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnchoredEpochView {
     /// The withdrawal root carried by the PROVEN, ANCHORED epoch output
-    /// root (what item [3] must be checked against).
+    /// root (what item \[3\] must be checked against).
     pub root: [u8; 32],
     /// The L2 epoch number this anchor commits.
     pub epoch_number: u64,
@@ -396,7 +526,8 @@ pub struct ReleaseObservation<'a> {
     pub bundle: &'a WithdrawalProofBundle,
     /// The anchored epoch (root + epoch + depth, bound to ONE anchor).
     pub anchor: AnchoredEpochView,
-    /// The agent's paid-nonce log.
+    /// The agent's paid-LEAF log ([`NullifierLog`], keyed by the withdrawal
+    /// leaf — checklist item \[4\]).
     pub nullifiers: &'a NullifierLog,
     /// Whether the agent's reorg sentinel currently has a freeze active
     /// (or not yet aged W blocks past resolution).
@@ -408,7 +539,7 @@ pub struct ReleaseObservation<'a> {
 
 /// Evaluate the §5 checklist over one agent's observations. Pure and
 /// total; returns typed outcomes, authorizes nothing, signs nothing.
-/// Items [1] and [7] are ALWAYS `Scaffold` from here — see module docs.
+/// Items \[1\] and \[7\] are ALWAYS `Scaffold` from here — see module docs.
 pub fn evaluate_release_checklist(obs: &ReleaseObservation<'_>) -> ReleaseChecklist {
     // [1] SCAFFOLD: no SP1/FRI verifier exists in this crate. Never faked.
     let fri_proof_verified = CheckOutcome::Scaffold(
@@ -469,9 +600,9 @@ pub fn evaluate_release_checklist(obs: &ReleaseObservation<'_>) -> ReleaseCheckl
         }
     };
 
-    // [4] nullifier log.
-    let not_already_paid = if obs.nullifiers.is_paid(obs.bundle.message.nonce) {
-        CheckOutcome::Fail("nonce already in the paid-nullifier log")
+    // [4] nullifier log — by LEAF (nonce, sender, recipient, amount, epoch).
+    let not_already_paid = if obs.nullifiers.is_paid(&obs.bundle.message) {
+        CheckOutcome::Fail("leaf already in the paid-nullifier log")
     } else {
         CheckOutcome::Pass
     };
@@ -573,12 +704,18 @@ mod tests {
         // gap
         assert_eq!(
             q.initiate(message(2)),
-            Err(QueueError::NonceMismatch { expected: 1, got: 2 })
+            Err(QueueError::NonceMismatch {
+                expected: 1,
+                got: 2
+            })
         );
         // replay of an already-used nonce
         assert_eq!(
             q.initiate(message(0)),
-            Err(QueueError::NonceMismatch { expected: 1, got: 0 })
+            Err(QueueError::NonceMismatch {
+                expected: 1,
+                got: 0
+            })
         );
         assert_eq!(q.initiate(message(1)).unwrap(), 1);
         assert_eq!(q.len(), 2);
@@ -630,6 +767,147 @@ mod tests {
         let (q, _) = queue_of(2);
         assert!(q.prove(2).is_none());
         assert!(q.prove(u64::MAX).is_none());
+        // prove_at: index must be below the count, count within the queue
+        assert!(q.prove_at(1, 1).is_none());
+        assert!(q.prove_at(0, 3).is_none());
+        assert!(q.prove_at(0, 0).is_none());
+        assert!(q.root_at(3).is_none());
+        assert_eq!(q.root_at(2), Some(q.root()));
+    }
+
+    /// The release-agent scenario: epoch 5 closes with two withdrawals and
+    /// its root is anchored; a third withdrawal lands in epoch 6. A bundle
+    /// from `prove` (current root) fails item \[3\] against the epoch-5
+    /// anchor; `prove_at(_, 2)` reproduces the anchored root and passes.
+    #[test]
+    fn prove_at_reproduces_the_anchored_epoch_root() {
+        let mut q = WithdrawalQueue::new();
+        q.initiate(WithdrawalMessage {
+            epoch_number: 5,
+            ..message(0)
+        })
+        .unwrap();
+        q.initiate(WithdrawalMessage {
+            epoch_number: 5,
+            ..message(1)
+        })
+        .unwrap();
+        let anchored_epoch_5 = q.root(); // what the epoch-5 anchor carried
+        q.initiate(WithdrawalMessage {
+            epoch_number: 6,
+            ..message(2)
+        })
+        .unwrap();
+        assert_ne!(q.root(), anchored_epoch_5);
+        assert_eq!(q.root_at(2), Some(anchored_epoch_5));
+
+        let log = NullifierLog::new();
+        let anchor = AnchoredEpochView {
+            root: anchored_epoch_5,
+            epoch_number: 5,
+            depth: F_ANCHOR_DEPTH_TESTNET_PLACEHOLDER,
+        };
+        let stale = q.prove(0).unwrap();
+        let obs = ReleaseObservation {
+            bundle: &stale,
+            anchor,
+            nullifiers: &log,
+            freeze_active: false,
+            post_payout_reserves: healthy_reserves(),
+        };
+        assert!(matches!(
+            evaluate_release_checklist(&obs).merkle_inclusion,
+            CheckOutcome::Fail(_)
+        ));
+
+        let historical = q.prove_at(0, 2).unwrap();
+        assert_eq!(historical.root, anchored_epoch_5);
+        assert_eq!(historical.verify(), WithdrawalInclusion::Included);
+        let obs = ReleaseObservation {
+            bundle: &historical,
+            ..obs
+        };
+        assert_eq!(
+            evaluate_release_checklist(&obs).merkle_inclusion,
+            CheckOutcome::Pass
+        );
+        // and the historical bundle equals what a queue frozen at the epoch
+        // boundary would have produced
+        let snapshot = WithdrawalQueue::from_messages(q.messages()[..2].iter().copied()).unwrap();
+        assert_eq!(snapshot.prove(0), Some(historical));
+    }
+
+    /// The queue mirrors the predeploy's `require`s: zero amount, zero L1
+    /// recipient and epoch regression are refused (and so is a snapshot
+    /// containing them).
+    #[test]
+    fn queue_mirrors_predeploy_refusals() {
+        let mut q = WithdrawalQueue::new();
+        assert_eq!(
+            q.initiate(WithdrawalMessage {
+                amount_atoms: 0,
+                ..message(0)
+            }),
+            Err(QueueError::ZeroAmount)
+        );
+        assert_eq!(
+            q.initiate(WithdrawalMessage {
+                l1_recipient: [0; 20],
+                ..message(0)
+            }),
+            Err(QueueError::ZeroRecipient)
+        );
+        q.initiate(WithdrawalMessage {
+            epoch_number: 7,
+            ..message(0)
+        })
+        .unwrap();
+        // same epoch is fine (many withdrawals per epoch), higher is fine
+        q.initiate(WithdrawalMessage {
+            epoch_number: 7,
+            ..message(1)
+        })
+        .unwrap();
+        q.initiate(WithdrawalMessage {
+            epoch_number: 9,
+            ..message(2)
+        })
+        .unwrap();
+        // lower is a regression the contract cannot produce
+        assert_eq!(
+            q.initiate(WithdrawalMessage {
+                epoch_number: 8,
+                ..message(3)
+            }),
+            Err(QueueError::EpochRegression { last: 9, got: 8 })
+        );
+        assert_eq!(q.len(), 3, "refused messages must not be appended");
+
+        // restore refuses the same histories
+        let regressing = vec![
+            WithdrawalMessage {
+                epoch_number: 9,
+                ..message(0)
+            },
+            WithdrawalMessage {
+                epoch_number: 8,
+                ..message(1)
+            },
+        ];
+        assert_eq!(
+            WithdrawalQueue::from_messages(regressing.clone()).err(),
+            Some(QueueError::EpochRegression { last: 9, got: 8 })
+        );
+        let json = serde_json::to_string(&regressing).unwrap();
+        assert!(serde_json::from_str::<WithdrawalQueue>(&json).is_err());
+        assert_eq!(
+            WithdrawalQueue::from_messages([WithdrawalMessage {
+                amount_atoms: 0,
+                ..message(0)
+            }])
+            .err(),
+            Some(QueueError::ZeroAmount)
+        );
     }
 
     // ---- nullifier log ----
@@ -637,11 +915,60 @@ mod tests {
     #[test]
     fn nullifier_log_refuses_double_pay() {
         let mut log = NullifierLog::new();
-        assert!(!log.is_paid(5));
-        log.record_paid(5).unwrap();
-        assert!(log.is_paid(5));
-        assert_eq!(log.record_paid(5), Err(AlreadyPaid(5)));
+        let m = message(5);
+        assert!(!log.is_paid(&m));
+        log.record_paid(&m).unwrap();
+        assert!(log.is_paid(&m));
+        assert!(log.is_paid_leaf(&m.leaf()));
+        assert_eq!(log.record_paid(&m), Err(AlreadyPaid(m.leaf())));
+        assert_eq!(log.record_paid_leaf(m.leaf()), Err(AlreadyPaid(m.leaf())));
         assert_eq!(log.len(), 1);
+    }
+
+    /// The log is keyed by LEAF, not nonce: paying nonce 5 of one history
+    /// does not mark a nonce-5 message with a different epoch or amount as
+    /// paid. The honest residual is pinned too: an IDENTICAL tuple (as after
+    /// a genesis re-alloc, or on a second L2 sharing the vault) still
+    /// collides, because the leaf carries no chain-id domain separator.
+    #[test]
+    fn nullifier_is_keyed_by_leaf_not_by_nonce() {
+        let mut log = NullifierLog::new();
+        let paid = message(5);
+        log.record_paid(&paid).unwrap();
+        let same_nonce_other_epoch = WithdrawalMessage {
+            epoch_number: paid.epoch_number + 1,
+            ..paid
+        };
+        let same_nonce_other_amount = WithdrawalMessage {
+            amount_atoms: paid.amount_atoms + 1,
+            ..paid
+        };
+        assert!(!log.is_paid(&same_nonce_other_epoch));
+        assert!(!log.is_paid(&same_nonce_other_amount));
+        log.record_paid(&same_nonce_other_epoch).unwrap();
+        assert_eq!(log.len(), 2);
+        // residual (L-3, open): the identical tuple from "another deployment"
+        // is indistinguishable and is refused fail-closed.
+        let identical_tuple_elsewhere = WithdrawalMessage { ..paid };
+        assert!(log.is_paid(&identical_tuple_elsewhere));
+    }
+
+    /// Migration path from the nonce-keyed persisted form: rebuilding from
+    /// the paid withdrawals' messages yields exactly the leaf-keyed log.
+    #[test]
+    fn nullifier_from_messages_rebuilds_the_leaf_keyed_log() {
+        let (q, _bundles) = queue_of(4);
+        let paid_nonces = [0u64, 2, 3]; // what an old nonce-keyed log held
+        let rebuilt =
+            NullifierLog::from_messages(paid_nonces.iter().map(|&n| &q.messages()[n as usize]));
+        let mut expected = NullifierLog::new();
+        for n in paid_nonces {
+            expected.record_paid(&q.messages()[n as usize]).unwrap();
+        }
+        assert_eq!(rebuilt, expected);
+        assert!(rebuilt.is_paid(&q.messages()[2]));
+        assert!(!rebuilt.is_paid(&q.messages()[1]));
+        assert_eq!(NullifierLog::from_messages([]), NullifierLog::new());
     }
 
     // ---- checklist ----
@@ -721,7 +1048,7 @@ mod tests {
 
     /// FIX-4 pin: the >1000-BLCH OperatorReview tier is restored in the
     /// release path — no depth, however large, lets a large withdrawal
-    /// auto-release from this crate (item [2] is Scaffold at best).
+    /// auto-release from this crate (item \[2\] is Scaffold at best).
     #[test]
     fn large_withdrawal_never_auto_releases() {
         let mut q = WithdrawalQueue::new();
@@ -761,7 +1088,7 @@ mod tests {
     }
 
     /// FIX-4 pin: an anchor at depth 0 (unconfirmed) can never pass item
-    /// [2], for any amount.
+    /// \[2\], for any amount.
     #[test]
     fn depth_zero_anchor_always_refuses() {
         let (_q, bundles) = queue_of(1);
@@ -802,7 +1129,10 @@ mod tests {
         let mut obs = observation(&bundles[0], &log);
         obs.anchor.root = UNANCHORED_ROOT;
         let verdict = evaluate_release_checklist(&obs).verdict();
-        assert!(matches!(verdict, ChecklistVerdict::Refused { .. }), "{verdict:?}");
+        assert!(
+            matches!(verdict, ChecklistVerdict::Refused { .. }),
+            "{verdict:?}"
+        );
     }
 
     #[test]
@@ -819,10 +1149,10 @@ mod tests {
     }
 
     #[test]
-    fn already_paid_nonce_refuses() {
+    fn already_paid_leaf_refuses() {
         let (_q, bundles) = queue_of(1);
         let mut log = NullifierLog::new();
-        log.record_paid(0).unwrap();
+        log.record_paid(&bundles[0].message).unwrap();
         let verdict = evaluate_release_checklist(&observation(&bundles[0], &log)).verdict();
         assert!(
             matches!(verdict, ChecklistVerdict::Refused { item, .. }
@@ -838,7 +1168,10 @@ mod tests {
         let mut obs = observation(&bundles[0], &log);
         obs.freeze_active = true;
         let verdict = evaluate_release_checklist(&obs).verdict();
-        assert!(matches!(verdict, ChecklistVerdict::Refused { .. }), "{verdict:?}");
+        assert!(
+            matches!(verdict, ChecklistVerdict::Refused { .. }),
+            "{verdict:?}"
+        );
     }
 
     #[test]
@@ -864,7 +1197,7 @@ mod tests {
         // Even though [1] is scaffold, a real failure is what gets named.
         let (_q, bundles) = queue_of(1);
         let mut log = NullifierLog::new();
-        log.record_paid(0).unwrap();
+        log.record_paid(&bundles[0].message).unwrap();
         let mut obs = observation(&bundles[0], &log);
         obs.freeze_active = true;
         obs.anchor.depth = 0;
@@ -895,7 +1228,10 @@ mod tests {
         // a replayed nonce is still refused after restore
         assert_eq!(
             restored.clone().initiate(message(0)),
-            Err(QueueError::NonceMismatch { expected: 3, got: 0 })
+            Err(QueueError::NonceMismatch {
+                expected: 3,
+                got: 0
+            })
         );
         // and the restored queue proves bundles identical to the original
         assert_eq!(restored.prove(1), q.prove(1));
@@ -920,15 +1256,18 @@ mod tests {
     #[test]
     fn nullifier_log_serde_roundtrip_preserves_paid_set() {
         let mut log = NullifierLog::new();
-        log.record_paid(0).unwrap();
-        log.record_paid(7).unwrap();
+        log.record_paid(&message(0)).unwrap();
+        log.record_paid(&message(7)).unwrap();
 
         let json = serde_json::to_string(&log).expect("log must serialize");
         let mut restored: NullifierLog = serde_json::from_str(&json).expect("log must restore");
         assert_eq!(restored, log);
-        assert!(restored.is_paid(0) && restored.is_paid(7));
+        assert!(restored.is_paid(&message(0)) && restored.is_paid(&message(7)));
         // double-pay still refused after restart
-        assert_eq!(restored.record_paid(7), Err(AlreadyPaid(7)));
+        assert_eq!(
+            restored.record_paid(&message(7)),
+            Err(AlreadyPaid(message(7).leaf()))
+        );
 
         // explicit constructor path too
         let from_paid = NullifierLog::from_paid(log.paid().iter().copied());
@@ -945,10 +1284,12 @@ mod tests {
         let log = NullifierLog::new();
         let checklist = evaluate_release_checklist(&observation(&bundles[0], &log));
 
-        let s = WithdrawalStatus::Queued.step(WithdrawalEvent::AnchorObserved {
-            commit_txid: [9u8; 32],
-            depth: F_ANCHOR_DEPTH_TESTNET_PLACEHOLDER,
-        });
+        let s = WithdrawalStatus::queued(bundles[0].message.amount_atoms).step(
+            WithdrawalEvent::AnchorObserved {
+                commit_txid: [9u8; 32],
+                depth: F_ANCHOR_DEPTH_TESTNET_PLACEHOLDER,
+            },
+        );
         assert!(matches!(s, WithdrawalStatus::Provable { .. }));
         // the checklist's best verdict is ScaffoldBlocked -> no authorize:
         assert!(matches!(
