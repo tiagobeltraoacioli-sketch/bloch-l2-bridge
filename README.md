@@ -1,18 +1,26 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-bridge
 
-**SCAFFOLD, UNAUDITED, not a working L2. The v1 L1 vault is CUSTODY, full
-stop — nothing here moves value.**
+**Reference components, unaudited, no live bridge deployment.** The historical
+v1 BLCH vault design is custodial. The new
+[Color-Changing Chameleon v1](docs/CHAMELEON-V1.md) implements a separate
+unrestricted Ustav ERC-20 adapter and a local roundtrip with PQ-native escrow.
+Its checkpoints are explicitly trusted; production finality verification,
+native BLCH and Solana integration remain open.
 
 Bridge *types* for the (design-only) Bloch EVM L2, implementing the wire
 formats and pure math of [`docs/specs/BLOCH-L2-EVM-DESIGN.md`](../../docs/specs/BLOCH-L2-EVM-DESIGN.md)
 §5 (L1<->L2 Bridge). This crate contains no networking, no keys and no chain
-interaction; the only compiler it ever invokes is a pinned solc 0.8.24, in
-tests, to compile-and-hash the contract sources it pins (never to deploy).
+interaction. Its Rust harness invokes pinned solc 0.8.24 to compile-and-hash
+contract sources; Solidity and Chameleon integration tests additionally deploy
+and execute contracts inside a local test EVM, never a live network.
 It is a first-iteration compiling scaffold produced so the byte formats and
 tree constructions are pinned by tests before anything real is built.
 
-## Honesty block (carried verbatim from the design, §5)
+## Historical v1 design context (carried from the design, §5)
+
+The PoW assumptions below belong to the original design, not the current
+Genesis-4 consensus. They are not Chameleon's checkpoint verification rules.
 
 * **THE VAULT IS CUSTODY, FULL STOP.** v1 BLCH deposits are operator-held;
   quorum policy is organizational, not cryptographic (no production
