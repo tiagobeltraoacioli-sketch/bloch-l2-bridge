@@ -22,10 +22,16 @@ jobs:
           persist-credentials: false
       - name: Install pinned advisory scanner
         run: |
-          rustup toolchain install stable --profile minimal
-          cargo +stable install cargo-audit --locked --version 0.21.2
+          mkdir -p /tmp/bloch-advisory-tools
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
+            --output /tmp/bloch-advisory-tools/cargo-audit.tgz
+          echo 'ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/bloch-advisory-tools/cargo-audit.tgz' | sha256sum --check
+          tar -xzf /tmp/bloch-advisory-tools/cargo-audit.tgz -C /tmp/bloch-advisory-tools
       - name: Check locked dependencies against RustSec
-        run: cargo +stable audit --deny warnings
+        run: |
+          audit_bin=$(rg --files /tmp/bloch-advisory-tools | rg '/cargo-audit$')
+          "$audit_bin" audit --deny warnings
 
   rust-and-contracts:
     runs-on: ubuntu-24.04

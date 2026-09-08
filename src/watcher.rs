@@ -9,6 +9,9 @@
 //! * **rewind-on-mismatch**: any journal suffix the source no longer
 //!   agrees with is popped (deposits observed under it are dropped);
 //! * **roll-forward** with parent-hash linkage checks;
+//! * **atomic source validation**: missing or inconsistent source data is a
+//!   typed refusal through `try_sync`, without changing persisted state;
+//!   catch-up and rewinds have an explicit per-call block limit;
 //! * **replay safety**: re-syncing an unchanged source emits nothing —
 //!   a reprocessed block can never double-observe or double-credit a
 //!   deposit (dedup key = `deposit_id = (txid, first vault-paying vout)`,
@@ -39,6 +42,9 @@
 //!   Creditable`] only at depth ≥ K for the Automatic tiers, and is parked
 //!   as [`WatcherUpdate::NeedsOperatorReview`] on the review tier — NEVER
 //!   auto-credited.
+//! * **current eligibility**: losing confirmations demotes the deposit and
+//!   emits `ConfirmationsLost` while retaining durable automatic credit history.
+//!   A restored or failed-sync watcher exposes no mint worklist until resynced.
 //!
 //! HONESTY (§5 / POSTERNDEX-BRIDGE-DESIGN §0.1, non-negotiable): K only
 //! prices out casual reorgs; NO finite depth is finality on a
@@ -268,11 +274,12 @@ pub enum WatcherUpdate {
     /// An OperatorReview-tier deposit reached its minimum depth: parked
     /// for the disclosed operator-review step. Never auto-credited here.
     NeedsOperatorReview { deposit: DepositEvent },
-    /// A still-Pending deposit's block was reorged away before the K gate:
-    /// cleanly dropped (nothing was ever announced creditable).
+    /// A currently Pending deposit with no durable automatic credit was
+    /// removed. Any earlier pending operator review was cancelled when
+    /// `ConfirmationsLost` demoted it; nothing here performed a reviewed mint.
     Dropped { deposit: DepositEvent },
-    /// §0.1 ALARM: a deposit already announced (Creditable or
-    /// AwaitingOperatorReview) was reorged away. This watcher can only
+    /// §0.1 ALARM: a previously automatically credited deposit, or one
+    /// currently awaiting operator review, was reorged away. This can only
     /// DETECT this — an L2 credit minted against it cannot be clawed back
     /// from here. Also recorded in [`DepositWatcher::credit_reorg_alarms`].
     CreditableReorged { deposit: DepositEvent },
@@ -432,6 +439,10 @@ impl DepositWatcher {
     /// A restored watcher re-syncing the SAME chain view emits nothing
     /// (journal intact), and the durable `credited` set means restart can
     /// never re-credit already-announced deposits.
+    /// Deposit identity, chain, nonzero facts, amount-derived K, current phase,
+    /// journal membership and credit-log consistency must all agree. This is
+    /// not snapshot authentication; prefer `from_state_for` with trusted config.
+    /// Resync successfully before reading the restart mint worklist.
     ///
     /// Rejects (rather than trusting) a corrupt/partial persisted state whose
     /// tracked deposits are inconsistent with the journal — otherwise a
@@ -1443,8 +1454,8 @@ mod tests {
 
     /// A source that serves chain A until height 2 is first requested, then
     /// chain B (sharing block 0) — a node that reorgs BETWEEN step 1 and the
-    /// roll-forward. Exercises branch (a) of the linkage-break handling: the
-    /// stale A tail is rewound (Dropped) and the watcher converges on B.
+    /// roll-forward. The mixed call is refused atomically; a subsequent call
+    /// on the settled B view rewinds the stale A tail and converges.
     struct FlippingSource {
         a: Vec<L1Block>,
         b: Vec<L1Block>,
