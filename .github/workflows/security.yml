@@ -30,7 +30,7 @@ jobs:
           tar -xzf /tmp/bloch-advisory-tools/cargo-audit.tgz -C /tmp/bloch-advisory-tools
       - name: Check locked dependencies against RustSec
         run: |
-          audit_bin=$(rg --files /tmp/bloch-advisory-tools | rg '/cargo-audit$')
+          audit_bin=$(find /tmp/bloch-advisory-tools -type f -name cargo-audit)
           "$audit_bin" audit --deny warnings
 
   rust-and-contracts:
