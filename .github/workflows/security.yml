@@ -35,7 +35,7 @@ jobs:
 
   rust-and-contracts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       REQUIRE_SOLC: '1'
       SOLC: /tmp/bloch-audit-tools/solc
@@ -69,6 +69,8 @@ jobs:
           cargo doc --locked --no-deps
       - name: Independent ABI and Keccak vector
         run: python3 contracts/verify_leaf.py
+      - name: Independent Chameleon ABI and SHA-256 vectors
+        run: python3 scripts/verify-chameleon-vectors.py
       - name: Install checksum-pinned Foundry
         run: |
           curl --fail --location --retry 3 --max-time 120 \
@@ -77,4 +79,20 @@ jobs:
           echo 'baad3e1b06d6f310d210c93e95258a03d923fe610f8d0742138f2245f94abd7c  /tmp/bloch-audit-tools/foundry.tar.gz' | sha256sum --check
           tar -xzf /tmp/bloch-audit-tools/foundry.tar.gz -C /tmp/bloch-audit-tools forge
       - name: EVM security regressions and fuzz tests
-        run: /tmp/bloch-audit-tools/forge test --use "$SOLC" -vv
+        run: /tmp/bloch-audit-tools/forge test --use "$SOLC" --threads 1 -vv
+      - name: Checkout matching PQ-native Chameleon implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: tiagobeltraoacioli-sketch/bloch-sis-pow
+          ref: ede654b79455c8a241a1ce0710170fce034b82a2
+          path: native-ustav
+          persist-credentials: false
+      - name: Install native fixture toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal --no-self-update
+      - name: Real PQ native export, EVM execution, and PQ native return
+        working-directory: native-ustav
+        env:
+          FORGE: /tmp/bloch-audit-tools/forge
+        run: |
+          cargo +1.94.1 run --locked --release -p bloch-ustav \
+            --example chameleon_roundtrip -- "$GITHUB_WORKSPACE"
