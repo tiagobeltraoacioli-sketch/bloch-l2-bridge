@@ -123,6 +123,25 @@ contract BridgeSecurityTest {
         require(verifier.computeLeaf(7, sender, recipient, 100_000_000, 42) == expected);
     }
 
+    function testMultiEpochRootsMatchRustAndIndependentPython() public {
+        address sender = address(bytes20(hex"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        bytes20 recipient = hex"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        address system = bridge.SYSTEM_CALLER();
+        vm.deal(sender, 1000 * SCALE);
+        for (uint64 nonce; nonce < 17; nonce++) {
+            if (nonce > 0 && nonce % 3 == 0) {
+                vm.prank(system);
+                bridge.setEpochNumber(nonce / 3);
+            }
+            vm.prank(sender);
+            bridge.withdraw{value: uint256(nonce + 1) * SCALE}(recipient);
+            if (nonce == 6) {
+                require(bridge.getWithdrawalRoot() == hex"2a4786e095abbcdfd22cc0056887d00e211109adc3e9074e52cbabc124a7d961");
+            }
+        }
+        require(bridge.getWithdrawalRoot() == hex"100fec66641dbfe9ea1ca07da955144d82c7794dd4aadecf957a593f8760064f");
+    }
+
     function testFuzzNativeWithdrawalAndProof(uint64 atoms, bytes20 recipient) public {
         vm.assume(atoms > 0 && recipient != bytes20(0));
         uint256 wad = uint256(atoms) * SCALE;

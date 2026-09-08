@@ -356,3 +356,39 @@ fn source_symlink_cannot_escape_crate_root() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(result.is_err());
 }
+
+#[test]
+fn historical_and_current_roots_match_independent_python_and_evm_vectors() {
+    use bloch_l2_bridge::{WithdrawalMessage, WithdrawalQueue};
+    let mut queue = WithdrawalQueue::new();
+    for nonce in 0..17 {
+        queue
+            .initiate(WithdrawalMessage {
+                nonce,
+                l2_sender: [0xaa; 20],
+                l1_recipient: [0xbb; 20],
+                amount_atoms: nonce + 1,
+                epoch_number: nonce / 3,
+            })
+            .unwrap();
+    }
+    // Generated with the independent Python Keccak implementation; also
+    // executed against the genesis predeploy in BridgeSecurity.t.sol.
+    for (count, expected) in [
+        (
+            7,
+            "2a4786e095abbcdfd22cc0056887d00e211109adc3e9074e52cbabc124a7d961",
+        ),
+        (
+            17,
+            "100fec66641dbfe9ea1ca07da955144d82c7794dd4aadecf957a593f8760064f",
+        ),
+    ] {
+        for index in 0..count {
+            let bundle = queue.prove_at(index, count).unwrap();
+            assert_eq!(bloch_l2_bridge::hex::encode(&bundle.root), expected);
+            assert_eq!(Some(bundle.root), queue.root_at(count));
+            assert!(bundle.verify().is_included());
+        }
+    }
+}
