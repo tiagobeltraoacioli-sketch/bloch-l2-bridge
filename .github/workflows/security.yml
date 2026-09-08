@@ -1,0 +1,80 @@
+name: Bridge security checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-advisories:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install pinned advisory scanner
+        run: |
+          mkdir -p /tmp/bloch-advisory-tools
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
+            --output /tmp/bloch-advisory-tools/cargo-audit.tgz
+          echo 'ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39  /tmp/bloch-advisory-tools/cargo-audit.tgz' | sha256sum --check
+          tar -xzf /tmp/bloch-advisory-tools/cargo-audit.tgz -C /tmp/bloch-advisory-tools
+      - name: Check locked dependencies against RustSec
+        run: |
+          audit_bin=$(find /tmp/bloch-advisory-tools -type f -name cargo-audit)
+          "$audit_bin" audit --deny warnings
+
+  rust-and-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REQUIRE_SOLC: '1'
+      SOLC: /tmp/bloch-audit-tools/solc
+      RUSTDOCFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install declared minimum Rust
+        run: |
+          rustup toolchain install 1.87.0 --profile minimal --component clippy,rustfmt
+          rustup override set 1.87.0
+      - name: Install checksum-pinned Solidity compiler
+        run: |
+          mkdir -p /tmp/bloch-audit-tools
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/argotorg/solidity/releases/download/v0.8.24/solc-static-linux \
+            --output "$SOLC"
+          echo 'fb03a29a517452b9f12bcf459ef37d0a543765bb3bbc911e70a87d6a37c30d5f  /tmp/bloch-audit-tools/solc' | sha256sum --check
+          chmod +x "$SOLC"
+          "$SOLC" --version
+      - name: Rust tests and exact deployed-bytecode pins
+        run: cargo test --locked --all-targets
+      - name: Optimized Rust tests
+        run: cargo test --locked --release
+      - name: Formatting, lints and documentation
+        run: |
+          cargo fmt --all
+          git -c color.ui=false diff --exit-code
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo doc --locked --no-deps
+      - name: Independent ABI and Keccak vector
+        run: python3 contracts/verify_leaf.py
+      - name: Install checksum-pinned Foundry
+        run: |
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/foundry-rs/foundry/releases/download/v1.3.1/foundry_v1.3.1_linux_amd64.tar.gz \
+            --output /tmp/bloch-audit-tools/foundry.tar.gz
+          echo 'baad3e1b06d6f310d210c93e95258a03d923fe610f8d0742138f2245f94abd7c  /tmp/bloch-audit-tools/foundry.tar.gz' | sha256sum --check
+          tar -xzf /tmp/bloch-audit-tools/foundry.tar.gz -C /tmp/bloch-audit-tools forge
+      - name: EVM security regressions and fuzz tests
+        run: /tmp/bloch-audit-tools/forge test --use "$SOLC" -vv

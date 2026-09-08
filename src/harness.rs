@@ -29,6 +29,8 @@ use crate::merkle::keccak256;
 
 /// The fixed WBLCH predeploy address (§5, OP-Stack address convention).
 pub const WBLCH_PREDEPLOY_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
+/// The fixed withdrawal predeploy address.
+pub const BRIDGE_PREDEPLOY_ADDRESS: &str = "0x4200000000000000000000000000000000000010";
 /// Proposed testnet chain id — PLACEHOLDER pending registration (§1).
 pub const TESTNET_CHAIN_ID: u64 = 700_771;
 /// solc pragma the WBLCH source pins.
@@ -148,6 +150,7 @@ pub enum HarnessError {
         actual: String,
     },
     WblchMissing,
+    InvalidPredeploy(String),
     SolcMismatch {
         expected: String,
         actual: String,
@@ -206,6 +209,7 @@ impl core::fmt::Display for HarnessError {
                 "WBLCH predeploy must sit at {WBLCH_PREDEPLOY_ADDRESS}, got {actual}"
             ),
             HarnessError::WblchMissing => write!(f, "config has no WBLCH predeploy"),
+            HarnessError::InvalidPredeploy(reason) => write!(f, "invalid predeploy: {reason}"),
             HarnessError::SolcMismatch { expected, actual } => {
                 write!(f, "solc pragma mismatch: expected {expected}, got {actual}")
             }
@@ -276,9 +280,10 @@ pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
 
 /// Resolve a config `source_path` under `base_dir`, refusing anything that
 /// could escape it: absolute paths (`Path::join` would silently REPLACE
-/// `base_dir`), `..` components and filesystem prefixes. Purely lexical —
-/// the file need not exist yet, so a missing in-crate file is still
-/// reported by the caller as [`HarnessError::SourceMissing`].
+/// `base_dir`), `..` components and filesystem prefixes. Existing files are
+/// additionally canonicalized so symlinks cannot escape the crate. Missing
+/// files remain the caller's `SourceMissing` error. The host must keep the
+/// source tree read-only during validation/compilation (no filesystem races).
 pub fn resolve_source_path(base_dir: &Path, source_path: &str) -> Result<PathBuf, HarnessError> {
     use std::path::Component;
     let rel = Path::new(source_path);
@@ -291,7 +296,15 @@ pub fn resolve_source_path(base_dir: &Path, source_path: &str) -> Result<PathBuf
             path: rel.to_path_buf(),
         });
     }
-    Ok(base_dir.join(rel))
+    let path = base_dir.join(rel);
+    if path.exists() {
+        let canonical = path.canonicalize()?;
+        if !canonical.starts_with(base_dir.canonicalize()?) {
+            return Err(HarnessError::SourceEscapesBaseDir { path });
+        }
+        return Ok(canonical);
+    }
+    Ok(path)
 }
 
 /// Load `deploy/testnet.json` (or any harness config) from disk.
@@ -327,17 +340,38 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
 
     let mut validated = Vec::new();
     let mut saw_wblch = false;
+    let mut saw_bridge = false;
+    let mut names = std::collections::BTreeSet::new();
+    let mut addresses = std::collections::BTreeSet::new();
     for p in &config.predeploys {
         let address = parse_address(&p.address).map_err(|reason| HarnessError::BadAddress {
             field: format!("predeploys[{}].address", p.name),
             reason,
         })?;
+        if !names.insert(&p.name) || !addresses.insert(address) {
+            return Err(HarnessError::InvalidPredeploy(
+                "duplicate name or address in genesis allocation".to_string(),
+            ));
+        }
+        if address == [0; 20] || p.name.trim().is_empty() {
+            return Err(HarnessError::InvalidPredeploy(
+                "zero address or empty name".to_string(),
+            ));
+        }
         if p.name == "WBLCH" {
             saw_wblch = true;
             if !p.address.eq_ignore_ascii_case(WBLCH_PREDEPLOY_ADDRESS) {
                 return Err(HarnessError::WblchAddressMismatch {
                     actual: p.address.clone(),
                 });
+            }
+        }
+        if p.name == "L2BlochBridge" {
+            saw_bridge = true;
+            if !p.address.eq_ignore_ascii_case(BRIDGE_PREDEPLOY_ADDRESS) {
+                return Err(HarnessError::InvalidPredeploy(format!(
+                    "L2BlochBridge must sit at {BRIDGE_PREDEPLOY_ADDRESS}"
+                )));
             }
         }
         let source_path = resolve_source_path(base_dir, &p.source_path)?;
@@ -393,6 +427,11 @@ pub fn validate(config: &DeployConfig, base_dir: &Path) -> Result<ValidatedDeplo
     }
     if !saw_wblch {
         return Err(HarnessError::WblchMissing);
+    }
+    if !saw_bridge {
+        return Err(HarnessError::InvalidPredeploy(
+            "missing L2BlochBridge".to_string(),
+        ));
     }
 
     // External artifacts: address syntax + honest placeholder labelling.
