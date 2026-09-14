@@ -8,6 +8,11 @@ unrestricted Ustav ERC-20 adapter and a local roundtrip with PQ-native escrow.
 Its checkpoints are explicitly trusted; production finality verification,
 native BLCH and Solana integration remain open.
 
+The [USDT source observer](docs/USDT-SOURCE-OBSERVER.md) checks Ethereum and
+TRON deposit evidence and can retain observations in an atomic local journal.
+It is a separate read-only tool: RPC consistency does not authorize minting,
+prove finality or make the bridge ready for deposits.
+
 Bridge *types* for the (design-only) Bloch EVM L2, implementing the wire
 formats and pure math of [`docs/specs/BLOCH-L2-EVM-DESIGN.md`](../../docs/specs/BLOCH-L2-EVM-DESIGN.md)
 §5 (L1<->L2 Bridge). This crate contains no networking, no keys and no chain
