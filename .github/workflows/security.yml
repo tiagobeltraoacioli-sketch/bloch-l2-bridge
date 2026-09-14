@@ -71,6 +71,10 @@ jobs:
         run: python3 contracts/verify_leaf.py
       - name: Independent Chameleon ABI and SHA-256 vectors
         run: python3 scripts/verify-chameleon-vectors.py
+      - name: Independent USDT route ABI and SHA-256 vectors
+        run: python3 scripts/verify-usdt-vectors.py
+      - name: Offline USDT source configuration regressions
+        run: python3 -m unittest discover -s scripts/tests -p 'test_validate_usdt_routes.py'
       - name: Install checksum-pinned Foundry
         run: |
           curl --fail --location --retry 3 --max-time 120 \

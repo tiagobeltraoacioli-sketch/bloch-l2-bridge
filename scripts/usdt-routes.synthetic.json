@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "synthetic": true,
+  "native_domain": "0x704b4b7103153db67922a581e605e7dac7e2dc4878782f38bbc118ae4c304860",
+  "native_asset": "0x47cba83effafcbcf66a1b0dfdb3b3c9ad384ac26e049eb178d64d183e66a73f5",
+  "native_supply_cap": 2000000000,
+  "routes": [
+    {
+      "network": "ethereum-mainnet",
+      "chain_id": "eip155:1",
+      "genesis_hash": "0x2d18253ac100544371a956861c2e9775191da7ca041ba4e7519746c8cc1860e6",
+      "source_domain": "0x433b87e32e81789d19c141e316c123b6090102da44be0283014694c7c719a48c",
+      "token": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "vault": "0xe2648ec7da0dc530e1c691e2dc59d4d930f6d2f2",
+      "decimals": 6,
+      "cap": 1000000000,
+      "transfer_mode": 0,
+      "deployment": {
+        "transaction": "0xc0617e511d2a843ae7f4997ff720585e43c27372f1d1fe52f620d432335d659a",
+        "block_hash": "0x9d5683007e4bdf3779571fa375ea76239851c207131afd38abbaac7849c3a9b7",
+        "block_number": 123,
+        "runtime_code": "0x60006000fd",
+        "runtime_sha256": "0x7983a150a0ee2eded2dfbbbc1d3520dc76d1819d96612a466ed49c2371da4bc9"
+      },
+      "committee": {
+        "threshold": 2,
+        "signers": [
+          "0x62f25347c0e7f30912213ab1c0d9d0ec471a2999",
+          "0x87f3274b1a9f0ff3fa5942b2e10f26e9dcafab59",
+          "0xea14fba2d86509e11d1ed0ab31d81af5fe1f825e"
+        ]
+      }
+    },
+    {
+      "network": "tron-mainnet",
+      "chain_id": "tron:728126428",
+      "genesis_hash": "0x3b0b034b3e81203dce261a7aa77bb8a8fa3e2dc49fc7511a14db0b57bd9a0658",
+      "source_domain": "0x0c8ea4aeb24363d35239bc44a018b25aeb3157ee9c1277f2c8a975f681bc93ba",
+      "token": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+      "vault": "41a08aa9b39e25a51d2023038aa44147dc256515c6",
+      "decimals": 6,
+      "cap": 1000000000,
+      "transfer_mode": 1,
+      "deployment": {
+        "transaction": "0xae57ddfe5f7ad591d341cf10a2e9eae4b679e58ff4aef7e6ddde9681fe40f9a4",
+        "block_hash": "0x8db8eb7d2d7fc665bebccee9edd4de75c016c362d9eb68922cdf8f717651a8c9",
+        "block_number": 123,
+        "runtime_code": "0x60006000fd",
+        "runtime_sha256": "0x7983a150a0ee2eded2dfbbbc1d3520dc76d1819d96612a466ed49c2371da4bc9"
+      },
+      "committee": {
+        "threshold": 2,
+        "signers": [
+          "411064c662d5458dc62403a1cadca379a3434bb8a9",
+          "418e175504db09a558086e70d7af04316b7b60e82b",
+          "41e90497c708761434d086f7b0f6b5ab7f215e2799"
+        ]
+      }
+    }
+  ]
+}
