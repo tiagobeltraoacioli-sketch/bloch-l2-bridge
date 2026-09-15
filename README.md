@@ -119,3 +119,9 @@ pattern) — deliberately excluded from the product root workspace.
 ## License
 
 MIT OR Apache-2.0.
+
+### Bitcoin observation groundwork
+
+The offline [BTC output inspector](docs/BTC-OBSERVER.md) derives transaction IDs
+from raw bytes and matches a selected output in integer satoshis. It does not
+validate inclusion, operate custody, mint native BTC or enable a Bitcoin bridge.
