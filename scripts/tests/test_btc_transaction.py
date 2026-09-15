@@ -110,6 +110,14 @@ class BitcoinCliTest(unittest.TestCase):
             good = subprocess.run(command, capture_output=True, text=True, timeout=10)
             self.assertEqual(good.returncode, 0, good.stderr)
             self.assertIs(json.loads(good.stdout)['mint_authorized'], False)
+            command += ['--journal', str(Path(directory) / 'btc.sqlite')]
+            for inserted, duplicates in ((1, 0), (0, 1)):
+                recorded = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertEqual(recorded.returncode, 0, recorded.stderr)
+                result = json.loads(recorded.stdout)
+                self.assertEqual(result['journal']['inserted'], inserted)
+                self.assertEqual(result['journal']['duplicates'], duplicates)
+                self.assertIs(result['mint_authorized'], False)
             path.write_text('not a transaction')
             bad = subprocess.run(command, capture_output=True, text=True, timeout=10)
             self.assertEqual(bad.returncode, 2)
