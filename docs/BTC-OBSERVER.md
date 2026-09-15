@@ -1,9 +1,10 @@
-# Offline Bitcoin deposit output inspection
+# Bitcoin deposit output inspection
 
 `scripts/inspect-btc-deposit.py` starts the Bitcoin bridge observation path. It
 reads an ASCII hex transaction file, calculates its txid and wtxid, and matches a
-specified output against an expected locking script. It makes no network calls,
-stores no keys, signs nothing and cannot authorize minting or payouts.
+specified output against an expected locking script. It is offline by default;
+explicit options enable read-only local Bitcoin Core queries. It stores no signing
+keys, signs nothing and cannot authorize minting or payouts.
 
 ```sh
 python3 scripts/inspect-btc-deposit.py \
@@ -147,3 +148,89 @@ References:
 - [Bitcoin header and Merkle serialization](https://developer.bitcoin.org/reference/block_chain.html)
 - [Bitcoin Core Merkle mutation handling](https://github.com/bitcoin/bitcoin/blob/master/src/consensus/merkle.cpp)
 - [Bitcoin Core 25.0: 64-byte transaction policy and CVE-2017-12842](https://bitcoincore.org/en/releases/25.0/)
+
+
+## Optional local Bitcoin Core assessment
+
+To the command above, add the proof options and all three node options:
+
+```sh
+  --proof-file /path/to/proof.json \
+  --block-hash <expected-lowercase-block-hash> \
+  --bitcoin-rpc http://127.0.0.1:18443/ \
+  --rpc-cookie /private/operator-bitcoin/regtest/.cookie \
+  --min-confirmations 6
+```
+
+This example uses a local regtest node and an illustrative threshold. There is
+no production confirmation default. All options must be explicit; a partial
+configuration fails rather than silently falling back to offline inspection.
+The proof file and raw transaction are still supplied by the operator; this
+collector does not fetch transactions or construct branches.
+
+The source accepts only literal loopback HTTP addresses with an explicit port
+and root path. DNS names, remote addresses, URL credentials, wallet paths,
+proxies, redirects and compressed/chunked responses are unsupported. A Bitcoin
+Core `__cookie__` authentication file must be regular, owned by the operator,
+private (no group/other permissions), at most 4096 bytes, and neither a symlink
+nor a hardlink. Trust its ancestor directories and the local host. Credentials
+are kept in memory, never printed, and must not be committed. Cookie rotation
+requires a new invocation; there is no unauthenticated fallback.
+
+Only `getblockchaininfo`, `getblockhash` and `getblockheader` can be called.
+Each response is capped at 64 KiB with strict JSON keys, envelope and numeric
+parsing. Connections have a five-second inactivity timeout; the POSIX main-thread
+CLI imposes a 40-second total collection deadline. Library callers must also
+wrap collection in `collection_deadline()` or enforce an equivalent wall limit.
+No wallet, transaction submission or node administration RPC is allowed.
+
+The assessment:
+
+1. Revalidates the raw deposit and Merkle branch before issuing RPC calls.
+2. Matches the selected network and pinned genesis. Standard signet additionally
+   requires its pinned challenge; custom signets are refused.
+3. Requires no initial block download, equal header/block heights and no node
+   warnings. This is a conservative local acceptance policy.
+4. Compares the node's header bytes, Merkle root and transaction count with the
+   supplied proof, checks active-chain membership at the reported height and
+   verifies the reported confirmation arithmetic.
+5. Re-reads chain information and requires the same height, tip hash and chainwork.
+   A tip extension or reorg observed during collection fails; retry with fresh
+   evidence. The collector does not loop or relax this check automatically.
+
+A successful result includes `chain.node_active_chain_observed`, the block and
+tip identities, confirmation count, explicit threshold and
+`chain.confirmation_policy_met`. Below-threshold evidence remains an observation
+with that policy flag false. The trust model is explicitly
+`operator-selected-bitcoin-core`. All inclusion/header-chain/finality/custody/mint
+and bridge-ready authorization flags remain false. Reaching a confirmation
+threshold is not permission to issue an asset.
+
+The operator trusts the selected Bitcoin Core process and its validation
+configuration. Cookie authentication authenticates the client to the local
+server; it is not proof that the server is honest. These reads do not independently
+validate consensus, inspect assumevalid/assumeutxo settings, detect an eclipsed
+or stale node, or prove full historical validation. Equal tip reads are not an
+atomic snapshot: an intervening change and return to the same tip can be missed,
+and another reorg can occur immediately afterward. There is no persistent reorg
+monitor or finalized state in this release. A future signing/credit path must
+reassess fresh evidence and invalidate approvals on lost confirmations.
+
+Node/proof failures occur before journal writes. The existing journal still
+stores only outpoint observations, not chain assessments, confirmation claims
+or credits. Restart does not restore any confirmation authorization. Native
+recipient binding, custody, reserve reconciliation, redemption and native replay
+protection remain required before a funded bridge or BTC pool launch.
+
+Tests use synthetic headers and a local mock HTTP server. They exercise network,
+genesis and signet mismatches, node synchronization/warnings, count/header
+inconsistency, orphaned blocks, tip changes, confirmation thresholds, restricted
+RPC methods, cookie permissions, malformed/oversized HTTP and JSON responses,
+CLI integration and unchanged journals on refusal. They are not a live Bitcoin
+Core or end-to-end funded regtest acceptance run.
+
+Protocol and configuration references:
+- [Bitcoin Core chain information RPC](https://bitcoincore.org/en/doc/30.0.0/rpc/blockchain/getblockchaininfo/)
+- [Bitcoin Core block header RPC](https://bitcoincore.org/en/doc/30.0.0/rpc/blockchain/getblockheader/)
+- [Bitcoin Core v30.0 network parameters](https://github.com/bitcoin/bitcoin/blob/v30.0/src/kernel/chainparams.cpp)
+- [Bitcoin Core JSON-RPC interface](https://github.com/bitcoin/bitcoin/blob/v30.0/doc/JSON-RPC-interface.md)

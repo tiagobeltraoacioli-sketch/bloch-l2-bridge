@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Inspect one Bitcoin output offline. Never authorize minting or custody."""
+"""Inspect a Bitcoin output, optionally consulting local Core. Never authorize minting."""
 import argparse
 import json
 from pathlib import Path
 import re
 import sys
 from btc_observer.journal import record
+from btc_observer.chain import assess_deposit
 from btc_observer.proof import verify_branch
+from btc_observer.rpc import CoreRpc, collection_deadline
 from btc_observer.transaction import Invalid, MAX_RAW_BYTES, MAX_SCRIPT_BYTES, NETWORKS, inspect_deposit
 
 
@@ -50,6 +52,9 @@ def main():
     parser.add_argument('--journal', type=Path, help='Optional SQLite file in an existing private directory')
     parser.add_argument('--proof-file', type=Path, help='Optional bounded Merkle branch JSON file')
     parser.add_argument('--block-hash', help='Expected lowercase block hash; requires --proof-file')
+    parser.add_argument('--bitcoin-rpc', help='Explicit local Bitcoin Core HTTP root URL')
+    parser.add_argument('--rpc-cookie', type=Path, help='Private Bitcoin Core cookie file')
+    parser.add_argument('--min-confirmations', type=int, help='Explicit observation policy; never mint permission')
     parser.add_argument('--network', choices=sorted(NETWORKS), required=True)
     parser.add_argument('--txid', required=True, help='Expected lowercase display txid')
     parser.add_argument('--vout', type=int, required=True)
@@ -58,6 +63,10 @@ def main():
     try:
         if (args.proof_file is None) != (args.block_hash is None):
             raise Invalid('Proof file and expected block hash must be supplied together')
+        online = (args.bitcoin_rpc is not None, args.rpc_cookie is not None,
+                  args.min_confirmations is not None)
+        if any(online) and (not all(online) or args.proof_file is None):
+            raise Invalid('Node assessment requires RPC, cookie, confirmation policy and proof')
         with args.raw_tx_file.open('rb') as stream:
             encoded = stream.read(MAX_RAW_BYTES * 2 + 3)
         if len(encoded) > MAX_RAW_BYTES * 2 + 2:
@@ -67,12 +76,18 @@ def main():
                        vout=args.vout, script_pubkey=hex_bytes(args.script_pubkey, MAX_SCRIPT_BYTES))
         result = inspect_deposit(**deposit)
         if args.proof_file is not None:
-            result['proof'] = verify_branch(raw, expected_block_hash=args.block_hash,
-                                            **read_proof(args.proof_file))
+            proof = read_proof(args.proof_file)
+            if all(online):
+                with collection_deadline():
+                    source = CoreRpc(args.bitcoin_rpc, args.rpc_cookie)
+                    result = assess_deposit(source, deposit, proof, expected_block_hash=args.block_hash,
+                                            min_confirmations=args.min_confirmations)
+            else:
+                result['proof'] = verify_branch(raw, expected_block_hash=args.block_hash, **proof)
         if args.journal is not None:
             result['journal'] = record(args.journal, [deposit])
     except (Invalid, OSError, UnicodeError, ValueError, RecursionError):
-        print('Bitcoin observation refused: invalid input, output mismatch, file or journal failure.', file=sys.stderr)
+        print('Bitcoin observation refused: invalid input, inconsistent node evidence or I/O failure.', file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

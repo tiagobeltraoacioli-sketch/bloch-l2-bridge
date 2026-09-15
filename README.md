@@ -122,6 +122,8 @@ MIT OR Apache-2.0.
 
 ### Bitcoin observation groundwork
 
-The offline [BTC output inspector](docs/BTC-OBSERVER.md) derives transaction IDs
-from raw bytes and matches a selected output in integer satoshis. It does not
-validate inclusion, operate custody, mint native BTC or enable a Bitcoin bridge.
+The [BTC output inspector](docs/BTC-OBSERVER.md) derives transaction IDs from raw
+bytes and matches an output in integer satoshis. Optional Merkle proofs and
+cookie-authenticated local Bitcoin Core queries assess active-chain observations
+and confirmation policy. It does not independently validate consensus, monitor
+reorgs durably, operate custody, mint native BTC or enable a funded Bitcoin bridge.
