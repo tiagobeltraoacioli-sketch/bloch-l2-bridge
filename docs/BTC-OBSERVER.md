@@ -300,8 +300,16 @@ a local pass does not assert that a remote CI run has passed.
 Add `--tracking /private/operator-directory/tracking.sqlite` to an explicit
 local-Core assessment. This is a **separate** private database from `--journal`.
 An existing observation journal is refused, never migrated or overwritten.
-The initial Bloch L1 launch scope is bETH/BLCH, bBTC/BLCH and bSOL/BLCH; USDT and
-USDC are excluded. This BTC tracking path is groundwork for bBTC only.
+All assets bridged into Bloch use `b` followed by the registered source symbol
+in destination display metadata: BTC → bBTC, ETH → bETH, SOL → bSOL,
+USDC → bUSDC and USDT → bUSDT. Source-chain evidence retains its source identity
+and symbol; this convention does not alter signed payloads, route IDs or native
+asset IDs. A symbol never establishes custody or makes distinct routes fungible.
+BLCH remains the native asset. Naming bUSDC/bUSDT does not activate their bridges.
+
+The Bloch L1 development scope is bETH/BLCH, bBTC/BLCH, bSOL/BLCH, bUSDT/BLCH
+and bUSDC/BLCH. This BTC tracking path is groundwork for bBTC only; stablecoin
+routes require separate token and destination identities.
 
 Each invocation refreshes one supplied outpoint/proof. There is no background
 scan, timer, automatic source switching or stored raw transaction/proof archive.
