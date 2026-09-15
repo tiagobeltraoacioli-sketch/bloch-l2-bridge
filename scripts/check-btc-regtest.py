@@ -12,6 +12,7 @@ import time
 
 from btc_observer.rpc import CoreRpc, collection_deadline
 from btc_observer.transaction import Invalid, decode
+from btc_observer.tracking import read_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,13 +133,15 @@ def exercise(node):
     block_hash = node.rpc('generatetoaddress', 1, mining_address)[0]
     raw_file, proof_file, journal = node.root / 'tx.hex', node.root / 'proof.json', node.root / 'btc.sqlite'
     raw_file.write_text(raw)
+    tracking_file = node.root / 'tracking.sqlite'
+    outpoint_key = 'bitcoin-regtest:' + txid + ':' + str(indexes[0])
 
     def write_proof(block):
         transactions = node.rpc('getblock', block, 1)['tx']
         proof_file.write_text(json.dumps(merkle_proof(
             transactions, transactions.index(txid), node.rpc('getblockheader', block, 'false'))))
 
-    def inspect(block, expected_code=0, network='bitcoin-regtest'):
+    def inspect(block, expected_code=0, network='bitcoin-regtest', tracked=False):
         result = subprocess.run([
             sys.executable, str(ROOT / 'scripts' / 'inspect-btc-deposit.py'),
             '--raw-tx-file', str(raw_file), '--network', network,
@@ -146,7 +149,8 @@ def exercise(node):
             '--proof-file', str(proof_file), '--block-hash', block,
             '--bitcoin-rpc', node.url, '--rpc-cookie', str(node.cookie),
             '--min-confirmations', '3', '--journal', str(journal),
-        ], capture_output=True, text=True, timeout=45)
+        ] + (['--tracking', str(tracking_file)] if tracked else []),
+            capture_output=True, text=True, timeout=45)
         check(result.returncode == expected_code, 'Unexpected inspector exit status')
         if expected_code:
             check(not result.stdout and 'Traceback' not in result.stderr, 'Unsafe inspector refusal')
@@ -173,10 +177,16 @@ def exercise(node):
     before = journal.read_bytes()
     inspect(block_hash, expected_code=2, network='bitcoin-mainnet')
     check(journal.read_bytes() == before, 'Wrong-network observation modified journal')
+    tracked = inspect(block_hash, tracked=True)
+    check(tracked['tracking']['last_refresh_status'] == 'observed', 'Missing durable refresh')
 
     old_source = CoreRpc(node.url, node.cookie)
     print('Regtest: restarting isolated node', file=sys.stderr, flush=True)
     node.stop()
+    inspect(block_hash, expected_code=2, tracked=True)
+    persisted = read_state(tracking_file, outpoint_key)
+    check(persisted['last_refresh_status'] == 'unavailable' and not persisted['confirmation_policy_met'],
+          'Node outage left old confirmation state usable')
     node.start()
     with collection_deadline():
         try:
@@ -189,6 +199,10 @@ def exercise(node):
     check(restarted['outpoint_key'] == first['outpoint_key'] and restarted['journal']['inserted'] == 0,
           'Restart lost deposit identity')
     check(restarted['chain']['confirmation_policy_met'], 'Restart changed confirmation assessment')
+    inspect(block_hash, tracked=True)
+    persisted = read_state(tracking_file, outpoint_key)
+    check(persisted['requires_refresh_for_action'] and not persisted['confirmation_policy_met'],
+          'Disk read restored a confirmation authorization')
 
     # Invalidate the deposit block only on this disposable regtest child.
     node.rpc('invalidateblock', block_hash)
@@ -197,6 +211,10 @@ def exercise(node):
     before = journal.read_bytes()
     inspect(block_hash, expected_code=2)
     check(journal.read_bytes() == before, 'Orphaned proof modified journal')
+    orphan = inspect(block_hash, tracked=True)
+    check(orphan['tracking']['last_refresh_status'] == 'orphaned' and 'journal' not in orphan,
+          'Tracking did not record orphan status separately')
+    check(journal.read_bytes() == before, 'Orphan tracking modified deposit journal')
     replacement = next((block for block in replacements if txid in node.rpc('getblock', block, 1)['tx']), None)
     check(replacement is not None and replacement != block_hash, 'Deposit was not re-mined in replacement chain')
     write_proof(replacement)
@@ -204,9 +222,14 @@ def exercise(node):
     check(restored['outpoint_key'] == first['outpoint_key'] and restored['journal']['inserted'] == 0
           and restored['journal']['total'] == 1, 'Reorg created a second deposit')
     check(restored['chain']['confirmation_policy_met'], 'Replacement deposit failed confirmation policy')
+    restored_tracking = inspect(replacement, tracked=True)
+    check(restored_tracking['tracking']['last_refresh_status'] == 'observed'
+          and restored_tracking['tracking']['revision'] == 5, 'Replacement refresh lost revision identity')
     return dict(schema='bloch-btc-regtest-acceptance-v1',
                 scenarios=['real-output-and-merkle-proof', 'confirmation-threshold', 'wrong-network-refusal',
-                           'node-restart', 'cookie-rotation', 'orphan-refusal', 'remined-outpoint-deduplication'],
+                           'node-restart', 'cookie-rotation', 'orphan-refusal', 'remined-outpoint-deduplication',
+                           'durable-refresh-state', 'offline-failure-invalidates', 'orphan-state',
+                           'restart-requires-refresh'],
                 passed=True, mint_authorized=False, bridge_ready=False)
 
 

@@ -212,8 +212,8 @@ server; it is not proof that the server is honest. These reads do not independen
 validate consensus, inspect assumevalid/assumeutxo settings, detect an eclipsed
 or stale node, or prove full historical validation. Equal tip reads are not an
 atomic snapshot: an intervening change and return to the same tip can be missed,
-and another reorg can occur immediately afterward. There is no persistent reorg
-monitor or finalized state in this release. A future signing/credit path must
+and another reorg can occur immediately afterward. There is no autonomous background reorg watcher or finalized state in this release.
+Optional persistent refresh state is described below. A future signing/credit path must
 reassess fresh evidence and invalidate approvals on lost confirmations.
 
 Node/proof failures occur before journal writes. The existing journal still
@@ -293,3 +293,70 @@ x86_64, using the checksum above. This validates the observer against a real
 Bitcoin Core process; it is not a production bridge, custody proof, native mint,
 burn/redemption test or durable reorg monitor. The CI job is configured separately;
 a local pass does not assert that a remote CI run has passed.
+
+
+## Persistent refresh state and reorganization tracking
+
+Add `--tracking /private/operator-directory/tracking.sqlite` to an explicit
+local-Core assessment. This is a **separate** private database from `--journal`.
+An existing observation journal is refused, never migrated or overwritten.
+The initial Bloch L1 launch scope is bETH/BLCH, bBTC/BLCH and bSOL/BLCH; USDT and
+USDC are excluded. This BTC tracking path is groundwork for bBTC only.
+
+Each invocation refreshes one supplied outpoint/proof. There is no background
+scan, timer, automatic source switching or stored raw transaction/proof archive.
+The operator must supply fresh evidence for each refresh, including a new branch
+if a transaction is mined into a different block.
+
+Before querying Core, a transaction increments the outpoint revision, records
+`refreshing`, clears previous evidence and commits with `synchronous=FULL`.
+Network queries run outside the database lock. A second transaction stores the
+result only if the same revision is still pending. A delayed success or failure
+cannot overwrite a newer refresh. The identity remains network/txid/vout across
+blocks and witness variants, with conflicting output facts refused.
+
+The last refresh has one of five states:
+
+| Last refresh status | Meaning |
+| --- | --- |
+| `refreshing` | Started and not completed; a crash may leave this state. |
+| `observed` | The latest completed query met the explicit confirmation policy. |
+| `below_threshold` | The block was active but had too few confirmations. |
+| `orphaned` | A stable node view reported the bound block outside the active chain. |
+| `unavailable` | The attempted assessment failed; it asserts no orphan or finality fact. |
+
+An orphan classification still validates raw transaction/proof, node network and
+genesis, header bytes, root and transaction count. It requires Core's explicit
+`confirmations=-1`, a different active block at that height when within the tip,
+and matching before/after tip snapshots. Unknown blocks, inconsistent replies,
+node outages and changing tips fail as unavailable instead of asserting a reorg.
+Without `--tracking`, the inspector retains its original orphan-refusal behavior.
+With tracking, a successfully observed orphan produces JSON with zero active
+confirmations and false policy status, skips the observation journal and exits 0.
+Exit 0 means an observation completed, not that a deposit is eligible for credit.
+
+`btc_observer.tracking.read_state(path, outpoint_key)` returns historical state.
+Its `confirmation_policy_met` is **always false**, and
+`requires_refresh_for_action` is **always true**, even for an `observed` record.
+Disk reads and process restarts cannot restore a usable confirmation decision.
+All custody, inclusion, finality, mint and bridge-ready flags remain false. Future
+signing/credit integration must revalidate the current revision and chain state;
+this cache is not an approval token or a complete reorg-safe mint protocol.
+
+RPC, credential and semantic proof failures after invalidation leave unavailable
+state; process interruption can leave refreshing state. Retry starts a new
+revision. Invalid configuration/raw input refused before a refresh starts does
+not alter existing records, whose historical read still never authorizes actions.
+A post-commit I/O error may persist pending state despite the caller's error.
+The original observation journal and this state file are not one atomic database
+transaction. Neither is a credit ledger or tamper-proof against its operator.
+Deleting/restoring old files can roll back revisions; native replay protection
+must be independent. The file is capped at 256 MiB, 100,000 outpoints, and signed
+64-bit revisions; no automatic pruning or reset is performed on exhaustion.
+
+Regression coverage includes confirmation loss, policy changes, stable orphans,
+re-mining, interrupted refresh/recovery, concurrent late success/failure,
+caller-container mutation, private-file checks and foreign-journal preservation.
+The real Core 30.3 regtest harness now also checks persistent state, credential
+failure while stopped, restart reads requiring refresh, and durable orphan status:
+all eleven scenarios passed locally on 2026-09-15.

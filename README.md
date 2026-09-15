@@ -125,7 +125,10 @@ MIT OR Apache-2.0.
 The [BTC output inspector](docs/BTC-OBSERVER.md) derives transaction IDs from raw
 bytes and matches an output in integer satoshis. Optional Merkle proofs and
 cookie-authenticated local Bitcoin Core queries assess active-chain observations
-and confirmation policy. It does not independently validate consensus, monitor
-reorgs durably, operate custody, mint native BTC or enable a funded Bitcoin bridge.
+and confirmation policy. It does not independently validate consensus, run an
+autonomous reorg watcher, operate custody, mint native BTC or enable a funded
+Bitcoin bridge.
 
 The same inspector has a [real Bitcoin Core regtest acceptance harness](docs/BTC-OBSERVER.md#real-bitcoin-core-regtest-acceptance) for confirmation thresholds, restart, cookie rotation, orphan refusal and re-mined outpoint deduplication.
+
+Optional BTC tracking persists revision-guarded refresh results and orphan status. Historical reads always require a fresh assessment and never authorize minting.

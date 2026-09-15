@@ -9,6 +9,7 @@ from btc_observer.journal import record
 from btc_observer.chain import assess_deposit
 from btc_observer.proof import verify_branch
 from btc_observer.rpc import CoreRpc, collection_deadline
+from btc_observer.tracking import refresh
 from btc_observer.transaction import Invalid, MAX_RAW_BYTES, MAX_SCRIPT_BYTES, NETWORKS, inspect_deposit
 
 
@@ -50,6 +51,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--raw-tx-file', type=Path, required=True, help='ASCII transaction hex file')
     parser.add_argument('--journal', type=Path, help='Optional SQLite file in an existing private directory')
+    parser.add_argument('--tracking', type=Path, help='Separate private SQLite refresh state; requires node assessment')
     parser.add_argument('--proof-file', type=Path, help='Optional bounded Merkle branch JSON file')
     parser.add_argument('--block-hash', help='Expected lowercase block hash; requires --proof-file')
     parser.add_argument('--bitcoin-rpc', help='Explicit local Bitcoin Core HTTP root URL')
@@ -67,6 +69,8 @@ def main():
                   args.min_confirmations is not None)
         if any(online) and (not all(online) or args.proof_file is None):
             raise Invalid('Node assessment requires RPC, cookie, confirmation policy and proof')
+        if args.tracking is not None and (not all(online) or args.proof_file is None):
+            raise Invalid('Tracking requires explicit node assessment')
         with args.raw_tx_file.open('rb') as stream:
             encoded = stream.read(MAX_RAW_BYTES * 2 + 3)
         if len(encoded) > MAX_RAW_BYTES * 2 + 2:
@@ -79,12 +83,20 @@ def main():
             proof = read_proof(args.proof_file)
             if all(online):
                 with collection_deadline():
-                    source = CoreRpc(args.bitcoin_rpc, args.rpc_cookie)
-                    result = assess_deposit(source, deposit, proof, expected_block_hash=args.block_hash,
-                                            min_confirmations=args.min_confirmations)
+                    source = None
+                    def call_core(method, params):
+                        nonlocal source
+                        if source is None:
+                            source = CoreRpc(args.bitcoin_rpc, args.rpc_cookie)
+                        return source(method, params)
+                    options = dict(expected_block_hash=args.block_hash, min_confirmations=args.min_confirmations)
+                    if args.tracking is not None:
+                        result = refresh(args.tracking, call_core, deposit, proof, **options)
+                    else:
+                        result = assess_deposit(call_core, deposit, proof, **options)
             else:
                 result['proof'] = verify_branch(raw, expected_block_hash=args.block_hash, **proof)
-        if args.journal is not None:
+        if args.journal is not None and result.get('chain', {}).get('node_active_chain_observed', True):
             result['journal'] = record(args.journal, [deposit])
     except (Invalid, OSError, UnicodeError, ValueError, RecursionError):
         print('Bitcoin observation refused: invalid input, inconsistent node evidence or I/O failure.', file=sys.stderr)

@@ -48,6 +48,15 @@ def assess_deposit(rpc, deposit, proof, *, expected_block_hash, min_confirmation
     Bitcoin Core connection. Matching snapshots are not an atomic chain lock,
     protection against a lying node, or a durable reorg monitor.
     """
+    return _assess(rpc, deposit, proof, expected_block_hash, min_confirmations, False)
+
+
+def assess_status(rpc, deposit, proof, *, expected_block_hash, min_confirmations):
+    """Also return a stable, internally consistent orphan observation for tracking."""
+    return _assess(rpc, deposit, proof, expected_block_hash, min_confirmations, True)
+
+
+def _assess(rpc, deposit, proof, expected_block_hash, min_confirmations, allow_orphan):
     integer(min_confirmations, 1, 100_000)
     require(type(deposit) is dict and set(deposit) ==
             {'raw', 'network', 'expected_txid', 'vout', 'script_pubkey'}, 'Invalid deposit request')
@@ -61,16 +70,24 @@ def assess_deposit(rpc, deposit, proof, *, expected_block_hash, min_confirmation
     metadata = rpc('getblockheader', [expected_block_hash, True])
     require(type(metadata) is dict and metadata.get('hash') == expected_block_hash,
             'Node returned a different block')
-    height = integer(metadata.get('height'), 1, before[0])
-    confirmations = integer(metadata.get('confirmations'), 1, MAX_HEIGHT)
-    require(confirmations == before[0] - height + 1, 'Inconsistent confirmation count')
+    height = integer(metadata.get('height'), 1, MAX_HEIGHT)
+    reported = integer(metadata.get('confirmations'), -1, MAX_HEIGHT)
+    active = reported >= 1
+    require(active or (allow_orphan and reported == -1), 'Block is not in active chain')
+    confirmations = reported if active else 0
+    if active:
+        require(height <= before[0] and confirmations == before[0] - height + 1,
+                'Inconsistent confirmation count')
     count = integer(metadata.get('nTx'), 1, 100_000)
     require(count == proof['tx_count'], 'Node transaction count differs from proof')
     require(metadata.get('merkleroot') == proof['header'][36:68][::-1].hex(),
             'Node Merkle root differs from proof')
     require(rpc('getblockheader', [expected_block_hash, False]) == proof['header'].hex(),
             'Node header differs from proof')
-    require(rpc('getblockhash', [height]) == expected_block_hash, 'Block is not in active chain')
+    if height <= before[0]:
+        active_hash = rpc('getblockhash', [height])
+        hash_bytes(active_hash)
+        require((active_hash == expected_block_hash) == active, 'Inconsistent active chain membership')
     after = snapshot(rpc('getblockchaininfo', []), network)
     require(before == after, 'Chain tip changed during observation; retry from fresh evidence')
     observation['proof'] = membership
@@ -81,7 +98,7 @@ def assess_deposit(rpc, deposit, proof, *, expected_block_hash, min_confirmation
         'tip_hash': before[1], 'tip_height': before[0], 'tip_chainwork': before[2],
         'confirmations': confirmations, 'required_confirmations': min_confirmations,
         'confirmation_policy_met': confirmations >= min_confirmations,
-        'node_active_chain_observed': True,
+        'node_active_chain_observed': active,
         'header_chain_verified': False, 'inclusion_verified': False,
         'finality_verified': False, 'custody_verified': False,
         'mint_authorized': False, 'bridge_ready': False,
