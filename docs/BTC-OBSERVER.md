@@ -222,15 +222,74 @@ or credits. Restart does not restore any confirmation authorization. Native
 recipient binding, custody, reserve reconciliation, redemption and native replay
 protection remain required before a funded bridge or BTC pool launch.
 
-Tests use synthetic headers and a local mock HTTP server. They exercise network,
+The Python unit suite uses synthetic headers and a local mock HTTP server. They exercise network,
 genesis and signet mismatches, node synchronization/warnings, count/header
 inconsistency, orphaned blocks, tip changes, confirmation thresholds, restricted
 RPC methods, cookie permissions, malformed/oversized HTTP and JSON responses,
-CLI integration and unchanged journals on refusal. They are not a live Bitcoin
-Core or end-to-end funded regtest acceptance run.
+CLI integration and unchanged journals on refusal. The separate real-node
+acceptance harness below adds Bitcoin Core regtest coverage.
 
 Protocol and configuration references:
 - [Bitcoin Core chain information RPC](https://bitcoincore.org/en/doc/30.0.0/rpc/blockchain/getblockchaininfo/)
 - [Bitcoin Core block header RPC](https://bitcoincore.org/en/doc/30.0.0/rpc/blockchain/getblockheader/)
 - [Bitcoin Core v30.0 network parameters](https://github.com/bitcoin/bitcoin/blob/v30.0/src/kernel/chainparams.cpp)
 - [Bitcoin Core JSON-RPC interface](https://github.com/bitcoin/bitcoin/blob/v30.0/doc/JSON-RPC-interface.md)
+
+
+## Real Bitcoin Core regtest acceptance
+
+`scripts/check-btc-regtest.py` starts its own Bitcoin Core 30.3 child in a newly
+created private temporary directory, with a dedicated empty configuration and
+loopback RPC port. P2P listening, discovery, DNS seeds and network activity are
+disabled. It never accepts an existing node endpoint or data directory. It uses
+only disposable regtest coins, stops only its own foreground process, and cleans
+up the temporary wallet, cookie, chain and observation journal afterward.
+
+Pass explicitly verified binaries:
+
+```sh
+python3 scripts/check-btc-regtest.py \
+  --bitcoind /path/to/bitcoin-30.3/bin/bitcoind \
+  --bitcoin-cli /path/to/bitcoin-30.3/bin/bitcoin-cli
+```
+
+The harness checks the executable version, not its authenticity. Verify the
+archive checksum before extracting/executing it. Pins from the official
+[30.3 checksum manifest](https://bitcoincore.org/bin/bitcoin-core-30.3/SHA256SUMS):
+
+| Archive | SHA-256 |
+| --- | --- |
+| `bitcoin-30.3-x86_64-linux-gnu.tar.gz` | `4753cd70416c629a2090503e8545a3c05e94a0f5037f8fb97b4c35c6e1afee0e` |
+| `bitcoin-30.3-x86_64-apple-darwin.tar.gz` | `24897a2e40596df5e4206499935aac0fe045c58b3de3170ce92ebbb2ebc765a3` |
+
+The CI `bitcoin-regtest` job downloads the pinned Linux archive, verifies its
+checksum and runs the harness separately from the Python unit suite. A missing
+binary, version mismatch, failed setup or failed assertion is a failure, not a
+skipped test. Local reproduction needs permission to start a loopback server.
+Mining RPC calls have a bounded 30-second client timeout; initial maturity is
+mined in ten-block batches to avoid a large wallet update queue on slow disks.
+
+The run checks:
+
+1. A real signed 1.25 BTC regtest transaction and independently constructed Merkle
+   branch from Core's complete block txid list reach the inspector correctly.
+2. One confirmation falls below the explicit three-confirmation test policy;
+   three meet it, and repeated inspection inserts no second journal row.
+3. Selecting mainnet against the regtest source fails without changing the journal.
+4. Restart preserves the chain, deposit identity and journal deduplication.
+5. The old RPC cookie is refused after restart; a fresh CLI invocation succeeds.
+6. Invalidating the deposit block and mining a replacement branch causes the old
+   proof to be refused without modifying the journal.
+7. Re-mining the same transaction in a different block preserves the outpoint
+   identity and does not insert a second deposit.
+
+The harness uses wallet, mining and invalidation RPCs only through its private
+regtest setup client. The production observer's three-method read-only allowlist
+is unchanged. Every successful inspector result is checked to retain false
+custody, finality, inclusion, mint and bridge-ready flags.
+
+On 2026-09-15 all seven scenarios passed locally with Bitcoin Core 30.3 on macOS
+x86_64, using the checksum above. This validates the observer against a real
+Bitcoin Core process; it is not a production bridge, custody proof, native mint,
+burn/redemption test or durable reorg monitor. The CI job is configured separately;
+a local pass does not assert that a remote CI run has passed.

@@ -127,3 +127,5 @@ bytes and matches an output in integer satoshis. Optional Merkle proofs and
 cookie-authenticated local Bitcoin Core queries assess active-chain observations
 and confirmation policy. It does not independently validate consensus, monitor
 reorgs durably, operate custody, mint native BTC or enable a funded Bitcoin bridge.
+
+The same inspector has a [real Bitcoin Core regtest acceptance harness](docs/BTC-OBSERVER.md#real-bitcoin-core-regtest-acceptance) for confirmation thresholds, restart, cookie rotation, orphan refusal and re-mined outpoint deduplication.

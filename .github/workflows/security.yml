@@ -13,6 +13,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bitcoin-regtest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install checksum-pinned Bitcoin Core 30.3
+        run: |
+          mkdir -p /tmp/postern-bitcoin-tools
+          curl --fail --location --retry 3 --max-time 180 \
+            https://bitcoincore.org/bin/bitcoin-core-30.3/bitcoin-30.3-x86_64-linux-gnu.tar.gz \
+            --output /tmp/postern-bitcoin-tools/core.tar.gz
+          echo '4753cd70416c629a2090503e8545a3c05e94a0f5037f8fb97b4c35c6e1afee0e  /tmp/postern-bitcoin-tools/core.tar.gz' | sha256sum --check
+          tar -xzf /tmp/postern-bitcoin-tools/core.tar.gz -C /tmp/postern-bitcoin-tools \
+            bitcoin-30.3/bin/bitcoind bitcoin-30.3/bin/bitcoin-cli
+      - name: Real regtest deposit, confirmations, restart and replacement chain
+        run: |
+          python3 scripts/check-btc-regtest.py \
+            --bitcoind /tmp/postern-bitcoin-tools/bitcoin-30.3/bin/bitcoind \
+            --bitcoin-cli /tmp/postern-bitcoin-tools/bitcoin-30.3/bin/bitcoin-cli
+
   dependency-advisories:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
