@@ -105,3 +105,45 @@ must never rely on this file alone.
 Regression tests cover restart and witness-variant replay, distinct outputs and
 networks, atomic rollback on conflicts/capacity, concurrent writers, unsafe files,
 foreign databases, failed post-commit sync and repeated CLI invocations.
+
+## Optional offline Merkle membership proof
+
+Add `--proof-file proof.json --block-hash EXPECTED_LOWERCASE_BLOCK_HASH` to the
+inspection command. Both options must be supplied together. Obtain the expected
+block identity independently from an authenticated, validated chain source; a
+caller-provided hash alone does not authenticate a Bitcoin block.
+
+The ASCII JSON file is limited to 4096 bytes and exactly these fields:
+
+```json
+{"header_hex":"<160 lowercase hex characters>","tx_index":0,"tx_count":1,"siblings":[]}
+```
+
+`tx_index` is zero-based; `tx_count` is an integer from 1 to 100,000 (local policy).
+`siblings` contains lowercase display-order 32-byte hashes, ordered from leaf to
+root, including explicit odd-node duplicates. The verifier checks the 80-byte
+header hash, stripped transaction txid, branch depth, index, duplication rules
+and Merkle root. It refuses equal real sibling pairs along the supplied branch
+and 64-byte stripped transaction leaves to avoid leaf/inner-node ambiguity.
+Duplicate JSON keys, unknown fields and nonfinite numbers are refused.
+
+A successful nested `proof` reports `merkle_membership_verified: true`, while
+`header_chain_verified`, `inclusion_verified`, `finality_verified`,
+`custody_verified`, `mint_authorized` and `bridge_ready` remain false. Top-level
+observation flags also remain false. Invalid proofs fail before any journal
+write, including when the journal already exists. Proofs and block status are
+not persisted in the observation journal.
+
+This is not a Bitcoin light client: it does not validate proof of work,
+difficulty, timestamps, ancestry, active-chain status, confirmations or reorgs.
+The header does not separately commit the transaction count; the caller must
+authenticate that count. A partial branch cannot detect mutations elsewhere in
+the tree or validate a complete block. Witness data is not authenticated by the
+txid branch. Custody, recipient binding, native replay protection and redemption
+remain separate acceptance gates. Synthetic test headers intentionally have no
+valid proof of work, demonstrating this boundary.
+
+References:
+- [Bitcoin header and Merkle serialization](https://developer.bitcoin.org/reference/block_chain.html)
+- [Bitcoin Core Merkle mutation handling](https://github.com/bitcoin/bitcoin/blob/master/src/consensus/merkle.cpp)
+- [Bitcoin Core 25.0: 64-byte transaction policy and CVE-2017-12842](https://bitcoincore.org/en/releases/25.0/)
