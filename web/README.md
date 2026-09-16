@@ -21,3 +21,12 @@ assets and section links, preserve the CSP headers, and verify the published
 content still says USDT transfers are not enabled. External repository links
 point to the actual project roots; no uncommitted file URLs or invented contract
 addresses are presented.
+
+## Publication on 15 September 2026
+
+Republished the four reviewed public files to the existing `blochbridge` Pages
+project with user authorization. Deployment: `4b5735df.blochbridge.pages.dev`.
+The files already matched Cloudflare's asset store; this is a verified
+republication, not new bridge activation. Desktop/mobile browser checks,
+anchors and published styles/favicon passed. Transfers remain disabled.
+Previous deployment for rollback: `5f9a35c9-9a4a-4250-8b36-9bc11a44af13`.
