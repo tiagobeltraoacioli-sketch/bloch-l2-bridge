@@ -10,9 +10,11 @@ block does not currently provide a verified commitment to that journal state.
 The native implementation now has dormant ownership of a native component in
 `CommittedState`, initialized empty through the real block transition, and an
 optional canonical SMT commitment under state tag `0x1F`. Its activation epoch
-remains disabled. This is not execution of the journal's gateway operations:
-there is no populated-state import, native transaction dispatch or release
-inclusion/finality proof available to this observer. The journal v7 root, native
+remains disabled. Sponsored native transfers now have a separately gated block
+dispatch path, but no production asset/route bootstrap or mempool admission.
+This is not execution of the journal's gateway operations: there is no
+populated-state import, gateway dispatch or release inclusion/finality proof
+available to this observer. The journal v7 root, native
 component v1 commitment, canonical state root and block ID are distinct values;
 none may be substituted for another in a redemption trust file.
 
