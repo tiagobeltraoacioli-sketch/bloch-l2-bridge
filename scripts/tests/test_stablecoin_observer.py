@@ -41,6 +41,22 @@ def evidence_for(route):
     return evidence
 
 
+def configuration_for(route):
+    def uint(n):
+        return '0x' + n.to_bytes(32, 'big').hex()
+    def address(value):
+        return '0x' + '00' * 12 + value[2:]
+    return {
+        'sourceDomain': route['source_domain'], 'nativeDomain': route['native_domain'],
+        'nativeAsset': route['native_asset'], 'token': address(route['token_vm_hex']),
+        'decimals': uint(6), 'cap': uint(route['cap']),
+        'threshold': uint(route['committee_threshold']), 'transferMode': uint(route['transfer_mode']),
+        'routeId': route['route_id'], 'signerCount': uint(len(route['committee_signers'])),
+        'signers': [address(s) for s in route['committee_signers']],
+        'memberships': [uint(1) for _ in route['committee_signers']],
+    }
+
+
 class StablecoinObserverTest(unittest.TestCase):
     def setUp(self):
         self.catalog = catalog_fixture()
@@ -165,6 +181,7 @@ class StablecoinObserverTest(unittest.TestCase):
                     'block_hash': captured['receipt']['blockHash'],
                     'block_number': captured['receipt']['blockNumber'],
                     'address': self.route(symbol)['vault_vm_hex'],
+                    'configuration': configuration_for(self.route(symbol)),
                     'code': manifest['routes'][0]['deployment']['runtime_code']}
                 evidence.write_text(json.dumps(captured))
                 result = subprocess.run([

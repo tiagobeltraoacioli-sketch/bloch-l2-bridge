@@ -50,7 +50,8 @@ synthetic online collection restricted to loopback fixtures.
 Ethereum evidence for this stablecoin CLI now requires a `vault_runtime` object
 alongside the existing receipt evidence. Its exact fields are `block_hash`,
 `block_number` (RPC hex quantity), `address`, and `code` (0x-prefixed runtime
-bytes). The address and block must match the selected vault and the deposit
+bytes), plus `configuration` containing the contract readback described below.
+The address and block must match the selected vault and the deposit
 receipt. The runtime SHA-256 must match the validated catalog deployment pin.
 Deposits before the configured deployment height are refused.
 
@@ -63,7 +64,7 @@ is refused before any observation journal write. The code limit is 65,536 bytes.
 
 The output's `vault_runtime` report describes only bytecode consistency with an
 operator-supplied pin at that block. It does not authenticate the manifest,
-constructor transaction, immutable getter values, committee, token proxy
+constructor transaction, token proxy
 implementation, reserves or consensus. Captured evidence can be fabricated;
 online evidence still trusts the selected RPC. A proxy runtime match does not
 authenticate its implementation. `deployment_verified` and `mint_authorized`
@@ -72,6 +73,38 @@ remain false. The journal evidence digest now includes the runtime capture.
 The legacy USDT CLI and TRON path retain their previous evidence format; neither
 reports an Ethereum runtime match. Missing Ethereum runtime evidence in the
 stablecoin CLI is refused rather than silently using the legacy path.
+
+### Complete vault configuration readback
+
+The stablecoin Ethereum CLI also requires block-bound `eth_call` readback of
+`sourceDomain()`, `nativeDomain()`, `nativeAsset()`, `token()`, `decimals()`,
+`cap()`, `threshold()`, `transferMode()`, `routeId()` and `signerCount()`.
+Each exact 32-byte ABI result must match the validated catalog, including zero
+address padding and integer widths. It then checks `signers(i)` in order and
+`isSigner(address)` for every configured member. `signerCount()` ensures the
+configured list is complete; a matching prefix alone is not accepted.
+
+The `configuration` evidence object uses these ten getter names without
+parentheses, with their raw 0x-prefixed 32-byte results, plus `signers` and
+`memberships` arrays of raw ABI words. Missing or unknown fields, extra committee
+members, malformed ABI words and noncanonical booleans are refused before the
+journal write. All calls use the deposit block hash and `requireCanonical: true`;
+the canonical block is rechecked after the entire read. Requests are bounded by
+the validated committee (2..16), at most 42 getter calls, each limited to 100,000
+gas and subject to the existing overall collection deadline. No response can
+increase the number of requested signer entries.
+
+`vault_configuration_matched: true` reports RPC consistency only. Getters can
+be fabricated by an untrusted endpoint or contract; the reviewed runtime pin
+and authenticated deployment still matter. This does not prove balances or
+native liabilities, or authorize emission.
+
+The source contract adds the read-only `signerCount()` getter without changing
+storage layout or route/deposit/release digest formats. Its compiled runtime
+changes and therefore requires a new reviewed deployment/runtime pin. Existing
+contracts without this getter are refused by this stricter observer; there is
+no fallback to partial committee verification. No contract is deployed by this
+code change. Legacy USDT and TRON observation formats remain unchanged.
 
 Output includes the selected bridged symbol, source symbol, native domain,
 native asset ID, token address and route ID. Amounts and nonces remain decimal

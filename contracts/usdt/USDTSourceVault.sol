@@ -81,6 +81,11 @@ contract USDTSourceVault {
         entered = false;
     }
 
+    /// @notice Exposes the complete committee size for block-bound observer checks.
+    function signerCount() external view returns (uint256) {
+        return signers.length;
+    }
+
     function routeId() public view returns (bytes32) {
         return sha256(
             abi.encode(

@@ -100,6 +100,20 @@ contract USDTSourceVaultTest {
         vault.deposit(100, bytes32(uint256(8)));
     }
 
+    function testCommitteeReadbackIsCompleteAndStableAcrossDeposit() public {
+        require(vault.signerCount() == 2);
+        require(vault.threshold() == 2);
+        for (uint256 i; i < vault.signerCount(); ++i) {
+            require(vault.isSigner(vault.signers(i)));
+        }
+        uint256 count = vault.signerCount();
+        vm.expectRevert();
+        vault.signers(count);
+        deposit();
+        require(vault.signerCount() == 2);
+        require(vault.signers(0) == vm.addr(key0) && vault.signers(1) == vm.addr(key1));
+    }
+
     function testNormalNoReturnAndTronFalseSuccess() public {
         for (uint8 i; i < 3; i++) {
             vault = deploy(i == 2 ? 1 : 0, bytes32(uint256(i + 10)));

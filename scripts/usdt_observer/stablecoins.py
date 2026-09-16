@@ -49,6 +49,10 @@ def select_route(catalog, symbol, network, allow_synthetic=False):
             if entry['symbol'] == symbol and route['network'] == network:
                 selected = dict(route, source_symbol=source, symbol=entry['symbol'],
                                 synthetic=synthetic,
+                                transfer_mode=configured['transfer_mode'],
+                                committee_threshold=configured['committee']['threshold'],
+                                committee_signers=tuple(s.lower() if network == 'ethereum-mainnet' else s
+                                                        for s in configured['committee']['signers']),
                                 vault_runtime_sha256=configured['deployment']['runtime_sha256'].lower(),
                                 vault_deployment_height=configured['deployment']['block_number'])
     require(selected is not None, 'stablecoin source route is not configured')

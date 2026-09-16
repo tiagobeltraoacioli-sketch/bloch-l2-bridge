@@ -3,11 +3,12 @@ import hashlib
 
 from .common import integer, quantity, require, word
 from .ethereum import validate
+from .vault_state import collect_configuration, validate_configuration
 
 MAX_CODE = 65536
 
 
-def validate_runtime(route, evidence, runtime):
+def _validate_code(route, evidence, runtime):
     # Validate all receipt, finality and route bindings before using block fields.
     validate(route, evidence)
     require(type(runtime) is dict and set(runtime) == {'block_hash', 'block_number', 'address', 'code'},
@@ -33,6 +34,17 @@ def validate_runtime(route, evidence, runtime):
             'deployment_verified': False, 'mint_authorized': False}
 
 
+def validate_runtime(route, evidence, runtime):
+    require(type(runtime) is dict and set(runtime) == {
+        'block_hash', 'block_number', 'address', 'code', 'configuration'},
+        'vault configuration evidence required')
+    report = _validate_code(route, evidence, {k: v for k, v in runtime.items() if k != 'configuration'})
+    validate_configuration(route, runtime['configuration'])
+    report['validation'] = 'source-rpc-vault-consistency-only'
+    report['vault_configuration_matched'] = True
+    return report
+
+
 def collect_runtime(route, evidence, source):
     validate(route, evidence)
     receipt = evidence['receipt']
@@ -43,6 +55,8 @@ def collect_runtime(route, evidence, source):
                                      {'blockHash': block, 'requireCanonical': True}])
     runtime = {'block_hash': block, 'block_number': height,
                'address': route['vault_vm_hex'], 'code': code}
+    _validate_code(route, evidence, runtime)
+    runtime['configuration'] = collect_configuration(route, block, source)
     validate_runtime(route, evidence, runtime)
     canonical = source.eth('eth_getBlockByNumber', [height, False])
     require(type(canonical) is dict and canonical == evidence['canonical_block'],

@@ -13,7 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 from usdt_observer.common import Invalid
 from usdt_observer.runtime import collect_runtime, validate_runtime, MAX_CODE
 from usdt_observer.stablecoins import select_route
-from test_stablecoin_observer import catalog_fixture, evidence_for
+from test_stablecoin_observer import catalog_fixture, evidence_for, configuration_for
 
 
 class StablecoinRuntimeTest(unittest.TestCase):
@@ -22,6 +22,7 @@ class StablecoinRuntimeTest(unittest.TestCase):
         self.route = select_route(self.catalog, 'bUSDC', 'ethereum-mainnet', True)
         self.evidence = evidence_for(self.route)
         self.runtime = {'block_hash': self.evidence['receipt']['blockHash'],
+                        'configuration': configuration_for(self.route),
                         'block_number': self.evidence['receipt']['blockNumber'],
                         'address': self.route['vault_vm_hex'],
                         'code': self.catalog['assets'][1]['manifest']['routes'][0]['deployment']['runtime_code']}
@@ -63,12 +64,20 @@ class StablecoinRuntimeTest(unittest.TestCase):
 
     def test_collection_uses_canonical_hash_and_rechecks_block(self):
         source = Mock()
-        source.eth.side_effect = [self.runtime['code'], self.evidence['canonical_block']]
+        config = self.runtime['configuration']
+        reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
+        for signer, membership in zip(config['signers'], config['memberships']):
+            reads.extend([signer, membership])
+        source.eth.side_effect = [self.runtime['code'], *reads, self.evidence['canonical_block']]
         self.assertEqual(collect_runtime(self.route, self.evidence, source), self.runtime)
         self.assertEqual(source.eth.call_args_list[0].args, ('eth_getCode', [
             self.route['vault_vm_hex'], {'blockHash': self.runtime['block_hash'], 'requireCanonical': True}]))
-        self.assertEqual(source.eth.call_args_list[1].args,
+        self.assertEqual(source.eth.call_args_list[-1].args,
                          ('eth_getBlockByNumber', ['0x64', False]))
+        for call in source.eth.call_args_list[1:-1]:
+            self.assertEqual(call.args[0], 'eth_call')
+            self.assertEqual(call.args[1][1], {
+                'blockHash': self.runtime['block_hash'], 'requireCanonical': True})
 
     def test_rpc_failure_never_falls_back_to_latest_or_height(self):
         source = Mock()
@@ -79,7 +88,11 @@ class StablecoinRuntimeTest(unittest.TestCase):
 
     def test_reorg_during_runtime_collection_refused(self):
         source = Mock()
-        source.eth.side_effect = [self.runtime['code'],
+        config = self.runtime['configuration']
+        reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
+        for signer, membership in zip(config['signers'], config['memberships']):
+            reads.extend([signer, membership])
+        source.eth.side_effect = [self.runtime['code'], *reads,
                                   dict(self.evidence['canonical_block'], hash='0x' + 'ab' * 32)]
         with self.assertRaises(Invalid):
             collect_runtime(self.route, self.evidence, source)
