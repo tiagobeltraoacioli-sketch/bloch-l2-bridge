@@ -76,7 +76,10 @@ def route_id(route, native_domain, native_asset, token, vault, domain):
     return hashlib.sha256(b"".join(parts)).hexdigest()
 
 
-def validate(config, allow_synthetic=False):
+def validate(config, allow_synthetic=False, *, source_asset="USDT"):
+    require(source_asset in ("USDT", "USDC"), "unsupported stablecoin")
+    networks = NETWORKS if source_asset == "USDT" else {
+        "ethereum-mainnet": ("eip155:1", "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 0)}
     require(isinstance(config, dict), "configuration: expected object")
     require(type(config.get("version")) is int and config["version"] == 2,
             "unsupported version: version 2 with native_supply_cap is required")
@@ -87,17 +90,17 @@ def validate(config, allow_synthetic=False):
     asset = word(config["native_asset"], 32, "native_asset")
     require(native != asset, "native asset and domain must differ")
     native_supply_cap = uint(config["native_supply_cap"], "native_supply_cap")
-    require(isinstance(config["routes"], list) and len(config["routes"]) == 2,
-            "exactly two source routes are required")
+    require(isinstance(config["routes"], list) and len(config["routes"]) == len(networks),
+            "exact source route set is required")
     seen, domains, output = set(), set(), []
     total_source_capacity = 0
     for route in config["routes"]:
         fields(route, "network chain_id genesis_hash source_domain token vault decimals cap transfer_mode deployment committee", "route")
         network = route["network"]
-        require(isinstance(network, str) and network in NETWORKS and network not in seen,
+        require(isinstance(network, str) and network in networks and network not in seen,
                 "unknown or duplicate source network")
         seen.add(network)
-        identity, expected_token, mode = NETWORKS[network]
+        identity, expected_token, mode = networks[network]
         require(route["chain_id"] == identity, "source chain namespace/ID mismatch")
         genesis = word(route["genesis_hash"], 32, "genesis_hash")
         domain = word(route["source_domain"], 32, "source_domain")
@@ -106,9 +109,9 @@ def validate(config, allow_synthetic=False):
         domains.add(domain)
         address = tron_address if network == "tron-mainnet" else lambda x: word(x, 20, "Ethereum address")
         token, vault = address(route["token"]), address(route["vault"])
-        require(token.hex() == expected_token, "noncanonical source USDT token")
+        require(token.hex() == expected_token, "noncanonical source stablecoin token")
         require(vault != token, "vault must differ from token")
-        require(type(route["decimals"]) is int and route["decimals"] == 6, "USDT decimals must be 6")
+        require(type(route["decimals"]) is int and route["decimals"] == 6, "stablecoin decimals must be 6")
         total_source_capacity += uint(route["cap"], "cap")
         # Independent vaults can fill simultaneously. Each route fitting on its
         # own does not ensure their common native asset can represent both.

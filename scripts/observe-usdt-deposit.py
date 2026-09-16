@@ -21,7 +21,7 @@ def observe(route, network, evidence):
             'mint_authorized': False, 'native_execution_performed': False, 'bridge_ready': False}
 
 
-def main(argv=None):
+def main(argv=None, *, stablecoins=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--network', required=True, choices=['ethereum-mainnet', 'tron-mainnet'])
@@ -31,16 +31,24 @@ def main(argv=None):
     source.add_argument('--endpoint', help='Explicit HTTPS source endpoint; no tokens or credentials')
     parser.add_argument('--tx-hash', help='Required when collecting; also pins a supplied evidence file')
     parser.add_argument('--journal', type=Path, help='Optional SQLite file in an existing private operator directory')
+    if stablecoins:
+        parser.add_argument("--asset", required=True, choices=["bUSDT", "bUSDC"])
     args = parser.parse_args(argv)
     try:
         config = load_json(args.config)
-        route = normalized_route(config, args.network, args.allow_synthetic)
+        if stablecoins:
+            from usdt_observer.stablecoins import select_route
+            route = select_route(config, args.asset, args.network, args.allow_synthetic)
+            synthetic = route['synthetic']
+        else:
+            route = normalized_route(config, args.network, args.allow_synthetic)
+            synthetic = config['synthetic']
         if args.evidence:
             evidence = load_json(args.evidence)
         else:
             require(args.tx_hash is not None, 'online collection requires a transaction hash')
             transport = HttpSource(args.endpoint)
-            require(not config['synthetic'] or transport.loopback,
+            require(not synthetic or transport.loopback,
                     'synthetic manifests may collect only from a loopback fixture')
             with collection_deadline():
                 evidence = collect(route, args.tx_hash, transport)
@@ -50,7 +58,11 @@ def main(argv=None):
             require(word(actual, 32, prefix=args.network == 'ethereum-mainnet') == expected,
                     'evidence is for another requested transaction')
         output = observe(route, args.network, evidence)
-        output['synthetic'] = config['synthetic']
+        output['synthetic'] = synthetic
+        if stablecoins:
+            output.update(source_symbol=route['source_symbol'], symbol=route['symbol'],
+                          native_asset=route['native_asset'], native_domain=route['native_domain'],
+                          token_vm_hex=route['token_vm_hex'], route_id=route['route_id'])
         # Deterministic digest of parsed evidence, not a consensus commitment.
         digest = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(',', ':'),
                                            allow_nan=False).encode()).hexdigest()

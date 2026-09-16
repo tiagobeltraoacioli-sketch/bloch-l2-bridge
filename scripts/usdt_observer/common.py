@@ -65,14 +65,17 @@ def load_json(path):
         return parse_json(stream.read(MAX_JSON + 1))
 
 
-def normalized_route(manifest, network, allow_synthetic=False):
-    """Reuse the full two-route/cap/deployment manifest validator unchanged."""
+def normalized_route(manifest, network, allow_synthetic=False, *, source_asset="USDT"):
+    """Reuse the cap/deployment validator with an explicit source-token policy.
+
+    The default retains the legacy two-route USDT manifest requirement.
+    """
     path = Path(__file__).resolve().parents[1] / 'validate-usdt-routes.py'
     spec = importlib.util.spec_from_file_location('usdt_route_manifest', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     try:
-        checked = module.validate(manifest, allow_synthetic=allow_synthetic)
+        checked = module.validate(manifest, allow_synthetic=allow_synthetic, source_asset=source_asset)
     except (ValueError, TypeError, KeyError):
         raise Invalid('route manifest rejected') from None
     # The existing validator's result is configuration consistency, not deployment proof.
@@ -176,7 +179,7 @@ def decode_deposits(route, logs):
             source, destination = padded_address(prior['topics'][1]), padded_address(prior['topics'][2])
             if source == sender and destination == vault and int.from_bytes(prior['data'], 'big') == amount:
                 candidates.append(prior['log_index'])
-        require(len(candidates) == 1, 'deposit lacks one unambiguous preceding USDT transfer')
+        require(len(candidates) == 1, 'deposit lacks one unambiguous preceding source-token transfer')
         observations.append({'route_id': '0x' + route_id.hex(), 'deposit_id': '0x' + expected.hex(),
                              'source_domain': route['source_domain'], 'nonce': nonce,
                              'sender': '0x' + sender.hex(), 'amount': amount,
