@@ -30,6 +30,11 @@ def validate(route: dict, evidence: dict) -> list[dict]:
     Result JSON alone cannot prove which selector was used or prove consensus.
     Canonical blocks must be fetched with full_transactions=false.
     """
+    return validate_events(route, evidence, decode_deposits)
+
+
+def validate_events(route, evidence, decoder):
+    """Shared receipt consistency checks; decoder is selected by local code only."""
     _object(route, 'route')
     _object(evidence, 'evidence')
     require(set(evidence) == EVIDENCE_KEYS, 'explicit finalized evidence fields required')
@@ -86,6 +91,6 @@ def validate(route: dict, evidence: dict) -> list[dict]:
         require(total_bytes <= MAX_TOTAL_LOG_BYTES, 'receipt log bytes exceed limit')
         normalized.append({'address': word(entry.get('address'), 20), 'topics': topics,
                            'data': data, 'log_index': index})
-    observations = decode_deposits(route, normalized)
+    observations = decoder(route, normalized)
     return [dict(observation, tx_hash='0x' + tx_hash.hex(), block_hash='0x' + block_hash.hex(),
                  block_number=block_number, network=route['network']) for observation in observations]

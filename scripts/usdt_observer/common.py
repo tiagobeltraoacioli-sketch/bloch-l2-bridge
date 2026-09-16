@@ -124,17 +124,8 @@ def padded_address(value):
     return value[12:]
 
 
-def decode_deposits(route, logs):
-    """Bind each vault event to one preceding exact token transfer.
-
-    The matching interval begins after the previous deposit from this vault.
-    Ambiguous transfers, reused transfers, duplicate deposit IDs/nonces and
-    malformed events fail the entire receipt. Unrelated emitters are ignored.
-    Logs are observations, not storage proofs or token/vault code authentication.
-    """
-    route_id = route_digest(route)
-    token = word(route['token_vm_hex'], 20)
-    vault = word(route['vault_vm_hex'], 20)
+def validate_logs(logs):
+    """Bound and validate normalized logs shared by deposit/release decoders."""
     require(type(logs) is list and len(logs) <= MAX_LOGS, 'too many receipt logs')
     last_index = -1
     total_bytes = 0
@@ -152,6 +143,20 @@ def decode_deposits(route, logs):
         last_index = index
         total_bytes += len(log['data']) + 32 * len(log['topics']) + 20
     require(total_bytes <= MAX_JSON, 'receipt logs exceed total limit')
+
+
+def decode_deposits(route, logs):
+    """Bind each vault event to one preceding exact token transfer.
+
+    The matching interval begins after the previous deposit from this vault.
+    Ambiguous transfers, reused transfers, duplicate deposit IDs/nonces and
+    malformed events fail the entire receipt. Unrelated emitters are ignored.
+    Logs are observations, not storage proofs or token/vault code authentication.
+    """
+    route_id = route_digest(route)
+    token = word(route['token_vm_hex'], 20)
+    vault = word(route['vault_vm_hex'], 20)
+    validate_logs(logs)
     observations, seen_ids, seen_nonces = [], set(), set()
     interval_start = 0
     for position, log in enumerate(logs):

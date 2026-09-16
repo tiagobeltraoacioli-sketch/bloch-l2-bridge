@@ -18,6 +18,11 @@ catalog with distinct token, native asset and custody-route identities. It
 supports USDC source evidence on Ethereum while preserving the legacy USDT
 routes and refusing cross-asset observation reassignment. It remains read-only.
 
+The [stablecoin release inspector](docs/STABLECOIN-RELEASE-OBSERVER.md) matches
+Ethereum payout events and token transfers to a supplied native release record.
+It retains the vault checks and does not authenticate native finality or settle
+redemptions.
+
 Bridge *types* for the (design-only) Bloch EVM L2, implementing the wire
 formats and pure math of [`docs/specs/BLOCH-L2-EVM-DESIGN.md`](../../docs/specs/BLOCH-L2-EVM-DESIGN.md)
 §5 (L1<->L2 Bridge). This crate contains no networking, no keys and no chain
