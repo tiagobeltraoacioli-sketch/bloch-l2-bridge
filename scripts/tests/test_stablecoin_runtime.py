@@ -23,6 +23,8 @@ class StablecoinRuntimeTest(unittest.TestCase):
         self.evidence = evidence_for(self.route)
         self.runtime = {'block_hash': self.evidence['receipt']['blockHash'],
                         'configuration': configuration_for(self.route),
+                        'reserves': {'total_locked': '0x' + (1_000_000).to_bytes(32, 'big').hex(),
+                                     'token_balance': '0x' + (1_000_000).to_bytes(32, 'big').hex()},
                         'block_number': self.evidence['receipt']['blockNumber'],
                         'address': self.route['vault_vm_hex'],
                         'code': self.catalog['assets'][1]['manifest']['routes'][0]['deployment']['runtime_code']}
@@ -68,6 +70,7 @@ class StablecoinRuntimeTest(unittest.TestCase):
         reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
+        reads.extend(self.runtime['reserves'].values())
         source.eth.side_effect = [self.runtime['code'], *reads, self.evidence['canonical_block']]
         self.assertEqual(collect_runtime(self.route, self.evidence, source), self.runtime)
         self.assertEqual(source.eth.call_args_list[0].args, ('eth_getCode', [
@@ -92,6 +95,7 @@ class StablecoinRuntimeTest(unittest.TestCase):
         reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
+        reads.extend(self.runtime['reserves'].values())
         source.eth.side_effect = [self.runtime['code'], *reads,
                                   dict(self.evidence['canonical_block'], hash='0x' + 'ab' * 32)]
         with self.assertRaises(Invalid):
@@ -109,7 +113,11 @@ class StablecoinRuntimeTest(unittest.TestCase):
             root = Path(tmp)
             config, evidence, journal = root / 'config.json', root / 'evidence.json', root / 'journal.sqlite'
             config.write_text(json.dumps(self.catalog))
-            for runtime in [None, dict(self.runtime, code='0x60016000fd')]:
+            deficit = dict(self.runtime, reserves={
+                'total_locked': '0x' + (1_000_000).to_bytes(32, 'big').hex(),
+                'token_balance': '0x' + (999_999).to_bytes(32, 'big').hex()})
+            missing_reserves = {k: v for k, v in self.runtime.items() if k != 'reserves'}
+            for runtime in [None, dict(self.runtime, code='0x60016000fd'), deficit, missing_reserves]:
                 captured = copy.deepcopy(self.evidence)
                 if runtime is not None:
                     captured['vault_runtime'] = runtime

@@ -182,6 +182,8 @@ class StablecoinObserverTest(unittest.TestCase):
                     'block_number': captured['receipt']['blockNumber'],
                     'address': self.route(symbol)['vault_vm_hex'],
                     'configuration': configuration_for(self.route(symbol)),
+                    'reserves': {'total_locked': '0x' + (1_000_000).to_bytes(32, 'big').hex(),
+                                 'token_balance': '0x' + (1_000_000).to_bytes(32, 'big').hex()},
                     'code': manifest['routes'][0]['deployment']['runtime_code']}
                 evidence.write_text(json.dumps(captured))
                 result = subprocess.run([

@@ -50,7 +50,7 @@ synthetic online collection restricted to loopback fixtures.
 Ethereum evidence for this stablecoin CLI now requires a `vault_runtime` object
 alongside the existing receipt evidence. Its exact fields are `block_hash`,
 `block_number` (RPC hex quantity), `address`, and `code` (0x-prefixed runtime
-bytes), plus `configuration` containing the contract readback described below.
+bytes), plus `configuration` and `reserves` containing the readbacks described below.
 The address and block must match the selected vault and the deposit
 receipt. The runtime SHA-256 must match the validated catalog deployment pin.
 Deposits before the configured deployment height are refused.
@@ -65,7 +65,7 @@ is refused before any observation journal write. The code limit is 65,536 bytes.
 The output's `vault_runtime` report describes only bytecode consistency with an
 operator-supplied pin at that block. It does not authenticate the manifest,
 constructor transaction, token proxy
-implementation, reserves or consensus. Captured evidence can be fabricated;
+implementation, native liabilities or consensus. Captured evidence can be fabricated;
 online evidence still trusts the selected RPC. A proxy runtime match does not
 authenticate its implementation. `deployment_verified` and `mint_authorized`
 remain false. The journal evidence digest now includes the runtime capture.
@@ -105,6 +105,36 @@ changes and therefore requires a new reviewed deployment/runtime pin. Existing
 contracts without this getter are refused by this stricter observer; there is
 no fallback to partial committee verification. No contract is deployed by this
 code change. Legacy USDT and TRON observation formats remain unchanged.
+
+### Source reserve consistency
+
+The Ethereum stablecoin observer requires `reserves` inside `vault_runtime`,
+with exactly `total_locked` and `token_balance`, both raw 0x-prefixed 32-byte ABI
+words. It reads `totalLocked()` from the configured vault and `balanceOf(vault)`
+from the configured token, using the same canonical deposit block hash as the
+other calls. Both reads have a 100,000 gas limit; the canonical block is checked
+again after all reads. The total maximum is now 44 getter calls, within the
+existing collection deadline, without any fallback to `latest` or block height.
+
+The reported liability must fit uint64 and the route cap. The token balance is
+decoded as uint256 and must cover the liability. A one-unit deficit is refused
+before any journal write. Surplus from direct donations is reported separately
+as `uncredited_surplus`; it never becomes a deposit or permission to issue tokens.
+All reported amounts are decimal strings, including balances above 2**53.
+
+This is an end-of-block comparison, not a per-transaction storage proof or a
+current solvency check. A later release in the same block can reduce the locked
+amount; the observer does not incorrectly require that end-of-block liability
+equal or exceed the individual deposit. Zero liability and zero balance can pass
+this local comparison. Neither result authorizes credit for historical deposits.
+Reconciliation against native outstanding supply, pending imports and pending
+redemptions still has to be implemented and authenticated independently.
+
+The nested report sets `source_reserve_policy_satisfied: true` only after these
+comparisons. `native_liabilities_reconciled`, `backing_verified` and
+`mint_authorized` remain false. Endpoint trust, token freezes and later reserve
+loss are not solved by a matching historical balance. Missing reserve evidence
+is refused by the stricter Ethereum stablecoin CLI; the legacy paths are unchanged.
 
 Output includes the selected bridged symbol, source symbol, native domain,
 native asset ID, token address and route ID. Amounts and nonces remain decimal

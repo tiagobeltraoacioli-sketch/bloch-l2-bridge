@@ -4,6 +4,7 @@ import hashlib
 from .common import integer, quantity, require, word
 from .ethereum import validate
 from .vault_state import collect_configuration, validate_configuration
+from .reserves import collect_reserves, validate_reserves
 
 MAX_CODE = 65536
 
@@ -36,12 +37,14 @@ def _validate_code(route, evidence, runtime):
 
 def validate_runtime(route, evidence, runtime):
     require(type(runtime) is dict and set(runtime) == {
-        'block_hash', 'block_number', 'address', 'code', 'configuration'},
+        'block_hash', 'block_number', 'address', 'code', 'configuration', 'reserves'},
         'vault configuration evidence required')
-    report = _validate_code(route, evidence, {k: v for k, v in runtime.items() if k != 'configuration'})
+    report = _validate_code(route, evidence, {
+        k: v for k, v in runtime.items() if k not in ('configuration', 'reserves')})
     validate_configuration(route, runtime['configuration'])
     report['validation'] = 'source-rpc-vault-consistency-only'
     report['vault_configuration_matched'] = True
+    report['reserves'] = validate_reserves(route, runtime['reserves'])
     return report
 
 
@@ -57,6 +60,7 @@ def collect_runtime(route, evidence, source):
                'address': route['vault_vm_hex'], 'code': code}
     _validate_code(route, evidence, runtime)
     runtime['configuration'] = collect_configuration(route, block, source)
+    runtime['reserves'] = collect_reserves(route, block, source)
     validate_runtime(route, evidence, runtime)
     canonical = source.eth('eth_getBlockByNumber', [height, False])
     require(type(canonical) is dict and canonical == evidence['canonical_block'],
