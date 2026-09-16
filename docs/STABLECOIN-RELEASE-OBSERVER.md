@@ -110,3 +110,49 @@ full synchronous transactions and parent-directory fsync on creation. It accepts
 at most 100,000 releases in 256 MiB, requires 64 MiB free before writes, and refuses
 revision exhaustion. Interrupted initialization may leave an uninitialized file
 that requires operator inspection; it is never silently recreated.
+
+## Optional native review attestation
+
+Build the companion native executable from `bloch-sis-pow`:
+
+```sh
+cargo build --release -p bloch-ustav --features native-dex-host --bin verify-redemption-review
+```
+
+Supply all three observer options together:
+`--native-verifier /absolute/path/to/verify-redemption-review`,
+`--native-trust trusted-state.json`, and `--native-certificate certificate.json`.
+The executable is operator-controlled code: install a reviewed binary, never a
+path supplied by a certificate sender. The observer executes it without a shell,
+with a ten-second deadline and a bounded binary request. Failure refuses the
+inspection before source RPC collection or journal mutation.
+
+The trust JSON has exactly `checkpoint_height`, `checkpoint_root`,
+`current_height`, and `authority`. Heights are canonical unsigned decimal u64
+strings; root is 32-byte `0x` hex and authority is the complete canonical hybrid
+PQ public-key envelope in lowercase `0x` hex. Obtain the checkpoint, current
+height and authority from independently authenticated operator state. A static
+file is not a freshness oracle; refresh it from trusted native state before use.
+
+The certificate JSON has exactly `valid_until` (decimal u64 string), `signature`
+and `preimage` (lowercase `0x` hex). The latter is the exact exported native review
+preimage, not its hash. Keys must never be embedded in the certificate as trust
+inputs. Neither tool generates or installs an operational authority.
+
+Successful output adds `native_review.attestation_verified: true` and the
+verified commitment, checkpoint and validity window. Existing
+`native_release_authenticated`, `finality_verified`, `redemption_settled` and
+`bridge_ready` remain false: authority attestation is not proof of consensus
+finality or a durable payout decision. Journals and tracking retain their existing
+historical semantics and do not persist this optional attestation as settlement.
+The interface currently supports the six-decimal bUSDT/bUSDC route format only.
+
+The stdin protocol starts with ASCII `BLOCH-REVIEW-VERIFY-v1` plus NUL, then
+checkpoint height (u64), root (32 bytes), current height (u64), expiry (u64),
+source domain (32), native domain (32), native asset (32), token (20), vault (20),
+cap (u64), release nonce (u64), recipient (20), amount (u64), and burn (32).
+Three u32-length-prefixed blobs follow: authority, signature, review preimage.
+All integers are big-endian, total input is at most 65,536 bytes, and trailing
+bytes are forbidden. Success returns exactly the lowercase SHA3-256 commitment
+plus newline; failure returns no stdout and a nonzero status. The route's runtime
+code pin is verified separately by the source observer, not this wire protocol.

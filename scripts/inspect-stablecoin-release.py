@@ -26,10 +26,20 @@ def main(argv=None):
     persistence = parser.add_mutually_exclusive_group()
     persistence.add_argument('--journal', type=Path, help='Immutable historical release observations')
     persistence.add_argument('--tracking', type=Path, help='Online revision-guarded refresh state')
+    parser.add_argument('--native-verifier', type=Path)
+    parser.add_argument('--native-trust', type=Path)
+    parser.add_argument('--native-certificate', type=Path)
     args = parser.parse_args(argv)
     try:
         route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
         expected = load_json(args.release)
+        review = None
+        options = (args.native_verifier, args.native_trust, args.native_certificate)
+        require(all(options) or not any(options), 'all native verification options required')
+        if all(options):
+            from usdt_observer.native_review import verify_review
+            review = verify_review(args.native_verifier, route, expected,
+                                   load_json(args.native_trust), load_json(args.native_certificate))
         tracking = None
         if args.evidence:
             require(args.tracking is None, 'tracking requires online collection')
@@ -60,6 +70,8 @@ def main(argv=None):
                       vault_runtime=runtime)
         output['evidence_sha256'] = hashlib.sha256(json.dumps(
             captured, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if review is not None:
+            output['native_review'] = review
         if tracking is not None:
             output['tracking'] = tracking
         if args.journal:
