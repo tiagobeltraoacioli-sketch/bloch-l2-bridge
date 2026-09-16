@@ -169,3 +169,22 @@ file; additional policy fields in a certificate are rejected. Output records the
 applied limits. Existing four-field trust files must be updated explicitly; there
 is no implicit unlimited default. These checks still depend on an independently
 refreshed `current_height` and do not establish live consensus freshness themselves.
+
+## Cross-repository cryptographic integration check
+
+From the native `bloch-sis-pow` checkout, run:
+
+```sh
+BLOCH_NATIVE_REVIEW_PROBE=/absolute/path/to/bloch-l2-bridge/scripts/tests/native_review_process_probe.py \
+  cargo test --offline -p bloch-ustav --features native-dex-host --test joint_gateway_crypto
+```
+
+The native integration fixtures produce real hybrid PQ signatures and committed
+journal reviews, pass only public data to the Python probe, and require the
+Python adapter to invoke the built Rust verifier successfully. Nine cases per
+fixture cover the valid commitment, altered signature, preimage, authority,
+checkpoint, burn, amount, expired validity and excessive certificate lifetime.
+A nonzero probe result fails the native test. The probe is opt-in because it
+requires both repositories and Python 3; ordinary Python unit tests mock the
+process boundary and are not a substitute for this check. No RPC, operational
+keys or funds are used.
