@@ -311,3 +311,21 @@ Upgrade the observer and verifier together: mismatched versions fail closed.
 The signed review and certificate formats do not change, so existing valid
 certificates remain usable under the supplied policy. This does not authenticate
 the supplied current height or wire the local journal into live consensus.
+
+Before switching a deployment to a newly installed verifier, run:
+
+```sh
+python3 scripts/check-native-verifier.py --native-verifier /absolute/path/to/verify-redemption-review
+```
+
+The diagnostic invokes `--protocol` through the bounded process transport with
+a three-second deadline, and accepts only the exact v2 response with successful
+exit status. Older binaries, additional output, missing paths and failures are
+refused. This is an explicit deployment preflight, not an automatic fallback or
+negotiation: ordinary verification continues to require v2. The verifier rejects
+unknown command-line arguments instead of silently ignoring them.
+
+`protocol_compatible: true` is only a version check on operator-installed code.
+It does not authenticate the executable, exercise cryptography, provision keys,
+validate native state or enable the bridge. Use the cross-repository integration
+tests for real signature verification and independently review the deployed build.
