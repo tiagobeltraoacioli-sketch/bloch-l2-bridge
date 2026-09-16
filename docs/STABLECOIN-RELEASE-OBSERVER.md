@@ -255,9 +255,26 @@ snapshot. Missing, oversized or inconsistent records are refused. It creates no
 missing journal and performs no RPC calls or cryptographic verification.
 
 The exported `audit` contains historical public verification inputs and results.
-Top-level `attestation_reverified` is always false, `requires_fresh_evidence` is
+Without explicit revalidation, top-level `attestation_reverified` is false, `requires_fresh_evidence` is
 true, and all finality, authentication and settlement permissions remain false.
 Nested historical `attestation_verified` records a past result, not current
 approval. A local checksum cannot protect against an operator rewriting both the
 audit and its identifier; use independently authenticated inputs for a new
 verification. The original source evidence must be retained separately.
+
+To reverify a saved certificate, add all of `--native-verifier`, `--native-trust`,
+`--config`, `--asset`, and `--release` to `read-stablecoin-review.py`. Their meanings
+match the release inspector; synthetic catalogs additionally require
+`--allow-synthetic`. Partial input sets are refused. The route and expected
+release are supplied independently, and the new trust file must independently
+authenticate the certificate's checkpoint while providing the current height,
+current authority and validity limits. A newer checkpoint cannot substitute for
+the checkpoint actually signed. The saved trust snapshot is never a fallback.
+
+Success adds `current_native_review` and sets top-level
+`attestation_reverified: true`. All source observations remain historical:
+`requires_fresh_evidence` stays true, while native finality, settlement and bridge
+readiness remain false. The command does not update the journal, collect source
+RPC evidence, rotate authorities or extend expired certificates. A rejected
+certificate requires a newly issued valid review or operator investigation;
+changing the saved record is not a recovery mechanism.

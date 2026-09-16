@@ -7,8 +7,10 @@ import copy
 import json
 from pathlib import Path
 import sys
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from usdt_observer.native_review import verify_review
+from usdt_observer.review_revalidation import revalidate_review
 
 
 def main():
@@ -20,6 +22,25 @@ def main():
     assert result['attestation_verified'] is True
     assert result['commitment'] == fixture['commitment']
     assert result['finality_verified'] is False and result['redemption_settled'] is False
+    # Exercise revalidation with real cryptography; only disk retrieval is stubbed.
+    historical = {'audit': {'certificate': fixture['certificate'],
+                           'native_review': result,
+                           'observation': {'release_id': result['release_id']},
+                           'trust': {'untrusted_historical_key': 'never use'}},
+                  'requires_fresh_evidence': True, 'redemption_settled': False}
+    with patch('usdt_observer.review_revalidation.read_review', return_value=historical):
+        checked = revalidate_review('unused', 'unused', sys.argv[1], fixture['route'],
+                                    fixture['expected'], fixture['trust'])
+        assert checked['attestation_reverified'] is True
+        assert checked['requires_fresh_evidence'] is True
+        assert checked['redemption_settled'] is False
+        expired = dict(fixture['trust'], current_height=str(int(fixture['certificate']['valid_until']) + 1))
+        try:
+            revalidate_review('unused', 'unused', sys.argv[1], fixture['route'], fixture['expected'], expired)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('historical certificate bypassed current validity')
     cases = 1
     for group, field in [('certificate', 'signature'), ('certificate', 'preimage'),
                          ('trust', 'authority'), ('trust', 'checkpoint_root'),
