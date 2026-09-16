@@ -6,6 +6,7 @@ import subprocess
 
 from .common import require, word
 from .releases import normalize_release
+from .verifier_process import run_verifier
 
 
 def verify_review(executable, route, expected, trust, certificate):
@@ -52,8 +53,7 @@ def verify_review(executable, route, expected, trust, certificate):
     executable = Path(executable)
     require(executable.is_absolute() and executable.is_file(), 'absolute verifier executable required')
     try:
-        result = subprocess.run([str(executable)], input=request, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, timeout=10, check=False)
+        result = run_verifier([str(executable)], input=request, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError('native verifier unavailable') from exc
     commitment = hashlib.sha3_256(bytes.fromhex(certificate['preimage'][2:])).hexdigest()

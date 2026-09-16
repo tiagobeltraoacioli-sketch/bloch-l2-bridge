@@ -188,3 +188,11 @@ A nonzero probe result fails the native test. The probe is opt-in because it
 requires both repositories and Python 3; ordinary Python unit tests mock the
 process boundary and are not a substitute for this check. No RPC, operational
 keys or funds are used.
+
+The verifier process transport uses nonblocking pipes and one monotonic deadline
+for writing the request, reading its response and waiting for exit. It buffers
+at most 66 response bytes and rejects output above the exact 65-byte success
+format. Excess output, blocked input, timeout and interruptions terminate and
+reap the verifier process; stderr is discarded. The executable remains trusted
+operator-installed code, not an execution sandbox. Real child-process tests
+cover output flooding, backpressure, early output and stalled processes.

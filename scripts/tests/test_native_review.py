@@ -23,7 +23,7 @@ class NativeReviewTest(unittest.TestCase):
     def verify(self):
         return verify_review(Path(sys.executable), self.route, self.expected, self.trust, self.cert)
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_process_protocol_and_no_settlement(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, (self.digest+'\n').encode())
         result = self.verify()
@@ -36,7 +36,7 @@ class NativeReviewTest(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], [sys.executable])
         self.assertEqual(run.call_args.kwargs['timeout'], 10)
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_failure_wrong_output_timeout_and_spawn_failure(self, run):
         for code, output in [(1, (self.digest+'\n').encode()), (0, b'00\n'), (0, b''),
                              (0, (self.digest+'\nextra').encode())]:
@@ -46,7 +46,7 @@ class NativeReviewTest(unittest.TestCase):
             run.side_effect = error
             with self.assertRaises(ValueError): self.verify()
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_malformed_or_embedded_trust_never_spawns(self, run):
         for field, value in [('valid_until', '01'), ('valid_until', True),
                              ('signature', '0x12 4'), ('preimage', '0x'+'00'*8193),
@@ -61,7 +61,7 @@ class NativeReviewTest(unittest.TestCase):
         run.assert_not_called()
 
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_policy_boundaries_are_inclusive(self, run):
         run.return_value = subprocess.CompletedProcess([], 0, (self.digest+'\n').encode())
         self.assertTrue(self.verify()['attestation_verified'])
@@ -71,7 +71,7 @@ class NativeReviewTest(unittest.TestCase):
         self.cert['valid_until'] = '4'
         self.assertTrue(self.verify()['attestation_verified'])
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_stale_future_expired_and_excessive_lifetime_never_spawn(self, run):
         for field, value in [('current_height', '6'), ('current_height', '3'),
                              ('current_height', '15'), ('max_certificate_lifetime', '9'),
@@ -83,7 +83,7 @@ class NativeReviewTest(unittest.TestCase):
                 self.trust = original
         run.assert_not_called()
 
-    @patch('usdt_observer.native_review.subprocess.run')
+    @patch('usdt_observer.native_review.run_verifier')
     def test_policy_must_be_present_canonical_and_operator_supplied(self, run):
         for field in ['max_checkpoint_age', 'max_certificate_lifetime']:
             original = dict(self.trust)
