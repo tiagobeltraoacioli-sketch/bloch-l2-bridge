@@ -2,12 +2,13 @@
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from usdt_observer.release_journal import record
+from usdt_observer.release_journal import record, read_review
 from usdt_observer.releases import match_release
 from test_release_journal import fixture
 
@@ -98,3 +99,51 @@ class ReviewJournalTest(unittest.TestCase):
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM release_observations').fetchone()[0], 1)
         self.assertEqual(len(self.rows()), 1)
+
+
+    def test_read_is_historical_and_preserves_database_bytes(self):
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            result = self.record()
+        before = self.path.read_bytes()
+        output = read_review(self.path, result['native_review_audit_id'])
+        self.assertEqual(output['audit']['certificate'], self.inputs['certificate'])
+        self.assertFalse(output['attestation_reverified'])
+        self.assertFalse(output['redemption_settled'])
+        self.assertTrue(output['requires_fresh_evidence'])
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_read_refuses_missing_corrupt_and_oversize_audits(self):
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            result = self.record()
+        with self.assertRaises(ValueError): read_review(self.path, '00'*32)
+        for value in ['{}', 'x'*131073]:
+            with sqlite3.connect(self.path) as db:
+                db.execute('UPDATE native_review_observations SET audit=?', (value,))
+            with self.assertRaises(ValueError): read_review(self.path, result['native_review_audit_id'])
+
+    def test_read_refuses_changed_source_facts(self):
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            result = self.record()
+        with sqlite3.connect(self.path) as db:
+            facts = json.loads(db.execute('SELECT facts FROM release_observations').fetchone()[0])
+            facts['amount'] = '123'
+            db.execute('UPDATE release_observations SET facts=?', (json.dumps(facts),))
+        with self.assertRaises(ValueError): read_review(self.path, result['native_review_audit_id'])
+
+    def test_read_missing_file_does_not_create_it(self):
+        with self.assertRaises(OSError): read_review(self.path, '00'*32)
+        self.assertFalse(self.path.exists())
+
+
+    def test_reader_cli_reports_history_and_refuses_unknown_id(self):
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            result = self.record()
+        command = [sys.executable, str(Path(__file__).resolve().parents[1] / 'read-stablecoin-review.py'),
+                   '--journal', str(self.path), '--audit-id']
+        output = subprocess.run(command + [result['native_review_audit_id']], capture_output=True, timeout=5)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        self.assertFalse(json.loads(output.stdout)['attestation_reverified'])
+        refused = subprocess.run(command + ['00'*32], capture_output=True, timeout=5)
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(refused.stdout, b'')
+        self.assertFalse(json.loads(refused.stderr)['redemption_settled'])

@@ -148,3 +148,64 @@ def record(path, route, captured, expected, *, native_verification=None):
             db.close()
     # Failed first initialization deliberately leaves a file that must not be
     # silently recreated or mistaken for an initialized journal on a retry.
+
+
+def read_review(path, audit_id):
+    """Read one bounded historical audit; do not trust its saved authority today."""
+    from .common import parse_json
+    require(type(audit_id) is str and len(audit_id) == 64
+            and all(c in '0123456789abcdef' for c in audit_id), 'invalid native audit ID')
+    path = Path(path).absolute()
+    parent, info = path.parent.lstat(), path.lstat()
+    require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.getuid()
+            and not parent.st_mode & 0o077, 'release journal requires a private directory')
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+            and not info.st_mode & 0o077 and info.st_size <= MAX_DB_BYTES,
+            'invalid release journal file')
+    db = None
+    try:
+        db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
+        db.execute('PRAGMA trusted_schema=OFF')
+        db.execute('PRAGMA query_only=ON')
+        require(db.execute('PRAGMA application_id').fetchone()[0] == APPLICATION_ID,
+                'not a release journal')
+        require(db.execute('PRAGMA user_version').fetchone()[0] == 1,
+                'unsupported release journal version')
+        # A single SELECT provides a consistent snapshot. Bound text before it
+        # crosses into Python, including corrupted rows in a local database.
+        row = db.execute('''SELECT a.release_id, a.audit, r.facts
+            FROM native_review_observations a JOIN release_observations r
+            ON a.release_id=r.release_id WHERE a.audit_id=?
+            AND typeof(a.release_id)='text' AND length(CAST(a.release_id AS BLOB))=66
+            AND typeof(a.audit)='text' AND length(CAST(a.audit AS BLOB))<=131072
+            AND typeof(r.facts)='text' AND length(CAST(r.facts AS BLOB))<=16384''',
+            (audit_id,)).fetchone()
+        require(row is not None, 'native review audit missing or invalid')
+        release_id, encoded, facts_raw = row
+        require(hashlib.sha256(b'BLOCH-JOURNALED-REVIEW-v1\0' + encoded.encode()).hexdigest() == audit_id,
+                'native review audit checksum mismatch')
+        audit, facts = parse_json(encoded.encode()), parse_json(facts_raw.encode())
+        require(type(audit) is dict and set(audit) == {'version', 'native_review', 'trust',
+                'certificate', 'observation', 'evidence_sha256'} and type(audit['version']) is int
+                and audit['version'] == 1, 'invalid native review audit format')
+        require(encoded == json.dumps(audit, sort_keys=True, separators=(',', ':'), allow_nan=False),
+                'noncanonical native review audit')
+        for key in ['native_review', 'trust', 'certificate', 'observation']:
+            require(type(audit[key]) is dict, 'invalid native audit object')
+        word(release_id, 32)
+        word(audit['evidence_sha256'], 32, prefix=False)
+        require(type(facts) is dict and facts.get('release_id') == release_id
+                and audit['observation'].get('release_id') == release_id
+                and audit['native_review'].get('release_id') == release_id,
+                'native audit release mismatch')
+        require(all(key in facts and facts[key] == value for key, value in audit['observation'].items()),
+                'native audit observation mismatch')
+        return {'audit_id': audit_id, 'audit': audit, 'historical_observation_only': True,
+                'requires_fresh_evidence': True, 'attestation_reverified': False,
+                'native_release_authenticated': False, 'finality_verified': False,
+                'redemption_settled': False, 'mint_authorized': False, 'bridge_ready': False}
+    except sqlite3.Error:
+        raise Invalid('release journal refused audit read') from None
+    finally:
+        if db is not None:
+            db.close()

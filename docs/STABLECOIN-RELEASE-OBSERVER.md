@@ -240,3 +240,24 @@ historical-only and no-settlement flags. Replaying a saved audit still requires
 independently authenticated, current trust; its stored trust snapshot is evidence
 of prior inputs, not a source of present authority. Source evidence itself must
 still be retained separately for full source-chain re-verification.
+
+Retrieve a saved audit using:
+
+```sh
+python3 scripts/read-stablecoin-review.py --journal /private/path/releases.sqlite --audit-id HASH
+```
+
+Use the `native_review_audit_id` returned by a journaled inspection. The reader
+opens an existing private journal in SQLite read-only mode, checks application
+and schema identity, bounds retrieved fields, verifies the canonical audit hash,
+and checks that its observation matches the source record in the same database
+snapshot. Missing, oversized or inconsistent records are refused. It creates no
+missing journal and performs no RPC calls or cryptographic verification.
+
+The exported `audit` contains historical public verification inputs and results.
+Top-level `attestation_reverified` is always false, `requires_fresh_evidence` is
+true, and all finality, authentication and settlement permissions remain false.
+Nested historical `attestation_verified` records a past result, not current
+approval. A local checksum cannot protect against an operator rewriting both the
+audit and its identifier; use independently authenticated inputs for a new
+verification. The original source evidence must be retained separately.
