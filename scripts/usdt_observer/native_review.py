@@ -12,7 +12,8 @@ def verify_review(executable, route, expected, trust, certificate):
     """Trust must come from authenticated operator state, never the certificate."""
     expected = normalize_release(route, expected)
     require(type(trust) is dict and set(trust) == {
-        'checkpoint_height', 'checkpoint_root', 'current_height', 'authority'}, 'invalid review trust')
+        'checkpoint_height', 'checkpoint_root', 'current_height', 'authority',
+        'max_checkpoint_age', 'max_certificate_lifetime'}, 'invalid review trust')
     require(type(certificate) is dict and set(certificate) == {
         'valid_until', 'signature', 'preimage'}, 'invalid review certificate')
     def number(value):
@@ -26,6 +27,17 @@ def verify_review(executable, route, expected, trust, certificate):
                 'invalid review bytes')
         raw = bytes.fromhex(value[2:])
         return struct.pack('>I', len(raw)) + raw
+    # Policy is authenticated operator input, never supplied by the certificate.
+    for value in (trust['checkpoint_height'], trust['current_height'],
+                  trust['max_checkpoint_age'], trust['max_certificate_lifetime'],
+                  certificate['valid_until']):
+        number(value)
+    checkpoint, current, expiry = (int(trust['checkpoint_height']), int(trust['current_height']),
+                                   int(certificate['valid_until']))
+    require(checkpoint <= current <= expiry, 'review outside validity window')
+    require(current - checkpoint <= int(trust['max_checkpoint_age']), 'review checkpoint too old')
+    require(expiry - checkpoint <= int(trust['max_certificate_lifetime']),
+            'review certificate lifetime exceeds policy')
     request = b'BLOCH-REVIEW-VERIFY-v1\0'
     request += number(trust['checkpoint_height']) + word(trust['checkpoint_root'], 32)
     request += number(trust['current_height']) + number(certificate['valid_until'])
@@ -50,4 +62,6 @@ def verify_review(executable, route, expected, trust, certificate):
     return {'attestation_verified': True, 'commitment': '0x' + commitment,
             'checkpoint_height': trust['checkpoint_height'], 'checkpoint_root': trust['checkpoint_root'],
             'current_height': trust['current_height'], 'valid_until': certificate['valid_until'],
+            'max_checkpoint_age': trust['max_checkpoint_age'],
+            'max_certificate_lifetime': trust['max_certificate_lifetime'],
             'finality_verified': False, 'redemption_settled': False}

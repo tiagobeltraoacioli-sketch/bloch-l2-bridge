@@ -15,7 +15,8 @@ class NativeReviewTest(unittest.TestCase):
     def setUp(self):
         self.route, _, self.expected = fixture()
         self.trust = dict(checkpoint_height='4', checkpoint_root='0x'+'11'*32,
-                          current_height='5', authority='0x1234')
+                          current_height='5', authority='0x1234',
+                          max_checkpoint_age='1', max_certificate_lifetime='10')
         self.cert = dict(valid_until='14', signature='0x5678', preimage='0xaabb')
         self.digest = hashlib.sha3_256(bytes.fromhex('aabb')).hexdigest()
 
@@ -57,4 +58,43 @@ class NativeReviewTest(unittest.TestCase):
                 self.cert = original
         self.expected['amount'] = '0'
         with self.assertRaises(ValueError): self.verify()
+        run.assert_not_called()
+
+
+    @patch('usdt_observer.native_review.subprocess.run')
+    def test_policy_boundaries_are_inclusive(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, (self.digest+'\n').encode())
+        self.assertTrue(self.verify()['attestation_verified'])
+        self.trust.update(current_height='14', max_checkpoint_age='10')
+        self.assertTrue(self.verify()['attestation_verified'])
+        self.trust.update(current_height='4', max_checkpoint_age='0', max_certificate_lifetime='0')
+        self.cert['valid_until'] = '4'
+        self.assertTrue(self.verify()['attestation_verified'])
+
+    @patch('usdt_observer.native_review.subprocess.run')
+    def test_stale_future_expired_and_excessive_lifetime_never_spawn(self, run):
+        for field, value in [('current_height', '6'), ('current_height', '3'),
+                             ('current_height', '15'), ('max_certificate_lifetime', '9'),
+                             ('max_checkpoint_age', '0')]:
+            with self.subTest(field=field, value=value):
+                original = dict(self.trust)
+                self.trust[field] = value
+                with self.assertRaises(ValueError): self.verify()
+                self.trust = original
+        run.assert_not_called()
+
+    @patch('usdt_observer.native_review.subprocess.run')
+    def test_policy_must_be_present_canonical_and_operator_supplied(self, run):
+        for field in ['max_checkpoint_age', 'max_certificate_lifetime']:
+            original = dict(self.trust)
+            del self.trust[field]
+            with self.assertRaises(ValueError): self.verify()
+            self.trust = original.copy()
+            for value in [True, 1, '-1', '01', '18446744073709551616']:
+                self.trust[field] = value
+                with self.assertRaises(ValueError): self.verify()
+            self.trust = original.copy()
+            self.cert[field] = '18446744073709551615'
+            with self.assertRaises(ValueError): self.verify()
+            del self.cert[field]
         run.assert_not_called()

@@ -128,7 +128,8 @@ with a ten-second deadline and a bounded binary request. Failure refuses the
 inspection before source RPC collection or journal mutation.
 
 The trust JSON has exactly `checkpoint_height`, `checkpoint_root`,
-`current_height`, and `authority`. Heights are canonical unsigned decimal u64
+`current_height`, `authority`, `max_checkpoint_age`, and
+`max_certificate_lifetime`. Heights and policy limits are canonical unsigned decimal u64
 strings; root is 32-byte `0x` hex and authority is the complete canonical hybrid
 PQ public-key envelope in lowercase `0x` hex. Obtain the checkpoint, current
 height and authority from independently authenticated operator state. A static
@@ -156,3 +157,15 @@ All integers are big-endian, total input is at most 65,536 bytes, and trailing
 bytes are forbidden. Success returns exactly the lowercase SHA3-256 commitment
 plus newline; failure returns no stdout and a nonzero status. The route's runtime
 code pin is verified separately by the source observer, not this wire protocol.
+
+
+Native review policy is mandatory when using native verification. Both limits
+are measured in native blocks: `current_height - checkpoint_height` must not
+exceed `max_checkpoint_age`, and `valid_until - checkpoint_height` must not exceed
+`max_certificate_lifetime`. Equality is accepted; zero permits only the same
+height. Future checkpoints, expired certificates and malformed or missing policy
+are rejected before launching the verifier. Policy belongs to the operator trust
+file; additional policy fields in a certificate are rejected. Output records the
+applied limits. Existing four-field trust files must be updated explicitly; there
+is no implicit unlimited default. These checks still depend on an independently
+refreshed `current_height` and do not establish live consensus freshness themselves.
