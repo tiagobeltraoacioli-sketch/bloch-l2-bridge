@@ -35,7 +35,7 @@ class NativeReviewTest(unittest.TestCase):
         self.assertFalse(result['redemption_settled'])
         self.assertFalse(result['finality_verified'])
         wire = run.call_args.kwargs['input']
-        self.assertTrue(wire.startswith(b'BLOCH-REVIEW-VERIFY-v1\0'+struct.pack('>Q', 4)+bytes.fromhex('11'*32)))
+        self.assertTrue(wire.startswith(b'BLOCH-REVIEW-VERIFY-v2\0'+struct.pack('>Q', 4)+bytes.fromhex('11'*32)))
         self.assertTrue(wire.endswith(bytes.fromhex('00000002123400000002567800000002aabb')))
         self.assertEqual(run.call_args.args[0], [sys.executable])
         self.assertEqual(run.call_args.kwargs['timeout'], 10)

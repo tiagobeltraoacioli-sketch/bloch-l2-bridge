@@ -148,8 +148,9 @@ finality or a durable payout decision. Journals and tracking retain their existi
 historical semantics and do not persist this optional attestation as settlement.
 The interface currently supports the six-decimal bUSDT/bUSDC route format only.
 
-The stdin protocol starts with ASCII `BLOCH-REVIEW-VERIFY-v1` plus NUL, then
+The stdin protocol starts with ASCII `BLOCH-REVIEW-VERIFY-v2` plus NUL, then
 checkpoint height (u64), root (32 bytes), current height (u64), expiry (u64),
+maximum checkpoint age (u64), maximum certificate lifetime (u64),
 source domain (32), native domain (32), native asset (32), token (20), vault (20),
 cap (u64), release nonce (u64), recipient (20), amount (u64), and burn (32).
 Three u32-length-prefixed blobs follow: authority, signature, review preimage.
@@ -301,3 +302,12 @@ The saved journal is opened read-only. An explicitly supplied output `--journal`
 retains the existing atomic audit persistence rules and immutable source-event
 conflict checks; it does not overwrite historical observations after a reorg.
 Neither this operation nor successful revalidation enables settlement or deposits.
+
+
+Protocol v2 makes both policy limits mandatory at the Rust executable boundary,
+not only in the Python adapter. The executable rejects age or lifetime above the
+operator's limits, future checkpoints, expired windows, and legacy v1 requests.
+Upgrade the observer and verifier together: mismatched versions fail closed.
+The signed review and certificate formats do not change, so existing valid
+certificates remain usable under the supplied policy. This does not authenticate
+the supplied current height or wire the local journal into live consensus.
