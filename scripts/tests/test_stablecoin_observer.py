@@ -19,6 +19,7 @@ from test_usdt_ethereum_observer import fixture, append_deposit
 
 def catalog_fixture():
     usdt = json.loads((SCRIPTS / 'usdt-routes.synthetic.json').read_text())
+    usdt['routes'][0]['deployment']['block_number'] = 90
     usdc = copy.deepcopy(usdt)
     usdc['native_asset'] = '0x' + hashlib.sha256(b'synthetic-bUSDC').hexdigest()
     usdc['routes'] = [usdc['routes'][0]]
@@ -158,7 +159,14 @@ class StablecoinObserverTest(unittest.TestCase):
             config, evidence = root / 'config.json', root / 'evidence.json'
             config.write_text(json.dumps(self.catalog))
             for symbol in ['bUSDT', 'bUSDC']:
-                evidence.write_text(json.dumps(evidence_for(self.route(symbol))))
+                captured = evidence_for(self.route(symbol))
+                manifest = next(e['manifest'] for e in self.catalog['assets'] if e['symbol'] == symbol)
+                captured['vault_runtime'] = {
+                    'block_hash': captured['receipt']['blockHash'],
+                    'block_number': captured['receipt']['blockNumber'],
+                    'address': self.route(symbol)['vault_vm_hex'],
+                    'code': manifest['routes'][0]['deployment']['runtime_code']}
+                evidence.write_text(json.dumps(captured))
                 result = subprocess.run([
                     sys.executable, str(SCRIPTS / 'observe-stablecoin-deposit.py'),
                     '--config', str(config), '--asset', symbol, '--network', 'ethereum-mainnet',
@@ -169,6 +177,7 @@ class StablecoinObserverTest(unittest.TestCase):
                 self.assertEqual(output['symbol'], symbol)
                 self.assertEqual(output['native_asset'], self.route(symbol)['native_asset'])
                 self.assertEqual(output['observations'][0]['amount'], '1000000')
+                self.assertIs(output['vault_runtime']['vault_runtime_matched'], True)
                 for flag in ['mint_authorized', 'bridge_ready', 'finality_verified',
                              'deployment_verified', 'native_execution_performed']:
                     self.assertIs(output[flag], False)

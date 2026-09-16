@@ -48,6 +48,8 @@ def select_route(catalog, symbol, network, allow_synthetic=False):
             route_ids.add(route['route_id'])
             if entry['symbol'] == symbol and route['network'] == network:
                 selected = dict(route, source_symbol=source, symbol=entry['symbol'],
-                                synthetic=synthetic)
+                                synthetic=synthetic,
+                                vault_runtime_sha256=configured['deployment']['runtime_sha256'].lower(),
+                                vault_deployment_height=configured['deployment']['block_number'])
     require(selected is not None, 'stablecoin source route is not configured')
     return selected

@@ -45,6 +45,34 @@ synthetic catalogs with no deployed custody address or usable native registratio
 Online collection uses the existing `--endpoint` and `--tx-hash` options, with
 synthetic online collection restricted to loopback fixtures.
 
+### Ethereum vault runtime binding
+
+Ethereum evidence for this stablecoin CLI now requires a `vault_runtime` object
+alongside the existing receipt evidence. Its exact fields are `block_hash`,
+`block_number` (RPC hex quantity), `address`, and `code` (0x-prefixed runtime
+bytes). The address and block must match the selected vault and the deposit
+receipt. The runtime SHA-256 must match the validated catalog deployment pin.
+Deposits before the configured deployment height are refused.
+
+Online collection reads `eth_getCode` using the receipt's block hash with
+`requireCanonical: true`, as specified by [EIP-1898](https://eips.ethereum.org/EIPS/eip-1898),
+then checks that the canonical block still matches the receipt evidence. An RPC
+that cannot serve this historical hash selector is refused; there is no retry
+using `latest` or a block number. Empty, malformed, oversized or mismatched code
+is refused before any observation journal write. The code limit is 65,536 bytes.
+
+The output's `vault_runtime` report describes only bytecode consistency with an
+operator-supplied pin at that block. It does not authenticate the manifest,
+constructor transaction, immutable getter values, committee, token proxy
+implementation, reserves or consensus. Captured evidence can be fabricated;
+online evidence still trusts the selected RPC. A proxy runtime match does not
+authenticate its implementation. `deployment_verified` and `mint_authorized`
+remain false. The journal evidence digest now includes the runtime capture.
+
+The legacy USDT CLI and TRON path retain their previous evidence format; neither
+reports an Ethereum runtime match. Missing Ethereum runtime evidence in the
+stablecoin CLI is refused rather than silently using the legacy path.
+
 Output includes the selected bridged symbol, source symbol, native domain,
 native asset ID, token address and route ID. Amounts and nonces remain decimal
 strings. `mint_authorized`, `native_execution_performed`, `bridge_ready`,

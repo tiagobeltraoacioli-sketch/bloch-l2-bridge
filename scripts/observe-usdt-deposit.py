@@ -52,12 +52,25 @@ def main(argv=None, *, stablecoins=False):
                     'synthetic manifests may collect only from a loopback fixture')
             with collection_deadline():
                 evidence = collect(route, args.tx_hash, transport)
+                if stablecoins and args.network == 'ethereum-mainnet':
+                    from usdt_observer.runtime import collect_runtime
+                    evidence['vault_runtime'] = collect_runtime(route, evidence, transport)
+        source_evidence = evidence
+        runtime_check = None
+        if stablecoins and args.network == 'ethereum-mainnet':
+            from usdt_observer.runtime import validate_runtime
+            require(type(evidence) is dict and 'vault_runtime' in evidence,
+                    'vault runtime evidence required')
+            source_evidence = {key: value for key, value in evidence.items() if key != 'vault_runtime'}
+            runtime_check = validate_runtime(route, source_evidence, evidence['vault_runtime'])
         if args.tx_hash:
             expected = word(args.tx_hash, 32)
             actual = evidence['receipt']['transactionHash'] if args.network == 'ethereum-mainnet' else evidence['transaction_info']['id']
             require(word(actual, 32, prefix=args.network == 'ethereum-mainnet') == expected,
                     'evidence is for another requested transaction')
-        output = observe(route, args.network, evidence)
+        output = observe(route, args.network, source_evidence)
+        if runtime_check is not None:
+            output['vault_runtime'] = runtime_check
         output['synthetic'] = synthetic
         if stablecoins:
             output.update(source_symbol=route['source_symbol'], symbol=route['symbol'],
