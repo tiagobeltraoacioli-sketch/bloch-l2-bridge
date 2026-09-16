@@ -23,6 +23,7 @@ def main(argv=None):
     source.add_argument('--evidence', type=Path)
     source.add_argument('--endpoint')
     parser.add_argument('--tx-hash')
+    parser.add_argument('--journal', type=Path, help='Private release observation database; never settles a redemption')
     args = parser.parse_args(argv)
     try:
         route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
@@ -48,6 +49,9 @@ def main(argv=None):
                       vault_runtime=runtime)
         output['evidence_sha256'] = hashlib.sha256(json.dumps(
             captured, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if args.journal:
+            from usdt_observer.release_journal import record
+            output['journal'] = record(args.journal, route, captured, expected)
         print(json.dumps(output, sort_keys=True, indent=2, allow_nan=False))
         return 0
     except (ValueError, OSError, TypeError, KeyError, RecursionError):

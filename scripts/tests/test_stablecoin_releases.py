@@ -124,10 +124,14 @@ class ReleaseObserverTest(unittest.TestCase):
                 (root / name).write_text(json.dumps(data))
             cmd = [sys.executable, str(SCRIPTS / 'inspect-stablecoin-release.py'), '--config', str(root / 'config'),
                    '--release', str(root / 'release'), '--evidence', str(root / 'evidence'),
-                   '--asset', 'bUSDC', '--allow-synthetic']
+                   '--asset', 'bUSDC', '--allow-synthetic', '--journal', str(root / 'release.sqlite')]
             result = subprocess.run(cmd, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(json.loads(result.stdout)['redemption_settled'])
+            self.assertEqual(json.loads(result.stdout)['journal']['new_observations'], 1)
+            retry = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(retry.returncode, 0, retry.stderr)
+            self.assertEqual(json.loads(retry.stdout)['journal']['duplicate_observations'], 1)
             captured['vault_runtime']['reserves']['total_locked'] = '0x' + abi(1).hex()
             (root / 'evidence').write_text(json.dumps(captured))
             refused = subprocess.run(cmd, capture_output=True, text=True)

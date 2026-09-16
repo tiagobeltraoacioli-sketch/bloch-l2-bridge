@@ -10,7 +10,8 @@ signs nothing and never marks a redemption paid.
 python3 scripts/inspect-stablecoin-release.py \
   --config /private/operator/stablecoins.json --asset bUSDC \
   --release /private/operator/native-release.json \
-  --evidence /private/operator/source-receipt.json
+  --evidence /private/operator/source-receipt.json \
+  --journal /private/operator/release-observations.sqlite
 ```
 
 The native release file has exactly `native_domain`, `native_asset`, `route_id`,
@@ -41,9 +42,37 @@ Output amounts are decimal strings and evidence is digested deterministically.
 release. `native_release_authenticated`, `finality_verified`,
 `redemption_settled`, `mint_authorized` and `bridge_ready` remain false.
 
-This tool has no settlement database. Re-running it returns another observation,
-not a second accounting credit; a caller must not treat repeated successful output
-as permission to subtract liabilities. Durable release/event/burn replay guards,
-authenticated native checkpoints, source reorg handling and atomic reserve/paid
+### Persistent observation identities
+
+The optional `--journal` uses a separate, versioned SQLite release-observation
+database. It revalidates the native-release match, vault configuration and reserve
+evidence before accessing the file. Exact retries are idempotent, including after
+process restart. Conflicting facts for a release are refused. Route/nonce,
+native-domain/burn, source event and token-transfer log identities cannot be
+reassigned to another release or asset. A previously recorded release log also
+cannot become another payment's transfer log (or the reverse).
+
+Writes use `BEGIN IMMEDIATE`, unique constraints and full synchronous commits.
+Concurrent retries serialize; any rejected insert is rolled back. The directory
+must already exist and be private to the operator. Files are private regular
+files, without symlinks or hardlinks. Foreign database identities or versions are
+refused before modifying database settings. Limits are 100,000 observations,
+256 MiB and 64 MiB of available disk space before writing. The first matching
+evidence digest is retained; new equivalent captures do not replace it.
+
+A failure after commit but before directory fsync can be retried safely; it may
+return an existing observation. A failed first initialization can leave an
+uninitialized file that is refused on retry and requires operator inspection.
+The tool does not delete or silently recreate such files. A changed source block
+is a conflict, not an automatic overwrite or proof that either branch is valid.
+
+This is not a settlement database or a current-finality cache. Its output always
+marks `historical_observation_only` and `requires_fresh_evidence` true, while
+`native_release_authenticated`, `redemption_settled`, `mint_authorized` and
+`bridge_ready` remain false. Failed refreshes do not turn retained historical
+rows into valid payments. Restoring or deleting the database can roll back local
+replay protection, so it cannot replace native consensus replay protection.
+
+Authenticated native checkpoints, source reorg handling and atomic reserve/paid
 liability updates remain required before operational reconciliation. A selected
 RPC can lie, and a captured receipt can be fabricated. No mainnet route is enabled.
