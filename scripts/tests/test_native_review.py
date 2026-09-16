@@ -28,6 +28,10 @@ class NativeReviewTest(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, (self.digest+'\n').encode())
         result = self.verify()
         self.assertTrue(result['attestation_verified'])
+        self.assertEqual(result['authority_sha256'], hashlib.sha256(bytes.fromhex('1234')).hexdigest())
+        self.assertEqual(result['signature_sha256'], hashlib.sha256(bytes.fromhex('5678')).hexdigest())
+        self.assertEqual(result['route_id'], self.expected['route_id'])
+        self.assertEqual(result['native_asset'], self.expected['native_asset'])
         self.assertFalse(result['redemption_settled'])
         self.assertFalse(result['finality_verified'])
         wire = run.call_args.kwargs['input']

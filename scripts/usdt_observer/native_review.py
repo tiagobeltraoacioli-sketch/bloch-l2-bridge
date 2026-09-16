@@ -5,7 +5,7 @@ import struct
 import subprocess
 
 from .common import require, word
-from .releases import normalize_release
+from .releases import normalize_release, release_digest
 from .verifier_process import run_verifier
 
 
@@ -59,7 +59,14 @@ def verify_review(executable, route, expected, trust, certificate):
     commitment = hashlib.sha3_256(bytes.fromhex(certificate['preimage'][2:])).hexdigest()
     require(result.returncode == 0 and result.stdout == (commitment + '\n').encode('ascii'),
             'native review refused')
+    release_id = release_digest(word(expected['route_id'], 32), int(expected['nonce']),
+                                word(expected['recipient'], 20), int(expected['amount']),
+                                word(expected['native_burn'], 32))
     return {'attestation_verified': True, 'commitment': '0x' + commitment,
+            'release_id': '0x' + release_id.hex(), 'route_id': expected['route_id'],
+            'native_domain': expected['native_domain'], 'native_asset': expected['native_asset'],
+            'authority_sha256': hashlib.sha256(bytes.fromhex(trust['authority'][2:])).hexdigest(),
+            'signature_sha256': hashlib.sha256(bytes.fromhex(certificate['signature'][2:])).hexdigest(),
             'checkpoint_height': trust['checkpoint_height'], 'checkpoint_root': trust['checkpoint_root'],
             'current_height': trust['current_height'], 'valid_until': certificate['valid_until'],
             'max_checkpoint_age': trust['max_checkpoint_age'],

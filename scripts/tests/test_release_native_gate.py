@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
@@ -74,7 +75,11 @@ class ReleaseNativeGateTest(unittest.TestCase):
             self.assertEqual((code, out), (1, ''))
 
     def test_success_keeps_finality_and_settlement_false(self):
-        review = {'attestation_verified': True, 'redemption_settled': False, 'finality_verified': False}
+        from usdt_observer.releases import match_release
+        route, captured, expected = fixture()
+        release_id = match_release(route, {k: v for k, v in captured.items() if k != 'vault_runtime'}, expected)['observation']['release_id']
+        review = {'attestation_verified': True, 'redemption_settled': False, 'finality_verified': False,
+                  'release_id': release_id}
         with patch('usdt_observer.native_review.verify_review', return_value=review) as verify:
             code, out, err = self.invoke(['--require-native-review', '--evidence', str(self.root / 'evidence')] + self.native)
             self.assertEqual((code, err), (0, ''))
@@ -83,3 +88,17 @@ class ReleaseNativeGateTest(unittest.TestCase):
             for field in ['native_release_authenticated', 'finality_verified', 'redemption_settled', 'bridge_ready']:
                 self.assertIs(output[field], False)
             verify.assert_called_once()
+            context = {key: output[key] for key in ['native_review', 'observation', 'evidence_sha256']}
+            digest = hashlib.sha256(b'BLOCH-REVIEW-EVIDENCE-v1\0' + json.dumps(
+                context, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            self.assertEqual(output['review_evidence_sha256'], digest)
+
+
+    def test_wrong_review_release_refuses_before_journal_write(self):
+        with patch('usdt_observer.native_review.verify_review', return_value={
+                'attestation_verified': True, 'release_id': '0x'+'00'*32}), \
+                patch('usdt_observer.release_journal.record') as record:
+            code, out, _ = self.invoke(['--require-native-review', '--evidence', str(self.root / 'evidence'),
+                                       '--journal', str(self.root / 'journal')] + self.native)
+            self.assertEqual((code, out), (1, ''))
+            record.assert_not_called()

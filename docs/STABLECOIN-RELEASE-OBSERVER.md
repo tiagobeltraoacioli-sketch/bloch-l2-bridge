@@ -208,3 +208,16 @@ A successful attestation still requires all source receipt and vault checks and
 leaves finality and settlement flags false. CLI gate tests cover these ordering
 and persistence guarantees; the separate cross-repository probe covers actual
 cryptographic verification.
+
+Verified review output includes the native domain, asset, route and release ID,
+plus SHA-256 fingerprints of the authority envelope and signature bytes. This
+records which attestation was checked without copying the large PQ envelopes.
+The CLI requires the review release ID to equal the observed payout release ID
+before writing its historical journal. Successful combined inspections include
+`review_evidence_sha256`: SHA-256 of ASCII `BLOCH-REVIEW-EVIDENCE-v1` plus NUL,
+followed by compact sorted-key JSON containing `native_review`, `observation`,
+and `evidence_sha256`. This is an unsigned correlation checksum, not independent
+proof of authenticity, consensus finality, or payment authorization. Preserve the
+original certificate and authenticated trust inputs for later re-verification;
+the report alone cannot recreate or authenticate them. Tracking remains a source
+observation mechanism and does not persist native attestation approval.

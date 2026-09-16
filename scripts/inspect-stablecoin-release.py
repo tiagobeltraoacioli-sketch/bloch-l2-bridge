@@ -74,7 +74,15 @@ def main(argv=None):
         output['evidence_sha256'] = hashlib.sha256(json.dumps(
             captured, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         if review is not None:
+            require(review['release_id'] == output['observation']['release_id'],
+                    'review and source release mismatch')
             output['native_review'] = review
+            # Correlation checksum only: this report is not independently signed.
+            context = {'native_review': review, 'observation': output['observation'],
+                       'evidence_sha256': output['evidence_sha256']}
+            output['review_evidence_sha256'] = hashlib.sha256(
+                b'BLOCH-REVIEW-EVIDENCE-v1\0' + json.dumps(context, sort_keys=True,
+                    separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         if tracking is not None:
             output['tracking'] = tracking
         if args.journal:
