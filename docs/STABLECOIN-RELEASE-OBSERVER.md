@@ -278,3 +278,26 @@ readiness remain false. The command does not update the journal, collect source
 RPC evidence, rotate authorities or extend expired certificates. A rejected
 certificate requires a newly issued valid review or operator investigation;
 changing the saved record is not a recovery mechanism.
+
+## Inspect new source evidence using a saved certificate
+
+`inspect-stablecoin-release.py` accepts `--native-audit-id HASH` together with
+`--native-audit-journal /private/path/releases.sqlite` instead of
+`--native-certificate`. Certificate-file and saved-audit inputs are mutually
+exclusive. Continue to supply `--native-verifier`, `--native-trust`, the current
+route catalog and expected release. `--require-native-review` also applies to
+this saved-certificate workflow.
+
+The inspector reads the bounded historical audit, uses only its public
+certificate, and verifies against the explicitly supplied trust and expected
+release. The resulting release ID and commitment must match the saved audit.
+Only then does normal source evidence collection/validation run. With
+`--endpoint` it collects the receipt, block, finalization, vault configuration and
+reserves again; it never reuses the audit's old source observation as fresh data.
+With `--evidence` the newly supplied file is validated but does not establish
+live freshness. Output includes `reused_native_audit_id` for traceability.
+
+The saved journal is opened read-only. An explicitly supplied output `--journal`
+retains the existing atomic audit persistence rules and immutable source-event
+conflict checks; it does not overwrite historical observations after a reorg.
+Neither this operation nor successful revalidation enables settlement or deposits.

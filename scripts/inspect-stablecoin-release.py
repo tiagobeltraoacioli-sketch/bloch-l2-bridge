@@ -30,23 +30,40 @@ def main(argv=None):
                         help='Refuse inspection unless all native review inputs are supplied')
     parser.add_argument('--native-verifier', type=Path)
     parser.add_argument('--native-trust', type=Path)
-    parser.add_argument('--native-certificate', type=Path)
+    certificate_source = parser.add_mutually_exclusive_group()
+    certificate_source.add_argument('--native-certificate', type=Path)
+    certificate_source.add_argument('--native-audit-id')
+    parser.add_argument('--native-audit-journal', type=Path)
     args = parser.parse_args(argv)
     try:
         route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
         expected = load_json(args.release)
         review = None
         native_verification = None
-        options = (args.native_verifier, args.native_trust, args.native_certificate)
+        require(bool(args.native_audit_id) == bool(args.native_audit_journal),
+                'saved audit ID and journal required together')
+        certificate_source = args.native_certificate or args.native_audit_id
+        options = (args.native_verifier, args.native_trust, certificate_source)
         require(all(options) or not any(options), 'all native verification options required')
         require(not args.require_native_review or all(options), 'native review required by operator')
+        saved_audit = None
         if all(options):
             from usdt_observer.native_review import verify_review
+            if args.native_audit_id:
+                from usdt_observer.release_journal import read_review
+                saved_audit = read_review(args.native_audit_journal, args.native_audit_id)['audit']
+                certificate = saved_audit['certificate']
+            else:
+                certificate = load_json(args.native_certificate)
             native_verification = {'executable': args.native_verifier,
                                    'trust': load_json(args.native_trust),
-                                   'certificate': load_json(args.native_certificate)}
+                                   'certificate': certificate}
             review = verify_review(args.native_verifier, route, expected,
                                    native_verification['trust'], native_verification['certificate'])
+            if saved_audit is not None:
+                require(review['release_id'] == saved_audit['observation']['release_id']
+                        and review['commitment'] == saved_audit['native_review']['commitment'],
+                        'saved review differs from current verification')
         tracking = None
         if args.evidence:
             require(args.tracking is None, 'tracking requires online collection')
@@ -77,6 +94,8 @@ def main(argv=None):
                       vault_runtime=runtime)
         output['evidence_sha256'] = hashlib.sha256(json.dumps(
             captured, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if saved_audit is not None:
+            output['reused_native_audit_id'] = args.native_audit_id
         if review is not None:
             require(review['release_id'] == output['observation']['release_id'],
                     'review and source release mismatch')
