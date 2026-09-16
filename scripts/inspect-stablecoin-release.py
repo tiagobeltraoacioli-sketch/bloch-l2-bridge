@@ -26,6 +26,8 @@ def main(argv=None):
     persistence = parser.add_mutually_exclusive_group()
     persistence.add_argument('--journal', type=Path, help='Immutable historical release observations')
     persistence.add_argument('--tracking', type=Path, help='Online revision-guarded refresh state')
+    parser.add_argument('--require-native-review', action='store_true',
+                        help='Refuse inspection unless all native review inputs are supplied')
     parser.add_argument('--native-verifier', type=Path)
     parser.add_argument('--native-trust', type=Path)
     parser.add_argument('--native-certificate', type=Path)
@@ -36,6 +38,7 @@ def main(argv=None):
         review = None
         options = (args.native_verifier, args.native_trust, args.native_certificate)
         require(all(options) or not any(options), 'all native verification options required')
+        require(not args.require_native_review or all(options), 'native review required by operator')
         if all(options):
             from usdt_observer.native_review import verify_review
             review = verify_review(args.native_verifier, route, expected,

@@ -196,3 +196,15 @@ format. Excess output, blocked input, timeout and interruptions terminate and
 reap the verifier process; stderr is discarded. The executable remains trusted
 operator-installed code, not an execution sandbox. Real child-process tests
 cover output flooding, backpressure, early output and stalled processes.
+
+For automation that must always verify a native review, include
+`--require-native-review` in the operator-controlled invocation. Missing any of
+`--native-verifier`, `--native-trust`, or `--native-certificate` then refuses the
+inspection before RPC creation, tracking refresh, or journal writes. Partial
+native options are rejected even without this flag. Omitting both the flag and
+all native options retains the source-only inspection workflow; this is an
+explicit invocation requirement, not a global policy or settlement authorization.
+A successful attestation still requires all source receipt and vault checks and
+leaves finality and settlement flags false. CLI gate tests cover these ordering
+and persistence guarantees; the separate cross-repository probe covers actual
+cryptographic verification.
