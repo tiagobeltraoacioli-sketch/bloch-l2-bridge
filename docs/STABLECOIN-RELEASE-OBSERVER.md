@@ -221,3 +221,22 @@ proof of authenticity, consensus finality, or payment authorization. Preserve th
 original certificate and authenticated trust inputs for later re-verification;
 the report alone cannot recreate or authenticate them. Tracking remains a source
 observation mechanism and does not persist native attestation approval.
+
+With `--journal` and native verification enabled, the journal independently
+re-verifies the supplied public certificate before opening or changing its file.
+It appends the review, public trust inputs, certificate, matched observation and
+evidence digest to `native_review_observations` in the same SQLite transaction
+as the source observation. No executable path or private key is stored. This is
+an additive table in the v1 journal: source-only records remain unchanged and
+source-only readers do not acquire new authority from its presence.
+
+The audit identifier is SHA-256 of `BLOCH-JOURNALED-REVIEW-v1` plus NUL and compact
+sorted-key JSON of the stored audit. Exact retries are idempotent; different
+certificates or trust snapshots append new entries without replacing history.
+Audits are limited to 128 KiB each, 100,000 entries and the existing total database
+size limit. Insertion failure rolls back the source observation in the same
+transaction. Outputs expose the audit ID and new-entry count, but retain all
+historical-only and no-settlement flags. Replaying a saved audit still requires
+independently authenticated, current trust; its stored trust snapshot is evidence
+of prior inputs, not a source of present authority. Source evidence itself must
+still be retained separately for full source-chain re-verification.

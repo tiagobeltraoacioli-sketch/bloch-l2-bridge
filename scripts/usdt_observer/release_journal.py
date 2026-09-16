@@ -1,4 +1,5 @@
 """Private persistent release observations. No row is a paid-redemption receipt."""
+import copy
 import hashlib
 import json
 import os
@@ -17,7 +18,7 @@ MAX_DB_BYTES = 256 * 1024 * 1024
 MIN_FREE = 64 * 1024 * 1024
 
 
-def record(path, route, captured, expected):
+def record(path, route, captured, expected, *, native_verification=None):
     """Revalidate, then atomically add one observation or recognize an exact retry.
 
     Conflicting blocks/events/nonces/burns are refused, never overwritten. This
@@ -36,6 +37,20 @@ def record(path, route, captured, expected):
     encoded = json.dumps(facts, sort_keys=True, separators=(',', ':'), allow_nan=False)
     digest = hashlib.sha256(json.dumps(captured, sort_keys=True, separators=(',', ':'),
                                        allow_nan=False).encode()).hexdigest()
+    audit = None
+    if native_verification is not None:
+        from .native_review import verify_review
+        require(type(native_verification) is dict and set(native_verification) == {
+            'executable', 'trust', 'certificate'}, 'invalid native verification inputs')
+        inputs = copy.deepcopy(native_verification)
+        review = verify_review(inputs['executable'], route, expected, inputs['trust'], inputs['certificate'])
+        require(review['release_id'] == observation['release_id'], 'native review release mismatch')
+        # Keep public inputs for later independent verification, never secret keys.
+        audit = json.dumps({'version': 1, 'native_review': review, 'trust': inputs['trust'],
+                            'certificate': inputs['certificate'], 'observation': observation,
+                            'evidence_sha256': digest}, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        require(len(audit.encode()) <= 131072, 'native review audit too large')
+        audit_id = hashlib.sha256(b'BLOCH-JOURNALED-REVIEW-v1\0' + audit.encode()).hexdigest()
     source = word(route['source_domain'], 32) + word(observation['tx_hash'], 32)
     event = hashlib.sha256(source + observation['log_index'].to_bytes(4, 'big')).hexdigest()
     transfer = hashlib.sha256(source + observation['transfer_log_index'].to_bytes(4, 'big')).hexdigest()
@@ -95,6 +110,22 @@ def record(path, route, captured, expected):
                     'release journal capacity reached')
             db.execute('INSERT INTO release_observations VALUES (?,?,?,?,?,?,?)',
                        (observation['release_id'], event, transfer, nonce, burn, encoded, digest))
+        new_review = False
+        if audit is not None:
+            # Additive v1 extension: source-only readers retain their semantics.
+            db.execute('''CREATE TABLE IF NOT EXISTS native_review_observations (
+                audit_id TEXT PRIMARY KEY, release_id TEXT NOT NULL,
+                audit TEXT NOT NULL)''')
+            prior_review = db.execute('SELECT release_id, audit FROM native_review_observations WHERE audit_id=?',
+                                     (audit_id,)).fetchone()
+            if prior_review is None:
+                require(db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0] < MAX_ROWS,
+                        'native review journal capacity reached')
+                db.execute('INSERT INTO native_review_observations VALUES (?,?,?)',
+                           (audit_id, observation['release_id'], audit))
+                new_review = True
+            else:
+                require(prior_review == (observation['release_id'], audit), 'conflicting native review audit')
         db.execute('COMMIT')
         if created:
             fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -102,7 +133,9 @@ def record(path, route, captured, expected):
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        return {'new_observations': int(prior is None), 'duplicate_observations': int(prior is not None),
+        return {'native_review_audit_id': audit_id if audit is not None else None,
+                'new_native_reviews': int(new_review),
+                'new_observations': int(prior is None), 'duplicate_observations': int(prior is not None),
                 'historical_observation_only': True, 'requires_fresh_evidence': True,
                 'native_release_authenticated': False, 'redemption_settled': False,
                 'mint_authorized': False, 'bridge_ready': False}

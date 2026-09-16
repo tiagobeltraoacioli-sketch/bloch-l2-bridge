@@ -36,13 +36,17 @@ def main(argv=None):
         route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
         expected = load_json(args.release)
         review = None
+        native_verification = None
         options = (args.native_verifier, args.native_trust, args.native_certificate)
         require(all(options) or not any(options), 'all native verification options required')
         require(not args.require_native_review or all(options), 'native review required by operator')
         if all(options):
             from usdt_observer.native_review import verify_review
+            native_verification = {'executable': args.native_verifier,
+                                   'trust': load_json(args.native_trust),
+                                   'certificate': load_json(args.native_certificate)}
             review = verify_review(args.native_verifier, route, expected,
-                                   load_json(args.native_trust), load_json(args.native_certificate))
+                                   native_verification['trust'], native_verification['certificate'])
         tracking = None
         if args.evidence:
             require(args.tracking is None, 'tracking requires online collection')
@@ -87,7 +91,8 @@ def main(argv=None):
             output['tracking'] = tracking
         if args.journal:
             from usdt_observer.release_journal import record
-            output['journal'] = record(args.journal, route, captured, expected)
+            output['journal'] = record(args.journal, route, captured, expected,
+                                       native_verification=native_verification)
         print(json.dumps(output, sort_keys=True, indent=2, allow_nan=False))
         return 0
     except (ValueError, OSError, TypeError, KeyError, RecursionError):
