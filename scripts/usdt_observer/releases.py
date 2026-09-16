@@ -56,7 +56,7 @@ def decode_releases(route, logs):
     return observations
 
 
-def match_release(route, evidence, expected):
+def normalize_release(route, expected):
     require(type(expected) is dict and set(expected) == {
         'native_domain', 'native_asset', 'route_id', 'nonce', 'recipient', 'amount', 'native_burn'},
         'exact native release fields required')
@@ -68,6 +68,20 @@ def match_release(route, evidence, expected):
                 and value.isdecimal() and (value == '0' or value[0] != '0'), 'invalid release integer')
         return integer(int(value))
     nonce, amount = decimal(expected['nonce']), decimal(expected['amount'])
+    recipient, burn = word(expected['recipient'], 20), word(expected['native_burn'], 32)
+    route_digest(route)
+    require(nonce < UINT64_MAX and 0 < amount <= route['cap'] and any(burn)
+            and any(recipient) and recipient not in (word(route['token_vm_hex'], 20),
+                                                     word(route['vault_vm_hex'], 20)),
+            'invalid native release')
+    return {**{k: '0x' + word(expected[k], 32).hex() for k in
+               ('native_domain', 'native_asset', 'route_id', 'native_burn')},
+            'nonce': str(nonce), 'amount': str(amount), 'recipient': '0x' + recipient.hex()}
+
+
+def match_release(route, evidence, expected):
+    expected = normalize_release(route, expected)
+    nonce, amount = int(expected['nonce']), int(expected['amount'])
     recipient, burn = word(expected['recipient'], 20), word(expected['native_burn'], 32)
     observations = validate_events(route, evidence, decode_releases)
     matched = [o for o in observations if o['nonce'] == nonce and o['amount'] == amount

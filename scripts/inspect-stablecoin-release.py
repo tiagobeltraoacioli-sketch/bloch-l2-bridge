@@ -23,20 +23,31 @@ def main(argv=None):
     source.add_argument('--evidence', type=Path)
     source.add_argument('--endpoint')
     parser.add_argument('--tx-hash')
-    parser.add_argument('--journal', type=Path, help='Private release observation database; never settles a redemption')
+    persistence = parser.add_mutually_exclusive_group()
+    persistence.add_argument('--journal', type=Path, help='Immutable historical release observations')
+    persistence.add_argument('--tracking', type=Path, help='Online revision-guarded refresh state')
     args = parser.parse_args(argv)
     try:
         route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
         expected = load_json(args.release)
+        tracking = None
         if args.evidence:
+            require(args.tracking is None, 'tracking requires online collection')
             captured = load_json(args.evidence)
         else:
             require(args.tx_hash is not None, 'source transaction required')
-            transport = HttpSource(args.endpoint)
-            require(not route['synthetic'] or transport.loopback, 'synthetic online evidence requires loopback')
-            with collection_deadline():
-                captured = collect(route, args.tx_hash, transport)
-                captured['vault_runtime'] = collect_runtime(route, captured, transport)
+            def fetch():
+                transport = HttpSource(args.endpoint)
+                require(not route['synthetic'] or transport.loopback, 'synthetic online evidence requires loopback')
+                with collection_deadline():
+                    evidence = collect(route, args.tx_hash, transport)
+                    evidence['vault_runtime'] = collect_runtime(route, evidence, transport)
+                return evidence
+            if args.tracking:
+                from usdt_observer.release_tracking import refresh
+                captured, tracking = refresh(args.tracking, route, expected, args.tx_hash, fetch)
+            else:
+                captured = fetch()
         require(type(captured) is dict and 'vault_runtime' in captured, 'vault evidence required')
         evidence = {k: v for k, v in captured.items() if k != 'vault_runtime'}
         if args.tx_hash:
@@ -49,6 +60,8 @@ def main(argv=None):
                       vault_runtime=runtime)
         output['evidence_sha256'] = hashlib.sha256(json.dumps(
             captured, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if tracking is not None:
+            output['tracking'] = tracking
         if args.journal:
             from usdt_observer.release_journal import record
             output['journal'] = record(args.journal, route, captured, expected)

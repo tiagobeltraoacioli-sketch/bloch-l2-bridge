@@ -76,3 +76,37 @@ replay protection, so it cannot replace native consensus replay protection.
 Authenticated native checkpoints, source reorg handling and atomic reserve/paid
 liability updates remain required before operational reconciliation. A selected
 RPC can lie, and a captured receipt can be fabricated. No mainnet route is enabled.
+
+### Revision-guarded online refresh
+
+For online refreshes, use `--tracking /private/operator/release-tracking.sqlite`
+instead of `--journal`. Tracking and the immutable observation journal are
+separate database formats and mutually exclusive CLI options. Tracking requires
+`--endpoint` and `--tx-hash`; it cannot label a captured file as a fresh RPC query.
+
+Before creating the transport or making an RPC request, tracking commits a new
+revision with status `refreshing` and clears the prior observation. The entire
+receipt, vault, reserve and exact native-release match must pass before the same
+revision can become `observed`. Collection and validation failures leave
+`unavailable`; a process interruption can leave `refreshing`. Neither state can
+retain a previous positive observation. An older success or failure cannot
+overwrite a newer revision; the superseded caller must discard its response.
+
+Tracking keys bind native domain and burn to an immutable, normalized release
+identity. A fresh observation may see the same payout in a different source block;
+this does not overwrite the separate immutable journal or settle the redemption.
+The tracker does not distinguish an orphaned block from RPC unavailability when
+collection fails, discover replacement transactions, or scan continuously.
+
+`release_tracking.read_state` opens the database read-only and returns historical
+status, never a live confirmation. `requires_fresh_evidence` remains true and
+`redemption_settled`, `native_release_authenticated` and `bridge_ready` remain
+false, even for an `observed` row. Native checkpoints still require independent
+authentication. Revision tracking protects against stale concurrent completion,
+not against a malicious RPC, restoration of an old database, or operator deletion.
+
+The tracker uses private regular files, its own application/version identity,
+full synchronous transactions and parent-directory fsync on creation. It accepts
+at most 100,000 releases in 256 MiB, requires 64 MiB free before writes, and refuses
+revision exhaustion. Interrupted initialization may leave an uninitialized file
+that requires operator inspection; it is never silently recreated.
