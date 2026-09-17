@@ -347,6 +347,9 @@ Exit 0 means an observation completed, not that a deposit is eligible for credit
 Its `confirmation_policy_met` is **always false**, and
 `requires_refresh_for_action` is **always true**, even for an `observed` record.
 Disk reads and process restarts cannot restore a usable confirmation decision.
+Historical reads also fail closed if stored evidence is absent for a completed
+refresh, present for an incomplete refresh, bound to another block or policy, or
+contradicts its active-chain, confirmation arithmetic or status classification.
 All custody, inclusion, finality, mint and bridge-ready flags remain false. Future
 signing/credit integration must revalidate the current revision and chain state;
 this cache is not an approval token or a complete reorg-safe mint protocol.

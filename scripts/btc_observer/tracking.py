@@ -21,6 +21,41 @@ EVIDENCE_FIELDS = ('block_hash', 'block_height', 'tip_hash', 'tip_height', 'tip_
                    'confirmations', 'required_confirmations', 'node_active_chain_observed')
 
 
+def _validate_evidence(status, requested_block_hash, required_confirmations, evidence):
+    """Refuse corrupt or cross-revision historical evidence.
+
+    The tracking database is not an authorization source, but its operator-facing
+    history must still be internally consistent and bound to the row that owns it.
+    """
+    if status in ('refreshing', 'unavailable'):
+        require(evidence is None, 'Unexpected stored tracking evidence')
+        return
+    require(type(evidence) is dict and set(evidence) == set(EVIDENCE_FIELDS),
+            'Invalid stored evidence')
+    block_hash, tip_hash, chainwork = (evidence['block_hash'], evidence['tip_hash'],
+                                       evidence['tip_chainwork'])
+    hash_bytes(block_hash)
+    hash_bytes(tip_hash)
+    hash_bytes(chainwork)
+    require(block_hash == requested_block_hash and int(chainwork, 16) > 0,
+            'Stored tracking evidence does not match its refresh')
+    block_height = integer(evidence['block_height'], 1, 2_147_483_647)
+    tip_height = integer(evidence['tip_height'], 0, 2_147_483_647)
+    confirmations = integer(evidence['confirmations'], 0, 2_147_483_647)
+    require(integer(evidence['required_confirmations'], 1, 100_000) == required_confirmations,
+            'Stored tracking policy does not match its refresh')
+    active = evidence['node_active_chain_observed']
+    require(type(active) is bool, 'Invalid stored active-chain status')
+    if status == 'orphaned':
+        require(not active and confirmations == 0, 'Invalid stored orphan evidence')
+        return
+    require(active and block_height <= tip_height
+            and confirmations == tip_height - block_height + 1,
+            'Invalid stored active-chain evidence')
+    require((status == 'observed') == (confirmations >= required_confirmations),
+            'Stored tracking status contradicts confirmation policy')
+
+
 @contextmanager
 def database(path, *, write):
     """A separate private database; never migrate an observation journal implicitly."""
@@ -152,9 +187,9 @@ def read_state(path, outpoint_key):
         row = db.execute('''SELECT revision, status, block_hash, required_confirmations, evidence
                             FROM btc_tracking WHERE outpoint=?''', (outpoint_key,)).fetchone()
     require(row is not None, 'Outpoint is not tracked')
-    revision, status, block_hash, confirmations, encoded = row
+    revision, status, block_hash, required_confirmations, encoded = row
     integer(revision, 1, MAX_REVISION)
-    integer(confirmations, 1, 100_000)
+    integer(required_confirmations, 1, 100_000)
     hash_bytes(block_hash)
     require(status in STATES, 'Invalid tracking state')
     evidence = None
@@ -164,10 +199,10 @@ def read_state(path, outpoint_key):
             evidence = json.loads(encoded)
         except (ValueError, RecursionError):
             raise Invalid('Invalid stored evidence') from None
-        require(type(evidence) is dict and set(evidence) == set(EVIDENCE_FIELDS), 'Invalid stored evidence')
+    _validate_evidence(status, block_hash, required_confirmations, evidence)
     return {'schema': 'bloch-btc-tracking-v1', 'outpoint_key': outpoint_key,
             'revision': revision, 'last_refresh_status': status, 'requested_block_hash': block_hash,
-            'required_confirmations': confirmations, 'historical_evidence': evidence,
+            'required_confirmations': required_confirmations, 'historical_evidence': evidence,
             'requires_refresh_for_action': True, 'confirmation_policy_met': False,
             'inclusion_verified': False, 'finality_verified': False, 'custody_verified': False,
             'mint_authorized': False, 'bridge_ready': False}

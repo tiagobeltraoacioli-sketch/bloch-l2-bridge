@@ -1,6 +1,7 @@
 """Persistence, crash and concurrent refresh regressions; no state authorizes minting."""
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -216,6 +217,35 @@ class BitcoinTrackingTest(unittest.TestCase):
         with self.assertRaises(OSError):
             self.state()
         self.assertFalse(self.path.exists())
+
+    def test_read_refuses_cross_revision_and_contradictory_evidence(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            original = db.execute('SELECT status, evidence FROM btc_tracking').fetchone()
+        status, encoded = original
+        evidence = json.loads(encoded)
+        mutations = (
+            ('observed', None),
+            ('observed', dict(evidence, block_hash='ff' * 32)),
+            ('observed', dict(evidence, required_confirmations=7)),
+            ('observed', dict(evidence, confirmations=5)),
+            ('observed', dict(evidence, tip_chainwork='00' * 32)),
+            ('observed', dict(evidence, node_active_chain_observed=False)),
+            ('below_threshold', evidence),
+            ('orphaned', dict(evidence, confirmations=0, node_active_chain_observed=True)),
+            ('refreshing', evidence),
+            ('unavailable', evidence),
+        )
+        for corrupt_status, corrupt_evidence in mutations:
+            with self.subTest(status=corrupt_status, evidence=corrupt_evidence):
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE btc_tracking SET status=?, evidence=?',
+                               (corrupt_status, json.dumps(corrupt_evidence)))
+                with self.assertRaises(Invalid):
+                    self.state()
+        with sqlite3.connect(self.path) as db:
+            db.execute('UPDATE btc_tracking SET status=?, evidence=?', original)
+        self.assertEqual(self.state()['last_refresh_status'], status)
 
     def test_post_commit_sync_failure_leaves_only_pending_state(self):
         with patch.object(tracking.os, 'fsync', side_effect=OSError('Injected sync failure')):
