@@ -247,6 +247,34 @@ class BitcoinTrackingTest(unittest.TestCase):
             db.execute('UPDATE btc_tracking SET status=?, evidence=?', original)
         self.assertEqual(self.state()['last_refresh_status'], status)
 
+    def test_read_revalidates_stored_outpoint_facts(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            encoded = db.execute('SELECT facts FROM btc_tracking').fetchone()[0]
+        facts = json.loads(encoded)
+        mutations = (
+            dict(facts, outpoint_key='bitcoin-regtest:' + 'ff' * 32 + ':0'),
+            dict(facts, amount_sats='0'),
+            dict(facts, script_pubkey_hex='AA'),
+            dict(facts, inclusion_verified=True),
+            dict(facts, schema='foreign-schema'),
+        )
+        for corrupt in mutations:
+            with self.subTest(corrupt=corrupt):
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE btc_tracking SET facts=?', (json.dumps(corrupt),))
+                with self.assertRaises(Invalid):
+                    self.state()
+        for corrupt in ('{"schema":"one","schema":"two"}', '[]', '{"amount_sats":NaN}'):
+            with self.subTest(encoded=corrupt):
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE btc_tracking SET facts=?', (corrupt,))
+                with self.assertRaises(Invalid):
+                    self.state()
+        with sqlite3.connect(self.path) as db:
+            db.execute('UPDATE btc_tracking SET facts=?', (encoded,))
+        self.assertEqual(self.state()['last_refresh_status'], 'observed')
+
     def test_post_commit_sync_failure_leaves_only_pending_state(self):
         with patch.object(tracking.os, 'fsync', side_effect=OSError('Injected sync failure')):
             with self.assertRaises(OSError):

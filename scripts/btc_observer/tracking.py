@@ -10,7 +10,7 @@ import stat
 from .chain import assess_status, integer, require
 from .journal import FIELDS
 from .proof import hash_bytes
-from .transaction import Invalid, inspect_deposit
+from .transaction import Invalid, MAX_MONEY, MAX_SCRIPT_BYTES, NETWORKS, inspect_deposit
 
 APPLICATION_ID = 0x5042544D
 MAX_ROWS = 100_000
@@ -19,6 +19,49 @@ MAX_REVISION = (1 << 63) - 1
 STATES = frozenset(('refreshing', 'observed', 'below_threshold', 'orphaned', 'unavailable'))
 EVIDENCE_FIELDS = ('block_hash', 'block_height', 'tip_hash', 'tip_height', 'tip_chainwork',
                    'confirmations', 'required_confirmations', 'node_active_chain_observed')
+FACT_FIELDS = frozenset(('schema', 'network', 'txid', 'vout', 'outpoint_key', 'amount_sats',
+                         'script_pubkey_hex', 'inclusion_verified', 'finality_verified',
+                         'custody_verified', 'mint_authorized', 'bridge_ready'))
+
+
+def _decode_object(encoded, limit):
+    require(type(encoded) is str and len(encoded) <= limit, 'Invalid stored JSON')
+
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, 'Duplicate stored JSON field')
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(encoded, object_pairs_hook=unique,
+                           parse_constant=lambda _: (_ for _ in ()).throw(Invalid('Nonfinite stored JSON')))
+    except (ValueError, RecursionError):
+        raise Invalid('Invalid stored JSON') from None
+    require(type(value) is dict, 'Invalid stored JSON')
+    return value
+
+
+def _validate_facts(outpoint_key, encoded):
+    facts = _decode_object(encoded, 32_768)
+    require(set(facts) == FACT_FIELDS and facts['schema'] == 'bloch-btc-output-observation-v1'
+            and facts['network'] in NETWORKS, 'Invalid stored outpoint facts')
+    hash_bytes(facts['txid'])
+    vout = integer(facts['vout'], 0, 0xffffffff)
+    require(facts['outpoint_key'] == '{}:{}:{}'.format(facts['network'], facts['txid'], vout)
+            and facts['outpoint_key'] == outpoint_key, 'Stored facts do not match outpoint key')
+    amount = facts['amount_sats']
+    require(type(amount) is str and 1 <= len(amount) <= 16 and amount.isascii() and amount.isdigit()
+            and not amount.startswith('0') and int(amount) <= MAX_MONEY,
+            'Invalid stored outpoint amount')
+    script = facts['script_pubkey_hex']
+    require(type(script) is str and 2 <= len(script) <= MAX_SCRIPT_BYTES * 2
+            and len(script) % 2 == 0 and all(character in '0123456789abcdef' for character in script),
+            'Invalid stored outpoint script')
+    for flag in ('inclusion_verified', 'finality_verified', 'custody_verified',
+                 'mint_authorized', 'bridge_ready'):
+        require(facts[flag] is False, 'Stored outpoint facts contain authorization')
 
 
 def _validate_evidence(status, requested_block_hash, required_confirmations, evidence):
@@ -184,21 +227,18 @@ def read_state(path, outpoint_key):
     """Read historical state only; even an 'observed' record requires fresh evidence."""
     require(type(outpoint_key) is str and 0 < len(outpoint_key) <= 160, 'Invalid outpoint key')
     with database(path, write=False) as db:
-        row = db.execute('''SELECT revision, status, block_hash, required_confirmations, evidence
+        row = db.execute('''SELECT facts, revision, status, block_hash, required_confirmations, evidence
                             FROM btc_tracking WHERE outpoint=?''', (outpoint_key,)).fetchone()
     require(row is not None, 'Outpoint is not tracked')
-    revision, status, block_hash, required_confirmations, encoded = row
+    facts, revision, status, block_hash, required_confirmations, encoded = row
+    _validate_facts(outpoint_key, facts)
     integer(revision, 1, MAX_REVISION)
     integer(required_confirmations, 1, 100_000)
     hash_bytes(block_hash)
     require(status in STATES, 'Invalid tracking state')
     evidence = None
     if encoded is not None:
-        require(type(encoded) is str and len(encoded) <= 4096, 'Invalid stored evidence')
-        try:
-            evidence = json.loads(encoded)
-        except (ValueError, RecursionError):
-            raise Invalid('Invalid stored evidence') from None
+        evidence = _decode_object(encoded, 4096)
     _validate_evidence(status, block_hash, required_confirmations, evidence)
     return {'schema': 'bloch-btc-tracking-v1', 'outpoint_key': outpoint_key,
             'revision': revision, 'last_refresh_status': status, 'requested_block_hash': block_hash,

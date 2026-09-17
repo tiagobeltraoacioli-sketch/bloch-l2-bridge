@@ -350,6 +350,9 @@ Disk reads and process restarts cannot restore a usable confirmation decision.
 Historical reads also fail closed if stored evidence is absent for a completed
 refresh, present for an incomplete refresh, bound to another block or policy, or
 contradicts its active-chain, confirmation arithmetic or status classification.
+The stored deposit facts are revalidated against the requested outpoint; malformed
+amounts/scripts, duplicate JSON fields and any persisted authorization flag are
+refused instead of being exposed as historical state.
 All custody, inclusion, finality, mint and bridge-ready flags remain false. Future
 signing/credit integration must revalidate the current revision and chain state;
 this cache is not an approval token or a complete reorg-safe mint protocol.
