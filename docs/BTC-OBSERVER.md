@@ -128,7 +128,8 @@ root, including explicit odd-node duplicates. The verifier checks the 80-byte
 header hash, stripped transaction txid, branch depth, index, duplication rules
 and Merkle root. It refuses equal real sibling pairs along the supplied branch
 and 64-byte stripped transaction leaves to avoid leaf/inner-node ambiguity.
-Duplicate JSON keys, unknown fields and nonfinite numbers are refused.
+Duplicate JSON keys, unknown fields, floating-point values and integers wider
+than the observer's bounded integer inputs are refused.
 
 A successful nested `proof` reports `merkle_membership_verified: true`, while
 `header_chain_verified`, `inclusion_verified`, `finality_verified`,

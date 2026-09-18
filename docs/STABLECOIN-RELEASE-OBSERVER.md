@@ -176,7 +176,9 @@ height. Future checkpoints, expired certificates and malformed or missing policy
 are rejected before launching the verifier. Policy belongs to the operator trust
 file; additional policy fields in a certificate are rejected. Output records the
 applied limits. Existing four-field trust files must be updated explicitly; there
-is no implicit unlimited default. These checks still depend on an independently
+is no implicit unlimited default. The checkpoint root is also mandatory and
+nonzero; an all-zero unanchored sentinel is refused before the verifier starts.
+These checks still depend on an independently
 refreshed `current_height` and do not establish live consensus freshness themselves.
 
 ## Cross-repository cryptographic integration check

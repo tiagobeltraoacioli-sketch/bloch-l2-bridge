@@ -82,8 +82,9 @@ The tool requires Python 3.9+ on Unix. It allows HTTPS, or literal loopback HTTP
 for fixtures. Credentials, query strings, redirects and implicit proxies are
 refused. Synthetic manifests cannot contact remote nodes. HTTP requests have
 five-second socket timeouts and a 40-second total collection deadline. Each JSON
-response/file is limited to 1 MiB; duplicate JSON fields, compressed HTTP bodies,
-ambiguous lengths and truncated responses are refused. Logs, topics, data and
+response/file is limited to 1 MiB; duplicate JSON fields, floating-point numbers,
+oversized integer tokens, compressed HTTP bodies, ambiguous lengths and truncated
+responses are refused. Logs, topics, data and
 block transaction lists have additional bounds. Endpoints and remote exception
 messages never appear in error reports.
 

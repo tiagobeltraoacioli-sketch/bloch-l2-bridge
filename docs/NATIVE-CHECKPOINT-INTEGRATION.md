@@ -38,7 +38,8 @@ that node's `getchaininfo`, not the RPC envelope. The command checks finalized
 epoch, block root and height agreement plus consistent epoch length. Different
 heads above the common checkpoint are allowed. Missing/null finalization,
 malformed integers and inconsistent positions are refused. The common JSON
-loader limits the entire input to 1 MiB and rejects duplicate keys.
+loader limits the entire input to 1 MiB and rejects duplicate keys. Finalized
+roots and each report's head block/state identities must be nonzero.
 
 This offline diagnostic cannot prove operator independence, source identity,
 genesis identity, signatures, freshness or native DEX state inclusion. Distinct
