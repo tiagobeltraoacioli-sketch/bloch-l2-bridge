@@ -4,8 +4,8 @@ use bloch_l2_bridge::envelope::{DepositEnvelope, TxOutput};
 use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
-    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, SourceCheckpoint,
-    VaultSet, WatcherSnapshotError, WatcherState, WatcherSyncError,
+    BlockSource, BlockSourceView, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource,
+    SourceCheckpoint, VaultSet, WatcherSnapshotError, WatcherState, WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -452,6 +452,38 @@ struct SameHashChangingInterior {
     interior_reads: std::cell::Cell<usize>,
 }
 
+struct InvalidatingView {
+    source: MemorySource,
+    generation: std::cell::Cell<u64>,
+    invalidated: std::cell::Cell<bool>,
+}
+
+impl BlockSource for InvalidatingView {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let block = self.source.block_at(height)?;
+        if height == 1 && !self.invalidated.replace(true) {
+            self.generation.set(self.generation.get() + 1);
+        }
+        Some(block)
+    }
+}
+
+impl BlockSourceView for InvalidatingView {
+    type ViewToken = u64;
+
+    fn view_token(&self) -> Self::ViewToken {
+        self.generation.get()
+    }
+
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool {
+        *token == self.generation.get()
+    }
+}
+
 impl BlockSource for SameHashChangingInterior {
     fn tip_height(&self) -> Option<u64> {
         self.source.tip_height()
@@ -580,6 +612,51 @@ fn same_hash_interior_content_change_is_refused_before_commit() {
     );
     assert_eq!(watcher.state(), before, "refusal must be atomic");
     assert_eq!(watcher.tracked().count(), 0);
+    assert_eq!(watcher.creditable().count(), 0);
+}
+
+#[test]
+fn immutable_view_token_invalidation_is_refused_atomically() {
+    let mut source = MemorySource::new();
+    let mut parent = [0; 32];
+    for height in 0u64..3 {
+        let hash = bloch_l2_bridge::merkle::keccak256(&height.to_le_bytes());
+        source
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+
+    // Complete block rechecks cannot observe an external snapshot-handle
+    // invalidation when the returned block values happen to remain identical.
+    let unguarded = InvalidatingView {
+        source: source.clone(),
+        generation: std::cell::Cell::new(0),
+        invalidated: std::cell::Cell::new(false),
+    };
+    let mut legacy = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    legacy.try_sync(&unguarded).unwrap();
+    assert_eq!(legacy.tip_height(), Some(2));
+
+    let guarded = InvalidatingView {
+        source,
+        generation: std::cell::Cell::new(0),
+        invalidated: std::cell::Cell::new(false),
+    };
+    let original_token = guarded.view_token();
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    let before = watcher.state();
+    assert_eq!(
+        watcher.try_sync_view(&guarded),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert!(!guarded.token_is_current(&original_token));
+    assert_eq!(watcher.state(), before, "invalidation must be atomic");
     assert_eq!(watcher.creditable().count(), 0);
 }
 

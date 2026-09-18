@@ -11,7 +11,10 @@
 //! * **roll-forward** with parent-hash linkage checks;
 //! * **atomic source validation**: missing or inconsistent source data is a
 //!   typed refusal through `try_sync`, without changing persisted state;
-//!   catch-up and rewinds have an explicit per-call block limit;
+//!   catch-up and rewinds have an explicit per-call block limit. Hosts with a
+//!   real snapshot handle should implement [`BlockSourceView`] and call
+//!   [`DepositWatcher::try_sync_view`] so token invalidation/ABA is also a
+//!   typed atomic refusal;
 //! * **replay safety**: re-syncing an unchanged source emits nothing —
 //!   a reprocessed block can never double-observe or double-credit a
 //!   deposit (dedup key = `deposit_id = (txid, first vault-paying vout)`,
@@ -120,6 +123,7 @@ pub enum WatcherSyncError {
         expected: [u8; 32],
         actual: [u8; 32],
     },
+    ViewInvalidated,
     ZeroWorkLimit,
 }
 
@@ -165,6 +169,29 @@ pub trait BlockSource {
     fn block_at(&self, height: u64) -> Option<L1Block>;
 }
 
+/// A [`BlockSource`] exposed through one host-managed immutable view.
+///
+/// The token is an operational consistency contract, not chain
+/// authentication. Implementations MUST assign a token that is never reused
+/// for a distinct view, make [`Self::token_is_current`] monotonically false
+/// once that view is invalidated, and return one coherent snapshot from all
+/// [`BlockSource`] calls while the token is current. A database read
+/// transaction or node RPC snapshot handle can satisfy this contract.
+///
+/// This crate cannot verify that an implementation honors those rules. Even a
+/// correct implementation proves neither PoW nor canonicality; the host still
+/// authenticates what the immutable view represents.
+pub trait BlockSourceView: BlockSource {
+    type ViewToken: Eq;
+
+    /// Capture the identity of the currently exposed immutable view.
+    fn view_token(&self) -> Self::ViewToken;
+
+    /// Whether `token` still identifies the immutable view returned by this
+    /// source. Once false for a token, this MUST remain false forever.
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool;
+}
+
 /// A simple in-memory [`BlockSource`] for tests and tooling, with strict
 /// linkage checks on `push` and an explicit `reorg_to` truncation.
 #[derive(Debug, Clone, Default)]
@@ -205,6 +232,18 @@ impl BlockSource for MemorySource {
     }
     fn block_at(&self, height: u64) -> Option<L1Block> {
         self.blocks.get(height as usize).cloned()
+    }
+}
+
+impl BlockSourceView for MemorySource {
+    type ViewToken = ();
+
+    fn view_token(&self) -> Self::ViewToken {}
+
+    fn token_is_current(&self, _token: &Self::ViewToken) -> bool {
+        // MemorySource has no interior mutation; an immutable borrow is a
+        // stable view for the entire call.
+        true
     }
 }
 
@@ -933,9 +972,48 @@ impl DepositWatcher {
         source: &S,
         limit: usize,
     ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        self.try_sync_with_limit_guarded(source, limit, || true)
+    }
+
+    /// Sync against an explicitly versioned immutable source view.
+    ///
+    /// The captured token is checked before every source read and immediately
+    /// before durable state changes. Invalidation therefore fails atomically;
+    /// a host that obeys [`BlockSourceView`]'s non-reuse contract also closes
+    /// the ABA window that repeated block reads alone cannot detect.
+    pub fn try_sync_view<S: BlockSourceView>(
+        &mut self,
+        source: &S,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        self.try_sync_view_with_limit(source, DEFAULT_SYNC_LIMIT)
+    }
+
+    /// Bounded variant of [`Self::try_sync_view`].
+    pub fn try_sync_view_with_limit<S: BlockSourceView>(
+        &mut self,
+        source: &S,
+        limit: usize,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        let token = source.view_token();
+        self.try_sync_with_limit_guarded(source, limit, || source.token_is_current(&token))
+    }
+
+    fn try_sync_with_limit_guarded<S, F>(
+        &mut self,
+        source: &S,
+        limit: usize,
+        view_is_current: F,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError>
+    where
+        S: BlockSource,
+        F: Fn() -> bool,
+    {
         self.view_verified = false;
         if limit == 0 {
             return Err(WatcherSyncError::ZeroWorkLimit);
+        }
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
         }
         let tip = source.tip_height().ok_or(WatcherSyncError::EmptySource)?;
         // Record the first complete value returned at every touched height.
@@ -945,6 +1023,9 @@ impl DepositWatcher {
         // a consensus block hash from its reduced L1Block representation.
         let observed = RefCell::new(BTreeMap::<u64, L1Block>::new());
         let read = |height| {
+            if !view_is_current() {
+                return Err(WatcherSyncError::ViewInvalidated);
+            }
             let block = source
                 .block_at(height)
                 .ok_or(WatcherSyncError::MissingBlock { height })?;
@@ -1125,6 +1206,9 @@ impl DepositWatcher {
             if read(expected.height)? != expected {
                 return Err(WatcherSyncError::ViewChanged);
             }
+        }
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
         }
 
         let mut updates = Vec::new();
