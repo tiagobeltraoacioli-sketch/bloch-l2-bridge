@@ -176,7 +176,12 @@ def _begin_refresh(path, deposit, block_hash, min_confirmations):
     with database(path, write=True) as db:
         count = db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
         require(type(count) is int and 0 <= count <= MAX_ROWS, 'Invalid tracking row count')
-        row = db.execute('SELECT facts, revision FROM btc_tracking WHERE outpoint=?', (key,)).fetchone()
+        # Bound persisted text before SQLite materializes it in Python. A
+        # private database can still be corrupt after a crash or disk fault;
+        # the 256 MiB file cap is not an acceptable per-row parser bound.
+        row = db.execute('''SELECT facts, revision FROM btc_tracking WHERE outpoint=?
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+            AND typeof(revision)='integer' ''', (key,)).fetchone()
         if row is None:
             require(count < MAX_ROWS, 'Tracking row limit')
             revision = 1
@@ -209,7 +214,13 @@ def _finish_refresh(path, key, revision, result):
         count = db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
         before = db.execute('''SELECT facts, revision, status, block_hash,
                 required_confirmations, evidence FROM btc_tracking WHERE outpoint=?
-                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768''',
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+                AND typeof(revision)='integer'
+                AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+                AND typeof(block_hash)='text' AND length(CAST(block_hash AS BLOB))=64
+                AND typeof(required_confirmations)='integer'
+                AND (evidence IS NULL OR (typeof(evidence)='text'
+                     AND length(CAST(evidence AS BLOB))<=4096))''',
                 (key,)).fetchone()
         require(before is not None, 'Invalid tracking refresh identity')
         facts, current_revision, current_status, block_hash, required_confirmations, prior = before
@@ -226,7 +237,13 @@ def _finish_refresh(path, key, revision, result):
         require(changed == 1, 'Refresh was superseded; discard its result')
         after = db.execute('''SELECT facts, revision, status, block_hash,
                 required_confirmations, evidence FROM btc_tracking WHERE outpoint=?
-                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768''',
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+                AND typeof(revision)='integer'
+                AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+                AND typeof(block_hash)='text' AND length(CAST(block_hash AS BLOB))=64
+                AND typeof(required_confirmations)='integer'
+                AND (evidence IS NULL OR (typeof(evidence)='text'
+                     AND length(CAST(evidence AS BLOB))<=4096))''',
                 (key,)).fetchone()
         require(after == (facts, revision, status, block_hash, required_confirmations, evidence),
                 'Tracking result readback mismatch')
@@ -266,7 +283,14 @@ def read_state(path, outpoint_key):
     require(type(outpoint_key) is str and 0 < len(outpoint_key) <= 160, 'Invalid outpoint key')
     with database(path, write=False) as db:
         row = db.execute('''SELECT facts, revision, status, block_hash, required_confirmations, evidence
-                            FROM btc_tracking WHERE outpoint=?''', (outpoint_key,)).fetchone()
+            FROM btc_tracking WHERE outpoint=?
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+            AND typeof(revision)='integer'
+            AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+            AND typeof(block_hash)='text' AND length(CAST(block_hash AS BLOB))=64
+            AND typeof(required_confirmations)='integer'
+            AND (evidence IS NULL OR (typeof(evidence)='text'
+                 AND length(CAST(evidence AS BLOB))<=4096))''', (outpoint_key,)).fetchone()
     require(row is not None, 'Outpoint is not tracked')
     facts, revision, status, block_hash, required_confirmations, encoded = row
     _validate_facts(outpoint_key, facts)

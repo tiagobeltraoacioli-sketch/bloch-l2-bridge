@@ -277,6 +277,28 @@ class BitcoinTrackingTest(unittest.TestCase):
             db.execute('UPDATE btc_tracking SET facts=?', (encoded,))
         self.assertEqual(self.state()['last_refresh_status'], 'observed')
 
+    def test_read_refuses_oversized_or_wrongly_typed_storage_fields(self):
+        self.refresh()
+        columns = ('facts', 'revision', 'status', 'block_hash', 'required_confirmations', 'evidence')
+        with sqlite3.connect(self.path) as db:
+            original = db.execute('SELECT ' + ','.join(columns) + ' FROM btc_tracking').fetchone()
+        mutations = (
+            "facts=CAST(zeroblob(32769) AS TEXT)",
+            "evidence=CAST(zeroblob(4097) AS TEXT)",
+            "revision='invalid'",
+            "status=CAST(status AS BLOB)",
+            "block_hash=CAST(block_hash AS BLOB)",
+            "required_confirmations='invalid'",
+        )
+        for assignment in mutations:
+            with self.subTest(assignment=assignment):
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE btc_tracking SET ' + assignment)
+                with self.assertRaises(Invalid):
+                    self.state()
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE btc_tracking SET ' + ','.join(name + '=?' for name in columns), original)
+
     def test_post_commit_sync_failure_leaves_only_pending_state(self):
         with patch.object(tracking.os, 'fsync', side_effect=OSError('Injected sync failure')):
             with self.assertRaises(OSError):
@@ -305,6 +327,19 @@ class BitcoinTrackingTest(unittest.TestCase):
             db.execute('''CREATE TRIGGER corrupt_tracking_identity AFTER UPDATE OF status ON btc_tracking
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE btc_tracking SET facts='{}', block_hash=printf('%064d', 0)
+                          WHERE outpoint=NEW.outpoint; END''')
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)
+
+    def test_oversized_result_mutation_is_rejected_before_json_decode(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_tracking_result AFTER UPDATE OF status ON btc_tracking
+                          WHEN NEW.status != 'refreshing'
+                          BEGIN UPDATE btc_tracking SET evidence=CAST(zeroblob(4097) AS TEXT)
                           WHERE outpoint=NEW.outpoint; END''')
         with self.assertRaisesRegex(Invalid, 'readback mismatch'):
             self.refresh()
