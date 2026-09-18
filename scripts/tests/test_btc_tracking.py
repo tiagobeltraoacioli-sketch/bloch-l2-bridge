@@ -57,6 +57,7 @@ class BitcoinTrackingTest(unittest.TestCase):
         self.refresh()
         node = Node()
         node.info.update(blocks=103, headers=103, bestblockhash='cd' * 32)
+        node.tip_active = node.info['bestblockhash']
         node.metadata['confirmations'] = 4
         self.assertFalse(self.refresh(node)['chain']['confirmation_policy_met'])
         self.assertEqual(self.state()['last_refresh_status'], 'below_threshold')

@@ -25,6 +25,7 @@ class Node:
         self.genesis = CHAINS[network][1]
         self.header = self.proof['header'].hex()
         self.active = self.block_hash
+        self.tip_active = self.info['bestblockhash']
         self.calls = []
         self.after = None
 
@@ -33,7 +34,7 @@ class Node:
         if method == 'getblockchaininfo':
             return copy.deepcopy(self.after if len(self.calls) > 1 and self.after is not None else self.info)
         if method == 'getblockhash':
-            return self.genesis if params == [0] else self.active
+            return self.genesis if params == [0] else self.tip_active if params == [self.info['blocks']] else self.active
         if method == 'getblockheader':
             return copy.deepcopy(self.metadata) if params[1] else self.header
         raise AssertionError('Unexpected RPC method')
@@ -53,8 +54,8 @@ class BitcoinChainTest(unittest.TestCase):
             self.assertEqual(result['chain']['confirmations'], 6)
             self.assertEqual(result['outpoint_key'], network + ':' + decode(node.raw).txid + ':0')
             self.assertEqual([method for method, _ in node.calls], [
-                'getblockchaininfo', 'getblockhash', 'getblockheader', 'getblockheader',
-                'getblockhash', 'getblockchaininfo'])
+                'getblockchaininfo', 'getblockhash', 'getblockhash', 'getblockheader',
+                'getblockheader', 'getblockhash', 'getblockchaininfo', 'getblockhash'])
             for section in (result, result['proof'], result['chain']):
                 for flag in ('inclusion_verified', 'finality_verified', 'custody_verified',
                              'mint_authorized', 'bridge_ready'):
@@ -116,6 +117,13 @@ class BitcoinChainTest(unittest.TestCase):
             node.after = dict(node.info, **changes)
             with self.subTest(changes=changes), self.assertRaises(Invalid):
                 node.assess()
+
+    def test_best_block_hash_is_pinned_to_active_height(self):
+        node = Node()
+        node.tip_active = 'ff' * 32
+        with self.assertRaisesRegex(Invalid, 'Best block hash'):
+            node.assess()
+        self.assertEqual(node.calls, [('getblockchaininfo', []), ('getblockhash', [105])])
 
     def test_invalid_local_inputs_make_no_rpc_requests(self):
         for value in (0, -1, True, 1.0, 100001):

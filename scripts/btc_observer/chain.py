@@ -41,6 +41,12 @@ def snapshot(info, network):
     return height, tip, work
 
 
+def pin_tip(rpc, view):
+    active = rpc('getblockhash', [view[0]])
+    hash_bytes(active)
+    require(active == view[1], 'Best block hash does not match active chain')
+
+
 def assess_deposit(rpc, deposit, proof, *, expected_block_hash, min_confirmations):
     """Check one output and its proof against a stable pair of node tip reads.
 
@@ -66,6 +72,7 @@ def _assess(rpc, deposit, proof, expected_block_hash, min_confirmations, allow_o
     membership = verify_branch(deposit['raw'], expected_block_hash=expected_block_hash, **proof)
     network = deposit['network']
     before = snapshot(rpc('getblockchaininfo', []), network)
+    pin_tip(rpc, before)
     require(rpc('getblockhash', [0]) == CHAINS[network][1], 'Wrong genesis block')
     metadata = rpc('getblockheader', [expected_block_hash, True])
     require(type(metadata) is dict and metadata.get('hash') == expected_block_hash,
@@ -90,6 +97,7 @@ def _assess(rpc, deposit, proof, expected_block_hash, min_confirmations, allow_o
         require((active_hash == expected_block_hash) == active, 'Inconsistent active chain membership')
     after = snapshot(rpc('getblockchaininfo', []), network)
     require(before == after, 'Chain tip changed during observation; retry from fresh evidence')
+    pin_tip(rpc, after)
     observation['proof'] = membership
     observation['chain'] = {
         'schema': 'bloch-btc-node-assessment-v1',

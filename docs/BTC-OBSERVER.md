@@ -192,11 +192,13 @@ The assessment:
 2. Matches the selected network and pinned genesis. Standard signet additionally
    requires its pinned challenge; custom signets are refused.
 3. Requires no initial block download, equal header/block heights and no node
-   warnings. This is a conservative local acceptance policy.
+   warnings, and pins `bestblockhash` with `getblockhash(tip_height)` before
+   and after the remaining reads. This is a conservative local acceptance policy.
 4. Compares the node's header bytes, Merkle root and transaction count with the
    supplied proof, checks active-chain membership at the reported height and
    verifies the reported confirmation arithmetic.
-5. Re-reads chain information and requires the same height, tip hash and chainwork.
+5. Re-reads chain information and requires the same height, tip hash and chainwork,
+   then pins that ending tip hash to its active height again.
    A tip extension or reorg observed during collection fails; retry with fresh
    evidence. The collector does not loop or relax this check automatically.
 
