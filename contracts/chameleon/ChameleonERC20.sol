@@ -86,7 +86,7 @@ contract ChameleonERC20 is ERC20 {
         if (block.chainid != destinationChainId) revert WrongChain();
         if (
             item.route != routeId() || item.amount == 0 || item.recipient == address(0)
-                || item.recipient == address(this) || proof.length > 4096
+                || item.recipient == address(this) || item.nativeTransaction == bytes32(0) || proof.length > 4096
         ) revert InvalidExport();
         if (mintedExportNonce[item.nonce]) revert ExportAlreadyMinted();
         bytes32 id = ChameleonWire.exportId(item);
