@@ -94,13 +94,31 @@ pub const DEFAULT_SYNC_LIMIT: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatcherSyncError {
     EmptySource,
-    MissingBlock { height: u64 },
-    WrongHeight { requested: u64, received: u64 },
-    InconsistentParent { height: u64 },
+    MissingBlock {
+        height: u64,
+    },
+    WrongHeight {
+        requested: u64,
+        received: u64,
+    },
+    InconsistentParent {
+        height: u64,
+    },
     ViewChanged,
     RewindLimitExceeded,
     RestoreValidationLimitExceeded,
-    RestoredDepositMismatch { deposit: DepositId },
+    RestoredDepositMismatch {
+        deposit: DepositId,
+    },
+    TrustedCheckpointUnavailable {
+        height: u64,
+        tip: u64,
+    },
+    TrustedCheckpointMismatch {
+        height: u64,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
     ZeroWorkLimit,
 }
 
@@ -311,6 +329,9 @@ pub struct DepositWatcher {
     /// Ephemeral: after restore, retained deposits must be re-derived from
     /// authenticated source blocks before the mint worklist can be exposed.
     restore_needs_validation: bool,
+    /// Ephemeral host trust policy. Kept out of [`WatcherState`] because a
+    /// checkpoint restored from the same rollbackable bytes adds no trust.
+    source_checkpoint: Option<SourceCheckpoint>,
     vaults: VaultSet,
     /// Only envelopes naming THIS chain id are deposits for this L2.
     l2_chain_id: u64,
@@ -553,6 +574,7 @@ impl DepositWatcher {
         DepositWatcher {
             view_verified: false,
             restore_needs_validation: false,
+            source_checkpoint: None,
             vaults,
             l2_chain_id,
             journal: Vec::new(),
@@ -760,6 +782,7 @@ impl DepositWatcher {
         Ok(DepositWatcher {
             view_verified: false,
             restore_needs_validation: true,
+            source_checkpoint: None,
             vaults: state.vaults,
             l2_chain_id: state.l2_chain_id,
             journal: state.journal,
@@ -783,9 +806,28 @@ impl DepositWatcher {
         Self::from_state(state)
     }
 
+    /// The host-supplied source checkpoint currently enforced on every sync.
+    /// It is intentionally absent from [`Self::state`].
+    pub fn source_checkpoint(&self) -> Option<SourceCheckpoint> {
+        self.source_checkpoint
+    }
+
+    /// Explicitly replace the external checkpoint after the host has
+    /// authenticated a fork according to its own policy.
+    ///
+    /// Merely calling this method is the host's authorization; this crate
+    /// cannot authenticate the replacement. The current mint worklist is
+    /// disabled immediately and remains unavailable until a successful sync
+    /// proves the source contains the replacement checkpoint.
+    pub fn replace_source_checkpoint(&mut self, checkpoint: SourceCheckpoint) {
+        self.source_checkpoint = Some(checkpoint);
+        self.view_verified = false;
+    }
+
     /// Restore using trusted configuration and an independently authenticated
     /// source checkpoint. Prefer this over [`Self::from_state_for`] when the
-    /// host can retain a monotonic checkpoint outside the snapshot store.
+    /// host can retain a checkpoint outside the snapshot store and explicitly
+    /// replace it when its authenticated fork policy requires recovery.
     pub fn from_state_for_checkpoint(
         state: WatcherState,
         vaults: &VaultSet,
@@ -812,7 +854,9 @@ impl DepositWatcher {
                 actual,
             });
         }
-        Self::from_state(state)
+        let mut watcher = Self::from_state(state)?;
+        watcher.source_checkpoint = Some(checkpoint);
+        Ok(watcher)
     }
 
     /// The durable credit log: deposit_ids ever announced `Creditable`.
@@ -871,10 +915,12 @@ impl DepositWatcher {
 
     /// Bounded sync: append at most `limit` blocks, or refuse a rewind deeper
     /// than `limit`. Repeat successful calls until `tip_height()` catches up.
-    /// At most `3 * limit + 4` block requests are made after restore (the
+    /// At most `3 * limit + 6` block requests are made after restore (the
     /// additional budget re-derives retained deposits from source blocks), and
-    /// at most `2 * limit + 4` otherwise. Only the new suffix is staged,
-    /// without copying the full historical journal or credit log.
+    /// at most `2 * limit + 6` otherwise. The two additional requests apply
+    /// when a trusted checkpoint is pinned: it is checked before staging and
+    /// rechecked before commit. Only the new suffix is staged, without copying
+    /// the full historical journal or credit log.
     ///
     /// The host must bound individual block/transaction sizes and RPC latency,
     /// and supply authenticated blocks from its own node. This trait cannot
@@ -904,6 +950,25 @@ impl DepositWatcher {
             Ok(block)
         };
         let tip_block = read(tip)?;
+        let checkpoint_block = if let Some(checkpoint) = self.source_checkpoint {
+            if tip < checkpoint.height {
+                return Err(WatcherSyncError::TrustedCheckpointUnavailable {
+                    height: checkpoint.height,
+                    tip,
+                });
+            }
+            let block = read(checkpoint.height)?;
+            if block.hash != checkpoint.hash {
+                return Err(WatcherSyncError::TrustedCheckpointMismatch {
+                    height: checkpoint.height,
+                    expected: checkpoint.hash,
+                    actual: block.hash,
+                });
+            }
+            Some(block)
+        } else {
+            None
+        };
 
         // Locate the common prefix without popping any live state. Heights
         // beyond a confirmed shorter tip may be rewound; a missing block AT
@@ -1044,6 +1109,11 @@ impl DepositWatcher {
         }
         if source.tip_height() != Some(tip) || read(tip)? != tip_block {
             return Err(WatcherSyncError::ViewChanged);
+        }
+        if let Some(checkpoint_block) = checkpoint_block {
+            if read(checkpoint_block.height)? != checkpoint_block {
+                return Err(WatcherSyncError::ViewChanged);
+            }
         }
 
         let mut updates = Vec::new();

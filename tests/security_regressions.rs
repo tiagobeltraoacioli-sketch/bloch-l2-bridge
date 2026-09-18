@@ -162,6 +162,69 @@ fn trusted_checkpoint_refuses_an_older_but_internally_valid_snapshot() {
 }
 
 #[test]
+fn trusted_checkpoint_remains_enforced_until_explicit_fork_recovery() {
+    let (current, source) = fixture(1, 24);
+    let vaults = VaultSet::new([VAULT]);
+    let tip = source.block_at(23).unwrap();
+    let checkpoint = SourceCheckpoint {
+        height: tip.height,
+        hash: tip.hash,
+    };
+    let encoded = serde_json::to_vec(&current.state()).unwrap();
+    let mut pinned = DepositWatcher::restore_json_at_checkpoint(
+        encoded.as_slice(),
+        encoded.len() as u64,
+        &vaults,
+        CHAIN,
+        checkpoint,
+    )
+    .unwrap();
+    pinned.try_sync(&source).unwrap();
+    assert_eq!(pinned.creditable().count(), 1);
+
+    let mut replacement = source.clone();
+    replacement.reorg_to(0);
+    let mut parent = [0; 32];
+    for height in 0u64..24 {
+        let mut preimage = vec![0xff];
+        preimage.extend_from_slice(&height.to_le_bytes());
+        let hash = bloch_l2_bridge::merkle::keccak256(&preimage);
+        replacement
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+
+    let before = pinned.state();
+    assert!(matches!(
+        pinned.try_sync(&replacement),
+        Err(WatcherSyncError::TrustedCheckpointMismatch { height: 23, .. })
+    ));
+    assert_eq!(pinned.state(), before, "checkpoint refusal must be atomic");
+    assert_eq!(pinned.creditable().count(), 0, "refusal disables work");
+
+    let replacement_tip = replacement.block_at(23).unwrap();
+    let replacement_checkpoint = SourceCheckpoint {
+        height: replacement_tip.height,
+        hash: replacement_tip.hash,
+    };
+    pinned.replace_source_checkpoint(replacement_checkpoint);
+    assert_eq!(pinned.source_checkpoint(), Some(replacement_checkpoint));
+    assert_eq!(pinned.creditable().count(), 0);
+    let updates = pinned.try_sync(&replacement).unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        bloch_l2_bridge::WatcherUpdate::CreditableReorged { .. }
+    )));
+    assert_eq!(pinned.credit_reorg_alarms().len(), 1);
+}
+
+#[test]
 fn watcher_snapshot_refuses_unknown_authority_fields() {
     let (watcher, _) = fixture(1, 1);
     let mut encoded = serde_json::to_value(watcher.state()).unwrap();
