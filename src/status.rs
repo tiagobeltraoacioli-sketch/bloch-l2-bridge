@@ -133,6 +133,7 @@ pub enum WithdrawalStatus {
 // remains useful for pure state-machine tests; the persistence boundary is
 // deliberately stricter.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 enum WithdrawalStatusWire {
     Queued {
         amount_atoms: u64,
@@ -1222,6 +1223,10 @@ mod tests {
         let mut shallow = valid;
         shallow["ReleaseEligible"]["depth"] = serde_json::json!(287);
         assert!(serde_json::from_value::<WithdrawalStatus>(shallow).is_err());
+
+        let mut extended = serde_json::to_value(eligible()).unwrap();
+        extended["ReleaseEligible"]["caller_gate"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<WithdrawalStatus>(extended).is_err());
     }
 
     #[test]
