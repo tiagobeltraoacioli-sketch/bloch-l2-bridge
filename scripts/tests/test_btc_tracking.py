@@ -298,6 +298,19 @@ class BitcoinTrackingTest(unittest.TestCase):
         self.assertEqual(state['last_refresh_status'], 'refreshing')
         self.assertEqual(state['revision'], 2)
 
+    def test_silent_identity_mutation_during_result_write_is_rolled_back(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER corrupt_tracking_identity AFTER UPDATE OF status ON btc_tracking
+                          WHEN NEW.status != 'refreshing'
+                          BEGIN UPDATE btc_tracking SET facts='{}', block_hash=printf('%064d', 0)
+                          WHERE outpoint=NEW.outpoint; END''')
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)
+
 
 if __name__ == '__main__':
     unittest.main()

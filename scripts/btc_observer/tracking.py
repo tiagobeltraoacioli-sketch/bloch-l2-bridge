@@ -201,13 +201,31 @@ def _finish_refresh(path, key, revision, result):
         evidence = json.dumps({field: chain[field] for field in EVIDENCE_FIELDS}, sort_keys=True)
     with database(path, write=True) as db:
         count = db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
+        before = db.execute('''SELECT facts, revision, status, block_hash,
+                required_confirmations, evidence FROM btc_tracking WHERE outpoint=?
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768''',
+                (key,)).fetchone()
+        require(before is not None, 'Invalid tracking refresh identity')
+        facts, current_revision, current_status, block_hash, required_confirmations, prior = before
+        require(current_revision == revision and current_status == 'refreshing',
+                'Refresh was superseded; discard its result')
+        _validate_facts(key, facts)
+        integer(current_revision, 1, MAX_REVISION)
+        hash_bytes(block_hash)
+        integer(required_confirmations, 1, 100_000)
+        _validate_evidence(current_status, block_hash, required_confirmations, prior)
         changed = db.execute('''UPDATE btc_tracking SET status=?, evidence=?
                                 WHERE outpoint=? AND revision=? AND status='refreshing' ''',
                              (status, evidence, key, revision)).rowcount
         require(changed == 1, 'Refresh was superseded; discard its result')
-        require(db.execute('SELECT status, evidence FROM btc_tracking WHERE outpoint=?',
-                           (key,)).fetchone() == (status, evidence),
+        after = db.execute('''SELECT facts, revision, status, block_hash,
+                required_confirmations, evidence FROM btc_tracking WHERE outpoint=?
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768''',
+                (key,)).fetchone()
+        require(after == (facts, revision, status, block_hash, required_confirmations, evidence),
                 'Tracking result readback mismatch')
+        checked_evidence = None if evidence is None else _decode_object(evidence, 4096)
+        _validate_evidence(status, block_hash, required_confirmations, checked_evidence)
         require(db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0] == count,
                 'Tracking row count changed unexpectedly')
     return status

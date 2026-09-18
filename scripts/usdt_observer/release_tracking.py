@@ -144,20 +144,27 @@ def _begin(path, route, expected):
                 'release refresh invalidation readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
                 == count + int(row is None), 'release tracking row count changed unexpectedly')
-    return key, revision
+    return key, facts, revision
 
 
-def _finish(path, key, revision, observation):
+def _finish(path, key, facts, revision, observation):
     status = 'observed' if observation is not None else 'unavailable'
     encoded = json.dumps(observation, sort_keys=True, allow_nan=False) if observation is not None else None
     with database(path, write=True) as db:
         count = db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
+        before = db.execute('''SELECT facts, revision, status, observation
+            FROM release_tracking WHERE burn=? AND typeof(facts)='text'
+            AND length(CAST(facts AS BLOB))<=4096''', (key,)).fetchone()
+        require(before == (facts, revision, 'refreshing', None),
+                'release refresh superseded; discard response')
         changed = db.execute('''UPDATE release_tracking SET status=?, observation=?
             WHERE burn=? AND revision=? AND status='refreshing' ''',
             (status, encoded, key, revision)).rowcount
         require(changed == 1, 'release refresh superseded; discard response')
-        require(db.execute('SELECT status, observation FROM release_tracking WHERE burn=?',
-                           (key,)).fetchone() == (status, encoded),
+        require(db.execute('''SELECT facts, revision, status, observation
+                FROM release_tracking WHERE burn=? AND typeof(facts)='text'
+                AND length(CAST(facts AS BLOB))<=4096''', (key,)).fetchone()
+                == (facts, revision, status, encoded),
                 'release refresh result readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0] == count,
                 'release tracking row count changed unexpectedly')
@@ -172,7 +179,7 @@ def refresh(path, route, expected, tx_hash, collector):
     route, expected = copy.deepcopy(route), copy.deepcopy(expected)
     tx = word(tx_hash, 32)
     require(any(tx), 'zero transaction hash')
-    key, revision = _begin(path, route, expected)
+    key, facts, revision = _begin(path, route, expected)
     try:
         captured = copy.deepcopy(collector())
         require(type(captured) is dict and 'vault_runtime' in captured, 'vault evidence required')
@@ -181,9 +188,9 @@ def refresh(path, route, expected, tx_hash, collector):
         validate_runtime(route, evidence, captured['vault_runtime'])
         observation = match_release(route, evidence, expected)['observation']
     except Exception:
-        _finish(path, key, revision, None)
+        _finish(path, key, facts, revision, None)
         raise
-    _finish(path, key, revision, observation)
+    _finish(path, key, facts, revision, observation)
     return captured, {'revision': revision, 'last_refresh_status': 'observed',
                       'requires_fresh_evidence': True, 'redemption_settled': False}
 

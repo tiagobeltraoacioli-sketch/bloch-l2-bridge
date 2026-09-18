@@ -182,3 +182,15 @@ class ReleaseTrackingTest(unittest.TestCase):
         state = self.state()
         self.assertEqual(state['last_refresh_status'], 'refreshing')
         self.assertEqual(state['revision'], 2)
+
+    def test_silent_identity_mutation_during_result_write_is_rolled_back(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER corrupt_release_identity AFTER UPDATE OF status ON release_tracking
+                          WHEN NEW.status != 'refreshing'
+                          BEGIN UPDATE release_tracking SET facts='{}' WHERE burn=NEW.burn; END''')
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)
