@@ -737,16 +737,32 @@ impl DepositWatcher {
         // will survive this sync before changing any durable state. Deposits
         // at/above `keep` are being rewound and need no validation.
         if self.restore_needs_validation {
-            let heights: BTreeSet<u64> = self
-                .tracked
-                .values()
-                .filter(|tracked| tracked.event.l1_block_height < keep as u64)
-                .map(|tracked| tracked.event.l1_block_height)
-                .collect();
+            // When the retained journal fits the explicit work budget, replay
+            // every block. This proves snapshot completeness against the
+            // supplied source, including a snapshot that omitted the only
+            // deposit in a block. For larger journals, retain the bounded
+            // historical behavior of authenticating every claimed deposit's
+            // source block; a local snapshot alone cannot prove omissions in
+            // unvisited history.
+            let heights: BTreeSet<u64> = if keep <= limit {
+                (0..keep as u64).collect()
+            } else {
+                self.tracked
+                    .values()
+                    .filter(|tracked| tracked.event.l1_block_height < keep as u64)
+                    .map(|tracked| tracked.event.l1_block_height)
+                    .collect()
+            };
             if heights.len() > limit {
                 return Err(WatcherSyncError::RestoreValidationLimitExceeded);
             }
-            let mut derived = BTreeMap::new();
+            // Replay sampled blocks through one verifier. A fresh verifier per
+            // height would forget deposit-id dedup between blocks and could
+            // replace an earlier legitimate observation when the same tx is
+            // repeated in a later block that also contains another tracked
+            // deposit. Restore validation must match normal watcher replay.
+            let mut verifier = DepositWatcher::new(self.vaults.clone(), self.l2_chain_id);
+            let mut ignored = Vec::new();
             for height in heights {
                 let block = read(height)?;
                 if block.hash != self.journal[height as usize]
@@ -754,20 +770,30 @@ impl DepositWatcher {
                 {
                     return Err(WatcherSyncError::ViewChanged);
                 }
-                let mut verifier = DepositWatcher::new(self.vaults.clone(), self.l2_chain_id);
-                let mut ignored = Vec::new();
                 verifier.scan_block(&block, &mut ignored);
-                derived.extend(verifier.tracked);
+                ignored.clear();
             }
             for (deposit, tracked) in self
                 .tracked
                 .iter()
                 .filter(|(_, tracked)| tracked.event.l1_block_height < keep as u64)
             {
-                let matches_source = derived.get(deposit).is_some_and(|observed| {
+                let matches_source = verifier.tracked.get(deposit).is_some_and(|observed| {
                     observed.event == tracked.event && observed.requirement == tracked.requirement
                 });
                 if !matches_source {
+                    return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
+                }
+            }
+            // Scanning a retained deposit's block can also reveal another
+            // valid deposit omitted from the snapshot. Refuse that detectable
+            // truncation instead of silently accepting an incomplete replay.
+            for deposit in verifier.tracked.keys() {
+                if !self
+                    .tracked
+                    .get(deposit)
+                    .is_some_and(|tracked| tracked.event.l1_block_height < keep as u64)
+                {
                     return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
                 }
             }
@@ -1121,6 +1147,74 @@ mod tests {
         extend(&mut src, "main", vec![tx]);
         assert_eq!(w.sync(&src), vec![]);
         assert_eq!(w.tracked().count(), 1);
+    }
+
+    #[test]
+    fn restore_validation_preserves_cross_block_deposit_deduplication() {
+        let mut src = chain("main", 1);
+        let first = deposit_tx(9, ATOMS_PER_BLCH, [0x33; 20], CHAIN_ID);
+        extend(&mut src, "main", vec![first.clone()]);
+        // The repeated first deposit shares a block with a second deposit, so
+        // both heights must be source-validated after restore.
+        extend(
+            &mut src,
+            "main",
+            vec![first, deposit_tx(10, ATOMS_PER_BLCH, [0x44; 20], CHAIN_ID)],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 2);
+        let state = watcher.state();
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(restored.try_sync(&src), Ok(vec![]));
+        assert_eq!(restored.state(), state);
+        assert_eq!(restored.tracked().count(), 2);
+    }
+
+    #[test]
+    fn restore_validation_refuses_omitted_deposit_in_scanned_block() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![
+                deposit_tx(11, ATOMS_PER_BLCH, [0x55; 20], CHAIN_ID),
+                deposit_tx(12, ATOMS_PER_BLCH, [0x66; 20], CHAIN_ID),
+            ],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 2);
+        let mut state = watcher.state();
+        let omitted = state.tracked.pop().unwrap().0;
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(
+            restored.try_sync(&src),
+            Err(WatcherSyncError::RestoredDepositMismatch { deposit: omitted })
+        );
+        assert_eq!(restored.state(), state, "refusal must be atomic");
+        assert_eq!(restored.creditable().count(), 0);
+    }
+
+    #[test]
+    fn restore_validation_refuses_sole_omitted_deposit_within_work_budget() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(13, ATOMS_PER_BLCH, [0x77; 20], CHAIN_ID)],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 1);
+        let mut state = watcher.state();
+        let omitted = state.tracked.pop().unwrap().0;
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(
+            restored.try_sync_with_limit(&src, 2),
+            Err(WatcherSyncError::RestoredDepositMismatch { deposit: omitted })
+        );
+        assert_eq!(restored.state(), state, "refusal must be atomic");
     }
 
     #[test]
