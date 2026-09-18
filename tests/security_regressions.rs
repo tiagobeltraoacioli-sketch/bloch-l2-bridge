@@ -147,6 +147,37 @@ fn restore_binds_reorg_alarms_to_credit_tier_and_configuration() {
 }
 
 #[test]
+fn restore_binds_remined_deposit_facts_to_permanent_alarm_history() {
+    let (watcher, _) = fixture(1, 24);
+    let mut state = watcher.state();
+    let mut alarm = state.tracked[0].1.event;
+    // A re-mined transaction may move blocks, but its txid commits these
+    // amount/recipient facts. Conflicting history for one deposit_id is not a
+    // valid replay of the same deposit.
+    alarm.l1_block_hash = [0x77; 32];
+    alarm.l1_block_height += 10;
+    state.credit_reorg_alarms.push(alarm);
+    assert!(DepositWatcher::from_state(state.clone()).is_ok());
+
+    for field in 0..2 {
+        let mut conflicting = state.clone();
+        let alarm = conflicting.credit_reorg_alarms.last_mut().unwrap();
+        if field == 0 {
+            alarm.amount_atoms += 1;
+        } else {
+            alarm.l2_recipient = [0x99; 20];
+        }
+        reject(conflicting);
+    }
+
+    let mut duplicate = state;
+    let mut conflicting_alarm = duplicate.credit_reorg_alarms[0];
+    conflicting_alarm.amount_atoms += 1;
+    duplicate.credit_reorg_alarms.push(conflicting_alarm);
+    reject(duplicate);
+}
+
+#[test]
 fn restore_cannot_auto_credit_operator_review_tier() {
     let (watcher, _) = fixture(1001 * ATOMS_PER_BLCH, 288);
     let mut state = watcher.state();

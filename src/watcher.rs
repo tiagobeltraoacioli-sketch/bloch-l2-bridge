@@ -69,6 +69,15 @@ use crate::status::{confirmation_depth, ConfirmationRequirement, DepositEvent};
 /// `deposit_id := (txid, first vault-paying vout)` — §5.
 pub type DepositId = ([u8; 32], u32);
 
+/// Facts committed by a transaction/deposit identity and therefore invariant
+/// when that transaction is re-mined in another block.
+fn same_deposit_facts(left: &DepositEvent, right: &DepositEvent) -> bool {
+    left.deposit_id() == right.deposit_id()
+        && left.amount_atoms == right.amount_atoms
+        && left.l2_chain_id == right.l2_chain_id
+        && left.l2_recipient == right.l2_recipient
+}
+
 /// Anti-dust minimum deposit, in atoms. §5 marks the real value TBD
 /// ("MIN_DEPOSIT_ATOMS, anti-dust, TBD"); 1 atom is the PLACEHOLDER floor
 /// (i.e. only the degenerate zero-vault-payment case is excluded).
@@ -485,7 +494,7 @@ impl DepositWatcher {
     /// [`WatcherRestoreError::DepositHashNotInJournal`]).
     pub fn from_state(state: WatcherState) -> Result<Self, WatcherRestoreError> {
         let journal_len = state.journal.len();
-        let mut alarmed = BTreeSet::new();
+        let mut alarmed = BTreeMap::new();
         for event in &state.credit_reorg_alarms {
             let deposit = event.deposit_id();
             let invalid = |reason| WatcherRestoreError::InvalidReorgAlarm { deposit, reason };
@@ -509,7 +518,11 @@ impl DepositWatcher {
                     "automatic-credit alarm is absent from durable credit log",
                 ));
             }
-            alarmed.insert(deposit);
+            if let Some(previous) = alarmed.insert(deposit, *event) {
+                if !same_deposit_facts(&previous, event) {
+                    return Err(invalid("conflicting immutable deposit facts"));
+                }
+            }
         }
         let mut tracked = BTreeMap::new();
         for (id, t) in state.tracked {
@@ -579,12 +592,21 @@ impl DepositWatcher {
             if requirement.needs_operator_review() && state.credited.contains(&id) {
                 return Err(invalid("operator-review deposit in automatic credit log"));
             }
+            if alarmed
+                .get(&id)
+                .is_some_and(|alarm| !same_deposit_facts(alarm, &t.event))
+            {
+                return Err(WatcherRestoreError::InvalidReorgAlarm {
+                    deposit: id,
+                    reason: "conflicting immutable deposit facts",
+                });
+            }
             if tracked.insert(id, t).is_some() {
                 return Err(WatcherRestoreError::DuplicateDeposit { deposit: id });
             }
         }
         for deposit in &state.credited {
-            if !tracked.contains_key(deposit) && !alarmed.contains(deposit) {
+            if !tracked.contains_key(deposit) && !alarmed.contains_key(deposit) {
                 return Err(WatcherRestoreError::UnaccountedCredit { deposit: *deposit });
             }
         }
