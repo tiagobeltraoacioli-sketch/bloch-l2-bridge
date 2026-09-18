@@ -37,7 +37,9 @@
 //!   [`DepositWatcher::from_state`]) so a HOST can persist it across
 //!   process restarts — a restarted watcher re-syncing the same chain
 //!   emits nothing and never re-credits history. This crate itself still
-//!   does NO file I/O;
+//!   does NO file I/O. [`DepositWatcher::restore_json_for`] is the preferred
+//!   JSON boundary: it bounds the stream before decoding and binds the
+//!   snapshot to independently trusted vault/chain configuration;
 //! * the **K(amount) gate**: a deposit is announced [`WatcherUpdate::
 //!   Creditable`] only at depth ≥ K for the Automatic tiers, and is parked
 //!   as [`WatcherUpdate::NeedsOperatorReview`] on the review tier — NEVER
@@ -396,6 +398,49 @@ pub enum WatcherRestoreError {
     UnaccountedCredit { deposit: DepositId },
 }
 
+/// Failures at the bounded JSON snapshot boundary.
+///
+/// This is deliberately separate from [`WatcherRestoreError`]: decoding an
+/// untrusted byte stream can fail before a typed [`WatcherState`] exists.
+#[derive(Debug)]
+pub enum WatcherSnapshotError {
+    /// Reading the bounded snapshot stream failed.
+    Io(std::io::Error),
+    /// The stream contained more bytes than the host-selected limit.
+    TooLarge { limit: u64 },
+    /// `limit + 1` cannot be represented for the bounded probe read.
+    InvalidSizeLimit,
+    /// The bounded bytes are not a valid [`WatcherState`] JSON document.
+    Json(serde_json::Error),
+    /// The decoded state failed invariant or trusted-configuration checks.
+    Restore(WatcherRestoreError),
+}
+
+impl core::fmt::Display for WatcherSnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "watcher snapshot read failed: {error}"),
+            Self::TooLarge { limit } => {
+                write!(f, "watcher snapshot exceeds the {limit}-byte host limit")
+            }
+            Self::InvalidSizeLimit => write!(f, "watcher snapshot size limit is invalid"),
+            Self::Json(error) => write!(f, "watcher snapshot JSON is invalid: {error}"),
+            Self::Restore(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for WatcherSnapshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Restore(error) => Some(error),
+            Self::TooLarge { .. } | Self::InvalidSizeLimit => None,
+        }
+    }
+}
+
 impl core::fmt::Display for WatcherRestoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -469,6 +514,42 @@ impl DepositWatcher {
             credited: self.credited.clone(),
             credit_reorg_alarms: self.credit_reorg_alarms.clone(),
         }
+    }
+
+    /// Read, decode and validate a JSON snapshot under a host-selected byte
+    /// limit and independently trusted configuration.
+    ///
+    /// Prefer this over an unbounded `serde_json::from_reader` followed by
+    /// [`Self::from_state`]. The `limit + 1` probe refuses an oversized stream
+    /// before serde can materialize its historical vectors. The host chooses
+    /// the limit because journal size grows with chain history; this crate
+    /// cannot impose one universal operational retention policy.
+    ///
+    /// This does NOT authenticate the bytes, establish file ownership, or
+    /// detect rollback to an older valid snapshot. The host must provide those
+    /// durability/provenance guarantees and revalidate the restored view
+    /// against its authenticated [`BlockSource`] before using the worklist.
+    pub fn restore_json_for<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+    ) -> Result<Self, WatcherSnapshotError> {
+        use std::io::Read;
+
+        let probe = limit
+            .checked_add(1)
+            .ok_or(WatcherSnapshotError::InvalidSizeLimit)?;
+        let mut encoded = Vec::new();
+        reader
+            .take(probe)
+            .read_to_end(&mut encoded)
+            .map_err(WatcherSnapshotError::Io)?;
+        if encoded.len() as u64 > limit {
+            return Err(WatcherSnapshotError::TooLarge { limit });
+        }
+        let state = serde_json::from_slice(&encoded).map_err(WatcherSnapshotError::Json)?;
+        Self::from_state_for(state, vaults, l2_chain_id).map_err(WatcherSnapshotError::Restore)
     }
 
     /// Restore a watcher from a persisted [`WatcherState`], VALIDATING it

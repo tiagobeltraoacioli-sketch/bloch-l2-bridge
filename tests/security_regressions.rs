@@ -4,8 +4,8 @@ use bloch_l2_bridge::envelope::{DepositEnvelope, TxOutput};
 use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
-    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet, WatcherState,
-    WatcherSyncError,
+    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet,
+    WatcherSnapshotError, WatcherState, WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -57,6 +57,40 @@ fn reject(state: WatcherState) {
     let encoded = serde_json::to_vec(&state).unwrap();
     let decoded = serde_json::from_slice(&encoded).unwrap();
     assert!(DepositWatcher::from_state(decoded).is_err());
+}
+
+#[test]
+fn watcher_json_restore_bounds_before_decode_and_binds_trusted_config() {
+    let (watcher, _) = fixture(1, 1);
+    let state = watcher.state();
+    let encoded = serde_json::to_vec(&state).unwrap();
+    let vaults = VaultSet::new([VAULT]);
+
+    let restored =
+        DepositWatcher::restore_json_for(encoded.as_slice(), encoded.len() as u64, &vaults, CHAIN)
+            .unwrap();
+    assert_eq!(restored.state(), state);
+
+    let oversized = vec![b' '; 129];
+    assert!(matches!(
+        DepositWatcher::restore_json_for(oversized.as_slice(), 128, &vaults, CHAIN),
+        Err(WatcherSnapshotError::TooLarge { limit: 128 })
+    ));
+    assert!(matches!(
+        DepositWatcher::restore_json_for(encoded.as_slice(), u64::MAX, &vaults, CHAIN),
+        Err(WatcherSnapshotError::InvalidSizeLimit)
+    ));
+    assert!(matches!(
+        DepositWatcher::restore_json_for(
+            encoded.as_slice(),
+            encoded.len() as u64,
+            &VaultSet::new([[0xbb; 20]]),
+            CHAIN,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::ConfigurationMismatch
+        ))
+    ));
 }
 
 #[test]
