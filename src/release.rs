@@ -167,8 +167,32 @@ impl Serialize for WithdrawalQueue {
 
 impl<'de> Deserialize<'de> for WithdrawalQueue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let messages = Vec::<WithdrawalMessage>::deserialize(deserializer)?;
-        WithdrawalQueue::from_messages(messages).map_err(serde::de::Error::custom)
+        struct QueueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for QueueVisitor {
+            type Value = WithdrawalQueue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a gapless withdrawal message sequence")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                // Replay while decoding instead of first materializing an
+                // attacker-controlled Vec. A corrupt early nonce, zero
+                // amount, zero recipient, epoch regression or full tree is
+                // therefore refused before any untrusted tail is decoded.
+                let mut queue = WithdrawalQueue::new();
+                while let Some(message) = sequence.next_element::<WithdrawalMessage>()? {
+                    queue.initiate(message).map_err(serde::de::Error::custom)?;
+                }
+                Ok(queue)
+            }
+        }
+
+        deserializer.deserialize_seq(QueueVisitor)
     }
 }
 
@@ -1247,6 +1271,25 @@ mod tests {
             "gapped nonce history must fail to deserialize"
         );
         assert!(WithdrawalQueue::from_messages(bad).is_err());
+    }
+
+    /// A corrupt prefix must be refused while it is decoded. In particular,
+    /// restoration must not first materialize an untrusted snapshot tail:
+    /// this deliberately truncated JSON would otherwise fail on EOF only
+    /// after consuming everything following the already-invalid nonce.
+    #[test]
+    fn queue_restore_refuses_invalid_prefix_before_decoding_tail() {
+        let first = serde_json::to_string(&message(0)).unwrap();
+        let gapped = serde_json::to_string(&message(2)).unwrap();
+        let truncated_tail = format!("[{first},{gapped},");
+        let error = serde_json::from_str::<WithdrawalQueue>(&truncated_tail).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("withdrawal nonce 2 != expected 1"),
+            "restore should reject the corrupt prefix before parsing its tail: {error}"
+        );
     }
 
     /// FIX-2 pin: nullifier-log round-trip preserves the paid set — a host
