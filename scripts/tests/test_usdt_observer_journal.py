@@ -1,6 +1,7 @@
 """Local journal durability and conflict regressions; no keys or mint authority."""
 import copy
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -78,6 +79,30 @@ class JournalTest(unittest.TestCase):
             with self.subTest(altered=altered), self.assertRaises(Invalid):
                 self.record([altered])
             self.assertEqual(self.rows(), original)
+
+    def test_idempotent_retry_revalidates_all_persisted_identity_columns(self):
+        self.record()
+        mutations = [
+            ("UPDATE observations SET source_event=?", ('00' * 32,)),
+            ("UPDATE observations SET route_nonce=?", ('unbound:0',)),
+            ("UPDATE observations SET evidence_sha256=?", ('not-a-digest',)),
+        ]
+        original = self.path.read_bytes()
+        for statement, parameters in mutations:
+            self.path.write_bytes(original)
+            with sqlite3.connect(self.path) as connection:
+                connection.execute(statement, parameters)
+            with self.subTest(statement=statement), self.assertRaises(Invalid):
+                self.record()
+
+    def test_hardlinked_journal_is_refused_without_modification(self):
+        self.record()
+        alias = self.directory / 'journal-alias.sqlite'
+        os.link(self.path, alias)
+        before = self.path.read_bytes()
+        with self.assertRaises(Invalid):
+            self.record()
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_source_event_alias_is_rejected_within_and_across_routes(self):
         self.record()

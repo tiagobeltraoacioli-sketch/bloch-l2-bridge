@@ -65,7 +65,8 @@ def record(path, route, observations, evidence_sha256):
         created = True
     except FileExistsError:
         info = path.lstat()
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                and not info.st_mode & 0o077
                 and info.st_size <= MAX_DB_BYTES, 'invalid existing journal file')
     # A private directory and single operator are prerequisites; no credentials
     # or arbitrary SQL/schema from the caller are accepted.
@@ -93,16 +94,20 @@ def record(path, route, observations, evidence_sha256):
         added = duplicate = 0
         for observation in checked:
             encoded = json.dumps(observation, sort_keys=True, separators=(',', ':'), allow_nan=False)
-            prior = connection.execute('SELECT observation_json FROM observations WHERE deposit_id=?',
-                                       (observation['deposit_id'],)).fetchone()
-            if prior:
-                require(prior[0] == encoded, 'conflicting observation for existing deposit')
-                duplicate += 1
-                continue
-            require(count + added < MAX_ROWS, 'observation journal capacity reached')
             source_event = hashlib.sha256(word(observation['source_domain'], 32)
                 + word(observation['tx_hash'], 32) + observation['log_index'].to_bytes(4, 'big')).hexdigest()
             route_nonce = observation['route_id'] + ':' + str(observation['nonce'])
+            prior = connection.execute('''SELECT source_event, route_nonce, observation_json, evidence_sha256
+                FROM observations WHERE deposit_id=?''',
+                                       (observation['deposit_id'],)).fetchone()
+            if prior:
+                require(prior[:3] == (source_event, route_nonce, encoded)
+                        and type(prior[3]) is str and len(prior[3]) == 64
+                        and all(char in '0123456789abcdef' for char in prior[3]),
+                        'conflicting or corrupt observation for existing deposit')
+                duplicate += 1
+                continue
+            require(count + added < MAX_ROWS, 'observation journal capacity reached')
             connection.execute('INSERT INTO observations VALUES (?,?,?,?,?)',
                                (observation['deposit_id'], source_event, route_nonce, encoded, evidence_sha256))
             added += 1

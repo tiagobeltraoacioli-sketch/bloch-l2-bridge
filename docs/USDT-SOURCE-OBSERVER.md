@@ -96,6 +96,8 @@ the original HTTP bytes or a consensus commitment.
 Create a dedicated directory with mode 0700 and pass
 `--journal /PRIVATE_DIRECTORY/observations.sqlite`. The file is mode 0600 and
 must belong to the operator. Unrelated databases and symlinks are refused.
+Hard-linked database files are also refused so one journal path cannot mutate
+another retained operator artifact.
 No private key or API credential is accepted or persisted.
 
 All observations from a receipt are committed in one SQLite transaction with
@@ -103,7 +105,10 @@ full synchronization. Deposit IDs, source transaction/log identities and route
 nonces are unique. Repeating identical facts is idempotent; changing a known
 block, amount, recipient or source event rejects the entire batch. This detects
 conflicting history; it does not automatically choose a fork or undo a mint.
-The first evidence digest is retained on duplicate observations.
+The first evidence digest is retained on duplicate observations. An idempotent
+retry revalidates the stored source-event key, route/nonce key, canonical facts
+and first-evidence digest shape before reporting a duplicate; altered metadata
+is refused rather than silently accepted.
 
 The journal stops at 100,000 rows or a 256 MiB database limit and requires at
 least 64 MiB free disk. It does not delete old records to make room. Use a private
