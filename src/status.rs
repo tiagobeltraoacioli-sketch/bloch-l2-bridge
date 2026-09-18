@@ -408,8 +408,33 @@ impl WithdrawalStatus {
         use WithdrawalEvent as E;
         use WithdrawalStatus as S;
 
+        // Enum variants are public data in Rust, so callers can construct a
+        // state without going through this transition function. Normalize an
+        // impossible eligible state before handling even a benign event;
+        // persistence rejects the same shape during deserialization above.
+        let state = match self {
+            S::ReleaseEligible {
+                commit_txid,
+                depth,
+                required_depth,
+                amount_atoms,
+            } => {
+                let derived = u64::from(confirmation_depth(amount_atoms).min_depth());
+                if required_depth == derived && depth >= derived {
+                    self
+                } else {
+                    S::Provable {
+                        commit_txid,
+                        depth,
+                        amount_atoms,
+                    }
+                }
+            }
+            state => state,
+        };
+
         // Halt is absorbing: nothing here recovers a halted bridge.
-        if let S::Halted = self {
+        if let S::Halted = state {
             return S::Halted;
         }
         // A deep reorg halts unconditionally (from any non-halted state).
@@ -419,7 +444,7 @@ impl WithdrawalStatus {
         // A fork freezes any non-halted state; a `Frozen` state keeps the
         // earliest (lowest) fork point observed so far.
         if let E::ForkObserved { fork_point } = event {
-            return match self {
+            return match state {
                 S::Frozen {
                     fork_point: prev,
                     amount_atoms,
@@ -438,7 +463,7 @@ impl WithdrawalStatus {
             };
         }
 
-        match (self, event) {
+        match (state, event) {
             // Queued only advances on an anchor observation.
             (S::Queued { amount_atoms }, E::AnchorObserved { commit_txid, depth }) => S::Provable {
                 commit_txid,
@@ -1197,5 +1222,27 @@ mod tests {
         let mut shallow = valid;
         shallow["ReleaseEligible"]["depth"] = serde_json::json!(287);
         assert!(serde_json::from_value::<WithdrawalStatus>(shallow).is_err());
+    }
+
+    #[test]
+    fn step_normalizes_directly_constructed_release_gate_bypass() {
+        let forged = WithdrawalStatus::ReleaseEligible {
+            commit_txid: [9; 32],
+            depth: 1,
+            required_depth: 1,
+            amount_atoms: LARGE,
+        };
+        assert_eq!(forged.step(AUTH), provable(9, 1, LARGE));
+
+        let wrong_tier = WithdrawalStatus::ReleaseEligible {
+            commit_txid: [8; 32],
+            depth: 288,
+            required_depth: 96,
+            amount_atoms: LARGE,
+        };
+        assert_eq!(
+            wrong_tier.step(WithdrawalEvent::AnchorDepthReported { depth: 300 }),
+            provable(8, 300, LARGE)
+        );
     }
 }
