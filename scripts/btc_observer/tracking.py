@@ -34,8 +34,14 @@ def _decode_object(encoded, limit):
             value[key] = item
         return value
 
+    def bounded_integer(raw):
+        require(len(raw) <= 19, 'Oversized stored integer')
+        return integer(int(raw), 0, MAX_REVISION)
+
     try:
         value = json.loads(encoded, object_pairs_hook=unique,
+                           parse_int=bounded_integer,
+                           parse_float=lambda _: (_ for _ in ()).throw(Invalid('Floating stored JSON')),
                            parse_constant=lambda _: (_ for _ in ()).throw(Invalid('Nonfinite stored JSON')))
     except (ValueError, RecursionError):
         raise Invalid('Invalid stored JSON') from None

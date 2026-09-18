@@ -266,7 +266,8 @@ class BitcoinTrackingTest(unittest.TestCase):
                     db.execute('UPDATE btc_tracking SET facts=?', (json.dumps(corrupt),))
                 with self.assertRaises(Invalid):
                     self.state()
-        for corrupt in ('{"schema":"one","schema":"two"}', '[]', '{"amount_sats":NaN}'):
+        for corrupt in ('{"schema":"one","schema":"two"}', '[]', '{"amount_sats":NaN}',
+                        '{"vout":1.0}', '{"vout":99999999999999999999}'):
             with self.subTest(encoded=corrupt):
                 with sqlite3.connect(self.path) as db:
                     db.execute('UPDATE btc_tracking SET facts=?', (corrupt,))
