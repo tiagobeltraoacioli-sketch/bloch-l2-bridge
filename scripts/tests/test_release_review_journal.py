@@ -112,6 +112,20 @@ class ReviewJournalTest(unittest.TestCase):
                 self.record()
         self.assertEqual(self.rows(), [])
 
+    def test_oversized_audit_insert_mutation_is_detected_before_decode(self):
+        record(self.path, self.route, self.captured, self.expected)
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TABLE native_review_observations (
+                audit_id TEXT PRIMARY KEY, release_id TEXT NOT NULL, audit TEXT NOT NULL)''')
+            db.execute('''CREATE TRIGGER enlarge_new_audit AFTER INSERT ON native_review_observations
+                          BEGIN UPDATE native_review_observations
+                          SET audit=CAST(zeroblob(131073) AS TEXT)
+                          WHERE audit_id=NEW.audit_id; END''')
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            with self.assertRaisesRegex(ValueError, 'readback mismatch'):
+                self.record()
+        self.assertEqual(self.rows(), [])
+
 
     def test_read_is_historical_and_preserves_database_bytes(self):
         with patch('usdt_observer.native_review.verify_review', return_value=self.review):

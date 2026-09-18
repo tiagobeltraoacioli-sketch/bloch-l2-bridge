@@ -141,7 +141,14 @@ def record(path, route, captured, expected, *, native_verification=None):
         require(type(source_count) is int and 0 <= source_count <= MAX_ROWS,
                 'invalid release journal row count')
         prior = db.execute('''SELECT source_event, transfer_event, route_nonce, native_burn,
-            facts, first_evidence_sha256 FROM release_observations WHERE release_id=?''',
+            facts, first_evidence_sha256 FROM release_observations WHERE release_id=?
+            AND typeof(source_event)='text' AND length(CAST(source_event AS BLOB))=64
+            AND typeof(transfer_event)='text' AND length(CAST(transfer_event AS BLOB))=64
+            AND typeof(route_nonce)='text' AND length(CAST(route_nonce AS BLOB))<=87
+            AND typeof(native_burn)='text' AND length(CAST(native_burn AS BLOB))=64
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=16384
+            AND typeof(first_evidence_sha256)='text'
+            AND length(CAST(first_evidence_sha256 AS BLOB))=64''',
                            (observation['release_id'],)).fetchone()
         if prior is not None:
             require(prior[:5] == (event, transfer, nonce, burn, encoded)
@@ -157,7 +164,14 @@ def record(path, route, captured, expected, *, native_verification=None):
             db.execute('INSERT INTO release_observations VALUES (?,?,?,?,?,?,?)',
                        (observation['release_id'], event, transfer, nonce, burn, encoded, digest))
         require(db.execute('''SELECT source_event, transfer_event, route_nonce, native_burn,
-                facts, first_evidence_sha256 FROM release_observations WHERE release_id=?''',
+                facts, first_evidence_sha256 FROM release_observations WHERE release_id=?
+                AND typeof(source_event)='text' AND length(CAST(source_event AS BLOB))=64
+                AND typeof(transfer_event)='text' AND length(CAST(transfer_event AS BLOB))=64
+                AND typeof(route_nonce)='text' AND length(CAST(route_nonce AS BLOB))<=87
+                AND typeof(native_burn)='text' AND length(CAST(native_burn AS BLOB))=64
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=16384
+                AND typeof(first_evidence_sha256)='text'
+                AND length(CAST(first_evidence_sha256 AS BLOB))=64''',
                 (observation['release_id'],)).fetchone()
                 == (event, transfer, nonce, burn, encoded, digest if prior is None else prior[5]),
                 'release journal write readback mismatch')
@@ -172,8 +186,10 @@ def record(path, route, captured, expected, *, native_verification=None):
             review_count = db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0]
             require(type(review_count) is int and 0 <= review_count <= MAX_ROWS,
                     'invalid native review row count')
-            prior_review = db.execute('SELECT release_id, audit FROM native_review_observations WHERE audit_id=?',
-                                     (audit_id,)).fetchone()
+            prior_review = db.execute('''SELECT release_id, audit FROM native_review_observations
+                WHERE audit_id=? AND typeof(release_id)='text'
+                AND length(CAST(release_id AS BLOB))=66 AND typeof(audit)='text'
+                AND length(CAST(audit AS BLOB))<=131072''', (audit_id,)).fetchone()
             if prior_review is None:
                 require(review_count < MAX_ROWS, 'native review journal capacity reached')
                 db.execute('INSERT INTO native_review_observations VALUES (?,?,?)',
@@ -182,7 +198,9 @@ def record(path, route, captured, expected, *, native_verification=None):
             else:
                 require(prior_review == (observation['release_id'], audit), 'conflicting native review audit')
             require(db.execute('''SELECT release_id, audit FROM native_review_observations
-                    WHERE audit_id=?''', (audit_id,)).fetchone()
+                    WHERE audit_id=? AND typeof(release_id)='text'
+                    AND length(CAST(release_id AS BLOB))=66 AND typeof(audit)='text'
+                    AND length(CAST(audit AS BLOB))<=131072''', (audit_id,)).fetchone()
                     == (observation['release_id'], audit), 'native review write readback mismatch')
             require(db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0]
                     == review_count + int(prior_review is None),

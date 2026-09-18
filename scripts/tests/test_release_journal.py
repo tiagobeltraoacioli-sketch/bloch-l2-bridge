@@ -72,6 +72,7 @@ class ReleaseJournalTest(unittest.TestCase):
             ("UPDATE release_observations SET route_nonce=?", ('unbound:7',)),
             ("UPDATE release_observations SET native_burn=?", ('22' * 32,)),
             ("UPDATE release_observations SET first_evidence_sha256=?", ('bad',)),
+            ("UPDATE release_observations SET facts=CAST(zeroblob(16385) AS TEXT)", ()),
         ]
         for statement, parameters in mutations:
             self.path.write_bytes(original)
@@ -164,6 +165,18 @@ class ReleaseJournalTest(unittest.TestCase):
         with sqlite3.connect(self.path) as db:
             db.execute('''CREATE TRIGGER discard_new_release AFTER INSERT ON release_observations
                           BEGIN DELETE FROM release_observations WHERE release_id=NEW.release_id; END''')
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.record(fixture(nonce=8, burn='0x' + 'bc' * 32, tx='0x' + 'ad' * 32))
+        self.assertEqual(self.rows(), before)
+
+    def test_oversized_insert_mutation_is_detected_before_decode(self):
+        self.record()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_new_release AFTER INSERT ON release_observations
+                          BEGIN UPDATE release_observations
+                          SET facts=CAST(zeroblob(16385) AS TEXT)
+                          WHERE release_id=NEW.release_id; END''')
         before = self.rows()
         with self.assertRaisesRegex(Invalid, 'readback mismatch'):
             self.record(fixture(nonce=8, burn='0x' + 'bc' * 32, tx='0x' + 'ad' * 32))
