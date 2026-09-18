@@ -724,7 +724,7 @@ impl DepositWatcher {
             }
             Ok(block)
         };
-        let tip_hash = read(tip)?.hash;
+        let tip_block = read(tip)?;
 
         // Locate the common prefix without popping any live state. Heights
         // beyond a confirmed shorter tip may be rewound; a missing block AT
@@ -742,7 +742,11 @@ impl DepositWatcher {
         }
         while keep > 0 {
             let height = (keep - 1) as u64;
-            if read(height)?.hash == self.journal[keep - 1] {
+            let block = read(height)?;
+            if block.hash == self.journal[keep - 1] {
+                if height > 0 && block.parent_hash != self.journal[keep - 2] {
+                    return Err(WatcherSyncError::InconsistentParent { height });
+                }
                 break;
             }
             if self.journal.len() - keep >= limit {
@@ -855,11 +859,11 @@ impl DepositWatcher {
         // Revalidate both the end of the staged prefix and the advertised
         // tip. A source changing during discovery cannot poison durable logs.
         if let Some(last) = staged.last() {
-            if read(last.height)?.hash != last.hash {
+            if read(last.height)? != *last {
                 return Err(WatcherSyncError::ViewChanged);
             }
         }
-        if source.tip_height() != Some(tip) || read(tip)?.hash != tip_hash {
+        if source.tip_height() != Some(tip) || read(tip)? != tip_block {
             return Err(WatcherSyncError::ViewChanged);
         }
 

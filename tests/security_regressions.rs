@@ -259,12 +259,90 @@ impl BlockSource for MissingSource {
     }
 }
 
+struct SameHashWrongParent {
+    source: MemorySource,
+}
+
+impl BlockSource for SameHashWrongParent {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if Some(height) == self.source.tip_height() && height > 0 {
+            block.parent_hash = [0xee; 32];
+        }
+        Some(block)
+    }
+}
+
+struct SameHashChangingContents {
+    source: MemorySource,
+    tip_reads: std::cell::Cell<usize>,
+}
+
+impl BlockSource for SameHashChangingContents {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if Some(height) == self.source.tip_height() {
+            let reads = self.tip_reads.get();
+            self.tip_reads.set(reads + 1);
+            if reads > 0 {
+                block.txs.push(L1Tx {
+                    txid: [0xdd; 32],
+                    outputs: vec![],
+                });
+            }
+        }
+        Some(block)
+    }
+}
+
 #[test]
 fn missing_rpc_blocks_do_not_erase_history_or_fabricate_reorg_alarm() {
     let (mut watcher, _) = fixture(1, 24);
     let before = watcher.state();
     assert!(watcher.sync(&MissingSource).is_empty());
     assert_eq!(watcher.state(), before);
+    assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn matching_tip_hash_with_wrong_parent_cannot_reenable_worklist() {
+    let (mut watcher, source) = fixture(1, 24);
+    assert_eq!(watcher.creditable().count(), 1);
+    let before = watcher.state();
+
+    let inconsistent = SameHashWrongParent { source };
+    assert_eq!(
+        watcher.try_sync(&inconsistent),
+        Err(WatcherSyncError::InconsistentParent { height: 23 })
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.creditable().count(), 0);
+    assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn same_hash_tip_content_change_is_refused_atomically() {
+    let (mut watcher, source) = fixture(1, 24);
+    let before = watcher.state();
+    let changing = SameHashChangingContents {
+        source,
+        tip_reads: std::cell::Cell::new(0),
+    };
+
+    assert_eq!(
+        watcher.try_sync(&changing),
+        Err(WatcherSyncError::ViewChanged)
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.creditable().count(), 0);
     assert!(watcher.credit_reorg_alarms().is_empty());
 }
 
