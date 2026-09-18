@@ -15,7 +15,6 @@ def run_verifier(command, *, input, timeout=10):
     output = bytearray()
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL, start_new_session=True) as process:
-        completed = False
         try:
             with selectors.DefaultSelector() as selector:
                 os.set_blocking(process.stdin.fileno(), False)
@@ -55,15 +54,13 @@ def run_verifier(command, *, input, timeout=10):
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
                 code = process.wait(timeout=remaining)
-                completed = True
                 return subprocess.CompletedProcess(command, code, bytes(output))
         finally:
-            # A verifier may spawn a descendant that inherits stdout. Kill the
-            # isolated process group on every incomplete run so that descendant
-            # cannot outlive a timeout or keep the bounded pipe open forever.
-            if not completed:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            # A verifier may spawn a descendant that inherits stdout, or close
+            # its pipes and leave a daemon behind after returning valid output.
+            # Always terminate the isolated group once the one result is read.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()

@@ -56,3 +56,16 @@ class VerifierProcessTest(unittest.TestCase):
                 self.run_child(parent, timeout=0.1)
             time.sleep(0.7)
             self.assertFalse(marker.exists())
+
+    def test_success_terminates_descendants_that_closed_verifier_pipes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'daemon-survived'
+            descendant = "import pathlib,time;time.sleep(.5);pathlib.Path({!r}).write_text('bad')".format(str(marker))
+            parent = ("import subprocess,sys;subprocess.Popen([sys.executable,'-c',{!r}],"
+                      "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+                      "print('a'*64)".format(descendant))
+            result = self.run_child(parent, timeout=1)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b'a'*64+b'\n')
+            time.sleep(0.7)
+            self.assertFalse(marker.exists())
