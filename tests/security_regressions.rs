@@ -4,8 +4,8 @@ use bloch_l2_bridge::envelope::{DepositEnvelope, TxOutput};
 use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
-    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet,
-    WatcherSnapshotError, WatcherState, WatcherSyncError,
+    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, SourceCheckpoint,
+    VaultSet, WatcherSnapshotError, WatcherState, WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -89,6 +89,74 @@ fn watcher_json_restore_bounds_before_decode_and_binds_trusted_config() {
         ),
         Err(WatcherSnapshotError::Restore(
             bloch_l2_bridge::watcher::WatcherRestoreError::ConfigurationMismatch
+        ))
+    ));
+}
+
+#[test]
+fn trusted_checkpoint_refuses_an_older_but_internally_valid_snapshot() {
+    let (current, source) = fixture(1, 24);
+    assert_eq!(current.credited().len(), 1);
+    let vaults = VaultSet::new([VAULT]);
+    let tip = source.block_at(23).unwrap();
+    let checkpoint = SourceCheckpoint {
+        height: tip.height,
+        hash: tip.hash,
+    };
+
+    let mut old = DepositWatcher::new(vaults.clone(), CHAIN);
+    old.try_sync_with_limit(&source, 1).unwrap();
+    assert!(old.credited().is_empty());
+    let old_json = serde_json::to_vec(&old.state()).unwrap();
+
+    // Configuration and internal invariants alone cannot distinguish a valid
+    // historical snapshot from the latest durable state.
+    assert!(DepositWatcher::restore_json_for(
+        old_json.as_slice(),
+        old_json.len() as u64,
+        &vaults,
+        CHAIN,
+    )
+    .is_ok());
+    assert!(matches!(
+        DepositWatcher::restore_json_at_checkpoint(
+            old_json.as_slice(),
+            old_json.len() as u64,
+            &vaults,
+            CHAIN,
+            checkpoint,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::CheckpointBeyondJournal {
+                height: 23,
+                journal_len: 1,
+            }
+        ))
+    ));
+
+    let current_json = serde_json::to_vec(&current.state()).unwrap();
+    assert!(DepositWatcher::restore_json_at_checkpoint(
+        current_json.as_slice(),
+        current_json.len() as u64,
+        &vaults,
+        CHAIN,
+        checkpoint,
+    )
+    .is_ok());
+    let wrong_hash = SourceCheckpoint {
+        hash: [0xff; 32],
+        ..checkpoint
+    };
+    assert!(matches!(
+        DepositWatcher::restore_json_at_checkpoint(
+            current_json.as_slice(),
+            current_json.len() as u64,
+            &vaults,
+            CHAIN,
+            wrong_hash,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::CheckpointMismatch { height: 23, .. }
         ))
     ));
 }

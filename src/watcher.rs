@@ -354,6 +354,21 @@ pub struct WatcherState {
     pub credit_reorg_alarms: Vec<DepositEvent>,
 }
 
+/// A source checkpoint authenticated and retained independently by the host.
+///
+/// This value is not authenticated by the crate. Supplying it from the same
+/// rollbackable snapshot provides no protection; the host must obtain and
+/// preserve it through a stronger trust/durability boundary. Bloch has no
+/// finite finality: an authenticated reorg at or below this height makes the
+/// check fail closed, and only the host's explicit fork policy may replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceCheckpoint {
+    /// Absolute L1 block height.
+    pub height: u64,
+    /// Authenticated block hash at `height`.
+    pub hash: [u8; 32],
+}
+
 /// Why a persisted [`WatcherState`] was rejected by
 /// [`DepositWatcher::from_state`]. A corrupt/partial persisted file must fail
 /// the restore CLOSED — like the sibling [`crate::release::WithdrawalQueue`]
@@ -362,6 +377,14 @@ pub struct WatcherState {
 pub enum WatcherRestoreError {
     /// Snapshot configuration disagrees with the host's trusted configuration.
     ConfigurationMismatch,
+    /// The snapshot predates a host-supplied checkpoint.
+    CheckpointBeyondJournal { height: u64, journal_len: usize },
+    /// The snapshot's journal disagrees with a host-supplied checkpoint.
+    CheckpointMismatch {
+        height: u64,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
     /// A derived field or deposit fact violates the watcher invariants.
     InvalidDeposit {
         deposit: DepositId,
@@ -445,6 +468,21 @@ impl core::fmt::Display for WatcherRestoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::ConfigurationMismatch => write!(f, "watcher restore: configuration mismatch"),
+            Self::CheckpointBeyondJournal {
+                height,
+                journal_len,
+            } => write!(
+                f,
+                "watcher restore: checkpoint height {height} is outside a {journal_len}-block journal"
+            ),
+            Self::CheckpointMismatch {
+                height,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "watcher restore: checkpoint at height {height} is {actual:?}, expected {expected:?}"
+            ),
             Self::InvalidDeposit { deposit, reason } => {
                 write!(f, "watcher restore: invalid deposit {deposit:?}: {reason}")
             }
@@ -491,6 +529,26 @@ impl core::fmt::Display for WatcherRestoreError {
 impl std::error::Error for WatcherRestoreError {}
 
 impl DepositWatcher {
+    fn decode_json_bounded<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+    ) -> Result<WatcherState, WatcherSnapshotError> {
+        use std::io::Read;
+
+        let probe = limit
+            .checked_add(1)
+            .ok_or(WatcherSnapshotError::InvalidSizeLimit)?;
+        let mut encoded = Vec::new();
+        reader
+            .take(probe)
+            .read_to_end(&mut encoded)
+            .map_err(WatcherSnapshotError::Io)?;
+        if encoded.len() as u64 > limit {
+            return Err(WatcherSnapshotError::TooLarge { limit });
+        }
+        serde_json::from_slice(&encoded).map_err(WatcherSnapshotError::Json)
+    }
+
     pub fn new(vaults: VaultSet, l2_chain_id: u64) -> Self {
         DepositWatcher {
             view_verified: false,
@@ -535,21 +593,29 @@ impl DepositWatcher {
         vaults: &VaultSet,
         l2_chain_id: u64,
     ) -> Result<Self, WatcherSnapshotError> {
-        use std::io::Read;
-
-        let probe = limit
-            .checked_add(1)
-            .ok_or(WatcherSnapshotError::InvalidSizeLimit)?;
-        let mut encoded = Vec::new();
-        reader
-            .take(probe)
-            .read_to_end(&mut encoded)
-            .map_err(WatcherSnapshotError::Io)?;
-        if encoded.len() as u64 > limit {
-            return Err(WatcherSnapshotError::TooLarge { limit });
-        }
-        let state = serde_json::from_slice(&encoded).map_err(WatcherSnapshotError::Json)?;
+        let state = Self::decode_json_bounded(reader, limit)?;
         Self::from_state_for(state, vaults, l2_chain_id).map_err(WatcherSnapshotError::Restore)
+    }
+
+    /// Bounded JSON restore additionally pinned to an independently trusted
+    /// source checkpoint. This prevents an older, otherwise valid snapshot
+    /// from being accepted when the host retained a newer L1 checkpoint.
+    ///
+    /// The checkpoint proves only that this journal contains the supplied
+    /// `(height, hash)`. It does not authenticate later blocks, prove the
+    /// snapshot complete, or replace the mandatory post-restore source sync.
+    /// A real reorg at/below the checkpoint is a refusal until the host updates
+    /// its external checkpoint under its own disclosed fork policy.
+    pub fn restore_json_at_checkpoint<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+        checkpoint: SourceCheckpoint,
+    ) -> Result<Self, WatcherSnapshotError> {
+        let state = Self::decode_json_bounded(reader, limit)?;
+        Self::from_state_for_checkpoint(state, vaults, l2_chain_id, checkpoint)
+            .map_err(WatcherSnapshotError::Restore)
     }
 
     /// Restore a watcher from a persisted [`WatcherState`], VALIDATING it
@@ -713,6 +779,38 @@ impl DepositWatcher {
     ) -> Result<Self, WatcherRestoreError> {
         if &state.vaults != vaults || state.l2_chain_id != l2_chain_id {
             return Err(WatcherRestoreError::ConfigurationMismatch);
+        }
+        Self::from_state(state)
+    }
+
+    /// Restore using trusted configuration and an independently authenticated
+    /// source checkpoint. Prefer this over [`Self::from_state_for`] when the
+    /// host can retain a monotonic checkpoint outside the snapshot store.
+    pub fn from_state_for_checkpoint(
+        state: WatcherState,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+        checkpoint: SourceCheckpoint,
+    ) -> Result<Self, WatcherRestoreError> {
+        if &state.vaults != vaults || state.l2_chain_id != l2_chain_id {
+            return Err(WatcherRestoreError::ConfigurationMismatch);
+        }
+        let Some(actual) = usize::try_from(checkpoint.height)
+            .ok()
+            .and_then(|height| state.journal.get(height))
+            .copied()
+        else {
+            return Err(WatcherRestoreError::CheckpointBeyondJournal {
+                height: checkpoint.height,
+                journal_len: state.journal.len(),
+            });
+        };
+        if actual != checkpoint.hash {
+            return Err(WatcherRestoreError::CheckpointMismatch {
+                height: checkpoint.height,
+                expected: checkpoint.hash,
+                actual,
+            });
         }
         Self::from_state(state)
     }
