@@ -59,6 +59,7 @@ pub struct DeployConfig {
 
 /// One genesis predeploy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Predeploy {
     pub name: String,
     /// 0x-prefixed 20-byte EVM address.
@@ -82,6 +83,7 @@ pub struct Predeploy {
 /// under. EVM bytecode is only byte-for-byte stable for a FIXED compiler
 /// version + settings, so all of these are pinned alongside the hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CompilerConfig {
     /// Exact solc version, e.g. "0.8.24" (must satisfy the source pragma).
     pub solc_version_exact: String,
@@ -99,6 +101,7 @@ pub struct CompilerConfig {
 
 /// The unchanged Uniswap-v2 pair of artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct UniswapV2Artifacts {
     pub factory: ExternalArtifact,
     pub router02: ExternalArtifact,
@@ -106,6 +109,7 @@ pub struct UniswapV2Artifacts {
 
 /// An artifact deployed byte-for-byte from Ethereum mainnet builds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalArtifact {
     pub name: String,
     /// Provenance note ("unchanged Uniswap v2 mainnet artifact").
