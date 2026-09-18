@@ -14,6 +14,17 @@ APPLICATION_ID = 0x50555243
 MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MAX_REVISION = (1 << 63) - 1
+
+
+def _claim(db, burn):
+    """Fetch one bounded claim without materializing corrupt oversized text."""
+    return db.execute('''SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?
+        AND typeof(route_nonce)='text' AND length(CAST(route_nonce AS BLOB))<=87
+        AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=4096
+        AND typeof(revision)='integer'
+        AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32''', (burn,)).fetchone()
+
+
 @contextmanager
 def database(path, *, write):
     """A separate private database; never migrate an observation journal implicitly."""
@@ -90,7 +101,7 @@ def register(path, route, expected):
     """Reserve an immutable local identity, not funds or a signing permission."""
     burn, nonce, facts = identity(route, expected)
     with database(path, write=True) as db:
-        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        row = _claim(db, burn)
         if row is not None:
             revision, status = _validate_history(db, burn, nonce, facts, row)
             return report(revision, status)
@@ -101,8 +112,7 @@ def register(path, route, expected):
         db.execute('INSERT INTO claims VALUES (?,?,?,?,?)', (burn, nonce, facts, 1, 'pending_evidence'))
         db.execute('INSERT INTO history VALUES (?,?,?,?,?)', (burn, 1, 'registration', '{}', 'pending_evidence'))
         require(_validate_history(db, burn, nonce, facts,
-                db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?',
-                           (burn,)).fetchone()) == (1, 'pending_evidence'),
+                _claim(db, burn)) == (1, 'pending_evidence'),
                 'reconciliation registration readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] == claim_count + 1
                 and db.execute('SELECT COUNT(*) FROM history').fetchone()[0] == history_count + 1,
@@ -132,6 +142,7 @@ def _validate_history(db, burn, nonce, facts, row):
         AND typeof(revision)='integer' AND typeof(operation)='text'
         AND length(CAST(operation AS BLOB))<=64 AND typeof(payload)='text'
         AND length(CAST(payload AS BLOB))<=1024 AND typeof(status)='text'
+        AND length(CAST(status AS BLOB))<=32
         ORDER BY revision''', (burn,)).fetchall()
     require(count == revision == len(rows), 'reconciliation history does not match claim revision')
     require(rows[0] == (1, 'registration', '{}', 'pending_evidence'),
@@ -193,7 +204,7 @@ def transition(path, route, expected, *, revision, operation, status,
         require(type(claim_count) is int and 0 <= claim_count <= MAX_ROWS
                 and type(history_count) is int and 0 <= history_count <= MAX_ROWS,
                 'invalid reconciliation row count')
-        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        row = _claim(db, burn)
         current_revision, current_status = _validate_history(db, burn, nonce, facts, row)
         prior = db.execute('SELECT payload FROM history WHERE burn=? AND operation=?',
                            (burn, operation)).fetchone()
@@ -209,8 +220,7 @@ def transition(path, route, expected, *, revision, operation, status,
                              (revision + 1, status, burn, revision)).rowcount
         require(changed == 1, 'superseded reconciliation')
         require(_validate_history(db, burn, nonce, facts,
-                db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?',
-                           (burn,)).fetchone()) == (revision + 1, status),
+                _claim(db, burn)) == (revision + 1, status),
                 'reconciliation transition readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] == claim_count
                 and db.execute('SELECT COUNT(*) FROM history').fetchone()[0] == history_count + 1,
@@ -221,6 +231,6 @@ def transition(path, route, expected, *, revision, operation, status,
 def read_state(path, route, expected):
     burn, nonce, facts = identity(route, expected)
     with database(path, write=False) as db:
-        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        row = _claim(db, burn)
         revision, status = _validate_history(db, burn, nonce, facts, row)
         return report(revision, status)

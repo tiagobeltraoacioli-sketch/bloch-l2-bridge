@@ -78,6 +78,18 @@ class ReconciliationTest(unittest.TestCase):
         state = r.read_state(self.path, self.route, self.expected)
         self.assertEqual((state['revision'], state['status']), (2, 'reconciling'))
 
+    def test_oversized_claim_mutation_is_rejected_before_decode_and_rolled_back(self):
+        self.move(1, 'reconciling')
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_reconciliation_claim
+                          AFTER UPDATE OF status ON claims
+                          BEGIN UPDATE claims SET facts=CAST(zeroblob(4097) AS TEXT)
+                          WHERE burn=NEW.burn; END''')
+        with self.assertRaises(Invalid):
+            self.move(2, 'unavailable', 2)
+        state = r.read_state(self.path, self.route, self.expected)
+        self.assertEqual((state['revision'], state['status']), (2, 'reconciling'))
+
     def test_restart_and_foreign_database(self):
         self.move(1, 'reconciling')
         self.assertEqual(r.read_state(self.path, self.route, self.expected)['status'], 'reconciling')
