@@ -151,7 +151,8 @@ class CollectionTest(unittest.TestCase):
         self.assertNotIn('secret', str(failure.exception))
 
     def test_wall_deadline_installs_and_restores_signal_handler(self):
-        with patch.object(collect.signal, 'signal', return_value='previous') as handler, \
+        with patch.object(collect.signal, 'getitimer', return_value=(0.0, 0.0)), \
+                patch.object(collect.signal, 'signal', return_value='previous') as handler, \
                 patch.object(collect.signal, 'setitimer') as timer:
             with collect.collection_deadline():
                 with self.assertRaises(Invalid):
@@ -159,6 +160,13 @@ class CollectionTest(unittest.TestCase):
             self.assertEqual(timer.call_args_list[0].args, (collect.signal.ITIMER_REAL, 40))
             self.assertEqual(timer.call_args_list[-1].args, (collect.signal.ITIMER_REAL, 0))
             self.assertEqual(handler.call_args_list[-1].args, (collect.signal.SIGALRM, 'previous'))
+
+    def test_wall_deadline_refuses_to_replace_an_active_timer(self):
+        with collect.collection_deadline():
+            with self.assertRaisesRegex(Invalid, 'already active'):
+                with collect.collection_deadline():
+                    self.fail('Nested collector replaced the outer deadline')
+            self.assertGreater(collect.signal.getitimer(collect.signal.ITIMER_REAL)[0], 0)
 
 
 class LocalHttpTest(unittest.TestCase):

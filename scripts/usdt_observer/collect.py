@@ -41,6 +41,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 @contextlib.contextmanager
 def collection_deadline():
     """CLI/main-thread wall limit, including DNS, TLS and slow response bodies."""
+    require(signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0),
+            'a collection alarm is already active')
     def expired(*_):
         raise Invalid('source collection exceeded deadline')
     old = signal.signal(signal.SIGALRM, expired)
