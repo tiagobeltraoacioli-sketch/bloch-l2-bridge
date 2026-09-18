@@ -347,6 +347,22 @@ class BitcoinTrackingTest(unittest.TestCase):
         self.assertEqual(state['last_refresh_status'], 'refreshing')
         self.assertEqual(state['revision'], 2)
 
+    def test_oversized_invalidation_mutation_rolls_back_before_rpc(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_tracking_invalidation
+                          AFTER UPDATE OF status ON btc_tracking
+                          WHEN NEW.status = 'refreshing'
+                          BEGIN UPDATE btc_tracking SET facts=CAST(zeroblob(32769) AS TEXT)
+                          WHERE outpoint=NEW.outpoint; END''')
+        self.node.calls.clear()
+        with self.assertRaisesRegex(Invalid, 'invalidation readback mismatch'):
+            self.refresh()
+        self.assertEqual(self.node.calls, [])
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -194,7 +194,13 @@ def _begin_refresh(path, deposit, block_hash, min_confirmations):
                           block_hash=?, required_confirmations=?, evidence=NULL WHERE outpoint=?''',
                        (revision, block_hash, min_confirmations, key))
         require(db.execute('''SELECT facts, revision, status, block_hash,
-                required_confirmations, evidence FROM btc_tracking WHERE outpoint=?''',
+                required_confirmations, evidence FROM btc_tracking WHERE outpoint=?
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+                AND typeof(revision)='integer'
+                AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+                AND typeof(block_hash)='text' AND length(CAST(block_hash AS BLOB))=64
+                AND typeof(required_confirmations)='integer'
+                AND evidence IS NULL''',
                 (key,)).fetchone() == (facts, revision, 'refreshing', block_hash,
                                        min_confirmations, None),
                 'Tracking invalidation readback mismatch')
