@@ -154,13 +154,15 @@ def _validate_history(db, burn, nonce, facts, row):
             'invalid or conflicting reconciliation claim')
     revision, current = row[2], row[3]
     count = db.execute('SELECT COUNT(*) FROM history WHERE burn=?', (burn,)).fetchone()[0]
+    require(type(count) is int and count == revision and 1 <= count <= MAX_ROWS,
+            'reconciliation history count is invalid')
     rows = db.execute('''SELECT revision, operation, payload, status FROM history WHERE burn=?
         AND typeof(revision)='integer' AND typeof(operation)='text'
         AND length(CAST(operation AS BLOB))<=64 AND typeof(payload)='text'
         AND length(CAST(payload AS BLOB))<=1024 AND typeof(status)='text'
         AND length(CAST(status AS BLOB))<=32
         ORDER BY revision''', (burn,)).fetchall()
-    require(count == revision == len(rows), 'reconciliation history does not match claim revision')
+    require(len(rows) == count, 'reconciliation history does not match claim revision')
     require(rows[0] == (1, 'registration', '{}', 'pending_evidence'),
             'invalid reconciliation registration history')
     previous = 'pending_evidence'

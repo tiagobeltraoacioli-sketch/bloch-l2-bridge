@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from test_release_journal import fixture
 from usdt_observer import reconciliation as r
 from usdt_observer.common import Invalid
@@ -82,6 +83,12 @@ class ReconciliationTest(unittest.TestCase):
             self.assertEqual(sum(pool.map(attempt, range(1, 5))), 1)
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM history').fetchone()[0], 2)
+
+    def test_read_refuses_over_capacity_history_before_materializing_rows(self):
+        self.move(1, 'reconciling')
+        with patch.object(r, 'MAX_ROWS', 1):
+            with self.assertRaisesRegex(Invalid, 'history count is invalid'):
+                r.read_state(self.path, self.route, self.expected)
 
     def test_silent_transition_mutation_is_detected_and_rolled_back(self):
         self.move(1, 'reconciling')
