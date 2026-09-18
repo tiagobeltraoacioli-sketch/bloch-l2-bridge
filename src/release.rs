@@ -344,9 +344,57 @@ impl WithdrawalQueue {
 /// A log persisted by the earlier nonce-keyed form (a set of `u64`) does not
 /// deserialize; rebuild it with [`NullifierLog::from_messages`] from the
 /// paid withdrawals' messages (kept in [`WithdrawalQueue::messages`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct NullifierLog {
     paid: BTreeSet<[u8; 32]>,
+}
+
+impl<'de> Deserialize<'de> for NullifierLog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PaidLeaves(BTreeSet<[u8; 32]>);
+
+        impl<'de> Deserialize<'de> for PaidLeaves {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct PaidLeavesVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for PaidLeavesVisitor {
+                    type Value = PaidLeaves;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a sequence of unique paid withdrawal leaves")
+                    }
+
+                    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: serde::de::SeqAccess<'de>,
+                    {
+                        let mut paid = BTreeSet::new();
+                        while let Some(leaf) = sequence.next_element::<[u8; 32]>()? {
+                            if !paid.insert(leaf) {
+                                return Err(serde::de::Error::custom(
+                                    "duplicate paid withdrawal leaf",
+                                ));
+                            }
+                        }
+                        Ok(PaidLeaves(paid))
+                    }
+                }
+
+                deserializer.deserialize_seq(PaidLeavesVisitor)
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct NullifierLogWire {
+            paid: PaidLeaves,
+        }
+
+        let wire = NullifierLogWire::deserialize(deserializer)?;
+        Ok(NullifierLog { paid: wire.paid.0 })
+    }
 }
 
 /// The double-pay refusal from [`NullifierLog::record_paid`] — carries the
@@ -1314,6 +1362,18 @@ mod tests {
         // explicit constructor path too
         let from_paid = NullifierLog::from_paid(log.paid().iter().copied());
         assert_eq!(from_paid, log);
+    }
+
+    #[test]
+    fn nullifier_restore_refuses_duplicate_prefix_before_decoding_tail() {
+        let leaf = serde_json::to_string(&message(0).leaf()).unwrap();
+        let truncated_tail = format!(r#"{{"paid":[{leaf},{leaf},"#);
+        let error = serde_json::from_str::<NullifierLog>(&truncated_tail).unwrap_err();
+
+        assert!(
+            error.to_string().contains("duplicate paid withdrawal leaf"),
+            "restore should reject the duplicate prefix before parsing its tail: {error}"
+        );
     }
 
     #[test]
