@@ -139,6 +139,19 @@ class JournalTest(unittest.TestCase):
             self.record([new])
         self.assertEqual(self.rows(), before)
 
+    def test_oversized_insert_mutation_is_rejected_before_decode(self):
+        self.record()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute('''CREATE TRIGGER enlarge_new_observation AFTER INSERT ON observations
+                                  BEGIN UPDATE observations
+                                  SET observation_json=CAST(zeroblob(4097) AS TEXT)
+                                  WHERE deposit_id=NEW.deposit_id; END''')
+        before = self.rows()
+        new = changed_observation(self.observation, nonce=1, tx_hash='0x' + 'ef' * 32)
+        with self.assertRaisesRegex(Invalid, 'refused the batch'):
+            self.record([new])
+        self.assertEqual(self.rows(), before)
+
     def test_failed_initial_transaction_leaves_no_unusable_empty_database(self):
         alias = changed_observation(self.observation, nonce=1)
         with self.assertRaises(Invalid):

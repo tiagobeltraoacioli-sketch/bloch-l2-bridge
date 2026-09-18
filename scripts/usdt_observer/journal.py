@@ -100,7 +100,13 @@ def record(path, route, observations, evidence_sha256):
                 + word(observation['tx_hash'], 32) + observation['log_index'].to_bytes(4, 'big')).hexdigest()
             route_nonce = observation['route_id'] + ':' + str(observation['nonce'])
             prior = connection.execute('''SELECT source_event, route_nonce, observation_json, evidence_sha256
-                FROM observations WHERE deposit_id=?''',
+                FROM observations WHERE deposit_id=?
+                AND typeof(source_event)='text' AND length(CAST(source_event AS BLOB))=64
+                AND typeof(route_nonce)='text' AND length(CAST(route_nonce AS BLOB))<=87
+                AND typeof(observation_json)='text'
+                AND length(CAST(observation_json AS BLOB))<=4096
+                AND typeof(evidence_sha256)='text'
+                AND length(CAST(evidence_sha256 AS BLOB))=64''',
                                        (observation['deposit_id'],)).fetchone()
             if prior:
                 require(prior[:3] == (source_event, route_nonce, encoded)
@@ -113,7 +119,13 @@ def record(path, route, observations, evidence_sha256):
             connection.execute('INSERT INTO observations VALUES (?,?,?,?,?)',
                                (observation['deposit_id'], source_event, route_nonce, encoded, evidence_sha256))
             require(connection.execute('''SELECT source_event, route_nonce, observation_json, evidence_sha256
-                    FROM observations WHERE deposit_id=?''',
+                    FROM observations WHERE deposit_id=?
+                    AND typeof(source_event)='text' AND length(CAST(source_event AS BLOB))=64
+                    AND typeof(route_nonce)='text' AND length(CAST(route_nonce AS BLOB))<=87
+                    AND typeof(observation_json)='text'
+                    AND length(CAST(observation_json AS BLOB))<=4096
+                    AND typeof(evidence_sha256)='text'
+                    AND length(CAST(evidence_sha256 AS BLOB))=64''',
                     (observation['deposit_id'],)).fetchone()
                     == (source_event, route_nonce, encoded, evidence_sha256),
                     'observation journal insert readback mismatch')
