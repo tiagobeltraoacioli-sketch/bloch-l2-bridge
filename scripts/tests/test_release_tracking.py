@@ -119,6 +119,7 @@ class ReleaseTrackingTest(unittest.TestCase):
             ('observed', '[]'),
             ('observed', '{"route_id":"one","route_id":"two"}'),
             ('observed', '{"amount":NaN}'),
+            ('observed', original[1] + ' '),
             ('observed', json.dumps(dict(observation, amount='999999'))),
             ('observed', json.dumps(dict(observation, release_id='0x' + 'cd' * 32))),
             ('observed', json.dumps(dict(observation, tx_hash='0x' + '00' * 32))),

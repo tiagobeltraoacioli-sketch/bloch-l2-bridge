@@ -279,6 +279,8 @@ def read_review(path, audit_id):
                 and audit['version'] == 1, 'invalid native review audit format')
         require(encoded == json.dumps(audit, sort_keys=True, separators=(',', ':'), allow_nan=False),
                 'noncanonical native review audit')
+        require(facts_raw == json.dumps(facts, sort_keys=True, separators=(',', ':'), allow_nan=False),
+                'noncanonical persisted release facts')
         for key in ['native_review', 'trust', 'certificate', 'observation']:
             require(type(audit[key]) is dict, 'invalid native audit object')
         word(release_id, 32)

@@ -267,7 +267,7 @@ class BitcoinTrackingTest(unittest.TestCase):
                 with self.assertRaises(Invalid):
                     self.state()
         for corrupt in ('{"schema":"one","schema":"two"}', '[]', '{"amount_sats":NaN}',
-                        '{"vout":1.0}', '{"vout":99999999999999999999}'):
+                        '{"vout":1.0}', '{"vout":99999999999999999999}', encoded + ' '):
             with self.subTest(encoded=corrupt):
                 with sqlite3.connect(self.path) as db:
                     db.execute('UPDATE btc_tracking SET facts=?', (corrupt,))
@@ -276,6 +276,14 @@ class BitcoinTrackingTest(unittest.TestCase):
         with sqlite3.connect(self.path) as db:
             db.execute('UPDATE btc_tracking SET facts=?', (encoded,))
         self.assertEqual(self.state()['last_refresh_status'], 'observed')
+
+    def test_read_refuses_noncanonical_stored_evidence(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            encoded = db.execute('SELECT evidence FROM btc_tracking').fetchone()[0]
+            db.execute('UPDATE btc_tracking SET evidence=?', (encoded + ' ',))
+        with self.assertRaisesRegex(Invalid, 'Noncanonical'):
+            self.state()
 
     def test_read_refuses_oversized_or_wrongly_typed_storage_fields(self):
         self.refresh()

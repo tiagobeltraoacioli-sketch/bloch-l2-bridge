@@ -31,6 +31,8 @@ def _validate_observation(status, route, expected, encoded):
     observation = parse_json(encoded.encode())
     require(type(observation) is dict and set(observation) == OBSERVATION_FIELDS,
             'invalid stored release observation')
+    require(encoded == json.dumps(observation, sort_keys=True, allow_nan=False),
+            'noncanonical stored release observation')
     normalized = normalize_release(route, expected)
     require(observation['route_id'] == normalized['route_id']
             and observation['nonce'] == normalized['nonce']

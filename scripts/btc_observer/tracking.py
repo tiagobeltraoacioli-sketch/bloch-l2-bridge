@@ -46,6 +46,7 @@ def _decode_object(encoded, limit):
     except (ValueError, RecursionError):
         raise Invalid('Invalid stored JSON') from None
     require(type(value) is dict, 'Invalid stored JSON')
+    require(encoded == json.dumps(value, sort_keys=True), 'Noncanonical stored JSON')
     return value
 
 
