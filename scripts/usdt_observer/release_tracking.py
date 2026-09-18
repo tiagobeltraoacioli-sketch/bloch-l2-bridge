@@ -8,14 +8,53 @@ import shutil
 import sqlite3
 import stat
 
-from .common import Invalid, integer, require, word
-from .releases import normalize_release, match_release
+from .common import Invalid, integer, parse_json, require, word
+from .releases import normalize_release, match_release, release_digest
 from .runtime import validate_runtime
 
 APPLICATION_ID = 0x50555254
 MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MAX_REVISION = (1 << 63) - 1
+OBSERVATION_FIELDS = frozenset(('route_id', 'release_id', 'nonce', 'recipient', 'amount',
+                                'native_burn', 'log_index', 'transfer_log_index', 'tx_hash',
+                                'block_hash', 'block_number', 'network'))
+
+
+def _validate_observation(status, route, expected, encoded):
+    """Refuse corrupt or cross-release historical observations."""
+    if status in ('refreshing', 'unavailable'):
+        require(encoded is None, 'unexpected stored release observation')
+        return
+    require(type(encoded) is str and len(encoded.encode()) <= 16_384,
+            'invalid stored release observation')
+    observation = parse_json(encoded.encode())
+    require(type(observation) is dict and set(observation) == OBSERVATION_FIELDS,
+            'invalid stored release observation')
+    normalized = normalize_release(route, expected)
+    require(observation['route_id'] == normalized['route_id']
+            and observation['nonce'] == normalized['nonce']
+            and observation['recipient'] == normalized['recipient']
+            and observation['amount'] == normalized['amount']
+            and observation['native_burn'] == normalized['native_burn']
+            and observation['network'] == route['network'],
+            'stored observation does not match native release')
+    nonce, amount = int(normalized['nonce']), int(normalized['amount'])
+    recipient, burn = word(normalized['recipient'], 20), word(normalized['native_burn'], 32)
+    expected_id = release_digest(word(normalized['route_id'], 32), nonce, recipient, amount, burn)
+    require(observation['release_id'] == '0x' + expected_id.hex(),
+            'stored release identity mismatch')
+    tx_hash, block_hash = word(observation['tx_hash'], 32), word(observation['block_hash'], 32)
+    require(any(tx_hash) and any(block_hash), 'zero stored source hash')
+    block_number = observation['block_number']
+    require(type(block_number) is str and 1 <= len(block_number) <= 20
+            and block_number.isascii() and block_number.isdecimal()
+            and block_number[0] != '0' and integer(int(block_number)) > 0,
+            'invalid stored source block')
+    transfer_index = integer(observation['transfer_log_index'])
+    release_index = integer(observation['log_index'])
+    require(transfer_index <= 0xffffffff and transfer_index < release_index <= 0xffffffff,
+            'invalid stored release log indices')
 
 @contextmanager
 def database(path, *, write):
@@ -104,7 +143,7 @@ def _begin(path, route, expected):
 
 def _finish(path, key, revision, observation):
     status = 'observed' if observation is not None else 'unavailable'
-    encoded = json.dumps(observation, sort_keys=True) if observation is not None else None
+    encoded = json.dumps(observation, sort_keys=True, allow_nan=False) if observation is not None else None
     with database(path, write=True) as db:
         changed = db.execute('''UPDATE release_tracking SET status=?, observation=?
             WHERE burn=? AND revision=? AND status='refreshing' ''',
@@ -140,10 +179,16 @@ def refresh(path, route, expected, tx_hash, collector):
 def read_state(path, route, expected):
     key, facts = identity(route, expected)
     with database(path, write=False) as db:
-        row = db.execute('SELECT revision, status, facts FROM release_tracking WHERE burn=?', (key,)).fetchone()
+        row = db.execute('''SELECT revision, status, facts, observation
+            FROM release_tracking WHERE burn=?
+            AND typeof(revision)='integer' AND typeof(status)='text'
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=4096
+            AND (observation IS NULL OR (typeof(observation)='text'
+                 AND length(CAST(observation AS BLOB))<=16384))''', (key,)).fetchone()
     require(row is not None and row[1] in ('refreshing', 'observed', 'unavailable'), 'unknown tracked release')
     require(1 <= integer(row[0]) <= MAX_REVISION, 'invalid release revision')
     require(row[2] == facts, 'conflicting native release identity')
+    _validate_observation(row[1], route, expected, row[3])
     return {'revision': row[0], 'last_refresh_status': row[1], 'historical_observation_only': True,
             'requires_fresh_evidence': True, 'native_release_authenticated': False,
             'redemption_settled': False, 'bridge_ready': False}

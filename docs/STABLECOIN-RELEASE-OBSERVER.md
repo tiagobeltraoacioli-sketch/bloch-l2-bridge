@@ -104,6 +104,11 @@ status, never a live confirmation. `requires_fresh_evidence` remains true and
 false, even for an `observed` row. Native checkpoints still require independent
 authentication. Revision tracking protects against stale concurrent completion,
 not against a malicious RPC, restoration of an old database, or operator deletion.
+Historical reads fail closed when status and observation presence disagree. An
+observed JSON record is bounded, decoded with duplicate/nonfinite fields refused,
+and revalidated against the stored route, burn, nonce, amount, recipient, release
+digest, network, source hashes and log ordering. This detects local corruption and
+cross-release substitution; it does not make a saved observation current evidence.
 
 The tracker uses private regular files, its own application/version identity,
 full synchronous transactions and parent-directory fsync on creation. It accepts

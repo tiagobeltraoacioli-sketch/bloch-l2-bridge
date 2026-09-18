@@ -107,6 +107,33 @@ class ReleaseTrackingTest(unittest.TestCase):
         with self.assertRaises(Invalid): tracking.read_state(self.path, self.route, expected)
         self.assertEqual(self.state()['revision'], 1)
 
+    def test_read_refuses_contradictory_or_cross_release_observation(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            original = db.execute('SELECT status, observation FROM release_tracking').fetchone()
+        observation = json.loads(original[1])
+        mutations = (
+            ('observed', None),
+            ('refreshing', original[1]),
+            ('unavailable', original[1]),
+            ('observed', '[]'),
+            ('observed', '{"route_id":"one","route_id":"two"}'),
+            ('observed', '{"amount":NaN}'),
+            ('observed', json.dumps(dict(observation, amount='999999'))),
+            ('observed', json.dumps(dict(observation, release_id='0x' + 'cd' * 32))),
+            ('observed', json.dumps(dict(observation, tx_hash='0x' + '00' * 32))),
+            ('observed', json.dumps(dict(observation, transfer_log_index=observation['log_index']))),
+        )
+        for status, encoded in mutations:
+            with self.subTest(status=status, encoded=encoded):
+                with sqlite3.connect(self.path) as db:
+                    db.execute('UPDATE release_tracking SET status=?, observation=?', (status, encoded))
+                with self.assertRaises(Invalid):
+                    self.state()
+        with sqlite3.connect(self.path) as db:
+            db.execute('UPDATE release_tracking SET status=?, observation=?', original)
+        self.assertEqual(self.state()['last_refresh_status'], 'observed')
+
     def test_missing_read_creates_nothing_and_foreign_db_is_unchanged(self):
         with self.assertRaises(OSError): self.state()
         self.assertFalse(self.path.exists())
