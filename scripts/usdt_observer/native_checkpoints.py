@@ -30,8 +30,8 @@ def compare_checkpoints(reports):
                 'invalid finalized checkpoint position')
         # Validate both identities but deliberately do not compare head state
         # roots: honest nodes may have different heads above a common checkpoint.
-        word(info['state_root'], 32)
-        word(info['block_id'], 32)
+        require(any(word(info['state_root'], 32)) and any(word(info['block_id'], 32)),
+                'zero native head identity')
         checkpoints.append((finalized_epoch, finalized_height, root, slots))
         heads.append({'source': source, 'height': str(height), 'epoch': str(epoch)})
     require(all(value == checkpoints[0] for value in checkpoints), 'native checkpoint disagreement')

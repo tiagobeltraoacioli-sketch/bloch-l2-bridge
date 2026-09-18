@@ -54,3 +54,10 @@ class NativeCheckpointsTest(unittest.TestCase):
             items = reports()
             items[0]['chaininfo']['finalized'][key] = value
             with self.assertRaises(ValueError): compare_checkpoints(items)
+
+    def test_zero_head_identities_refuse_even_when_checkpoint_matches(self):
+        for field in ('state_root', 'block_id'):
+            items = reports()
+            items[0]['chaininfo'][field] = '0x' + '00' * 32
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                compare_checkpoints(items)
