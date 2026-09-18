@@ -33,6 +33,14 @@ journals and tracking databases are refused, never migrated. Local rollback,
 operator compromise, concurrent directory substitution and deletion are not
 prevented by this database. It does not coordinate independent operator databases.
 
+Every restart read, idempotent registration and transition revalidates the claim
+against its complete append-only history. Revisions must be contiguous from the
+canonical registration, every operation and JSON payload is bounded and typed,
+each transition must be allowed by its predecessor, observed entries must retain
+both audit hashes, and the final revision/status must equal the claim row. Local
+corruption is refused before another transition; this consistency check does not
+make the operator-controlled database tamper-proof or authoritative.
+
 ## Future authenticated settlement interface
 
 Do not extend transition with `authorized=True`, import report flags, or treat

@@ -1,6 +1,7 @@
 """Reconciliation identities survive uncertainty, retries and competing workers."""
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -79,9 +80,55 @@ class ReconciliationTest(unittest.TestCase):
         self.move(1, 'reconciling')
         with self.assertRaises(Invalid):
             self.move(2, 'observed', 2)
+        with self.assertRaises(Invalid):
+            self.move(2, 'observed', 2, transaction='0x'+'00'*32,
+                      evidence_sha256='0x'+'bb'*32)
         with self.assertRaises(TypeError):
             self.move(2, 'observed', 2, payment_authorized=True)
         self.assertEqual(r.read_state(self.path, self.route, self.expected)['revision'], 2)
+
+    def test_reads_and_mutations_refuse_corrupt_transition_history(self):
+        self.move(1, 'reconciling')
+        self.move(2, 'observed', 2, transaction='0x'+'aa'*32, evidence_sha256='0x'+'bb'*32)
+        with sqlite3.connect(self.path) as db:
+            claim = db.execute('SELECT * FROM claims').fetchone()
+            history = db.execute('SELECT * FROM history ORDER BY revision').fetchall()
+
+        def restore():
+            with sqlite3.connect(self.path) as db:
+                db.execute('DELETE FROM history')
+                db.executemany('INSERT INTO history VALUES (?,?,?,?,?)', history)
+                db.execute('UPDATE claims SET route_nonce=?, facts=?, revision=?, status=? WHERE burn=?',
+                           (claim[1], claim[2], claim[3], claim[4], claim[0]))
+
+        payload = json.loads(history[2][3])
+        mutations = (
+            ('claim status', "UPDATE claims SET status='unavailable'", ()),
+            ('claim revision', 'UPDATE claims SET revision=2', ()),
+            ('route nonce', "UPDATE claims SET route_nonce='foreign:7'", ()),
+            ('missing revision', 'DELETE FROM history WHERE revision=2', ()),
+            ('history status', "UPDATE history SET status='frozen' WHERE revision=2", ()),
+            ('duplicate payload', 'UPDATE history SET payload=? WHERE revision=2',
+             ('{"status":"reconciling","status":"frozen"}',)),
+            ('wrong previous revision', 'UPDATE history SET payload=? WHERE revision=3',
+             (json.dumps(dict(payload, previous_revision=1), sort_keys=True, separators=(',', ':')),)),
+            ('missing observed hash', 'UPDATE history SET payload=? WHERE revision=3',
+             (json.dumps(dict(payload, transaction=None), sort_keys=True, separators=(',', ':')),)),
+            ('invalid operation', "UPDATE history SET operation='xyz' WHERE revision=2", ()),
+        )
+        for name, statement, parameters in mutations:
+            with self.subTest(name=name):
+                restore()
+                with sqlite3.connect(self.path) as db:
+                    db.execute(statement, parameters)
+                with self.assertRaises(Invalid):
+                    r.read_state(self.path, self.route, self.expected)
+                with self.assertRaises(Invalid):
+                    r.register(self.path, self.route, self.expected)
+                with self.assertRaises(Invalid):
+                    self.move(3, 'reconciling', 99)
+        restore()
+        self.assertEqual(r.read_state(self.path, self.route, self.expected)['status'], 'observed')
 
     def test_first_creator_window_fails_closed_then_retry_succeeds(self):
         from unittest.mock import patch

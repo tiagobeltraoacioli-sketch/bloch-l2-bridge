@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import stat
 
-from .common import Invalid, require, word
+from .common import Invalid, parse_json, require, word
 from .releases import normalize_release
 
 APPLICATION_ID = 0x50555243
@@ -90,10 +90,10 @@ def register(path, route, expected):
     """Reserve an immutable local identity, not funds or a signing permission."""
     burn, nonce, facts = identity(route, expected)
     with database(path, write=True) as db:
-        row = db.execute('SELECT facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
         if row is not None:
-            require(row[0] == facts, 'conflicting release identity')
-            return report(row[1], row[2])
+            revision, status = _validate_history(db, burn, nonce, facts, row)
+            return report(revision, status)
         require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] < MAX_ROWS,
                 'claim capacity reached')
         require(db.execute('SELECT COUNT(*) FROM history').fetchone()[0] < MAX_ROWS,
@@ -113,6 +113,50 @@ TRANSITIONS = {
 }
 
 
+def _validate_history(db, burn, nonce, facts, row):
+    """Validate the current claim against its complete append-only history."""
+    require(row is not None and len(row) == 4 and row[0] == nonce and row[1] == facts
+            and type(row[2]) is int and 1 <= row[2] <= MAX_REVISION
+            and type(row[3]) is str and row[3] in TRANSITIONS,
+            'invalid or conflicting reconciliation claim')
+    revision, current = row[2], row[3]
+    count = db.execute('SELECT COUNT(*) FROM history WHERE burn=?', (burn,)).fetchone()[0]
+    rows = db.execute('''SELECT revision, operation, payload, status FROM history WHERE burn=?
+        AND typeof(revision)='integer' AND typeof(operation)='text'
+        AND length(CAST(operation AS BLOB))<=64 AND typeof(payload)='text'
+        AND length(CAST(payload AS BLOB))<=1024 AND typeof(status)='text'
+        ORDER BY revision''', (burn,)).fetchall()
+    require(count == revision == len(rows), 'reconciliation history does not match claim revision')
+    require(rows[0] == (1, 'registration', '{}', 'pending_evidence'),
+            'invalid reconciliation registration history')
+    previous = 'pending_evidence'
+    for expected_revision, (stored_revision, operation, payload_raw, status) in enumerate(rows[1:], 2):
+        require(stored_revision == expected_revision,
+                'noncontiguous reconciliation history')
+        require(len(operation) == 64 and operation == operation.lower(), 'invalid reconciliation operation')
+        word(operation, 32, prefix=False)
+        payload = parse_json(payload_raw.encode())
+        require(type(payload) is dict and set(payload) == {
+                'previous_revision', 'status', 'transaction', 'evidence_sha256'}
+                and type(payload['previous_revision']) is int
+                and payload['previous_revision'] == stored_revision - 1
+                and payload['status'] == status and status in TRANSITIONS.get(previous, set()),
+                'invalid reconciliation transition history')
+        for key in ('transaction', 'evidence_sha256'):
+            value = payload[key]
+            require(value is None or (type(value) is str and len(value) == 64
+                    and value == value.lower()), 'invalid reconciliation audit identifier')
+            if value is not None:
+                require(any(word(value, 32, prefix=False)), 'zero reconciliation audit identifier')
+        require(status != 'observed' or (payload['transaction'] is not None
+                and payload['evidence_sha256'] is not None), 'observed history lacks audit identifiers')
+        require(payload_raw == json.dumps(payload, sort_keys=True, separators=(',', ':')),
+                'noncanonical reconciliation history')
+        previous = status
+    require(previous == current, 'reconciliation history does not match claim status')
+    return revision, current
+
+
 def transition(path, route, expected, *, revision, operation, status,
                transaction=None, evidence_sha256=None):
     """CAS observation update. Operation IDs make exact crash retries idempotent.
@@ -120,27 +164,32 @@ def transition(path, route, expected, *, revision, operation, status,
     Transaction and evidence hashes are untrusted audit identifiers, never proofs.
     An unavailable/uncertain result retains the claim and its route nonce forever.
     """
-    burn, _, facts = identity(route, expected)
+    burn, nonce, facts = identity(route, expected)
     require(type(revision) is int and 1 <= revision < MAX_REVISION, 'invalid revision')
     operation = word(operation, 32).hex()
     require(type(status) is str and status in TRANSITIONS, 'invalid status')
-    transaction = None if transaction is None else word(transaction, 32).hex()
-    evidence_sha256 = None if evidence_sha256 is None else word(evidence_sha256, 32).hex()
+    def audit(value):
+        if value is None:
+            return None
+        decoded = word(value, 32)
+        require(any(decoded), 'zero reconciliation audit identifier')
+        return decoded.hex()
+    transaction, evidence_sha256 = audit(transaction), audit(evidence_sha256)
     require(status != 'observed' or (transaction is not None and evidence_sha256 is not None),
             'observed requires audit identifiers')
     payload = json.dumps({'previous_revision': revision, 'status': status,
                           'transaction': transaction, 'evidence_sha256': evidence_sha256},
                          sort_keys=True, separators=(',', ':'))
     with database(path, write=True) as db:
-        row = db.execute('SELECT facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
-        require(row is not None and row[0] == facts, 'unknown or conflicting release')
+        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        current_revision, current_status = _validate_history(db, burn, nonce, facts, row)
         prior = db.execute('SELECT payload FROM history WHERE burn=? AND operation=?',
                            (burn, operation)).fetchone()
         if prior is not None:
             require(prior[0] == payload, 'operation retry conflicts')
             # Return current state, never resurrect an older observation on retry.
-            return report(row[1], row[2])
-        require(row[1] == revision and status in TRANSITIONS.get(row[2], set()),
+            return report(current_revision, current_status)
+        require(current_revision == revision and status in TRANSITIONS.get(current_status, set()),
                 'stale revision or forbidden transition')
         require(db.execute('SELECT COUNT(*) FROM history').fetchone()[0] < MAX_ROWS,
                 'history capacity reached')
@@ -152,10 +201,8 @@ def transition(path, route, expected, *, revision, operation, status,
 
 
 def read_state(path, route, expected):
-    burn, _, facts = identity(route, expected)
+    burn, nonce, facts = identity(route, expected)
     with database(path, write=False) as db:
-        row = db.execute('SELECT facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
-        require(row is not None and row[0] == facts, 'unknown or conflicting release')
-        require(type(row[1]) is int and 1 <= row[1] <= MAX_REVISION and row[2] in TRANSITIONS,
-                'invalid reconciliation state')
-        return report(row[1], row[2])
+        row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
+        revision, status = _validate_history(db, burn, nonce, facts, row)
+        return report(revision, status)
