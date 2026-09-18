@@ -59,6 +59,9 @@ files, without symlinks or hardlinks. Foreign database identities or versions ar
 refused before modifying database settings. Limits are 100,000 observations,
 256 MiB and 64 MiB of available disk space before writing. The first matching
 evidence digest is retained; new equivalent captures do not replace it.
+Every retry reconstructs and checks all four indexed identities plus the retained
+digest shape before reporting a duplicate, so changed index metadata cannot hide
+behind unchanged fact JSON.
 
 A failure after commit but before directory fsync can be retried safely; it may
 return an existing observation. A failed first initialization can leave an
@@ -257,7 +260,9 @@ Use the `native_review_audit_id` returned by a journaled inspection. The reader
 opens an existing private journal in SQLite read-only mode, checks application
 and schema identity, bounds retrieved fields, verifies the canonical audit hash,
 and checks that its observation matches the source record in the same database
-snapshot. Missing, oversized or inconsistent records are refused. It creates no
+snapshot. It also reconstructs the source-event, transfer-event, route/nonce and
+native-burn keys from the bounded canonical facts. Missing, oversized or
+inconsistent records are refused. It creates no
 missing journal and performs no RPC calls or cryptographic verification.
 
 The exported `audit` contains historical public verification inputs and results.

@@ -8,14 +8,52 @@ import shutil
 import sqlite3
 import stat
 
-from .common import Invalid, require, word
-from .releases import match_release
+from .common import Invalid, UINT64_MAX, require, word
+from .releases import match_release, release_digest
 from .runtime import validate_runtime
 
 APPLICATION_ID = 0x5055524C
 MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MIN_FREE = 64 * 1024 * 1024
+FACT_FIELDS = {'route_id', 'release_id', 'nonce', 'recipient', 'amount', 'native_burn',
+               'log_index', 'transfer_log_index', 'tx_hash', 'block_hash', 'block_number',
+               'network', 'native_domain', 'native_asset', 'source_domain', 'token', 'vault'}
+
+
+def _stored_identities(facts):
+    """Rebuild every indexed identity from one canonical persisted fact set."""
+    require(type(facts) is dict and set(facts) == FACT_FIELDS, 'invalid stored release facts')
+    def decimal(name, maximum=UINT64_MAX):
+        value = facts[name]
+        require(type(value) is str and 1 <= len(value) <= 20 and value.isascii() and value.isdecimal()
+                and (value == '0' or value[0] != '0') and int(value) <= maximum,
+                'invalid stored release integer')
+        return int(value)
+    nonce, amount, block_number = decimal('nonce', UINT64_MAX - 1), decimal('amount'), decimal('block_number')
+    require(amount > 0 and block_number > 0 and type(facts['network']) is str
+            and 1 <= len(facts['network']) <= 64 and facts['network'].isascii(),
+            'invalid stored release values')
+    log_index, transfer_index = facts['log_index'], facts['transfer_log_index']
+    require(type(log_index) is int and type(transfer_index) is int
+            and 0 <= transfer_index < log_index <= (1 << 32) - 1,
+            'invalid stored release log indices')
+    route_id, tx_hash = word(facts['route_id'], 32), word(facts['tx_hash'], 32)
+    source_domain = word(facts['source_domain'], 32)
+    native_domain, burn = word(facts['native_domain'], 32), word(facts['native_burn'], 32)
+    recipient = word(facts['recipient'], 20)
+    require(all(any(value) for value in [route_id, tx_hash, source_domain, native_domain, burn, recipient]),
+            'zero stored release identity')
+    for name, size in [('release_id', 32), ('block_hash', 32), ('native_asset', 32),
+                       ('token', 20), ('vault', 20)]:
+        require(any(word(facts[name], size)), 'zero stored release identity')
+    require(word(facts['release_id'], 32) == release_digest(route_id, nonce, recipient, amount, burn),
+            'stored release digest mismatch')
+    source = source_domain + tx_hash
+    return (hashlib.sha256(source + log_index.to_bytes(4, 'big')).hexdigest(),
+            hashlib.sha256(source + transfer_index.to_bytes(4, 'big')).hexdigest(),
+            facts['route_id'] + ':' + facts['nonce'],
+            hashlib.sha256(native_domain + burn).hexdigest())
 
 
 def record(path, route, captured, expected, *, native_verification=None):
@@ -57,6 +95,8 @@ def record(path, route, captured, expected, *, native_verification=None):
     nonce = observation['route_id'] + ':' + observation['nonce']
     burn = hashlib.sha256(word(route['native_domain'], 32)
                           + word(observation['native_burn'], 32)).hexdigest()
+    require(_stored_identities(facts) == (event, transfer, nonce, burn),
+            'release journal identity derivation mismatch')
     # Validate evidence before creating a file or modifying any journal state.
     path = Path(path).absolute()
     parent = path.parent.lstat()
@@ -97,10 +137,14 @@ def record(path, route, captured, expected, *, native_verification=None):
                 transfer_event TEXT NOT NULL UNIQUE, route_nonce TEXT NOT NULL UNIQUE,
                 native_burn TEXT NOT NULL UNIQUE, facts TEXT NOT NULL,
                 first_evidence_sha256 TEXT NOT NULL)''')
-        prior = db.execute('SELECT facts FROM release_observations WHERE release_id=?',
+        prior = db.execute('''SELECT source_event, transfer_event, route_nonce, native_burn,
+            facts, first_evidence_sha256 FROM release_observations WHERE release_id=?''',
                            (observation['release_id'],)).fetchone()
         if prior is not None:
-            require(prior[0] == encoded, 'conflicting release observation')
+            require(prior[:5] == (event, transfer, nonce, burn, encoded)
+                    and type(prior[5]) is str and len(prior[5]) == 64
+                    and all(char in '0123456789abcdef' for char in prior[5]),
+                    'conflicting or corrupt release observation')
         else:
             require(db.execute('''SELECT 1 FROM release_observations
                 WHERE source_event IN (?,?) OR transfer_event IN (?,?) LIMIT 1''',
@@ -173,18 +217,28 @@ def read_review(path, audit_id):
                 'unsupported release journal version')
         # A single SELECT provides a consistent snapshot. Bound text before it
         # crosses into Python, including corrupted rows in a local database.
-        row = db.execute('''SELECT a.release_id, a.audit, r.facts
+        row = db.execute('''SELECT a.release_id, a.audit, r.source_event, r.transfer_event,
+            r.route_nonce, r.native_burn, r.facts, r.first_evidence_sha256
             FROM native_review_observations a JOIN release_observations r
             ON a.release_id=r.release_id WHERE a.audit_id=?
             AND typeof(a.release_id)='text' AND length(CAST(a.release_id AS BLOB))=66
             AND typeof(a.audit)='text' AND length(CAST(a.audit AS BLOB))<=131072
+            AND typeof(r.source_event)='text' AND length(CAST(r.source_event AS BLOB))=64
+            AND typeof(r.transfer_event)='text' AND length(CAST(r.transfer_event AS BLOB))=64
+            AND typeof(r.route_nonce)='text' AND length(CAST(r.route_nonce AS BLOB))<=87
+            AND typeof(r.native_burn)='text' AND length(CAST(r.native_burn AS BLOB))=64
+            AND typeof(r.first_evidence_sha256)='text' AND length(CAST(r.first_evidence_sha256 AS BLOB))=64
             AND typeof(r.facts)='text' AND length(CAST(r.facts AS BLOB))<=16384''',
             (audit_id,)).fetchone()
         require(row is not None, 'native review audit missing or invalid')
-        release_id, encoded, facts_raw = row
+        release_id, encoded, source_event, transfer_event, route_nonce, native_burn, facts_raw, first_evidence = row
         require(hashlib.sha256(b'BLOCH-JOURNALED-REVIEW-v1\0' + encoded.encode()).hexdigest() == audit_id,
                 'native review audit checksum mismatch')
         audit, facts = parse_json(encoded.encode()), parse_json(facts_raw.encode())
+        require(_stored_identities(facts) == (source_event, transfer_event, route_nonce, native_burn)
+                and type(first_evidence) is str and len(first_evidence) == 64
+                and all(char in '0123456789abcdef' for char in first_evidence),
+                'corrupt persisted release identity')
         require(type(audit) is dict and set(audit) == {'version', 'native_review', 'trust',
                 'certificate', 'observation', 'evidence_sha256'} and type(audit['version']) is int
                 and audit['version'] == 1, 'invalid native review audit format')

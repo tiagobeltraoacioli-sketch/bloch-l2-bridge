@@ -63,6 +63,23 @@ class ReleaseJournalTest(unittest.TestCase):
         self.assertEqual(self.rows(), before)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
+    def test_retry_revalidates_all_persisted_identity_columns(self):
+        self.record()
+        original = self.path.read_bytes()
+        mutations = [
+            ("UPDATE release_observations SET source_event=?", ('00' * 32,)),
+            ("UPDATE release_observations SET transfer_event=?", ('11' * 32,)),
+            ("UPDATE release_observations SET route_nonce=?", ('unbound:7',)),
+            ("UPDATE release_observations SET native_burn=?", ('22' * 32,)),
+            ("UPDATE release_observations SET first_evidence_sha256=?", ('bad',)),
+        ]
+        for statement, parameters in mutations:
+            self.path.write_bytes(original)
+            with sqlite3.connect(self.path) as db:
+                db.execute(statement, parameters)
+            with self.subTest(statement=statement), self.assertRaises(Invalid):
+                self.record()
+
     def test_same_burn_cannot_be_reassigned_to_other_asset_or_nonce(self):
         self.record()
         before = self.rows()

@@ -130,6 +130,19 @@ class ReviewJournalTest(unittest.TestCase):
             db.execute('UPDATE release_observations SET facts=?', (json.dumps(facts),))
         with self.assertRaises(ValueError): read_review(self.path, result['native_review_audit_id'])
 
+    def test_read_refuses_changed_source_identity_columns(self):
+        with patch('usdt_observer.native_review.verify_review', return_value=self.review):
+            result = self.record()
+        original = self.path.read_bytes()
+        for column, value in [('source_event', '00' * 32), ('transfer_event', '11' * 32),
+                              ('route_nonce', 'wrong:7'), ('native_burn', '22' * 32),
+                              ('first_evidence_sha256', 'bad')]:
+            self.path.write_bytes(original)
+            with sqlite3.connect(self.path) as db:
+                db.execute(f'UPDATE release_observations SET {column}=?', (value,))
+            with self.subTest(column=column), self.assertRaises(ValueError):
+                read_review(self.path, result['native_review_audit_id'])
+
     def test_read_missing_file_does_not_create_it(self):
         with self.assertRaises(OSError): read_review(self.path, '00'*32)
         self.assertFalse(self.path.exists())
