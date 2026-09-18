@@ -51,10 +51,22 @@ def unique_object(items):
     return result
 
 
+def bounded_json_int(value):
+    """Decode only the signed textual width needed for the observer's u64 inputs."""
+    require(type(value) is str and 1 <= len(value) <= (21 if value.startswith('-') else 20),
+            'oversized JSON integer')
+    return int(value)
+
+
+def reject_json_float(_):
+    raise Invalid('floating-point JSON number')
+
+
 def parse_json(raw):
     require(type(raw) is bytes and len(raw) <= MAX_JSON, 'JSON evidence exceeds limit')
     try:
         return json.loads(raw, object_pairs_hook=unique_object,
+                          parse_int=bounded_json_int, parse_float=reject_json_float,
                           parse_constant=lambda _: (_ for _ in ()).throw(Invalid('nonfinite JSON')))
     except (ValueError, UnicodeError, RecursionError):
         raise Invalid('invalid JSON evidence') from None

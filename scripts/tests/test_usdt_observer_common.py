@@ -156,6 +156,9 @@ class SharedObserverTest(unittest.TestCase):
     def test_json_duplicate_nested_nonfinite_and_oversized_documents_fail(self):
         for raw in (b'{"nonce":1,"nonce":2}', b'{"x":{"n":1,"n":2}}',
                     b'{"nonce":NaN}', b'{"nonce":Infinity}', b'{"nonce":-Infinity}',
+                    b'{"nonce":1.0}', b'{"nonce":1e2}',
+                    b'{"nonce":999999999999999999999}',
+                    b'{"nonce":-999999999999999999999}',
                     b' ' * (MAX_JSON + 1), b'\xff', b'{'):
             with self.subTest(raw=raw[:40]), self.assertRaises(Invalid):
                 parse_json(raw)

@@ -132,6 +132,12 @@ class RouteValidation(unittest.TestCase):
     def test_duplicate_json_fields_rejected(self):
         with self.assertRaises(validator.Invalid):
             json.loads('{"version":1,"version":2}', object_pairs_hook=validator.unique_object)
+        for encoded in ('999999999999999999999', '-999999999999999999999'):
+            with self.assertRaises(validator.Invalid):
+                json.loads(encoded, parse_int=validator.bounded_json_int)
+        for encoded in ('1.0', '1e2'):
+            with self.assertRaises(validator.Invalid):
+                json.loads(encoded, parse_float=validator.reject_json_float)
 
 
 if __name__ == "__main__":

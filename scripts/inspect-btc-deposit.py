@@ -32,12 +32,23 @@ def reject_constant(value):
     raise Invalid('Nonfinite JSON number')
 
 
+def bounded_int(value):
+    if len(value) > (21 if value.startswith('-') else 20):
+        raise Invalid('Oversized proof integer')
+    return int(value)
+
+
+def reject_float(value):
+    raise Invalid('Floating-point proof number')
+
+
 def read_proof(path):
     with path.open('rb') as stream:
         encoded = stream.read(4097)
     if len(encoded) > 4096:
         raise Invalid('Proof exceeds byte limit')
     proof = json.loads(encoded.decode('ascii'), object_pairs_hook=unique_object,
+                       parse_int=bounded_int, parse_float=reject_float,
                        parse_constant=reject_constant)
     if type(proof) is not dict or set(proof) != {'header_hex', 'tx_index', 'tx_count', 'siblings'}:
         raise Invalid('Unexpected proof fields')

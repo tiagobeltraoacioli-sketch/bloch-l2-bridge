@@ -123,6 +123,8 @@ class BitcoinProofTest(unittest.TestCase):
                 json.dumps(dict(document, siblings=[])),
                 json.dumps(document)[:-1] + ',"tx_count":3}',
                 json.dumps(document).replace('"tx_count": 3', '"tx_count": NaN'),
+                json.dumps(document).replace('"tx_count": 3', '"tx_count": 1.0'),
+                json.dumps(document).replace('"tx_count": 3', '"tx_count": ' + '9' * 21),
                 ' ' * 4097, '[' * 1500 + ']' * 1500,
             ]
             for encoded in invalid_documents:

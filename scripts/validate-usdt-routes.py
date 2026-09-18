@@ -158,6 +158,16 @@ def unique_object(pairs):
     return result
 
 
+def bounded_json_int(value):
+    require(type(value) is str and 1 <= len(value) <= (21 if value.startswith("-") else 20),
+            "oversized JSON integer")
+    return int(value)
+
+
+def reject_json_float(_):
+    raise Invalid("floating-point JSON number")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
@@ -168,6 +178,7 @@ def main():
             raw = stream.read(LIMIT + 1)
         require(len(raw) <= LIMIT, "configuration exceeds 1 MiB")
         config = json.loads(raw, object_pairs_hook=unique_object,
+                            parse_int=bounded_json_int, parse_float=reject_json_float,
                             parse_constant=lambda _: (_ for _ in ()).throw(Invalid("nonfinite JSON number")))
         print(json.dumps(validate(config, args.allow_synthetic), indent=2))
     except (ValueError, OSError, TypeError, RecursionError) as error:
