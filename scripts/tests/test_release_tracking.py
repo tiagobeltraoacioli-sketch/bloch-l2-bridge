@@ -194,3 +194,34 @@ class ReleaseTrackingTest(unittest.TestCase):
         state = self.state()
         self.assertEqual(state['last_refresh_status'], 'refreshing')
         self.assertEqual(state['revision'], 2)
+
+    def test_oversized_invalidation_mutation_rolls_back_before_collection(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_release_invalidation
+                          AFTER UPDATE OF status ON release_tracking
+                          WHEN NEW.status = 'refreshing'
+                          BEGIN UPDATE release_tracking SET facts=CAST(zeroblob(4097) AS TEXT)
+                          WHERE burn=NEW.burn; END''')
+        fetch = Mock()
+        with self.assertRaisesRegex(Invalid, 'invalidation readback mismatch'):
+            self.refresh(fetch)
+        fetch.assert_not_called()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
+
+    def test_oversized_result_mutation_is_rolled_back_before_decode(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_release_result
+                          AFTER UPDATE OF status ON release_tracking
+                          WHEN NEW.status = 'observed'
+                          BEGIN UPDATE release_tracking
+                          SET observation=CAST(zeroblob(16385) AS TEXT)
+                          WHERE burn=NEW.burn; END''')
+        with self.assertRaisesRegex(Invalid, 'result readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)

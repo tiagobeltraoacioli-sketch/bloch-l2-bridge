@@ -127,7 +127,9 @@ def _begin(path, route, expected):
     with database(path, write=True) as db:
         count = db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
         require(type(count) is int and 0 <= count <= MAX_ROWS, 'invalid release tracking row count')
-        row = db.execute('SELECT facts, revision FROM release_tracking WHERE burn=?', (key,)).fetchone()
+        row = db.execute('''SELECT facts, revision FROM release_tracking WHERE burn=?
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=4096
+            AND typeof(revision)='integer' ''', (key,)).fetchone()
         if row is None:
             require(count < MAX_ROWS, 'release tracking capacity reached')
             revision = 1
@@ -139,8 +141,13 @@ def _begin(path, route, expected):
             require(revision <= MAX_REVISION, 'release revision exhausted')
             db.execute("UPDATE release_tracking SET revision=?, status='refreshing', observation=NULL WHERE burn=?",
                        (revision, key))
-        require(db.execute('SELECT facts, revision, status, observation FROM release_tracking WHERE burn=?',
-                           (key,)).fetchone() == (facts, revision, 'refreshing', None),
+        require(db.execute('''SELECT facts, revision, status, observation
+            FROM release_tracking WHERE burn=?
+            AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=4096
+            AND typeof(revision)='integer'
+            AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+            AND observation IS NULL''', (key,)).fetchone()
+                == (facts, revision, 'refreshing', None),
                 'release refresh invalidation readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
                 == count + int(row is None), 'release tracking row count changed unexpectedly')
@@ -154,7 +161,10 @@ def _finish(path, key, facts, revision, observation):
         count = db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
         before = db.execute('''SELECT facts, revision, status, observation
             FROM release_tracking WHERE burn=? AND typeof(facts)='text'
-            AND length(CAST(facts AS BLOB))<=4096''', (key,)).fetchone()
+            AND length(CAST(facts AS BLOB))<=4096
+            AND typeof(revision)='integer'
+            AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+            AND observation IS NULL''', (key,)).fetchone()
         require(before == (facts, revision, 'refreshing', None),
                 'release refresh superseded; discard response')
         changed = db.execute('''UPDATE release_tracking SET status=?, observation=?
@@ -163,7 +173,11 @@ def _finish(path, key, facts, revision, observation):
         require(changed == 1, 'release refresh superseded; discard response')
         require(db.execute('''SELECT facts, revision, status, observation
                 FROM release_tracking WHERE burn=? AND typeof(facts)='text'
-                AND length(CAST(facts AS BLOB))<=4096''', (key,)).fetchone()
+                AND length(CAST(facts AS BLOB))<=4096
+                AND typeof(revision)='integer'
+                AND typeof(status)='text' AND length(CAST(status AS BLOB))<=32
+                AND (observation IS NULL OR (typeof(observation)='text'
+                     AND length(CAST(observation AS BLOB))<=16384))''', (key,)).fetchone()
                 == (facts, revision, status, encoded),
                 'release refresh result readback mismatch')
         require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0] == count,
@@ -201,6 +215,7 @@ def read_state(path, route, expected):
         row = db.execute('''SELECT revision, status, facts, observation
             FROM release_tracking WHERE burn=?
             AND typeof(revision)='integer' AND typeof(status)='text'
+            AND length(CAST(status AS BLOB))<=32
             AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=4096
             AND (observation IS NULL OR (typeof(observation)='text'
                  AND length(CAST(observation AS BLOB))<=16384))''', (key,)).fetchone()
