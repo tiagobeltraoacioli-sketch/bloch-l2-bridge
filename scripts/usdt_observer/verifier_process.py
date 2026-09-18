@@ -1,17 +1,21 @@
 """Bounded local verifier transport; no shell, network or unbounded output buffer."""
 import os
 import selectors
+import signal
 import subprocess
 import time
 
 
 def run_verifier(command, *, input, timeout=10):
-    if len(input) > 65536 or timeout <= 0:
+    if (type(input) is not bytes or len(input) > 65536
+            or type(timeout) not in (int, float) or isinstance(timeout, bool)
+            or not 0 < timeout <= 60):
         raise ValueError('invalid verifier request bounds')
     deadline = time.monotonic() + timeout
     output = bytearray()
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
+                          stderr=subprocess.DEVNULL, start_new_session=True) as process:
+        completed = False
         try:
             with selectors.DefaultSelector() as selector:
                 os.set_blocking(process.stdin.fileno(), False)
@@ -51,9 +55,15 @@ def run_verifier(command, *, input, timeout=10):
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
                 code = process.wait(timeout=remaining)
+                completed = True
                 return subprocess.CompletedProcess(command, code, bytes(output))
         finally:
-            # Reap even on malformed output, broken stdin, timeout or interruption.
-            if process.poll() is None:
-                process.kill()
+            # A verifier may spawn a descendant that inherits stdout. Kill the
+            # isolated process group on every incomplete run so that descendant
+            # cannot outlive a timeout or keep the bounded pipe open forever.
+            if not completed:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             process.wait()

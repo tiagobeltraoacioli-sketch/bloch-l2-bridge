@@ -2,6 +2,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,3 +42,17 @@ class VerifierProcessTest(unittest.TestCase):
     def test_oversize_input_never_launches(self):
         with self.assertRaises(ValueError):
             run_verifier(['/nonexistent'], input=b'x'*65537)
+        for payload, timeout in [(bytearray(b'x'), 1), (b'x', True), (b'x', 0), (b'x', 61),
+                                 (b'x', float('nan'))]:
+            with self.assertRaises(ValueError):
+                run_verifier(['/nonexistent'], input=payload, timeout=timeout)
+
+    def test_timeout_terminates_descendants_holding_verifier_pipes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'descendant-survived'
+            descendant = "import pathlib,time;time.sleep(.5);pathlib.Path({!r}).write_text('bad')".format(str(marker))
+            parent = "import subprocess,sys;subprocess.Popen([sys.executable,'-c',{!r}])".format(descendant)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.run_child(parent, timeout=0.1)
+            time.sleep(0.7)
+            self.assertFalse(marker.exists())
