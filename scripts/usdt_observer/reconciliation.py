@@ -94,12 +94,19 @@ def register(path, route, expected):
         if row is not None:
             revision, status = _validate_history(db, burn, nonce, facts, row)
             return report(revision, status)
-        require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] < MAX_ROWS,
-                'claim capacity reached')
-        require(db.execute('SELECT COUNT(*) FROM history').fetchone()[0] < MAX_ROWS,
-                'history capacity reached')
+        claim_count = db.execute('SELECT COUNT(*) FROM claims').fetchone()[0]
+        history_count = db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
+        require(type(claim_count) is int and 0 <= claim_count < MAX_ROWS, 'claim capacity reached')
+        require(type(history_count) is int and 0 <= history_count < MAX_ROWS, 'history capacity reached')
         db.execute('INSERT INTO claims VALUES (?,?,?,?,?)', (burn, nonce, facts, 1, 'pending_evidence'))
         db.execute('INSERT INTO history VALUES (?,?,?,?,?)', (burn, 1, 'registration', '{}', 'pending_evidence'))
+        require(_validate_history(db, burn, nonce, facts,
+                db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?',
+                           (burn,)).fetchone()) == (1, 'pending_evidence'),
+                'reconciliation registration readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] == claim_count + 1
+                and db.execute('SELECT COUNT(*) FROM history').fetchone()[0] == history_count + 1,
+                'reconciliation registration row count changed unexpectedly')
     return report(1, 'pending_evidence')
 
 
@@ -181,6 +188,11 @@ def transition(path, route, expected, *, revision, operation, status,
                           'transaction': transaction, 'evidence_sha256': evidence_sha256},
                          sort_keys=True, separators=(',', ':'))
     with database(path, write=True) as db:
+        claim_count = db.execute('SELECT COUNT(*) FROM claims').fetchone()[0]
+        history_count = db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
+        require(type(claim_count) is int and 0 <= claim_count <= MAX_ROWS
+                and type(history_count) is int and 0 <= history_count <= MAX_ROWS,
+                'invalid reconciliation row count')
         row = db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?', (burn,)).fetchone()
         current_revision, current_status = _validate_history(db, burn, nonce, facts, row)
         prior = db.execute('SELECT payload FROM history WHERE burn=? AND operation=?',
@@ -191,12 +203,18 @@ def transition(path, route, expected, *, revision, operation, status,
             return report(current_revision, current_status)
         require(current_revision == revision and status in TRANSITIONS.get(current_status, set()),
                 'stale revision or forbidden transition')
-        require(db.execute('SELECT COUNT(*) FROM history').fetchone()[0] < MAX_ROWS,
-                'history capacity reached')
+        require(history_count < MAX_ROWS, 'history capacity reached')
         db.execute('INSERT INTO history VALUES (?,?,?,?,?)', (burn, revision + 1, operation, payload, status))
         changed = db.execute('UPDATE claims SET revision=?, status=? WHERE burn=? AND revision=?',
                              (revision + 1, status, burn, revision)).rowcount
         require(changed == 1, 'superseded reconciliation')
+        require(_validate_history(db, burn, nonce, facts,
+                db.execute('SELECT route_nonce, facts, revision, status FROM claims WHERE burn=?',
+                           (burn,)).fetchone()) == (revision + 1, status),
+                'reconciliation transition readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0] == claim_count
+                and db.execute('SELECT COUNT(*) FROM history').fetchone()[0] == history_count + 1,
+                'reconciliation transition row count changed unexpectedly')
     return report(revision + 1, status)
 
 

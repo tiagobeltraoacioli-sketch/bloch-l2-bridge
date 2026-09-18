@@ -159,6 +159,16 @@ class ReleaseJournalTest(unittest.TestCase):
         self.assertTrue(all(r['duplicate_observations'] == 1 for r in results))
         self.assertEqual(len(self.rows()), 1)
 
+    def test_silent_insert_loss_is_detected_and_rolled_back(self):
+        self.record()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER discard_new_release AFTER INSERT ON release_observations
+                          BEGIN DELETE FROM release_observations WHERE release_id=NEW.release_id; END''')
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.record(fixture(nonce=8, burn='0x' + 'bc' * 32, tx='0x' + 'ad' * 32))
+        self.assertEqual(self.rows(), before)
+
     def test_post_commit_fsync_failure_is_recoverable_by_exact_retry(self):
         with patch.object(release_journal.os, 'fsync', side_effect=OSError('simulated')):
             with self.assertRaises(OSError): self.record()

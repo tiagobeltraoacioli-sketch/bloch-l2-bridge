@@ -141,6 +141,16 @@ class BitcoinJournalTest(unittest.TestCase):
         self.assertEqual(sum(r['duplicates'] for r in results), 3)
         self.assertEqual(len(self.rows()), 2)
 
+    def test_silent_insert_loss_is_detected_and_rolled_back(self):
+        journal.record(self.path, [deposit()])
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER discard_new_output AFTER INSERT ON btc_outputs
+                          BEGIN DELETE FROM btc_outputs WHERE outpoint=NEW.outpoint; END''')
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            journal.record(self.path, [deposit(index=1)])
+        self.assertEqual(self.rows(), before)
+
     def test_post_commit_sync_failure_is_safe_to_retry(self):
         with patch.object(journal.os, 'fsync', side_effect=OSError('injected directory sync failure')):
             with self.assertRaises(OSError):

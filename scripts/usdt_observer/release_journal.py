@@ -137,6 +137,9 @@ def record(path, route, captured, expected, *, native_verification=None):
                 transfer_event TEXT NOT NULL UNIQUE, route_nonce TEXT NOT NULL UNIQUE,
                 native_burn TEXT NOT NULL UNIQUE, facts TEXT NOT NULL,
                 first_evidence_sha256 TEXT NOT NULL)''')
+        source_count = db.execute('SELECT COUNT(*) FROM release_observations').fetchone()[0]
+        require(type(source_count) is int and 0 <= source_count <= MAX_ROWS,
+                'invalid release journal row count')
         prior = db.execute('''SELECT source_event, transfer_event, route_nonce, native_burn,
             facts, first_evidence_sha256 FROM release_observations WHERE release_id=?''',
                            (observation['release_id'],)).fetchone()
@@ -150,26 +153,40 @@ def record(path, route, captured, expected, *, native_verification=None):
                 WHERE source_event IN (?,?) OR transfer_event IN (?,?) LIMIT 1''',
                 (event, transfer, event, transfer)).fetchone() is None,
                 'source log already assigned to another release')
-            require(db.execute('SELECT COUNT(*) FROM release_observations').fetchone()[0] < MAX_ROWS,
-                    'release journal capacity reached')
+            require(source_count < MAX_ROWS, 'release journal capacity reached')
             db.execute('INSERT INTO release_observations VALUES (?,?,?,?,?,?,?)',
                        (observation['release_id'], event, transfer, nonce, burn, encoded, digest))
+        require(db.execute('''SELECT source_event, transfer_event, route_nonce, native_burn,
+                facts, first_evidence_sha256 FROM release_observations WHERE release_id=?''',
+                (observation['release_id'],)).fetchone()
+                == (event, transfer, nonce, burn, encoded, digest if prior is None else prior[5]),
+                'release journal write readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM release_observations').fetchone()[0]
+                == source_count + int(prior is None), 'release journal row count changed unexpectedly')
         new_review = False
         if audit is not None:
             # Additive v1 extension: source-only readers retain their semantics.
             db.execute('''CREATE TABLE IF NOT EXISTS native_review_observations (
                 audit_id TEXT PRIMARY KEY, release_id TEXT NOT NULL,
                 audit TEXT NOT NULL)''')
+            review_count = db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0]
+            require(type(review_count) is int and 0 <= review_count <= MAX_ROWS,
+                    'invalid native review row count')
             prior_review = db.execute('SELECT release_id, audit FROM native_review_observations WHERE audit_id=?',
                                      (audit_id,)).fetchone()
             if prior_review is None:
-                require(db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0] < MAX_ROWS,
-                        'native review journal capacity reached')
+                require(review_count < MAX_ROWS, 'native review journal capacity reached')
                 db.execute('INSERT INTO native_review_observations VALUES (?,?,?)',
                            (audit_id, observation['release_id'], audit))
                 new_review = True
             else:
                 require(prior_review == (observation['release_id'], audit), 'conflicting native review audit')
+            require(db.execute('''SELECT release_id, audit FROM native_review_observations
+                    WHERE audit_id=?''', (audit_id,)).fetchone()
+                    == (observation['release_id'], audit), 'native review write readback mismatch')
+            require(db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0]
+                    == review_count + int(prior_review is None),
+                    'native review row count changed unexpectedly')
         db.execute('COMMIT')
         if created:
             fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)

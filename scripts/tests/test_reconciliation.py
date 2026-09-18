@@ -68,6 +68,16 @@ class ReconciliationTest(unittest.TestCase):
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM history').fetchone()[0], 2)
 
+    def test_silent_transition_mutation_is_detected_and_rolled_back(self):
+        self.move(1, 'reconciling')
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER undo_claim_status AFTER UPDATE OF status ON claims
+                          BEGIN UPDATE claims SET status='reconciling' WHERE burn=NEW.burn; END''')
+        with self.assertRaises(Invalid):
+            self.move(2, 'observed', 2, transaction='0x'+'aa'*32, evidence_sha256='0x'+'bb'*32)
+        state = r.read_state(self.path, self.route, self.expected)
+        self.assertEqual((state['revision'], state['status']), (2, 'reconciling'))
+
     def test_restart_and_foreign_database(self):
         self.move(1, 'reconciling')
         self.assertEqual(r.read_state(self.path, self.route, self.expected)['status'], 'reconciling')

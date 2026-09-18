@@ -169,3 +169,16 @@ class ReleaseTrackingTest(unittest.TestCase):
                                '--tracking', str(self.path)])
         self.assertEqual(result, 1)
         self.assertEqual(self.state()['last_refresh_status'], 'unavailable')
+
+    def test_silent_result_mutation_is_detected_and_rolled_back(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER erase_release_result AFTER UPDATE OF status ON release_tracking
+                          WHEN NEW.status != 'refreshing'
+                          BEGIN UPDATE release_tracking SET status='refreshing', observation=NULL
+                          WHERE burn=NEW.burn; END''')
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)

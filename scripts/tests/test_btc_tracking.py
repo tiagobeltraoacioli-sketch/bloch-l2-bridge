@@ -285,6 +285,19 @@ class BitcoinTrackingTest(unittest.TestCase):
         self.refresh()
         self.assertEqual((self.state()['revision'], self.state()['last_refresh_status']), (2, 'observed'))
 
+    def test_silent_result_mutation_is_detected_and_rolled_back(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER erase_tracking_result AFTER UPDATE OF status ON btc_tracking
+                          WHEN NEW.status != 'refreshing'
+                          BEGIN UPDATE btc_tracking SET status='refreshing', evidence=NULL
+                          WHERE outpoint=NEW.outpoint; END''')
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            self.refresh()
+        state = self.state()
+        self.assertEqual(state['last_refresh_status'], 'refreshing')
+        self.assertEqual(state['revision'], 2)
+
 
 if __name__ == '__main__':
     unittest.main()

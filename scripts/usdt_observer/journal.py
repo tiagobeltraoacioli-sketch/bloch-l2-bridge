@@ -91,6 +91,8 @@ def record(path, route, observations, evidence_sha256):
                 evidence_sha256 TEXT NOT NULL)''')
         require(connection.execute('PRAGMA user_version').fetchone()[0] == 1, 'unsupported journal version')
         count = connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
+        require(type(count) is int and 0 <= count <= MAX_ROWS,
+                'invalid observation journal row count')
         added = duplicate = 0
         for observation in checked:
             encoded = json.dumps(observation, sort_keys=True, separators=(',', ':'), allow_nan=False)
@@ -110,7 +112,14 @@ def record(path, route, observations, evidence_sha256):
             require(count + added < MAX_ROWS, 'observation journal capacity reached')
             connection.execute('INSERT INTO observations VALUES (?,?,?,?,?)',
                                (observation['deposit_id'], source_event, route_nonce, encoded, evidence_sha256))
+            require(connection.execute('''SELECT source_event, route_nonce, observation_json, evidence_sha256
+                    FROM observations WHERE deposit_id=?''',
+                    (observation['deposit_id'],)).fetchone()
+                    == (source_event, route_nonce, encoded, evidence_sha256),
+                    'observation journal insert readback mismatch')
             added += 1
+        require(connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == count + added,
+                'observation journal row count changed unexpectedly')
         connection.execute('COMMIT')
         committed = True
         fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)

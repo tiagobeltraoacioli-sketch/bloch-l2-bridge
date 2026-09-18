@@ -128,6 +128,17 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(self.rows(), baseline)
         self.assertEqual(self.record([new])['new_observations'], 1)
 
+    def test_silent_insert_loss_is_detected_and_rolled_back(self):
+        self.record()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute('''CREATE TRIGGER discard_new_observation AFTER INSERT ON observations
+                                  BEGIN DELETE FROM observations WHERE deposit_id=NEW.deposit_id; END''')
+        before = self.rows()
+        new = changed_observation(self.observation, nonce=1, tx_hash='0x' + 'ef' * 32)
+        with self.assertRaisesRegex(Invalid, 'refused the batch'):
+            self.record([new])
+        self.assertEqual(self.rows(), before)
+
     def test_failed_initial_transaction_leaves_no_unusable_empty_database(self):
         alias = changed_observation(self.observation, nonce=1)
         with self.assertRaises(Invalid):

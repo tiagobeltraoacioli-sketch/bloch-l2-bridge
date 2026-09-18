@@ -168,10 +168,11 @@ def _begin_refresh(path, deposit, block_hash, min_confirmations):
     key = observation['outpoint_key']
     facts = json.dumps({k: v for k, v in observation.items() if k != 'wtxid'}, sort_keys=True)
     with database(path, write=True) as db:
+        count = db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
+        require(type(count) is int and 0 <= count <= MAX_ROWS, 'Invalid tracking row count')
         row = db.execute('SELECT facts, revision FROM btc_tracking WHERE outpoint=?', (key,)).fetchone()
         if row is None:
-            require(db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0] < MAX_ROWS,
-                    'Tracking row limit')
+            require(count < MAX_ROWS, 'Tracking row limit')
             revision = 1
             db.execute('INSERT INTO btc_tracking VALUES (?, ?, ?, ?, ?, ?, NULL)',
                        (key, facts, revision, 'refreshing', block_hash, min_confirmations))
@@ -181,6 +182,13 @@ def _begin_refresh(path, deposit, block_hash, min_confirmations):
             db.execute('''UPDATE btc_tracking SET revision=?, status='refreshing',
                           block_hash=?, required_confirmations=?, evidence=NULL WHERE outpoint=?''',
                        (revision, block_hash, min_confirmations, key))
+        require(db.execute('''SELECT facts, revision, status, block_hash,
+                required_confirmations, evidence FROM btc_tracking WHERE outpoint=?''',
+                (key,)).fetchone() == (facts, revision, 'refreshing', block_hash,
+                                       min_confirmations, None),
+                'Tracking invalidation readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
+                == count + int(row is None), 'Tracking row count changed unexpectedly')
     return key, revision
 
 
@@ -192,10 +200,16 @@ def _finish_refresh(path, key, revision, result):
                   'observed' if chain['confirmation_policy_met'] else 'below_threshold')
         evidence = json.dumps({field: chain[field] for field in EVIDENCE_FIELDS}, sort_keys=True)
     with database(path, write=True) as db:
+        count = db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0]
         changed = db.execute('''UPDATE btc_tracking SET status=?, evidence=?
                                 WHERE outpoint=? AND revision=? AND status='refreshing' ''',
                              (status, evidence, key, revision)).rowcount
         require(changed == 1, 'Refresh was superseded; discard its result')
+        require(db.execute('SELECT status, evidence FROM btc_tracking WHERE outpoint=?',
+                           (key,)).fetchone() == (status, evidence),
+                'Tracking result readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM btc_tracking').fetchone()[0] == count,
+                'Tracking row count changed unexpectedly')
     return status
 
 

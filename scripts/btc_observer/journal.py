@@ -98,7 +98,13 @@ def record(path, deposits):
                 continue
             require(count + inserted < MAX_ROWS, 'Journal row limit')
             connection.execute('INSERT INTO btc_outputs VALUES (?, ?, ?, ?)', (key, facts, wtxid, evidence))
+            require(connection.execute('''SELECT outpoint, facts, first_wtxid, first_evidence_sha256
+                    FROM btc_outputs WHERE outpoint=?''', (key,)).fetchone()
+                    == (key, facts, wtxid, evidence),
+                    'Journal insert readback mismatch')
             inserted += 1
+        require(connection.execute('SELECT COUNT(*) FROM btc_outputs').fetchone()[0] == count + inserted,
+                'Journal row count changed unexpectedly')
         connection.execute('COMMIT')
         # Persist directory metadata for the newly created database as well.
         if created:

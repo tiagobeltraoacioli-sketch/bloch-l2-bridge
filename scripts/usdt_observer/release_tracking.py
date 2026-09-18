@@ -125,10 +125,11 @@ def identity(route, expected):
 def _begin(path, route, expected):
     key, facts = identity(route, expected)
     with database(path, write=True) as db:
+        count = db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
+        require(type(count) is int and 0 <= count <= MAX_ROWS, 'invalid release tracking row count')
         row = db.execute('SELECT facts, revision FROM release_tracking WHERE burn=?', (key,)).fetchone()
         if row is None:
-            require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0] < MAX_ROWS,
-                    'release tracking capacity reached')
+            require(count < MAX_ROWS, 'release tracking capacity reached')
             revision = 1
             db.execute('INSERT INTO release_tracking VALUES (?,?,?,?,NULL)',
                        (key, facts, revision, 'refreshing'))
@@ -138,6 +139,11 @@ def _begin(path, route, expected):
             require(revision <= MAX_REVISION, 'release revision exhausted')
             db.execute("UPDATE release_tracking SET revision=?, status='refreshing', observation=NULL WHERE burn=?",
                        (revision, key))
+        require(db.execute('SELECT facts, revision, status, observation FROM release_tracking WHERE burn=?',
+                           (key,)).fetchone() == (facts, revision, 'refreshing', None),
+                'release refresh invalidation readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
+                == count + int(row is None), 'release tracking row count changed unexpectedly')
     return key, revision
 
 
@@ -145,10 +151,16 @@ def _finish(path, key, revision, observation):
     status = 'observed' if observation is not None else 'unavailable'
     encoded = json.dumps(observation, sort_keys=True, allow_nan=False) if observation is not None else None
     with database(path, write=True) as db:
+        count = db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0]
         changed = db.execute('''UPDATE release_tracking SET status=?, observation=?
             WHERE burn=? AND revision=? AND status='refreshing' ''',
             (status, encoded, key, revision)).rowcount
         require(changed == 1, 'release refresh superseded; discard response')
+        require(db.execute('SELECT status, observation FROM release_tracking WHERE burn=?',
+                           (key,)).fetchone() == (status, encoded),
+                'release refresh result readback mismatch')
+        require(db.execute('SELECT COUNT(*) FROM release_tracking').fetchone()[0] == count,
+                'release tracking row count changed unexpectedly')
 
 
 def refresh(path, route, expected, tx_hash, collector):
