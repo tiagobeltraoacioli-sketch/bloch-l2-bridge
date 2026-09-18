@@ -5,6 +5,7 @@ use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
     BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet, WatcherState,
+    WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -139,6 +140,32 @@ fn restore_cannot_auto_credit_operator_review_tier() {
     state.tracked[0].1.phase = DepositPhase::Creditable;
     state.credited.insert(state.tracked[0].0);
     reject(state);
+}
+
+#[test]
+fn restored_snapshot_cannot_fabricate_deposit_under_real_block_hash() {
+    let (watcher, source) = fixture(1, 24);
+    let mut state = watcher.state();
+    let old_id = state.tracked[0].0;
+    state.tracked[0].1.event.txid = [0xff; 32];
+    let forged_id = state.tracked[0].1.event.deposit_id();
+    state.tracked[0].0 = forged_id;
+    state.credited.remove(&old_id);
+    state.credited.insert(forged_id);
+
+    // The forged snapshot is internally consistent and names a real block,
+    // but its transaction never appeared in that block. Restore alone cannot
+    // authenticate this; the first source sync must re-derive and refuse it.
+    let mut restored =
+        DepositWatcher::from_state_for(state.clone(), &VaultSet::new([VAULT]), CHAIN)
+            .expect("internally consistent snapshot");
+    assert_eq!(restored.creditable().count(), 0);
+    assert_eq!(
+        restored.try_sync(&source),
+        Err(WatcherSyncError::RestoredDepositMismatch { deposit: forged_id })
+    );
+    assert_eq!(restored.state(), state, "refusal must be atomic");
+    assert_eq!(restored.creditable().count(), 0);
 }
 
 #[test]

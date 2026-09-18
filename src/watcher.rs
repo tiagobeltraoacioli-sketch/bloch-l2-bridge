@@ -88,6 +88,8 @@ pub enum WatcherSyncError {
     InconsistentParent { height: u64 },
     ViewChanged,
     RewindLimitExceeded,
+    RestoreValidationLimitExceeded,
+    RestoredDepositMismatch { deposit: DepositId },
     ZeroWorkLimit,
 }
 
@@ -293,6 +295,9 @@ pub struct DepositWatcher {
     /// Ephemeral: snapshots cannot attest to a current source view. A restore
     /// or a failed sync must not expose a stale pending-mint worklist.
     view_verified: bool,
+    /// Ephemeral: after restore, retained deposits must be re-derived from
+    /// authenticated source blocks before the mint worklist can be exposed.
+    restore_needs_validation: bool,
     vaults: VaultSet,
     /// Only envelopes naming THIS chain id are deposits for this L2.
     l2_chain_id: u64,
@@ -432,6 +437,7 @@ impl DepositWatcher {
     pub fn new(vaults: VaultSet, l2_chain_id: u64) -> Self {
         DepositWatcher {
             view_verified: false,
+            restore_needs_validation: false,
             vaults,
             l2_chain_id,
             journal: Vec::new(),
@@ -462,7 +468,9 @@ impl DepositWatcher {
     /// journal membership and the tracked/credited/permanent-alarm histories
     /// must all agree. This is not snapshot authentication; prefer
     /// `from_state_for` with trusted config.
-    /// Resync successfully before reading the restart mint worklist.
+    /// Resync successfully before reading the restart mint worklist: that
+    /// first sync re-derives every retained tracked deposit from its source
+    /// block, so internal snapshot consistency alone cannot fabricate work.
     ///
     /// Rejects (rather than trusting) a corrupt/partial persisted state whose
     /// tracked deposits are inconsistent with the journal — otherwise a
@@ -579,6 +587,7 @@ impl DepositWatcher {
         }
         Ok(DepositWatcher {
             view_verified: false,
+            restore_needs_validation: true,
             vaults: state.vaults,
             l2_chain_id: state.l2_chain_id,
             journal: state.journal,
@@ -658,8 +667,10 @@ impl DepositWatcher {
 
     /// Bounded sync: append at most `limit` blocks, or refuse a rewind deeper
     /// than `limit`. Repeat successful calls until `tip_height()` catches up.
-    /// At most `2 * limit + 4` block requests are made; only the new suffix is
-    /// staged, without copying the full historical journal or credit log.
+    /// At most `3 * limit + 4` block requests are made after restore (the
+    /// additional budget re-derives retained deposits from source blocks), and
+    /// at most `2 * limit + 4` otherwise. Only the new suffix is staged,
+    /// without copying the full historical journal or credit log.
     ///
     /// The host must bound individual block/transaction sizes and RPC latency,
     /// and supply authenticated blocks from its own node. This trait cannot
@@ -715,6 +726,50 @@ impl DepositWatcher {
             keep -= 1;
         }
 
+        // A snapshot is only internally consistent; it cannot prove that a
+        // tracked event was actually present in the named source block. In
+        // particular, a forged event can reuse the real journal tip and block
+        // hash, pass `from_state`, and otherwise become visible through
+        // `creditable()` after a no-op tip sync. Re-derive every deposit that
+        // will survive this sync before changing any durable state. Deposits
+        // at/above `keep` are being rewound and need no validation.
+        if self.restore_needs_validation {
+            let heights: BTreeSet<u64> = self
+                .tracked
+                .values()
+                .filter(|tracked| tracked.event.l1_block_height < keep as u64)
+                .map(|tracked| tracked.event.l1_block_height)
+                .collect();
+            if heights.len() > limit {
+                return Err(WatcherSyncError::RestoreValidationLimitExceeded);
+            }
+            let mut derived = BTreeMap::new();
+            for height in heights {
+                let block = read(height)?;
+                if block.hash != self.journal[height as usize]
+                    || (height > 0 && block.parent_hash != self.journal[height as usize - 1])
+                {
+                    return Err(WatcherSyncError::ViewChanged);
+                }
+                let mut verifier = DepositWatcher::new(self.vaults.clone(), self.l2_chain_id);
+                let mut ignored = Vec::new();
+                verifier.scan_block(&block, &mut ignored);
+                derived.extend(verifier.tracked);
+            }
+            for (deposit, tracked) in self
+                .tracked
+                .iter()
+                .filter(|(_, tracked)| tracked.event.l1_block_height < keep as u64)
+            {
+                let matches_source = derived.get(deposit).is_some_and(|observed| {
+                    observed.event == tracked.event && observed.requirement == tracked.requirement
+                });
+                if !matches_source {
+                    return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
+                }
+            }
+        }
+
         let mut staged = Vec::new();
         let mut parent = keep.checked_sub(1).map(|h| self.journal[h]);
         let mut next = keep as u64;
@@ -752,6 +807,7 @@ impl DepositWatcher {
             self.journal.push(block.hash);
         }
         self.age_deposits(&mut updates);
+        self.restore_needs_validation = false;
         self.view_verified = true;
         Ok(updates)
     }
