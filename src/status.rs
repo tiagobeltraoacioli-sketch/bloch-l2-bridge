@@ -73,8 +73,9 @@ impl DepositEvent {
 /// Every non-halted state carries the withdrawal's `amount_atoms`, so the
 /// release gate is a function of the withdrawal itself (see
 /// [`WithdrawalStatus::step`]), not of whatever a caller chooses to pass.
-/// Deserialization also rejects a persisted `ReleaseEligible` state whose
-/// stored gate differs from `K(amount_atoms)` or exceeds its reported depth.
+/// Deserialization also rejects zero-amount withdrawals (which the L2 queue
+/// cannot produce) and a persisted `ReleaseEligible` state whose stored gate
+/// differs from `K(amount_atoms)` or exceeds its reported depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum WithdrawalStatus {
     /// Initiated on L2; its epoch's output root not yet anchored.
@@ -130,9 +131,9 @@ pub enum WithdrawalStatus {
 }
 
 // Keep the public serde representation stable while ensuring a persisted
-// snapshot cannot bypass the amount-derived release gate. Direct construction
-// remains useful for pure state-machine tests; the persistence boundary is
-// deliberately stricter.
+// snapshot cannot introduce a zero-amount withdrawal or bypass the
+// amount-derived release gate. Direct construction remains useful for pure
+// state-machine tests; the persistence boundary is deliberately stricter.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 enum WithdrawalStatusWire {
@@ -160,6 +161,18 @@ enum WithdrawalStatusWire {
 impl<'de> Deserialize<'de> for WithdrawalStatus {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = WithdrawalStatusWire::deserialize(deserializer)?;
+        let amount_atoms = match &wire {
+            WithdrawalStatusWire::Queued { amount_atoms }
+            | WithdrawalStatusWire::Provable { amount_atoms, .. }
+            | WithdrawalStatusWire::ReleaseEligible { amount_atoms, .. }
+            | WithdrawalStatusWire::Frozen { amount_atoms, .. } => Some(*amount_atoms),
+            WithdrawalStatusWire::Halted => None,
+        };
+        if amount_atoms == Some(0) {
+            return Err(serde::de::Error::custom(
+                "withdrawal snapshot contains a zero amount",
+            ));
+        }
         Ok(match wire {
             WithdrawalStatusWire::Queued { amount_atoms } => Self::Queued { amount_atoms },
             WithdrawalStatusWire::Provable {
@@ -1229,6 +1242,27 @@ mod tests {
         let mut extended = serde_json::to_value(eligible()).unwrap();
         extended["ReleaseEligible"]["caller_gate"] = serde_json::json!(1);
         assert!(serde_json::from_value::<WithdrawalStatus>(extended).is_err());
+    }
+
+    #[test]
+    fn status_restore_rejects_zero_amount_withdrawals() {
+        let impossible = [
+            serde_json::json!({"Queued": {"amount_atoms": 0}}),
+            serde_json::json!({"Provable": {
+                "commit_txid": vec![1; 32], "depth": 1, "amount_atoms": 0
+            }}),
+            serde_json::json!({"ReleaseEligible": {
+                "commit_txid": vec![1; 32], "depth": 24,
+                "required_depth": 24, "amount_atoms": 0
+            }}),
+            serde_json::json!({"Frozen": {"fork_point": 1, "amount_atoms": 0}}),
+        ];
+        for snapshot in impossible {
+            assert!(
+                serde_json::from_value::<WithdrawalStatus>(snapshot).is_err(),
+                "zero-amount withdrawal snapshot must fail closed"
+            );
+        }
     }
 
     #[test]
