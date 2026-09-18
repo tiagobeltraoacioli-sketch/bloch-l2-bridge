@@ -23,6 +23,26 @@ fn crate_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[test]
+fn config_loader_bounds_input_before_json_decode() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "bloch-bridge-config-{}-{suffix}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        vec![b' '; bloch_l2_bridge::harness::MAX_CONFIG_BYTES as usize + 1],
+    )
+    .unwrap();
+    let result = load_config(&path);
+    std::fs::remove_file(path).unwrap();
+    assert!(matches!(result, Err(HarnessError::ConfigTooLarge { .. })));
+}
+
 /// Find a solc whose version exactly matches the compiler pin, or `None`.
 /// The pinned deployed-bytecode hashes are only byte-for-byte reproducible
 /// under that exact version, so a mismatched (or absent) solc means the

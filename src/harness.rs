@@ -35,6 +35,8 @@ pub const BRIDGE_PREDEPLOY_ADDRESS: &str = "0x4200000000000000000000000000000000
 pub const TESTNET_CHAIN_ID: u64 = 700_771;
 /// solc pragma the WBLCH source pins.
 pub const WBLCH_SOLC_PRAGMA: &str = "^0.8.24";
+/// Maximum serialized harness configuration accepted from disk.
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Top-level deploy harness config (`deploy/testnet.json`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +140,9 @@ pub struct ValidatedPredeploy {
 pub enum HarnessError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    ConfigTooLarge {
+        limit: u64,
+    },
     BadAddress {
         field: String,
         reason: String,
@@ -198,6 +203,9 @@ impl core::fmt::Display for HarnessError {
         match self {
             HarnessError::Io(e) => write!(f, "io: {e}"),
             HarnessError::Json(e) => write!(f, "json: {e}"),
+            HarnessError::ConfigTooLarge { limit } => {
+                write!(f, "harness config exceeds {limit} bytes")
+            }
             HarnessError::BadAddress { field, reason } => {
                 write!(f, "bad address in {field}: {reason}")
             }
@@ -309,7 +317,16 @@ pub fn resolve_source_path(base_dir: &Path, source_path: &str) -> Result<PathBuf
 
 /// Load `deploy/testnet.json` (or any harness config) from disk.
 pub fn load_config(path: &Path) -> Result<DeployConfig, HarnessError> {
-    let bytes = std::fs::read(path)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(HarnessError::ConfigTooLarge {
+            limit: MAX_CONFIG_BYTES,
+        });
+    }
     Ok(serde_json::from_slice(&bytes)?)
 }
 
