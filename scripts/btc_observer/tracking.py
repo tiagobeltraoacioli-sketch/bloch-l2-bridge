@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 
 from .chain import assess_status, integer, require
 from .journal import FIELDS
@@ -17,6 +18,13 @@ MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MAX_REVISION = (1 << 63) - 1
 STATES = frozenset(('refreshing', 'observed', 'below_threshold', 'orphaned', 'unavailable'))
+SCHEMA = {'btc_tracking': (
+    ((0, 'outpoint', 'TEXT', 0, None, 1), (1, 'facts', 'TEXT', 1, None, 0),
+     (2, 'revision', 'INTEGER', 1, None, 0), (3, 'status', 'TEXT', 1, None, 0),
+     (4, 'block_hash', 'TEXT', 1, None, 0),
+     (5, 'required_confirmations', 'INTEGER', 1, None, 0),
+     (6, 'evidence', 'TEXT', 0, None, 0)),
+    {('outpoint',)})}
 EVIDENCE_FIELDS = ('block_hash', 'block_height', 'tip_hash', 'tip_height', 'tip_chainwork',
                    'confirmations', 'required_confirmations', 'node_active_chain_observed')
 FACT_FIELDS = frozenset(('schema', 'network', 'txid', 'vout', 'outpoint_key', 'amount_sats',
@@ -149,6 +157,7 @@ def database(path, *, write):
                 outpoint TEXT PRIMARY KEY, facts TEXT NOT NULL, revision INTEGER NOT NULL,
                 status TEXT NOT NULL, block_hash TEXT NOT NULL,
                 required_confirmations INTEGER NOT NULL, evidence TEXT)''')
+        validate_schema(connection, require, SCHEMA)
         yield connection
         connection.execute('COMMIT')
         if created:

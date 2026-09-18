@@ -323,11 +323,13 @@ class BitcoinTrackingTest(unittest.TestCase):
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE btc_tracking SET status='refreshing', evidence=NULL
                           WHERE outpoint=NEW.outpoint; END''')
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER erase_tracking_result')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
 
     def test_silent_identity_mutation_during_result_write_is_rolled_back(self):
         self.refresh()
@@ -336,11 +338,13 @@ class BitcoinTrackingTest(unittest.TestCase):
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE btc_tracking SET facts='{}', block_hash=printf('%064d', 0)
                           WHERE outpoint=NEW.outpoint; END''')
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER corrupt_tracking_identity')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
 
     def test_oversized_result_mutation_is_rejected_before_json_decode(self):
         self.refresh()
@@ -349,11 +353,13 @@ class BitcoinTrackingTest(unittest.TestCase):
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE btc_tracking SET evidence=CAST(zeroblob(4097) AS TEXT)
                           WHERE outpoint=NEW.outpoint; END''')
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER enlarge_tracking_result')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
 
     def test_oversized_invalidation_mutation_rolls_back_before_rpc(self):
         self.refresh()
@@ -364,9 +370,11 @@ class BitcoinTrackingTest(unittest.TestCase):
                           BEGIN UPDATE btc_tracking SET facts=CAST(zeroblob(32769) AS TEXT)
                           WHERE outpoint=NEW.outpoint; END''')
         self.node.calls.clear()
-        with self.assertRaisesRegex(Invalid, 'invalidation readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
         self.assertEqual(self.node.calls, [])
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER enlarge_tracking_invalidation')
         state = self.state()
         self.assertEqual(state['last_refresh_status'], 'observed')
         self.assertEqual(state['revision'], 1)

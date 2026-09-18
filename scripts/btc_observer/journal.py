@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 from .transaction import Invalid, inspect_deposit
 
 APPLICATION_ID = 0x50425443
@@ -13,6 +14,11 @@ MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MAX_BATCH_BYTES = 8 * 1024 * 1024
 FIELDS = {'raw', 'network', 'expected_txid', 'vout', 'script_pubkey'}
+SCHEMA = {'btc_outputs': (
+    ((0, 'outpoint', 'TEXT', 0, None, 1), (1, 'facts', 'TEXT', 1, None, 0),
+     (2, 'first_wtxid', 'TEXT', 1, None, 0),
+     (3, 'first_evidence_sha256', 'TEXT', 1, None, 0)),
+    {('outpoint',)})}
 
 
 def require(condition, message):
@@ -78,6 +84,7 @@ def record(path, deposits):
             connection.execute('''CREATE TABLE btc_outputs (
                 outpoint TEXT PRIMARY KEY, facts TEXT NOT NULL,
                 first_wtxid TEXT NOT NULL, first_evidence_sha256 TEXT NOT NULL)''')
+        validate_schema(connection, require, SCHEMA)
         require(connection.execute('PRAGMA application_id').fetchone()[0] == APPLICATION_ID,
                 'Not a BTC observation journal')
         require(connection.execute('PRAGMA user_version').fetchone()[0] == 1, 'Unsupported BTC journal version')

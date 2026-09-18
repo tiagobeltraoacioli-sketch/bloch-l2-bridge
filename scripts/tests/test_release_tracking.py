@@ -144,6 +144,34 @@ class ReleaseTrackingTest(unittest.TestCase):
         with self.assertRaises(Invalid): self.refresh()
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_view_cannot_masquerade_as_tracking_table(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute('PRAGMA application_id=' + str(tracking.APPLICATION_ID))
+            db.execute('PRAGMA user_version=1')
+            db.execute('''CREATE VIEW release_tracking AS SELECT
+                '' AS burn, '' AS facts, 1 AS revision, 'refreshing' AS status,
+                NULL AS observation''')
+        self.path.chmod(0o600)
+        fetch = Mock()
+        with self.assertRaisesRegex(Invalid, 'invalid SQLite store table'):
+            self.refresh(fetch)
+        fetch.assert_not_called()
+
+    def test_nonidentity_column_collation_cannot_change_state_comparisons(self):
+        self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('ALTER TABLE release_tracking RENAME TO original_release_tracking')
+            db.execute('''CREATE TABLE release_tracking (
+                burn TEXT PRIMARY KEY, facts TEXT NOT NULL, revision INTEGER NOT NULL,
+                status TEXT COLLATE NOCASE NOT NULL, observation TEXT)''')
+            db.execute('INSERT INTO release_tracking SELECT * FROM original_release_tracking')
+            db.execute('DROP TABLE original_release_tracking')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM release_tracking WHERE status='OBSERVED'").fetchone()[0], 1)
+        fetch = Mock()
+        with self.assertRaisesRegex(Invalid, 'invalid SQLite store collation'):
+            self.refresh(fetch)
+        fetch.assert_not_called()
+
     def test_capacity_and_revision_exhaustion_stop_before_network(self):
         fetch = Mock()
         with patch.object(tracking, 'MAX_ROWS', 0), self.assertRaises(Invalid): self.refresh(fetch)
@@ -178,11 +206,13 @@ class ReleaseTrackingTest(unittest.TestCase):
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE release_tracking SET status='refreshing', observation=NULL
                           WHERE burn=NEW.burn; END''')
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER erase_release_result')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
 
     def test_silent_identity_mutation_during_result_write_is_rolled_back(self):
         self.refresh()
@@ -190,11 +220,13 @@ class ReleaseTrackingTest(unittest.TestCase):
             db.execute('''CREATE TRIGGER corrupt_release_identity AFTER UPDATE OF status ON release_tracking
                           WHEN NEW.status != 'refreshing'
                           BEGIN UPDATE release_tracking SET facts='{}' WHERE burn=NEW.burn; END''')
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER corrupt_release_identity')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)
 
     def test_oversized_invalidation_mutation_rolls_back_before_collection(self):
         self.refresh()
@@ -205,9 +237,11 @@ class ReleaseTrackingTest(unittest.TestCase):
                           BEGIN UPDATE release_tracking SET facts=CAST(zeroblob(4097) AS TEXT)
                           WHERE burn=NEW.burn; END''')
         fetch = Mock()
-        with self.assertRaisesRegex(Invalid, 'invalidation readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh(fetch)
         fetch.assert_not_called()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER enlarge_release_invalidation')
         state = self.state()
         self.assertEqual(state['last_refresh_status'], 'observed')
         self.assertEqual(state['revision'], 1)
@@ -221,8 +255,10 @@ class ReleaseTrackingTest(unittest.TestCase):
                           BEGIN UPDATE release_tracking
                           SET observation=CAST(zeroblob(16385) AS TEXT)
                           WHERE burn=NEW.burn; END''')
-        with self.assertRaisesRegex(Invalid, 'result readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             self.refresh()
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER enlarge_release_result')
         state = self.state()
-        self.assertEqual(state['last_refresh_status'], 'refreshing')
-        self.assertEqual(state['revision'], 2)
+        self.assertEqual(state['last_refresh_status'], 'observed')
+        self.assertEqual(state['revision'], 1)

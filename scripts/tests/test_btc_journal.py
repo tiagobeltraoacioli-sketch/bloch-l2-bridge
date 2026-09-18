@@ -147,7 +147,7 @@ class BitcoinJournalTest(unittest.TestCase):
             db.execute('''CREATE TRIGGER discard_new_output AFTER INSERT ON btc_outputs
                           BEGIN DELETE FROM btc_outputs WHERE outpoint=NEW.outpoint; END''')
         before = self.rows()
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             journal.record(self.path, [deposit(index=1)])
         self.assertEqual(self.rows(), before)
 
@@ -158,7 +158,7 @@ class BitcoinJournalTest(unittest.TestCase):
                           BEGIN UPDATE btc_outputs SET facts=CAST(zeroblob(32769) AS TEXT)
                           WHERE outpoint=NEW.outpoint; END''')
         before = self.rows()
-        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+        with self.assertRaisesRegex(Invalid, 'triggers are not allowed'):
             journal.record(self.path, [deposit(index=1)])
         self.assertEqual(self.rows(), before)
 

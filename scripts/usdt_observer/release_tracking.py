@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 
 from .common import Invalid, integer, parse_json, require, word
 from .releases import normalize_release, match_release, release_digest
@@ -19,6 +20,11 @@ MAX_REVISION = (1 << 63) - 1
 OBSERVATION_FIELDS = frozenset(('route_id', 'release_id', 'nonce', 'recipient', 'amount',
                                 'native_burn', 'log_index', 'transfer_log_index', 'tx_hash',
                                 'block_hash', 'block_number', 'network'))
+SCHEMA = {'release_tracking': (
+    ((0, 'burn', 'TEXT', 0, None, 1), (1, 'facts', 'TEXT', 1, None, 0),
+     (2, 'revision', 'INTEGER', 1, None, 0), (3, 'status', 'TEXT', 1, None, 0),
+     (4, 'observation', 'TEXT', 0, None, 0)),
+    {('burn',)})}
 
 
 def _validate_observation(status, route, expected, encoded):
@@ -100,6 +106,7 @@ def database(path, *, write):
             connection.execute('''CREATE TABLE release_tracking (
                 burn TEXT PRIMARY KEY, facts TEXT NOT NULL, revision INTEGER NOT NULL,
                 status TEXT NOT NULL, observation TEXT)''')
+        validate_schema(connection, require, SCHEMA)
         yield connection
         connection.execute('COMMIT')
         if created:

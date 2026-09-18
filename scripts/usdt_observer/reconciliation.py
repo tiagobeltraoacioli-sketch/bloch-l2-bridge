@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 
 from .common import Invalid, parse_json, require, word
 from .releases import normalize_release
@@ -14,6 +15,17 @@ APPLICATION_ID = 0x50555243
 MAX_ROWS = 100_000
 MAX_DB_BYTES = 256 * 1024 * 1024
 MAX_REVISION = (1 << 63) - 1
+SCHEMA = {
+    'claims': (
+        ((0, 'burn', 'TEXT', 0, None, 1), (1, 'route_nonce', 'TEXT', 1, None, 0),
+         (2, 'facts', 'TEXT', 1, None, 0), (3, 'revision', 'INTEGER', 1, None, 0),
+         (4, 'status', 'TEXT', 1, None, 0)),
+        {('burn',), ('route_nonce',)}),
+    'history': (
+        ((0, 'burn', 'TEXT', 1, None, 1), (1, 'revision', 'INTEGER', 1, None, 2),
+         (2, 'operation', 'TEXT', 1, None, 0), (3, 'payload', 'TEXT', 1, None, 0),
+         (4, 'status', 'TEXT', 1, None, 0)),
+        {('burn', 'operation'), ('burn', 'revision')})}
 
 
 def _claim(db, burn):
@@ -66,6 +78,7 @@ def database(path, *, write):
             connection.execute('PRAGMA user_version=1')
             connection.execute("CREATE TABLE claims (burn TEXT PRIMARY KEY, route_nonce TEXT NOT NULL UNIQUE, facts TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL)")
             connection.execute("CREATE TABLE history (burn TEXT NOT NULL, revision INTEGER NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(burn, revision), UNIQUE(burn, operation))")
+        validate_schema(connection, require, SCHEMA)
         yield connection
         connection.execute('COMMIT')
         if created:

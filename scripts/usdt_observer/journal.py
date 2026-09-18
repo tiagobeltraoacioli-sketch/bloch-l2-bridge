@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 
 from .common import Invalid, deposit_digest, integer, require, route_digest, word
 
@@ -15,6 +16,12 @@ MAX_DB_BYTES = 256 * 1024 * 1024
 MIN_FREE = 64 * 1024 * 1024
 FIELDS = {'route_id', 'deposit_id', 'source_domain', 'nonce', 'sender', 'amount', 'pq_recipient_hash',
           'log_index', 'transfer_log_index', 'network', 'tx_hash', 'block_hash', 'block_number'}
+SCHEMA = {'observations': (
+    ((0, 'deposit_id', 'TEXT', 0, None, 1), (1, 'source_event', 'TEXT', 1, None, 0),
+     (2, 'route_nonce', 'TEXT', 1, None, 0),
+     (3, 'observation_json', 'TEXT', 1, None, 0),
+     (4, 'evidence_sha256', 'TEXT', 1, None, 0)),
+    {('deposit_id',), ('source_event',), ('route_nonce',)})}
 
 
 def validate_observation(route, observation):
@@ -89,6 +96,7 @@ def record(path, route, observations, evidence_sha256):
                 deposit_id TEXT PRIMARY KEY, source_event TEXT NOT NULL UNIQUE,
                 route_nonce TEXT NOT NULL UNIQUE, observation_json TEXT NOT NULL,
                 evidence_sha256 TEXT NOT NULL)''')
+        validate_schema(connection, require, SCHEMA)
         require(connection.execute('PRAGMA user_version').fetchone()[0] == 1, 'unsupported journal version')
         count = connection.execute('SELECT COUNT(*) FROM observations').fetchone()[0]
         require(type(count) is int and 0 <= count <= MAX_ROWS,

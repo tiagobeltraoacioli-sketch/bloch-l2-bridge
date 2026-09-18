@@ -108,7 +108,7 @@ class ReviewJournalTest(unittest.TestCase):
             db.execute('''CREATE TRIGGER discard_new_audit AFTER INSERT ON native_review_observations
                           BEGIN DELETE FROM native_review_observations WHERE audit_id=NEW.audit_id; END''')
         with patch('usdt_observer.native_review.verify_review', return_value=self.review):
-            with self.assertRaisesRegex(ValueError, 'readback mismatch'):
+            with self.assertRaisesRegex(ValueError, 'triggers are not allowed'):
                 self.record()
         self.assertEqual(self.rows(), [])
 
@@ -122,7 +122,7 @@ class ReviewJournalTest(unittest.TestCase):
                           SET audit=CAST(zeroblob(131073) AS TEXT)
                           WHERE audit_id=NEW.audit_id; END''')
         with patch('usdt_observer.native_review.verify_review', return_value=self.review):
-            with self.assertRaisesRegex(ValueError, 'readback mismatch'):
+            with self.assertRaisesRegex(ValueError, 'triggers are not allowed'):
                 self.record()
         self.assertEqual(self.rows(), [])
 

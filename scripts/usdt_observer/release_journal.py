@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import stat
+from sqlite_schema import validate_schema
 
 from .common import Invalid, UINT64_MAX, require, word
 from .releases import match_release, release_digest
@@ -19,6 +20,16 @@ MIN_FREE = 64 * 1024 * 1024
 FACT_FIELDS = {'route_id', 'release_id', 'nonce', 'recipient', 'amount', 'native_burn',
                'log_index', 'transfer_log_index', 'tx_hash', 'block_hash', 'block_number',
                'network', 'native_domain', 'native_asset', 'source_domain', 'token', 'vault'}
+RELEASE_SCHEMA = {'release_observations': (
+    ((0, 'release_id', 'TEXT', 0, None, 1), (1, 'source_event', 'TEXT', 1, None, 0),
+     (2, 'transfer_event', 'TEXT', 1, None, 0), (3, 'route_nonce', 'TEXT', 1, None, 0),
+     (4, 'native_burn', 'TEXT', 1, None, 0), (5, 'facts', 'TEXT', 1, None, 0),
+     (6, 'first_evidence_sha256', 'TEXT', 1, None, 0)),
+    {('release_id',), ('source_event',), ('transfer_event',), ('route_nonce',), ('native_burn',)})}
+REVIEW_SCHEMA = {'native_review_observations': (
+    ((0, 'audit_id', 'TEXT', 0, None, 1), (1, 'release_id', 'TEXT', 1, None, 0),
+     (2, 'audit', 'TEXT', 1, None, 0)),
+    {('audit_id',)})}
 
 
 def _stored_identities(facts):
@@ -137,6 +148,7 @@ def record(path, route, captured, expected, *, native_verification=None):
                 transfer_event TEXT NOT NULL UNIQUE, route_nonce TEXT NOT NULL UNIQUE,
                 native_burn TEXT NOT NULL UNIQUE, facts TEXT NOT NULL,
                 first_evidence_sha256 TEXT NOT NULL)''')
+        validate_schema(db, require, RELEASE_SCHEMA)
         source_count = db.execute('SELECT COUNT(*) FROM release_observations').fetchone()[0]
         require(type(source_count) is int and 0 <= source_count <= MAX_ROWS,
                 'invalid release journal row count')
@@ -184,6 +196,7 @@ def record(path, route, captured, expected, *, native_verification=None):
             db.execute('''CREATE TABLE IF NOT EXISTS native_review_observations (
                 audit_id TEXT PRIMARY KEY, release_id TEXT NOT NULL,
                 audit TEXT NOT NULL)''')
+            validate_schema(db, require, REVIEW_SCHEMA)
             review_count = db.execute('SELECT COUNT(*) FROM native_review_observations').fetchone()[0]
             require(type(review_count) is int and 0 <= review_count <= MAX_ROWS,
                     'invalid native review row count')
@@ -251,6 +264,7 @@ def read_review(path, audit_id):
                 'not a release journal')
         require(db.execute('PRAGMA user_version').fetchone()[0] == 1,
                 'unsupported release journal version')
+        validate_schema(db, require, {**RELEASE_SCHEMA, **REVIEW_SCHEMA})
         # A single SELECT provides a consistent snapshot. Bound text before it
         # crosses into Python, including corrupted rows in a local database.
         row = db.execute('''SELECT a.release_id, a.audit, r.source_event, r.transfer_event,

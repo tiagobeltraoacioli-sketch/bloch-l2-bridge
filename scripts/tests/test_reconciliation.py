@@ -53,7 +53,7 @@ class ReconciliationTest(unittest.TestCase):
             db.execute('DROP TABLE claims_original')
         changed = copy.deepcopy(self.expected)
         changed['native_burn'] = '0x' + 'ac' * 32
-        with self.assertRaisesRegex(Invalid, 'identity already assigned'):
+        with self.assertRaisesRegex(Invalid, 'invalid SQLite store columns'):
             r.register(self.path, self.route, changed)
         with sqlite3.connect(self.path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0], 1)
@@ -90,6 +90,8 @@ class ReconciliationTest(unittest.TestCase):
                           BEGIN UPDATE claims SET status='reconciling' WHERE burn=NEW.burn; END''')
         with self.assertRaises(Invalid):
             self.move(2, 'observed', 2, transaction='0x'+'aa'*32, evidence_sha256='0x'+'bb'*32)
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER undo_claim_status')
         state = r.read_state(self.path, self.route, self.expected)
         self.assertEqual((state['revision'], state['status']), (2, 'reconciling'))
 
@@ -102,6 +104,8 @@ class ReconciliationTest(unittest.TestCase):
                           WHERE burn=NEW.burn; END''')
         with self.assertRaises(Invalid):
             self.move(2, 'unavailable', 2)
+        with sqlite3.connect(self.path) as db:
+            db.execute('DROP TRIGGER enlarge_reconciliation_claim')
         state = r.read_state(self.path, self.route, self.expected)
         self.assertEqual((state['revision'], state['status']), (2, 'reconciling'))
 
