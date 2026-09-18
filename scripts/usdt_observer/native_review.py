@@ -35,12 +35,14 @@ def verify_review(executable, route, expected, trust, certificate):
         number(value)
     checkpoint, current, expiry = (int(trust['checkpoint_height']), int(trust['current_height']),
                                    int(certificate['valid_until']))
+    checkpoint_root = word(trust['checkpoint_root'], 32)
+    require(any(checkpoint_root), 'zero review checkpoint root')
     require(checkpoint <= current <= expiry, 'review outside validity window')
     require(current - checkpoint <= int(trust['max_checkpoint_age']), 'review checkpoint too old')
     require(expiry - checkpoint <= int(trust['max_certificate_lifetime']),
             'review certificate lifetime exceeds policy')
     request = b'BLOCH-REVIEW-VERIFY-v2\0'
-    request += number(trust['checkpoint_height']) + word(trust['checkpoint_root'], 32)
+    request += number(trust['checkpoint_height']) + checkpoint_root
     request += number(trust['current_height']) + number(certificate['valid_until'])
     request += number(trust['max_checkpoint_age']) + number(trust['max_certificate_lifetime'])
     for field, size in [('source_domain', 32), ('native_domain', 32), ('native_asset', 32),

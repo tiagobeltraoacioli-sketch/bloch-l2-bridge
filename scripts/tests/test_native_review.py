@@ -101,4 +101,6 @@ class NativeReviewTest(unittest.TestCase):
             self.cert[field] = '18446744073709551615'
             with self.assertRaises(ValueError): self.verify()
             del self.cert[field]
+        self.trust['checkpoint_root'] = '0x' + '00' * 32
+        with self.assertRaises(ValueError): self.verify()
         run.assert_not_called()
