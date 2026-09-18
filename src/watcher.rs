@@ -368,6 +368,15 @@ pub enum WatcherRestoreError {
     },
     /// The same `deposit_id` appears more than once in `tracked`.
     DuplicateDeposit { deposit: DepositId },
+    /// A permanent reorg alarm contains impossible or cross-configuration
+    /// deposit facts, or disagrees with the automatic-credit log.
+    InvalidReorgAlarm {
+        deposit: DepositId,
+        reason: &'static str,
+    },
+    /// A durable automatic-credit entry is neither currently tracked nor
+    /// represented by the permanent alarm emitted when it was removed.
+    UnaccountedCredit { deposit: DepositId },
 }
 
 impl core::fmt::Display for WatcherRestoreError {
@@ -403,6 +412,16 @@ impl core::fmt::Display for WatcherRestoreError {
                     "watcher restore: duplicate deposit_id {deposit:?} in tracked set"
                 )
             }
+            Self::InvalidReorgAlarm { deposit, reason } => {
+                write!(
+                    f,
+                    "watcher restore: invalid reorg alarm {deposit:?}: {reason}"
+                )
+            }
+            Self::UnaccountedCredit { deposit } => write!(
+                f,
+                "watcher restore: credited deposit {deposit:?} is neither tracked nor alarmed"
+            ),
         }
     }
 }
@@ -440,8 +459,9 @@ impl DepositWatcher {
     /// (journal intact), and the durable `credited` set means restart can
     /// never re-credit already-announced deposits.
     /// Deposit identity, chain, nonzero facts, amount-derived K, current phase,
-    /// journal membership and credit-log consistency must all agree. This is
-    /// not snapshot authentication; prefer `from_state_for` with trusted config.
+    /// journal membership and the tracked/credited/permanent-alarm histories
+    /// must all agree. This is not snapshot authentication; prefer
+    /// `from_state_for` with trusted config.
     /// Resync successfully before reading the restart mint worklist.
     ///
     /// Rejects (rather than trusting) a corrupt/partial persisted state whose
@@ -454,6 +474,32 @@ impl DepositWatcher {
     /// [`WatcherRestoreError::DepositHashNotInJournal`]).
     pub fn from_state(state: WatcherState) -> Result<Self, WatcherRestoreError> {
         let journal_len = state.journal.len();
+        let mut alarmed = BTreeSet::new();
+        for event in &state.credit_reorg_alarms {
+            let deposit = event.deposit_id();
+            let invalid = |reason| WatcherRestoreError::InvalidReorgAlarm { deposit, reason };
+            if event.l2_chain_id != state.l2_chain_id {
+                return Err(invalid("foreign L2 chain"));
+            }
+            if state.vaults.is_empty()
+                || event.amount_atoms < MIN_DEPOSIT_ATOMS
+                || event.l2_recipient == [0; 20]
+            {
+                return Err(invalid("missing vault configuration, amount or recipient"));
+            }
+            if confirmation_depth(event.amount_atoms).needs_operator_review() {
+                if state.credited.contains(&deposit) {
+                    return Err(invalid(
+                        "operator-review alarm appears in automatic credit log",
+                    ));
+                }
+            } else if !state.credited.contains(&deposit) {
+                return Err(invalid(
+                    "automatic-credit alarm is absent from durable credit log",
+                ));
+            }
+            alarmed.insert(deposit);
+        }
         let mut tracked = BTreeMap::new();
         for (id, t) in state.tracked {
             let invalid = |reason| WatcherRestoreError::InvalidDeposit {
@@ -524,6 +570,11 @@ impl DepositWatcher {
             }
             if tracked.insert(id, t).is_some() {
                 return Err(WatcherRestoreError::DuplicateDeposit { deposit: id });
+            }
+        }
+        for deposit in &state.credited {
+            if !tracked.contains_key(deposit) && !alarmed.contains(deposit) {
+                return Err(WatcherRestoreError::UnaccountedCredit { deposit: *deposit });
             }
         }
         Ok(DepositWatcher {

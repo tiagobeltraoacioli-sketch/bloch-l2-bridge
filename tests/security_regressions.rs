@@ -107,6 +107,32 @@ fn restore_requires_durable_log_for_creditable_deposit() {
 }
 
 #[test]
+fn restore_refuses_unaccounted_credit_log_entry() {
+    let (watcher, _) = fixture(1, 24);
+    let mut state = watcher.state();
+    state.tracked.clear();
+    state.credit_reorg_alarms.clear();
+    reject(state);
+}
+
+#[test]
+fn restore_binds_reorg_alarms_to_credit_tier_and_configuration() {
+    let (watcher, _) = fixture(1, 24);
+    let mut foreign = watcher.state();
+    let mut alarm = foreign.tracked[0].1.event;
+    alarm.l2_chain_id += 1;
+    foreign.credit_reorg_alarms.push(alarm);
+    reject(foreign);
+
+    let (pending, _) = fixture(1, 1);
+    let mut missing_credit = pending.state();
+    missing_credit
+        .credit_reorg_alarms
+        .push(missing_credit.tracked[0].1.event);
+    reject(missing_credit);
+}
+
+#[test]
 fn restore_cannot_auto_credit_operator_review_tier() {
     let (watcher, _) = fixture(1001 * ATOMS_PER_BLCH, 288);
     let mut state = watcher.state();
