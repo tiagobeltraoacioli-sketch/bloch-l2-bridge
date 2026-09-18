@@ -76,6 +76,17 @@ class BitcoinJournalTest(unittest.TestCase):
             journal.record(self.path, [deposit(index=1), deposit()])
         self.assertEqual(self.rows(), before)
 
+    def test_duplicate_revalidates_retained_witness_and_evidence_digests(self):
+        journal.record(self.path, [deposit()])
+        original = self.path.read_bytes()
+        for column, value in [('first_wtxid', 'not-a-wtxid'),
+                              ('first_evidence_sha256', 'not-a-digest')]:
+            self.path.write_bytes(original)
+            with sqlite3.connect(self.path) as db:
+                db.execute(f'UPDATE btc_outputs SET {column}=?', (value,))
+            with self.subTest(column=column), self.assertRaisesRegex(Invalid, 'corrupt'):
+                journal.record(self.path, [deposit()])
+
     def test_row_limit_rolls_back_new_rows_but_allows_duplicates(self):
         raw = tx(amounts=(1, 2, 3))
         journal.record(self.path, [deposit(raw)])

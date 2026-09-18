@@ -86,7 +86,9 @@ The unique key is network/txid/vout. Repeated facts, including a different witne
 for the same txid, increment the returned duplicate count and create no new row.
 Conflicting stored facts cause the entire batch to fail. The first wtxid and raw
 transaction SHA-256 digest are retained; later witness variants do not overwrite
-that evidence. Raw transactions, keys, native recipients, block hashes and
+that evidence. A duplicate retry revalidates the exact stored facts and the
+canonical shape of both retained digests before reporting success; altered
+metadata is refused. Raw transactions, keys, native recipients, block hashes and
 confirmation claims are not stored. A separate archival/chain-evidence layer is
 still needed. JSON amounts remain integer satoshi strings.
 

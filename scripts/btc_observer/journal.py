@@ -85,9 +85,15 @@ def record(path, deposits):
         require(count <= MAX_ROWS, 'Journal row limit')
         inserted = duplicates = 0
         for key, facts, wtxid, evidence in checked:
-            prior = connection.execute('SELECT facts FROM btc_outputs WHERE outpoint=?', (key,)).fetchone()
+            prior = connection.execute('''SELECT outpoint, facts, first_wtxid, first_evidence_sha256
+                FROM btc_outputs WHERE outpoint=?''', (key,)).fetchone()
             if prior is not None:
-                require(prior[0] == facts, 'Conflicting facts for an existing Bitcoin outpoint')
+                require(prior[:2] == (key, facts)
+                        and type(prior[2]) is str and len(prior[2]) == 64
+                        and all(char in '0123456789abcdef' for char in prior[2])
+                        and type(prior[3]) is str and len(prior[3]) == 64
+                        and all(char in '0123456789abcdef' for char in prior[3]),
+                        'Conflicting or corrupt facts for an existing Bitcoin outpoint')
                 duplicates += 1
                 continue
             require(count + inserted < MAX_ROWS, 'Journal row limit')
