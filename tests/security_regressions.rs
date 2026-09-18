@@ -447,6 +447,46 @@ struct SameHashChangingContents {
     tip_reads: std::cell::Cell<usize>,
 }
 
+struct SameHashChangingInterior {
+    source: MemorySource,
+    interior_reads: std::cell::Cell<usize>,
+}
+
+impl BlockSource for SameHashChangingInterior {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if height == 1 {
+            let reads = self.interior_reads.get();
+            self.interior_reads.set(reads + 1);
+            if reads == 0 {
+                block.txs.push(L1Tx {
+                    txid: [0x44; 32],
+                    outputs: vec![
+                        TxOutput {
+                            value: 1,
+                            script_pubkey: VAULT.to_vec(),
+                        },
+                        TxOutput {
+                            value: 0,
+                            script_pubkey: DepositEnvelope {
+                                l2_chain_id: CHAIN,
+                                l2_recipient: [0x55; 20],
+                            }
+                            .encode()
+                            .to_vec(),
+                        },
+                    ],
+                });
+            }
+        }
+        Some(block)
+    }
+}
+
 impl BlockSource for SameHashChangingContents {
     fn tip_height(&self) -> Option<u64> {
         self.source.tip_height()
@@ -509,6 +549,38 @@ fn same_hash_tip_content_change_is_refused_atomically() {
     assert_eq!(watcher.state(), before, "refusal must be atomic");
     assert_eq!(watcher.creditable().count(), 0);
     assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn same_hash_interior_content_change_is_refused_before_commit() {
+    let mut source = MemorySource::new();
+    let mut parent = [0; 32];
+    for height in 0u64..3 {
+        let hash = bloch_l2_bridge::merkle::keccak256(&height.to_le_bytes());
+        source
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+    let changing = SameHashChangingInterior {
+        source,
+        interior_reads: std::cell::Cell::new(0),
+    };
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    let before = watcher.state();
+
+    assert_eq!(
+        watcher.try_sync(&changing),
+        Err(WatcherSyncError::ViewChanged)
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.tracked().count(), 0);
+    assert_eq!(watcher.creditable().count(), 0);
 }
 
 #[test]

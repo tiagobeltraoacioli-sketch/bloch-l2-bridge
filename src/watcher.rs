@@ -60,6 +60,7 @@
 //! JSON-RPC (see `stubs::L1DepositWatcher`); the RPC client does not
 //! exist in this crate.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -904,8 +905,9 @@ impl DepositWatcher {
     }
 
     /// Fold a coherent source view in, atomically. Missing data is NOT evidence
-    /// of a reorg. Validate a staged suffix and recheck the source endpoints
-    /// before changing the journal, deposits, credit log or permanent alarms.
+    /// of a reorg. Validate a staged suffix and recheck every source block
+    /// touched by the call before changing the journal, deposits, credit log
+    /// or permanent alarms.
     pub fn try_sync<S: BlockSource>(
         &mut self,
         source: &S,
@@ -915,12 +917,11 @@ impl DepositWatcher {
 
     /// Bounded sync: append at most `limit` blocks, or refuse a rewind deeper
     /// than `limit`. Repeat successful calls until `tip_height()` catches up.
-    /// At most `3 * limit + 6` block requests are made after restore (the
-    /// additional budget re-derives retained deposits from source blocks), and
-    /// at most `2 * limit + 6` otherwise. The two additional requests apply
-    /// when a trusted checkpoint is pinned: it is checked before staging and
-    /// rechecked before commit. Only the new suffix is staged, without copying
-    /// the full historical journal or credit log.
+    /// At most `6 * limit + 8` block requests are made after restore (the
+    /// additional budget re-derives retained deposits and rechecks every block
+    /// read during the call), and at most `4 * limit + 8` otherwise. Only the
+    /// new suffix and a limit-bounded ledger of observed source blocks are
+    /// staged, without copying the full historical journal or credit log.
     ///
     /// The host must bound individual block/transaction sizes and RPC latency,
     /// and supply authenticated blocks from its own node. This trait cannot
@@ -937,6 +938,12 @@ impl DepositWatcher {
             return Err(WatcherSyncError::ZeroWorkLimit);
         }
         let tip = source.tip_height().ok_or(WatcherSyncError::EmptySource)?;
+        // Record the first complete value returned at every touched height.
+        // Repeated reads must agree immediately, and the full ledger is read
+        // once more before commit. Hash equality alone is insufficient because
+        // BlockSource is an untrusted trait and this crate cannot recalculate
+        // a consensus block hash from its reduced L1Block representation.
+        let observed = RefCell::new(BTreeMap::<u64, L1Block>::new());
         let read = |height| {
             let block = source
                 .block_at(height)
@@ -947,10 +954,18 @@ impl DepositWatcher {
                     received: block.height,
                 });
             }
+            let mut observed = observed.borrow_mut();
+            if let Some(first) = observed.get(&height) {
+                if first != &block {
+                    return Err(WatcherSyncError::ViewChanged);
+                }
+            } else {
+                observed.insert(height, block.clone());
+            }
             Ok(block)
         };
-        let tip_block = read(tip)?;
-        let checkpoint_block = if let Some(checkpoint) = self.source_checkpoint {
+        read(tip)?;
+        if let Some(checkpoint) = self.source_checkpoint {
             if tip < checkpoint.height {
                 return Err(WatcherSyncError::TrustedCheckpointUnavailable {
                     height: checkpoint.height,
@@ -965,10 +980,7 @@ impl DepositWatcher {
                     actual: block.hash,
                 });
             }
-            Some(block)
-        } else {
-            None
-        };
+        }
 
         // Locate the common prefix without popping any live state. Heights
         // beyond a confirmed shorter tip may be rewound; a missing block AT
@@ -1100,18 +1112,17 @@ impl DepositWatcher {
             next = successor;
         }
 
-        // Revalidate both the end of the staged prefix and the advertised
-        // tip. A source changing during discovery cannot poison durable logs.
-        if let Some(last) = staged.last() {
-            if read(last.height)? != *last {
-                return Err(WatcherSyncError::ViewChanged);
-            }
-        }
-        if source.tip_height() != Some(tip) || read(tip)? != tip_block {
+        // Revalidate every complete block observed by this call, not only the
+        // staged endpoint/tip/checkpoint. An interior same-hash content change
+        // must not poison durable state. This catches observable changes; a
+        // malicious source that performs an ABA change entirely between reads
+        // still requires an atomic/authenticated host snapshot API.
+        if source.tip_height() != Some(tip) {
             return Err(WatcherSyncError::ViewChanged);
         }
-        if let Some(checkpoint_block) = checkpoint_block {
-            if read(checkpoint_block.height)? != checkpoint_block {
+        let observed_blocks: Vec<L1Block> = observed.borrow().values().cloned().collect();
+        for expected in observed_blocks {
+            if read(expected.height)? != expected {
                 return Err(WatcherSyncError::ViewChanged);
             }
         }
