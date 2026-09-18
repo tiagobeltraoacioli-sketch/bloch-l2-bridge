@@ -734,9 +734,23 @@ impl DepositWatcher {
         // particular, a forged event can reuse the real journal tip and block
         // hash, pass `from_state`, and otherwise become visible through
         // `creditable()` after a no-op tip sync. Re-derive every deposit that
-        // will survive this sync before changing any durable state. Deposits
-        // at/above `keep` are being rewound and need no validation.
+        // will survive this sync before changing any durable state. A deposit
+        // at/above `keep` cannot be re-derived from the replacement branch, so
+        // it must fail closed rather than generate durable history.
         if self.restore_needs_validation {
+            // A restored snapshot is not source authentication. If the
+            // current source has already reorged a retained deposit away, its
+            // old block is unavailable here and the event cannot be
+            // re-derived. Refuse instead of converting an unverified snapshot
+            // entry into a permanent reorg alarm / credited-id tombstone.
+            if let Some(deposit) = self
+                .tracked
+                .iter()
+                .find(|(_, tracked)| tracked.event.l1_block_height >= keep as u64)
+                .map(|(deposit, _)| *deposit)
+            {
+                return Err(WatcherSyncError::RestoredDepositMismatch { deposit });
+            }
             // When the retained journal fits the explicit work budget, replay
             // every block. This proves snapshot completeness against the
             // supplied source, including a snapshot that omitted the only

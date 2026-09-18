@@ -182,6 +182,33 @@ fn restored_snapshot_cannot_fabricate_deposit_under_real_block_hash() {
 }
 
 #[test]
+fn restored_unvalidated_deposit_cannot_become_a_permanent_reorg_alarm() {
+    let (watcher, _) = fixture(1, 24);
+    let state = watcher.state();
+    let deposit = state.tracked[0].0;
+    let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+
+    // The current source has replaced the whole saved branch. It cannot
+    // authenticate whether the snapshot's deposit was ever in the old block.
+    let mut replacement = MemorySource::new();
+    replacement
+        .push(L1Block {
+            height: 0,
+            hash: [0xff; 32],
+            parent_hash: [0; 32],
+            txs: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        restored.try_sync_with_limit(&replacement, 24),
+        Err(WatcherSyncError::RestoredDepositMismatch { deposit })
+    );
+    assert_eq!(restored.state(), state, "refusal must be atomic");
+    assert!(restored.credit_reorg_alarms().is_empty());
+    assert_eq!(restored.creditable().count(), 0);
+}
+
+#[test]
 fn lost_confirmations_remove_deposit_from_restart_mint_worklist() {
     let (mut watcher, mut source) = fixture(1, 24);
     assert_eq!(watcher.creditable().count(), 1);
