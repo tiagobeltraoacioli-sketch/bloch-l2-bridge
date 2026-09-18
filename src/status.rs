@@ -72,7 +72,9 @@ impl DepositEvent {
 /// Every non-halted state carries the withdrawal's `amount_atoms`, so the
 /// release gate is a function of the withdrawal itself (see
 /// [`WithdrawalStatus::step`]), not of whatever a caller chooses to pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Deserialization also rejects a persisted `ReleaseEligible` state whose
+/// stored gate differs from `K(amount_atoms)` or exceeds its reported depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum WithdrawalStatus {
     /// Initiated on L2; its epoch's output root not yet anchored.
     Queued {
@@ -124,6 +126,78 @@ pub enum WithdrawalStatus {
     /// Reorg deeper than K observed (majority-attack territory): bridge
     /// HALT, no releases, manual reconciliation required (§2 R4).
     Halted,
+}
+
+// Keep the public serde representation stable while ensuring a persisted
+// snapshot cannot bypass the amount-derived release gate. Direct construction
+// remains useful for pure state-machine tests; the persistence boundary is
+// deliberately stricter.
+#[derive(Deserialize)]
+enum WithdrawalStatusWire {
+    Queued {
+        amount_atoms: u64,
+    },
+    Provable {
+        commit_txid: [u8; 32],
+        depth: u64,
+        amount_atoms: u64,
+    },
+    ReleaseEligible {
+        commit_txid: [u8; 32],
+        depth: u64,
+        required_depth: u64,
+        amount_atoms: u64,
+    },
+    Frozen {
+        fork_point: u64,
+        amount_atoms: u64,
+    },
+    Halted,
+}
+
+impl<'de> Deserialize<'de> for WithdrawalStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = WithdrawalStatusWire::deserialize(deserializer)?;
+        Ok(match wire {
+            WithdrawalStatusWire::Queued { amount_atoms } => Self::Queued { amount_atoms },
+            WithdrawalStatusWire::Provable {
+                commit_txid,
+                depth,
+                amount_atoms,
+            } => Self::Provable {
+                commit_txid,
+                depth,
+                amount_atoms,
+            },
+            WithdrawalStatusWire::ReleaseEligible {
+                commit_txid,
+                depth,
+                required_depth,
+                amount_atoms,
+            } => {
+                let derived = u64::from(confirmation_depth(amount_atoms).min_depth());
+                if required_depth != derived || depth < derived {
+                    return Err(serde::de::Error::custom(
+                        "release-eligible snapshot bypasses the amount-derived depth gate",
+                    ));
+                }
+                Self::ReleaseEligible {
+                    commit_txid,
+                    depth,
+                    required_depth,
+                    amount_atoms,
+                }
+            }
+            WithdrawalStatusWire::Frozen {
+                fork_point,
+                amount_atoms,
+            } => Self::Frozen {
+                fork_point,
+                amount_atoms,
+            },
+            WithdrawalStatusWire::Halted => Self::Halted,
+        })
+    }
 }
 
 /// What the K(amount) schedule requires before a deposit is credited
@@ -1100,5 +1174,28 @@ mod tests {
             let back: WithdrawalStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(back, s);
         }
+    }
+
+    #[test]
+    fn status_restore_rejects_release_gate_bypass() {
+        let valid = serde_json::to_value(WithdrawalStatus::ReleaseEligible {
+            commit_txid: [1; 32],
+            depth: 288,
+            required_depth: 288,
+            amount_atoms: LARGE,
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::from_value::<WithdrawalStatus>(valid.clone()).unwrap(),
+            eligible()
+        );
+
+        let mut weak_gate = valid.clone();
+        weak_gate["ReleaseEligible"]["required_depth"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<WithdrawalStatus>(weak_gate).is_err());
+
+        let mut shallow = valid;
+        shallow["ReleaseEligible"]["depth"] = serde_json::json!(287);
+        assert!(serde_json::from_value::<WithdrawalStatus>(shallow).is_err());
     }
 }
