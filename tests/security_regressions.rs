@@ -5,7 +5,8 @@ use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
     BlockSource, BlockSourceView, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource,
-    SourceCheckpoint, VaultSet, WatcherSnapshotError, WatcherState, WatcherSyncError,
+    SourceCheckpoint, VaultSet, VersionedMemorySource, WatcherSnapshotError, WatcherState,
+    WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -658,6 +659,46 @@ fn immutable_view_token_invalidation_is_refused_atomically() {
     assert!(!guarded.token_is_current(&original_token));
     assert_eq!(watcher.state(), before, "invalidation must be atomic");
     assert_eq!(watcher.creditable().count(), 0);
+}
+
+#[test]
+fn versioned_memory_adapter_invalidates_handles_and_prevents_aba() {
+    let (_, source) = fixture(1, 3);
+    let adapter = VersionedMemorySource::new(source.clone());
+    let old_view = adapter.view();
+    let old_token = old_view.view_token();
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    watcher.try_sync_view(&old_view).unwrap();
+    let before = watcher.state();
+
+    // Publishing byte-identical content is still a distinct view generation.
+    let replacement_token = adapter.install(source.clone()).unwrap();
+    assert_ne!(replacement_token, old_token);
+    assert!(!old_view.token_is_current(&old_token));
+    assert_eq!(
+        watcher.try_sync_view(&old_view),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert_eq!(watcher.state(), before, "stale handle refusal is atomic");
+    assert_eq!(watcher.creditable().count(), 0, "refusal disables work");
+
+    let replacement_view = adapter.view();
+    assert_eq!(replacement_view.view_token(), replacement_token);
+    watcher.try_sync_view(&replacement_view).unwrap();
+
+    let third_token = adapter.install(source).unwrap();
+    assert_ne!(third_token, old_token);
+    assert_ne!(third_token, replacement_token);
+    adapter.invalidate().unwrap();
+    let invalid_view = adapter.view();
+    let invalid_token = invalid_view.view_token();
+    assert!(!invalid_view.token_is_current(&invalid_token));
+    let stable = watcher.state();
+    assert_eq!(
+        watcher.try_sync_view(&invalid_view),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert_eq!(watcher.state(), stable);
 }
 
 #[test]

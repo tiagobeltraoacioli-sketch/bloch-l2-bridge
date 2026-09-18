@@ -66,6 +66,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -244,6 +245,152 @@ impl BlockSourceView for MemorySource {
         // MemorySource has no interior mutation; an immutable borrow is a
         // stable view for the entire call.
         true
+    }
+}
+
+/// Opaque, non-reused generation of a [`VersionedMemorySource`] snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceViewToken(u64);
+
+/// Refusal to advance a versioned source after exhausting its token space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceGenerationExhausted;
+
+impl core::fmt::Display for SourceGenerationExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "block-source view generation exhausted")
+    }
+}
+
+impl std::error::Error for SourceGenerationExhausted {}
+
+#[derive(Debug)]
+struct VersionedMemoryState {
+    source: MemorySource,
+    generation: u64,
+    valid: bool,
+}
+
+/// Host-facing staging adapter for atomically replacing immutable block views.
+///
+/// Build and authenticate a complete [`MemorySource`] outside this adapter,
+/// then [`Self::install`] it under one write lock. Existing [`Self::view`]
+/// handles become permanently invalid because every install/invalidation uses
+/// a checked, never-wrapping generation. Reinstalling byte-identical blocks
+/// still gets a fresh token, preventing ABA by construction.
+///
+/// This adapter guarantees only in-process snapshot consistency. `MemorySource`
+/// checks height/parent linkage, but neither type verifies consensus hashes,
+/// PoW, canonicality, RPC provenance, or persistence across process restart.
+/// The host must also bound the staged source's block/transaction count and
+/// byte size before installation.
+#[derive(Debug)]
+pub struct VersionedMemorySource {
+    state: RwLock<VersionedMemoryState>,
+}
+
+impl VersionedMemorySource {
+    pub fn new(source: MemorySource) -> Self {
+        Self {
+            state: RwLock::new(VersionedMemoryState {
+                source,
+                generation: 0,
+                valid: true,
+            }),
+        }
+    }
+
+    /// Capture a handle to the current generation. The handle itself does not
+    /// hold a lock; replacement remains possible and is observed as monotonic
+    /// token invalidation by [`BlockSourceView`].
+    pub fn view(&self) -> VersionedMemoryView<'_> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        VersionedMemoryView {
+            owner: self,
+            token: SourceViewToken(state.generation),
+        }
+    }
+
+    /// Atomically publish a fully staged immutable source under a fresh token.
+    pub fn install(
+        &self,
+        source: MemorySource,
+    ) -> Result<SourceViewToken, SourceGenerationExhausted> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(SourceGenerationExhausted)?;
+        state.source = source;
+        state.generation = generation;
+        state.valid = true;
+        Ok(SourceViewToken(generation))
+    }
+
+    /// Invalidate every existing handle without publishing a replacement.
+    pub fn invalidate(&self) -> Result<(), SourceGenerationExhausted> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(SourceGenerationExhausted)?;
+        state.generation = generation;
+        state.valid = false;
+        Ok(())
+    }
+}
+
+/// One captured generation of a [`VersionedMemorySource`].
+#[derive(Debug)]
+pub struct VersionedMemoryView<'a> {
+    owner: &'a VersionedMemorySource,
+    token: SourceViewToken,
+}
+
+impl BlockSource for VersionedMemoryView<'_> {
+    fn tip_height(&self) -> Option<u64> {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (state.valid && SourceViewToken(state.generation) == self.token)
+            .then(|| state.source.tip_height())
+            .flatten()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (state.valid && SourceViewToken(state.generation) == self.token)
+            .then(|| state.source.block_at(height))
+            .flatten()
+    }
+}
+
+impl BlockSourceView for VersionedMemoryView<'_> {
+    type ViewToken = SourceViewToken;
+
+    fn view_token(&self) -> Self::ViewToken {
+        self.token
+    }
+
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        *token == self.token && state.valid && SourceViewToken(state.generation) == self.token
     }
 }
 
@@ -1015,7 +1162,11 @@ impl DepositWatcher {
         if !view_is_current() {
             return Err(WatcherSyncError::ViewInvalidated);
         }
-        let tip = source.tip_height().ok_or(WatcherSyncError::EmptySource)?;
+        let reported_tip = source.tip_height();
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
+        }
+        let tip = reported_tip.ok_or(WatcherSyncError::EmptySource)?;
         // Record the first complete value returned at every touched height.
         // Repeated reads must agree immediately, and the full ledger is read
         // once more before commit. Hash equality alone is insufficient because
@@ -1026,9 +1177,11 @@ impl DepositWatcher {
             if !view_is_current() {
                 return Err(WatcherSyncError::ViewInvalidated);
             }
-            let block = source
-                .block_at(height)
-                .ok_or(WatcherSyncError::MissingBlock { height })?;
+            let block = source.block_at(height);
+            if !view_is_current() {
+                return Err(WatcherSyncError::ViewInvalidated);
+            }
+            let block = block.ok_or(WatcherSyncError::MissingBlock { height })?;
             if block.height != height {
                 return Err(WatcherSyncError::WrongHeight {
                     requested: height,
@@ -1198,7 +1351,11 @@ impl DepositWatcher {
         // must not poison durable state. This catches observable changes; a
         // malicious source that performs an ABA change entirely between reads
         // still requires an atomic/authenticated host snapshot API.
-        if source.tip_height() != Some(tip) {
+        let final_tip = source.tip_height();
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
+        }
+        if final_tip != Some(tip) {
             return Err(WatcherSyncError::ViewChanged);
         }
         let observed_blocks: Vec<L1Block> = observed.borrow().values().cloned().collect();

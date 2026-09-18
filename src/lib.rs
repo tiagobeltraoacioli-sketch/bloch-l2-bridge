@@ -50,7 +50,8 @@ pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };
 pub use watcher::{
-    BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint, VaultSet,
-    WatcherSnapshotError, WatcherState, WatcherSyncError, WatcherUpdate,
+    BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint,
+    SourceGenerationExhausted, SourceViewToken, VaultSet, VersionedMemorySource,
+    VersionedMemoryView, WatcherSnapshotError, WatcherState, WatcherSyncError, WatcherUpdate,
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};
