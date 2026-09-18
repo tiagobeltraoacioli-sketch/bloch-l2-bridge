@@ -14,8 +14,10 @@
 //!   keccak256 matches the hash pinned in the config (so the config and
 //!   the source cannot drift silently).
 //!
-//! What it deliberately does NOT do (see [`crate::stubs`]): compile
-//! Solidity, talk to any chain, deploy anything, or hold keys.
+//! The compile helper invokes an explicitly selected, version-checked solc and
+//! hashes runtime bytecode; the tests use it when the pinned compiler exists.
+//! What this module deliberately does NOT do (see [`crate::stubs`]): talk to
+//! any chain, deploy anything, submit transactions, or hold keys.
 //!
 //! SCAFFOLD, UNAUDITED. Chain id 700771 is a PLACEHOLDER pending
 //! ethereum-lists/chains registration; the Uniswap artifact hashes are
