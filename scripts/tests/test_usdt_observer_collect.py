@@ -48,6 +48,7 @@ def script_fixture(network):
                   ('eth', 'eth_getTransactionReceipt', [txid], evidence['receipt']),
                   ('eth', 'eth_getBlockByNumber', [height, False], evidence['canonical_block']),
                   ('eth', 'eth_getBlockByNumber', ['finalized', False], evidence['finalized_block']),
+                  ('eth', 'eth_getBlockByNumber', [evidence['finalized_block']['number'], False], evidence['finalized_block']),
                   ('eth', 'eth_getBlockByNumber', [height, False], evidence['canonical_block'])]
         return route, evidence, txid, script, ethereum.validate
     route, evidence = tron_fixture()
@@ -59,6 +60,7 @@ def script_fixture(network):
               ('post', '/walletsolidity/gettransactionbyid', selector, evidence['transaction']),
               ('post', '/walletsolidity/getblockbynum', height, evidence['canonical_block']),
               ('post', '/walletsolidity/getnowblock', {'visible': False}, evidence['solidified_block']),
+              ('post', '/walletsolidity/getblockbynum', {'num': evidence['solidified_block']['block_header']['raw_data']['number'], 'visible': False}, evidence['solidified_block']),
               ('post', '/walletsolidity/getblockbynum', height, evidence['canonical_block'])]
     return route, evidence, txid, script, tron.validate
 
@@ -115,6 +117,17 @@ class CollectionTest(unittest.TestCase):
             script[-1] = (*script[-1][:3], bad)
             source = ScriptedSource(script)
             with self.assertRaises(Invalid):
+                collect.collect(route, txid, source)
+            self.assertEqual(len(source.calls), 7)
+
+    def test_reported_finality_checkpoint_is_pinned_at_its_explicit_height(self):
+        for network in ('ethereum-mainnet', 'tron-mainnet'):
+            route, _, txid, script, _ = script_fixture(network)
+            bad = copy.deepcopy(script[-2][3])
+            bad['hash' if network == 'ethereum-mainnet' else 'blockID'] = ('0x' if network == 'ethereum-mainnet' else '') + 'ef' * 32
+            script[-2] = (*script[-2][:3], bad)
+            source = ScriptedSource(script)
+            with self.assertRaisesRegex(Invalid, 'checkpoint changed'):
                 collect.collect(route, txid, source)
             self.assertEqual(len(source.calls), 6)
 

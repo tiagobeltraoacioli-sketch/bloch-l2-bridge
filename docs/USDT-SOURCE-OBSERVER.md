@@ -16,8 +16,9 @@ never a certificate or a native mint work item.
 ## Source-specific collection
 
 Ethereum collection reads chain ID, block zero, the requested receipt, its
-canonical block, the **`finalized`** block and the canonical block again. It
-rejects a changed view. The validator checks successful execution, receipt and
+canonical block, the **`finalized`** block, that checkpoint again by its explicit
+height, and the canonical receipt block again. It rejects either changed view.
+The validator checks successful execution, receipt and
 log metadata, canonical transaction inclusion and index, the reported finalized
 height, and matching hashes when receipt and finalized heights are equal.
 See [Ethereum checks](USDT-ETHEREUM-OBSERVER.md) for the source API references.
@@ -26,7 +27,8 @@ TRON collection exclusively uses `/walletsolidity/getblockbynum`,
 `gettransactioninfobyid`, `gettransactionbyid` and `getnowblock`, with
 `visible:false`. It verifies receipt success, the included transaction body,
 TRON block-ID height encoding, the configured genesis and the reported solidified
-boundary, then rechecks the canonical block. These are native TRON response
+boundary, pins that boundary with `getblockbynum`, then rechecks the canonical
+receipt block. These are native TRON response
 shapes, not Ethereum-compatible JSON-RPC. See the official
 [block schema](https://developers.tron.network/docs/block),
 [receipt schema](https://tronprotocol.github.io/documentation-en/api/http/block-and-tx-query/gettransactioninfobyid/)

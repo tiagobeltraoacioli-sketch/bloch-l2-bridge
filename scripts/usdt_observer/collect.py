@@ -117,6 +117,15 @@ def collect(route, tx_hash, source):
         height = quantity(receipt.get('blockNumber'))
         canonical = source.eth('eth_getBlockByNumber', [hex(height), False])
         finalized = source.eth('eth_getBlockByNumber', ['finalized', False])
+        require(type(finalized) is dict, 'finalized checkpoint is unavailable')
+        final_height = quantity(finalized.get('number'))
+        final_hash = word(finalized.get('hash'), 32)
+        require(any(final_hash), 'zero finalized checkpoint hash')
+        pinned_finalized = source.eth('eth_getBlockByNumber', [hex(final_height), False])
+        require(type(pinned_finalized) is dict
+                and quantity(pinned_finalized.get('number')) == final_height
+                and word(pinned_finalized.get('hash'), 32) == final_hash,
+                'finalized checkpoint changed during collection')
         rechecked = source.eth('eth_getBlockByNumber', [hex(height), False])
         require(type(canonical) is dict and type(rechecked) is dict
                 and canonical == rechecked, 'canonical block changed during collection')
@@ -135,6 +144,20 @@ def collect(route, tx_hash, source):
     height = integer(info.get('blockNumber'))
     canonical = source.post('/walletsolidity/getblockbynum', {'num': height, 'visible': False})
     solidified = source.post('/walletsolidity/getnowblock', {'visible': False})
+    require(type(solidified) is dict and type(solidified.get('block_header')) is dict
+            and type(solidified['block_header'].get('raw_data')) is dict,
+            'solidified checkpoint is unavailable')
+    solid_height = integer(solidified['block_header']['raw_data'].get('number'))
+    solid_id = word(solidified.get('blockID'), 32, prefix=False)
+    require(any(solid_id), 'zero solidified checkpoint ID')
+    pinned_solidified = source.post('/walletsolidity/getblockbynum',
+                                    {'num': solid_height, 'visible': False})
+    require(type(pinned_solidified) is dict
+            and type(pinned_solidified.get('block_header')) is dict
+            and type(pinned_solidified['block_header'].get('raw_data')) is dict
+            and integer(pinned_solidified['block_header']['raw_data'].get('number')) == solid_height
+            and word(pinned_solidified.get('blockID'), 32, prefix=False) == solid_id,
+            'solidified checkpoint changed during collection')
     rechecked = source.post('/walletsolidity/getblockbynum', {'num': height, 'visible': False})
     require(type(canonical) is dict and type(rechecked) is dict and canonical == rechecked,
             'solidified block changed during collection')
