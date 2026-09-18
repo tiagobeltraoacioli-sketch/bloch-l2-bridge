@@ -37,6 +37,7 @@ pub const ATOMS_PER_BLCH: u64 = 100_000_000;
 /// Serde: serializable so a host can PERSIST watcher state across process
 /// restarts (this crate still does no file I/O of its own).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepositEvent {
     /// Bloch txid of the depositing transaction.
     pub txid: [u8; 32],
@@ -204,6 +205,7 @@ impl<'de> Deserialize<'de> for WithdrawalStatus {
 /// What the K(amount) schedule requires before a deposit is credited
 /// (or, value-scaled, before a withdrawal releases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ConfirmationRequirement {
     /// Wait `depth` confirmations, then proceed automatically.
     Automatic { depth: u32 },

@@ -182,6 +182,7 @@ impl BlockSource for MemorySource {
 /// published). Addresses are the node's own 20-byte key-hash form; an
 /// output "pays the vault" iff its script_pubkey is exactly one of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultSet {
     addrs: BTreeSet<[u8; 20]>,
 }
@@ -226,6 +227,7 @@ pub enum DepositPhase {
 
 /// A deposit the watcher is tracking under its current L1 view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackedDeposit {
     /// The observed deposit facts (txid, vout, amount, recipient, view).
     pub event: DepositEvent,
@@ -325,6 +327,7 @@ pub struct DepositWatcher {
 /// host serializes/stores/restores via [`DepositWatcher::state`] and
 /// [`DepositWatcher::from_state`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatcherState {
     /// The disclosed vault address set.
     pub vaults: VaultSet,

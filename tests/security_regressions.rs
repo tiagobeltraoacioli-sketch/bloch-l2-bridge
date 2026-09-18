@@ -60,6 +60,19 @@ fn reject(state: WatcherState) {
 }
 
 #[test]
+fn watcher_snapshot_refuses_unknown_authority_fields() {
+    let (watcher, _) = fixture(1, 1);
+    let mut encoded = serde_json::to_value(watcher.state()).unwrap();
+
+    encoded["mint_authorized"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WatcherState>(encoded.clone()).is_err());
+
+    encoded.as_object_mut().unwrap().remove("mint_authorized");
+    encoded["tracked"][0][1]["event"]["mint_authorized"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WatcherState>(encoded).is_err());
+}
+
+#[test]
 fn restore_refuses_weakened_confirmation_schedule() {
     let (watcher, _) = fixture(1001 * ATOMS_PER_BLCH, 1);
     let mut state = watcher.state();

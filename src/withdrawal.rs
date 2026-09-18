@@ -78,6 +78,7 @@ impl WithdrawalInclusion {
 /// Serde: serializable so a host can persist a [`crate::release::
 /// WithdrawalQueue`]'s message list across restarts (no file I/O here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WithdrawalMessage {
     /// Strictly-increasing per-bridge nonce (uint64 in the event).
     pub nonce: u64,

@@ -388,6 +388,7 @@ impl<'de> Deserialize<'de> for NullifierLog {
         }
 
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct NullifierLogWire {
             paid: PaidLeaves,
         }
@@ -1340,6 +1341,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queue_restore_refuses_unknown_message_fields() {
+        let mut snapshot =
+            serde_json::to_value(WithdrawalQueue::from_messages([message(0)]).unwrap()).unwrap();
+        snapshot[0]["payment_authorized"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<WithdrawalQueue>(snapshot).is_err());
+    }
+
     /// FIX-2 pin: nullifier-log round-trip preserves the paid set — a host
     /// restart can no longer clear it (which would re-open every past
     /// payout to a double-pay).
@@ -1374,6 +1384,14 @@ mod tests {
             error.to_string().contains("duplicate paid withdrawal leaf"),
             "restore should reject the duplicate prefix before parsing its tail: {error}"
         );
+    }
+
+    #[test]
+    fn nullifier_restore_refuses_unknown_fields() {
+        let mut snapshot = serde_json::to_value(NullifierLog::new()).unwrap();
+        snapshot["payment_authorized"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<NullifierLog>(snapshot).is_err());
     }
 
     #[test]
