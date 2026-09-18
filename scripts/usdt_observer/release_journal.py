@@ -157,9 +157,10 @@ def record(path, route, captured, expected, *, native_verification=None):
                     'conflicting or corrupt release observation')
         else:
             require(db.execute('''SELECT 1 FROM release_observations
-                WHERE source_event IN (?,?) OR transfer_event IN (?,?) LIMIT 1''',
-                (event, transfer, event, transfer)).fetchone() is None,
-                'source log already assigned to another release')
+                WHERE release_id=? OR source_event IN (?,?) OR transfer_event IN (?,?)
+                OR route_nonce=? OR native_burn=? LIMIT 1''',
+                (observation['release_id'], event, transfer, event, transfer, nonce, burn)).fetchone() is None,
+                'release identity already assigned')
             require(source_count < MAX_ROWS, 'release journal capacity reached')
             db.execute('INSERT INTO release_observations VALUES (?,?,?,?,?,?,?)',
                        (observation['release_id'], event, transfer, nonce, burn, encoded, digest))

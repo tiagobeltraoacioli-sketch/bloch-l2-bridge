@@ -115,6 +115,13 @@ def record(path, route, observations, evidence_sha256):
                         'conflicting or corrupt observation for existing deposit')
                 duplicate += 1
                 continue
+            # Do not rely only on schema UNIQUE constraints for replay
+            # identity. A locally corrupt database can retain the expected
+            # application/user version while losing an index or constraint.
+            require(connection.execute('''SELECT 1 FROM observations
+                    WHERE deposit_id=? OR source_event=? OR route_nonce=? LIMIT 1''',
+                    (observation['deposit_id'], source_event, route_nonce)).fetchone() is None,
+                    'observation identity already assigned')
             require(count + added < MAX_ROWS, 'observation journal capacity reached')
             connection.execute('INSERT INTO observations VALUES (?,?,?,?,?)',
                                (observation['deposit_id'], source_event, route_nonce, encoded, evidence_sha256))

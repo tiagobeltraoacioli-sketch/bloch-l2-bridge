@@ -109,6 +109,9 @@ def register(path, route, expected):
         history_count = db.execute('SELECT COUNT(*) FROM history').fetchone()[0]
         require(type(claim_count) is int and 0 <= claim_count < MAX_ROWS, 'claim capacity reached')
         require(type(history_count) is int and 0 <= history_count < MAX_ROWS, 'history capacity reached')
+        require(db.execute('''SELECT 1 FROM claims
+                WHERE burn=? OR route_nonce=? LIMIT 1''', (burn, nonce)).fetchone() is None,
+                'reconciliation identity already assigned')
         db.execute('INSERT INTO claims VALUES (?,?,?,?,?)', (burn, nonce, facts, 1, 'pending_evidence'))
         db.execute('INSERT INTO history VALUES (?,?,?,?,?)', (burn, 1, 'registration', '{}', 'pending_evidence'))
         require(_validate_history(db, burn, nonce, facts,

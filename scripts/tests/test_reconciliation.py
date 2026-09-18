@@ -44,6 +44,21 @@ class ReconciliationTest(unittest.TestCase):
             r.register(self.path, self.route, changed)
         self.assertEqual(r.register(self.path, self.route, self.expected)['revision'], 3)
 
+    def test_route_nonce_identity_survives_weakened_table_constraints(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute('ALTER TABLE claims RENAME TO claims_original')
+            db.execute('''CREATE TABLE claims (
+                burn TEXT, route_nonce TEXT, facts TEXT, revision INTEGER, status TEXT)''')
+            db.execute('INSERT INTO claims SELECT * FROM claims_original')
+            db.execute('DROP TABLE claims_original')
+        changed = copy.deepcopy(self.expected)
+        changed['native_burn'] = '0x' + 'ac' * 32
+        with self.assertRaisesRegex(Invalid, 'identity already assigned'):
+            r.register(self.path, self.route, changed)
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM claims').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM history').fetchone()[0], 1)
+
     def test_reorg_freezes_without_settlement_or_new_identity(self):
         self.move(1, 'reconciling')
         self.move(2, 'observed', 2, transaction='0x'+'aa'*32, evidence_sha256='0x'+'bb'*32)

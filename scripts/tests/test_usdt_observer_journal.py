@@ -118,6 +118,23 @@ class JournalTest(unittest.TestCase):
         distinct = changed_observation(alias, tx_hash='0x' + 'ef' * 32)
         self.assertEqual(self.record([distinct], route=other_route)['new_observations'], 1)
 
+    def test_replay_identity_survives_weakened_table_constraints(self):
+        self.record()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute('ALTER TABLE observations RENAME TO observations_original')
+            connection.execute('''CREATE TABLE observations (
+                deposit_id TEXT, source_event TEXT, route_nonce TEXT,
+                observation_json TEXT, evidence_sha256 TEXT)''')
+            connection.execute('INSERT INTO observations SELECT * FROM observations_original')
+            connection.execute('DROP TABLE observations_original')
+        conflict = changed_observation(
+            self.observation, amount=self.observation['amount'] + 1,
+            tx_hash='0x' + 'ef' * 32)
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'journal refused the batch'):
+            self.record([conflict])
+        self.assertEqual(self.rows(), before)
+
     def test_mid_batch_conflict_rolls_back_prior_insertions(self):
         self.record()
         baseline = self.rows()

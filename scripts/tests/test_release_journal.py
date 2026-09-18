@@ -100,6 +100,22 @@ class ReleaseJournalTest(unittest.TestCase):
             self.record(fixture(nonce=8, burn='0x' + 'bc' * 32))
         self.assertEqual(len(self.rows()), 1)
 
+    def test_replay_identity_survives_weakened_table_constraints(self):
+        self.record()
+        with sqlite3.connect(self.path) as db:
+            db.execute('ALTER TABLE release_observations RENAME TO release_observations_original')
+            db.execute('''CREATE TABLE release_observations (
+                release_id TEXT, source_event TEXT, transfer_event TEXT,
+                route_nonce TEXT, native_burn TEXT, facts TEXT,
+                first_evidence_sha256 TEXT)''')
+            db.execute('''INSERT INTO release_observations
+                SELECT * FROM release_observations_original''')
+            db.execute('DROP TABLE release_observations_original')
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'identity already assigned'):
+            self.record(fixture(burn='0x' + 'bc' * 32, tx='0x' + 'ad' * 32))
+        self.assertEqual(self.rows(), before)
+
     def test_reorg_does_not_overwrite_old_block(self):
         self.record()
         before = self.rows()
