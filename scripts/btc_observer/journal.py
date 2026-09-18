@@ -86,7 +86,12 @@ def record(path, deposits):
         inserted = duplicates = 0
         for key, facts, wtxid, evidence in checked:
             prior = connection.execute('''SELECT outpoint, facts, first_wtxid, first_evidence_sha256
-                FROM btc_outputs WHERE outpoint=?''', (key,)).fetchone()
+                FROM btc_outputs WHERE outpoint=?
+                AND typeof(outpoint)='text' AND length(CAST(outpoint AS BLOB))<=160
+                AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+                AND typeof(first_wtxid)='text' AND length(CAST(first_wtxid AS BLOB))=64
+                AND typeof(first_evidence_sha256)='text'
+                AND length(CAST(first_evidence_sha256 AS BLOB))=64''', (key,)).fetchone()
             if prior is not None:
                 require(prior[:2] == (key, facts)
                         and type(prior[2]) is str and len(prior[2]) == 64
@@ -96,10 +101,18 @@ def record(path, deposits):
                         'Conflicting or corrupt facts for an existing Bitcoin outpoint')
                 duplicates += 1
                 continue
+            require(connection.execute('SELECT 1 FROM btc_outputs WHERE outpoint=?',
+                                       (key,)).fetchone() is None,
+                    'Conflicting or corrupt facts for an existing Bitcoin outpoint')
             require(count + inserted < MAX_ROWS, 'Journal row limit')
             connection.execute('INSERT INTO btc_outputs VALUES (?, ?, ?, ?)', (key, facts, wtxid, evidence))
             require(connection.execute('''SELECT outpoint, facts, first_wtxid, first_evidence_sha256
-                    FROM btc_outputs WHERE outpoint=?''', (key,)).fetchone()
+                    FROM btc_outputs WHERE outpoint=?
+                    AND typeof(outpoint)='text' AND length(CAST(outpoint AS BLOB))<=160
+                    AND typeof(facts)='text' AND length(CAST(facts AS BLOB))<=32768
+                    AND typeof(first_wtxid)='text' AND length(CAST(first_wtxid AS BLOB))=64
+                    AND typeof(first_evidence_sha256)='text'
+                    AND length(CAST(first_evidence_sha256 AS BLOB))=64''', (key,)).fetchone()
                     == (key, facts, wtxid, evidence),
                     'Journal insert readback mismatch')
             inserted += 1

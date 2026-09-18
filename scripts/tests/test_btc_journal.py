@@ -151,6 +151,17 @@ class BitcoinJournalTest(unittest.TestCase):
             journal.record(self.path, [deposit(index=1)])
         self.assertEqual(self.rows(), before)
 
+    def test_oversized_insert_mutation_is_rejected_before_decode(self):
+        journal.record(self.path, [deposit()])
+        with sqlite3.connect(self.path) as db:
+            db.execute('''CREATE TRIGGER enlarge_new_output AFTER INSERT ON btc_outputs
+                          BEGIN UPDATE btc_outputs SET facts=CAST(zeroblob(32769) AS TEXT)
+                          WHERE outpoint=NEW.outpoint; END''')
+        before = self.rows()
+        with self.assertRaisesRegex(Invalid, 'readback mismatch'):
+            journal.record(self.path, [deposit(index=1)])
+        self.assertEqual(self.rows(), before)
+
     def test_post_commit_sync_failure_is_safe_to_retry(self):
         with patch.object(journal.os, 'fsync', side_effect=OSError('injected directory sync failure')):
             with self.assertRaises(OSError):
