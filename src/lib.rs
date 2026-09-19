@@ -31,6 +31,8 @@ pub mod envelope;
 #[cfg(unix)]
 pub mod external_floor;
 #[cfg(unix)]
+pub mod external_floor_auth;
+#[cfg(unix)]
 pub mod external_floor_codec;
 pub mod harness;
 pub mod hex;
@@ -53,6 +55,14 @@ pub use external_floor::{
     ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome,
     ExternalFloorReconciliation, ExternalFloorRequest, ExternalFloorResponse,
     ExternalGenerationFloor,
+};
+#[cfg(unix)]
+pub use external_floor_auth::{
+    decode_authenticated_external_floor_request, decode_authenticated_external_floor_response,
+    encode_authenticated_external_floor_request, encode_authenticated_external_floor_response,
+    AuthenticatedExternalFloorBoundary, ExternalFloorAuthError, ExternalFloorByteTransport,
+    ExternalFloorPeerAuthentication, ExternalFloorReplayGuard, EXTERNAL_FLOOR_AUTH_MAGIC,
+    EXTERNAL_FLOOR_AUTH_MAX_LEN, EXTERNAL_FLOOR_AUTH_VERSION,
 };
 #[cfg(unix)]
 pub use external_floor_codec::{

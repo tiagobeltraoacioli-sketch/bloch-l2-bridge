@@ -65,3 +65,40 @@ HSM or equivalent administrative boundary, and cap transport frames before
 passing them to the decoder. The Keccak request and response bindings are not
 MACs or peer identities, and canonical encoding does not provide
 confidentiality, availability, finality, or anti-rollback storage.
+
+## Authenticated peer envelope
+
+The optional `external_floor_auth` module wraps one canonical `BXFL` record in
+the canonical `BXFA` v1 envelope. It uses KMAC256 with an independently
+provisioned 256-bit secret and authenticates all of:
+
+- direction (`client -> boundary` request or `boundary -> client` response);
+- fixed client and boundary peer identities;
+- session nonce and sequence;
+- exact request binding; and
+- the byte-exact inner `BXFL` payload and its length.
+
+Decoding requires the expected direction and configured peer pair. A server
+uses `ExternalFloorReplayGuard`, provisioned with a pre-authorized session
+nonce and next sequence, to reject duplicate, skipped, reordered, or
+cross-session requests. It consumes the sequence only after the KMAC and the
+canonical inner record both verify. A new session needs a new guard only after
+that nonce is approved by the independently durable session registry; accepting
+arbitrary session changes from the wire would re-enable old-session replay.
+
+`AuthenticatedExternalFloorBoundary` connects this framing to
+`ExternalGenerationFloor` through an application-supplied byte transport. A
+response is accepted only for the exact in-flight request: peer direction,
+session, sequence, request binding, KMAC, canonical response commitment, and
+typed outcome must all agree. The typed adapter never retransmits an ambiguous
+CAS. Its reconciliation read uses the same authenticated framing with the new
+session nonce, so there is no weaker recovery message.
+
+`BXFA` is defense in depth, not a replacement for transport or storage
+security. KMAC is symmetric: either holder can impersonate the other and it
+does not provide non-repudiation. The in-memory replay guard loses its state on
+restart. Production still requires mTLS (or an equivalently authenticated and
+confidential channel), HSM-backed/separated key custody, durable authorization
+and anti-replay state, rollback-resistant linearizable CAS storage, rate and
+frame limits, and independent service monitoring. None of this establishes L1
+canonicality or finality and none of it authorizes funds.

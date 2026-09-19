@@ -445,6 +445,12 @@ serialization before wiring the RPC source.
 
 * **L2D0 codec** — strict, panic-free for every length/content class,
   golden vector byte-exact, lowest-index-wins, zero-value only.
+* **External-floor authenticated framing** — canonical `BXFA` KMAC envelope
+  binds the fixed client/boundary identities, direction, session, sequence,
+  request binding and exact inner `BXFL` bytes; server-side exact-next replay
+  guard advances only after full verification. This remains symmetric-key,
+  in-memory defense in depth and does not replace mTLS, HSM custody, a durable
+  anti-replay/session registry, or rollback-resistant CAS storage.
 * **`ATOM_SCALE`** — exact both ways; `u64::MAX · 10¹⁰` fits u128; dust and
   overflow are typed refusals; the Solidity `_initiate` enforces the same
   `% ATOM_SCALE == 0` and `≤ uint64::max` rules.
