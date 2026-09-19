@@ -120,12 +120,16 @@ fn c_name(value: &'static str) -> std::ffi::CString {
 }
 
 fn open_at(directory: RawFd, filename: &'static str, flags: i32, mode: u32) -> io::Result<File> {
+    // The file type is necessarily checked only after open(2) gives us a
+    // descriptor whose identity can be pinned. Refuse to let an unexpected
+    // FIFO or terminal block that inspection or acquire a controlling TTY.
+    // O_NONBLOCK/O_NOCTTY do not change regular-file I/O semantics.
     // SAFETY: the directory descriptor and fixed NUL-terminated name are valid.
     let descriptor = unsafe {
         libc::openat(
             directory,
             c_name(filename).as_ptr(),
-            flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY,
             mode as libc::c_uint,
         )
     };
@@ -1410,6 +1414,34 @@ mod tests {
         assert!(temporary.exists());
 
         drop(opened);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_open_rejects_fifo_without_waiting_for_a_writer() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-fifo-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let state_name = std::ffi::CString::new(state.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: state_name is a valid NUL-terminated pathname.
+        assert_eq!(unsafe { libc::mkfifo(state_name.as_ptr(), 0o600) }, 0);
+
+        let directory = open_directory(&root).unwrap();
+        let error = open_checkpoint_file(
+            &directory,
+            STATE_FILE,
+            "BXRC authority record must be private and single-link",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(state.exists());
+
         drop(directory);
         fs::remove_dir_all(root).unwrap();
     }

@@ -443,7 +443,10 @@ private directory is still safe and that the persistent lock pathname still
 names the exact inode locked at open. Replacing or hardlinking the lock, or
 making the directory group/world-accessible, therefore fails closed before an
 authority write instead of permitting split locking. Record descriptors are
-revalidated after their bounded read and must still match their
+opened with nonblocking, no-controlling-terminal semantics before their type
+is inspected, so a same-user FIFO or terminal substitution cannot hang receipt
+opening or acquire a terminal. They are revalidated after their bounded read
+and must still match their
 descriptor-relative path. The configured directory pathname is likewise
 reopened and required to name the same device and inode before and after live
 operations. Renaming the locked directory and replacing its old pathname can
