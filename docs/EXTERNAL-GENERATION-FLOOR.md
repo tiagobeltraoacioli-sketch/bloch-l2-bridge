@@ -187,6 +187,29 @@ As with `BXFA`, symmetric KMAC does not replace mTLS,
 HSM-backed key custody, endpoint authorization or physical failure-domain
 separation.
 
+`TcpExternalFloorCustodianTransport` is the concrete bounded carrier for
+cross-host BXRC exchanges. Configuration takes a numeric `SocketAddr` (no DNS
+or fallback endpoints), a mandatory timeout capped at 30 seconds, and an
+optional expected local egress IP. It opens exactly one connection for one
+request, verifies the connected peer address, sends a two-byte big-endian
+length plus one bounded BXRC frame, half-closes its write side, accepts exactly
+one response and requires EOF. It never reconnects or retransmits.
+
+The matching server helper handles exactly one stream supplied by an
+application-owned listener. Before authentication or store access it enforces
+read/write timeouts, pins the client source IP, bounds the length before
+allocation, reads exactly one frame and requires client EOF. It emits exactly
+one response and closes its write side. The helper creates no listener, loop,
+thread or service.
+
+IP pinning is routing policy, not cryptographic channel authentication, and
+raw TCP is not confidential. BXRC KMAC still detects peer/content forgery, but
+production must place this carrier behind a separately managed mTLS tunnel or
+equivalent mutually authenticated encrypted channel with certificate/public-key
+pinning. Proxy deployments must pin the immediate source and enforce the
+original client identity at that secure-channel layer; forwarded-IP headers are
+not accepted by this protocol.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

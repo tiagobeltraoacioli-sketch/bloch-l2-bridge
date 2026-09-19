@@ -19,6 +19,7 @@ use crate::{
 
 pub const EXTERNAL_FLOOR_CUSTODIAN_MAGIC: [u8; 4] = *b"BXRC";
 pub const EXTERNAL_FLOOR_CUSTODIAN_VERSION: u8 = 1;
+pub const EXTERNAL_FLOOR_CUSTODIAN_MIN_LEN: usize = 178;
 pub const EXTERNAL_FLOOR_CUSTODIAN_MAX_LEN: usize = 274;
 
 const HEADER_LEN: usize = 114;
@@ -26,7 +27,7 @@ const CHECKPOINT_LEN: usize = 48;
 const CAS_PAYLOAD_LEN: usize = CHECKPOINT_LEN * 2;
 const BINDING_LEN: usize = 32;
 const TAG_LEN: usize = 32;
-const MIN_LEN: usize = HEADER_LEN + BINDING_LEN + TAG_LEN;
+const MIN_LEN: usize = EXTERNAL_FLOOR_CUSTODIAN_MIN_LEN;
 const REQUEST: u8 = 0;
 const RESPONSE: u8 = 1;
 const LOAD: u8 = 0;
