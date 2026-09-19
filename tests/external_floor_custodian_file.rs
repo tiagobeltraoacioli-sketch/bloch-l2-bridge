@@ -87,18 +87,26 @@ impl ExternalFloorCustodianTransport for FailingTransport {
 struct AnchorStore {
     state: Arc<Mutex<ExternalFloorCustodianClientAnchor>>,
     fail_after_commit: Arc<AtomicUsize>,
+    after_commit: Arc<Mutex<AfterCommit>>,
 }
+
+type AfterCommit = Option<Box<dyn FnOnce() + Send>>;
 
 impl AnchorStore {
     fn new(anchor: ExternalFloorCustodianClientAnchor) -> Self {
         Self {
             state: Arc::new(Mutex::new(anchor)),
             fail_after_commit: Arc::new(AtomicUsize::new(0)),
+            after_commit: Arc::new(Mutex::new(None)),
         }
     }
 
     fn fail_next_after_commit(&self) {
         self.fail_after_commit.store(1, Ordering::SeqCst);
+    }
+
+    fn after_next_commit(&self, action: impl FnOnce() + Send + 'static) {
+        *self.after_commit.lock().unwrap() = Some(Box::new(action));
     }
 }
 
@@ -115,6 +123,9 @@ impl ExternalFloorCustodianAnchorStore for AnchorStore {
         let mut state = self.state.lock().unwrap();
         if *state == expected {
             *state = replacement;
+            if let Some(action) = self.after_commit.lock().unwrap().take() {
+                action();
+            }
             if self.fail_after_commit.swap(0, Ordering::SeqCst) == 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -538,4 +549,206 @@ fn ambiguous_pending_anchor_failure_prevents_transport_and_rollback_reopen() {
     )
     .is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn reservation_refuses_replaced_lock_before_checkpoint_commit() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let original = fs::read(temp.store.join(".bxrc-client-checkpoint")).unwrap();
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store,
+        FailingTransport(Arc::clone(&calls)),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .unwrap();
+
+    fs::rename(
+        temp.store.join(".bxrc-client-checkpoint.lock"),
+        temp.store.join("displaced-lock"),
+    )
+    .unwrap();
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temp.store.join(".bxrc-client-checkpoint.lock"))
+        .unwrap();
+
+    assert_eq!(
+        client.load().unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fs::read(temp.store.join(".bxrc-client-checkpoint")).unwrap(),
+        original
+    );
+    assert!(temp.store.join(".bxrc-client-checkpoint.tmp").exists());
+}
+
+#[test]
+fn reservation_refuses_displaced_directory_before_checkpoint_commit() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let original = fs::read(temp.store.join(".bxrc-client-checkpoint")).unwrap();
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store,
+        FailingTransport(Arc::clone(&calls)),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .unwrap();
+    let displaced = temp.root.join("displaced-checkpoint");
+    fs::rename(&temp.store, &displaced).unwrap();
+    fs::create_dir(&temp.store).unwrap();
+    fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        client.load().unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fs::read(displaced.join(".bxrc-client-checkpoint")).unwrap(),
+        original
+    );
+    assert!(displaced.join(".bxrc-client-checkpoint.tmp").exists());
+    assert!(fs::read_dir(&temp.store).unwrap().next().is_none());
+}
+
+#[test]
+fn committed_anchor_cas_rejects_replaced_lock_before_transport() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let client = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store.clone(),
+        FailingTransport(Arc::clone(&attempts)),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .unwrap();
+    let store = temp.store.clone();
+    anchor_store.after_next_commit(move || {
+        fs::rename(
+            store.join(".bxrc-client-checkpoint.lock"),
+            store.join("displaced-lock-after-anchor"),
+        )
+        .unwrap();
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(store.join(".bxrc-client-checkpoint.lock"))
+            .unwrap();
+    });
+
+    assert_eq!(
+        client.load().unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(anchor_store.load().unwrap().revision, 1);
+    assert_eq!(client.load().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn committed_anchor_cas_rejects_replaced_state_before_transport() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let client = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store.clone(),
+        FailingTransport(Arc::clone(&attempts)),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .unwrap();
+    let store = temp.store.clone();
+    anchor_store.after_next_commit(move || {
+        let state = store.join(".bxrc-client-checkpoint");
+        let displaced = store.join("displaced-state-after-anchor");
+        let bytes = fs::read(&state).unwrap();
+        fs::rename(&state, &displaced).unwrap();
+        fs::write(&state, bytes).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    });
+
+    assert_eq!(
+        client.load().unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(anchor_store.load().unwrap().revision, 1);
+    assert!(temp.store.join("displaced-state-after-anchor").exists());
+    assert_eq!(client.load().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn committed_reconciliation_anchor_cas_rejects_displaced_directory() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let anchor_store = AnchorStore::new(initial_anchor);
+    anchor_store.fail_next_after_commit();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let client = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store.clone(),
+        FailingTransport(Arc::clone(&attempts)),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .unwrap();
+    assert_eq!(client.load().unwrap_err().kind(), io::ErrorKind::TimedOut);
+    drop(client);
+    let pending =
+        match DurableAuthenticatedExternalFloorCustodian::<FailingTransport, AnchorStore>::inspect(
+            &temp.store,
+            &anchor_store,
+            CHECKPOINT_KEY,
+        )
+        .unwrap()
+        {
+            ExternalFloorCustodianClientInspection::Pending(pending) => pending,
+            _ => panic!("expected pending checkpoint"),
+        };
+    let moved = temp.root.join("checkpoint-after-anchor");
+    let store = temp.store.clone();
+    let moved_for_hook = moved.clone();
+    anchor_store.after_next_commit(move || {
+        fs::rename(&store, &moved_for_hook).unwrap();
+        fs::create_dir(&store).unwrap();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).unwrap();
+    });
+
+    // The retained anchor already names the pending record, so reconcile the
+    // pending operation; its ready-anchor CAS commits before the path race is
+    // detected by the mandatory post-check.
+    assert_eq!(
+        DurableAuthenticatedExternalFloorCustodian::<FailingTransport, AnchorStore>::reconcile_pending(
+            &temp.store,
+            &anchor_store,
+            pending.operation_commitment,
+            CHECKPOINT_KEY,
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(anchor_store.load().unwrap().revision, 2);
+    assert!(moved.join(".bxrc-client-checkpoint").exists());
 }

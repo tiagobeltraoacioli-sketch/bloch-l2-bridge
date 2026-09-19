@@ -8,10 +8,10 @@
 
 use std::cell::Cell;
 use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{self, Error, ErrorKind, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use tiny_keccak::{Hasher, Kmac};
 use zeroize::Zeroizing;
@@ -93,6 +93,81 @@ fn validate_file(file: &File, message: &'static str) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileSnapshot {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+fn file_snapshot(file: &File) -> io::Result<FileSnapshot> {
+    let metadata = file.metadata()?;
+    Ok(FileSnapshot {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        nlink: metadata.nlink(),
+        size: metadata.size(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
+}
+
+fn same_stable_snapshot(actual: FileSnapshot, expected: FileSnapshot, nlink: u64) -> bool {
+    actual.dev == expected.dev
+        && actual.ino == expected.ino
+        && actual.mode == expected.mode
+        && actual.uid == expected.uid
+        && actual.gid == expected.gid
+        && actual.nlink == nlink
+        && actual.size == expected.size
+        && actual.mtime == expected.mtime
+        && actual.mtime_nsec == expected.mtime_nsec
+}
+
+fn read_record_bytes(file: &File) -> io::Result<[u8; EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN]> {
+    let mut encoded = [0_u8; EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN];
+    file.read_exact_at(&mut encoded, 0)?;
+    let mut trailing = [0_u8; 1];
+    if file.read_at(&mut trailing, encoded.len() as u64)? != 0 {
+        return Err(invalid("BXRC checkpoint has trailing data"));
+    }
+    Ok(encoded)
+}
+
+fn validate_file_name(
+    directory: &File,
+    filename: &'static str,
+    file: &File,
+    message: &'static str,
+) -> io::Result<()> {
+    validate_file(file, message)?;
+    let named = open_at(
+        directory.as_raw_fd(),
+        filename,
+        libc::O_RDONLY | libc::O_NONBLOCK,
+        0,
+    )?;
+    let opened = file.metadata()?;
+    let named = named.metadata()?;
+    if opened.dev() != named.dev() || opened.ino() != named.ino() {
+        return Err(denied(message));
+    }
+    Ok(())
+}
+
 fn reject_temp(directory: &File) -> io::Result<()> {
     let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: all pointers are valid for this call; the output is not read on
@@ -149,7 +224,30 @@ impl Lock {
             return Err(Error::last_os_error());
         }
         validate_file(&lock, "BXRC checkpoint lock changed while it was acquired")?;
-        Ok(Self(lock))
+        let acquired = Self(lock);
+        acquired.validate_current(directory)?;
+        Ok(acquired)
+    }
+
+    fn validate_current(&self, directory: &File) -> io::Result<()> {
+        validate_directory(directory)?;
+        validate_file(
+            &self.0,
+            "BXRC checkpoint lock pathname no longer names the acquired private single-link file",
+        )?;
+        let named = open_at(directory.as_raw_fd(), LOCK_FILE, libc::O_RDWR, 0)?;
+        validate_file(
+            &named,
+            "BXRC checkpoint lock pathname no longer names the acquired private single-link file",
+        )?;
+        let acquired = self.0.metadata()?;
+        let named = named.metadata()?;
+        if acquired.dev() != named.dev() || acquired.ino() != named.ino() {
+            return Err(denied(
+                "BXRC checkpoint lock pathname no longer names the acquired private single-link file",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -157,6 +255,20 @@ impl Drop for Lock {
     fn drop(&mut self) {
         // The inode is persistent: unlinking a lock permits split locking.
         let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MutationAuthority<'a> {
+    directory_path: &'a Path,
+    directory: &'a File,
+    lock: &'a Lock,
+}
+
+impl MutationAuthority<'_> {
+    fn validate(self) -> io::Result<()> {
+        validate_directory_name(self.directory_path, self.directory)?;
+        self.lock.validate_current(self.directory)
     }
 }
 
@@ -333,33 +445,131 @@ fn read_record(
     directory: &File,
     key: &[u8; 32],
 ) -> io::Result<(Record, ExternalFloorCustodianClientAnchor)> {
-    let mut file = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0)?;
+    let file = open_at(
+        directory.as_raw_fd(),
+        STATE_FILE,
+        libc::O_RDONLY | libc::O_NONBLOCK,
+        0,
+    )?;
     validate_file(
         &file,
         "BXRC checkpoint must be a private single-link regular file",
     )?;
-    let mut encoded = [0_u8; EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN];
-    file.read_exact(&mut encoded)?;
-    let mut trailing = [0_u8; 1];
-    if file.read(&mut trailing)? != 0 {
-        return Err(invalid("BXRC checkpoint has trailing data"));
-    }
+    let encoded = read_record_bytes(&file)?;
     decode(&encoded, key)
 }
 
-fn write_record(
+fn open_record(
     directory: &File,
+    key: &[u8; 32],
+) -> io::Result<(
+    Record,
+    ExternalFloorCustodianClientAnchor,
+    File,
+    FileSnapshot,
+    [u8; EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN],
+)> {
+    let file = open_at(
+        directory.as_raw_fd(),
+        STATE_FILE,
+        libc::O_RDONLY | libc::O_NONBLOCK,
+        0,
+    )?;
+    validate_file_name(
+        directory,
+        STATE_FILE,
+        &file,
+        "BXRC checkpoint changed while it was opened",
+    )?;
+    let before = file_snapshot(&file)?;
+    let encoded = read_record_bytes(&file)?;
+    let after = file_snapshot(&file)?;
+    if before != after {
+        return Err(denied("BXRC checkpoint changed while it was read"));
+    }
+    let (record, anchor) = decode(&encoded, key)?;
+    Ok((record, anchor, file, after, encoded))
+}
+
+#[cfg(target_os = "linux")]
+fn install_checkpoint(directory: &File, create: bool) -> io::Result<()> {
+    let flags = if create {
+        libc::RENAME_NOREPLACE
+    } else {
+        libc::RENAME_EXCHANGE
+    };
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    if unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            flags,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_checkpoint(directory: &File, create: bool) -> io::Result<()> {
+    let flags = if create {
+        libc::RENAME_EXCL
+    } else {
+        libc::RENAME_SWAP
+    };
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    if unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            flags,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn install_checkpoint(_directory: &File, _create: bool) -> io::Result<()> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "atomic BXRC checkpoint install is unavailable on this platform",
+    ))
+}
+
+fn write_record_inner<F>(
+    mutation_authority: MutationAuthority<'_>,
     record: Record,
     key: &[u8; 32],
     expected: Option<ExternalFloorCustodianClientAnchor>,
-) -> io::Result<ExternalFloorCustodianClientAnchor> {
+    before_install: F,
+) -> io::Result<ExternalFloorCustodianClientAnchor>
+where
+    F: FnOnce(),
+{
+    let MutationAuthority {
+        directory_path: _,
+        directory,
+        lock: _,
+    } = mutation_authority;
     reject_temp(directory)?;
-    match expected {
+    let previous = match expected {
         Some(expected) => {
-            let (_, actual) = read_record(directory, key)?;
+            let (_, actual, file, snapshot, bytes) = open_record(directory, key)?;
             if actual != expected {
                 return Err(denied("BXRC checkpoint CAS anchor mismatch"));
             }
+            Some((file, snapshot, bytes))
         }
         None => {
             let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -383,8 +593,9 @@ fn write_record(
             if error.kind() != ErrorKind::NotFound {
                 return Err(error);
             }
+            None
         }
-    }
+    };
     let encoded = encode(record, key);
     let anchor = ExternalFloorCustodianClientAnchor {
         revision: record.revision,
@@ -395,7 +606,7 @@ fn write_record(
     let mut temporary = open_at(
         directory.as_raw_fd(),
         TEMP_FILE,
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
         0o600,
     )?;
     validate_file(
@@ -404,24 +615,131 @@ fn write_record(
     )?;
     temporary.write_all(&encoded)?;
     temporary.sync_all()?;
-    // SAFETY: both fixed names are valid and relative to the same live fd.
-    if unsafe {
-        libc::renameat(
-            directory.as_raw_fd(),
-            c_name(TEMP_FILE).as_ptr(),
-            directory.as_raw_fd(),
-            c_name(STATE_FILE).as_ptr(),
-        )
-    } != 0
+    let temporary_snapshot = file_snapshot(&temporary)?;
+    if read_record_bytes(&temporary)? != encoded {
+        return Err(invalid("temporary BXRC checkpoint read-back mismatch"));
+    }
+    validate_file_name(
+        directory,
+        TEMP_FILE,
+        &temporary,
+        "temporary BXRC checkpoint changed before commit",
+    )?;
+    if file_snapshot(&temporary)? != temporary_snapshot {
+        return Err(denied("temporary BXRC checkpoint changed before commit"));
+    }
+    if let Some((previous, snapshot, bytes)) = previous.as_ref() {
+        validate_file_name(
+            directory,
+            STATE_FILE,
+            previous,
+            "previous BXRC checkpoint changed before commit",
+        )?;
+        if file_snapshot(previous)? != *snapshot || read_record_bytes(previous)? != *bytes {
+            return Err(denied("previous BXRC checkpoint changed before commit"));
+        }
+    }
+    // Rebind the mutation to both the configured directory pathname and the
+    // exact persistent lock inode at the final deterministic boundary. A
+    // failure leaves the synced temporary record available for inspection.
+    mutation_authority.validate()?;
+    before_install();
+    install_checkpoint(directory, previous.is_none())?;
+    validate_file_name(
+        directory,
+        STATE_FILE,
+        &temporary,
+        "BXRC checkpoint changed during commit",
+    )?;
+    let installed = file_snapshot(&temporary)?;
+    if !same_stable_snapshot(installed, temporary_snapshot, 1)
+        || read_record_bytes(&temporary)? != encoded
     {
-        return Err(Error::last_os_error());
+        return Err(denied("BXRC checkpoint changed during commit"));
+    }
+    if let Some((previous, snapshot, bytes)) = previous.as_ref() {
+        validate_file_name(
+            directory,
+            TEMP_FILE,
+            previous,
+            "previous BXRC checkpoint changed during exchange",
+        )?;
+        let displaced = file_snapshot(previous)?;
+        if !same_stable_snapshot(displaced, *snapshot, 1) || read_record_bytes(previous)? != *bytes
+        {
+            return Err(denied("previous BXRC checkpoint changed during exchange"));
+        }
     }
     directory.sync_all()?;
+    mutation_authority.validate()?;
+    validate_file_name(
+        directory,
+        STATE_FILE,
+        &temporary,
+        "BXRC checkpoint changed while commit was synced",
+    )?;
+    if !same_stable_snapshot(file_snapshot(&temporary)?, temporary_snapshot, 1)
+        || read_record_bytes(&temporary)? != encoded
+    {
+        return Err(denied("BXRC checkpoint changed while commit was synced"));
+    }
+    if let Some((previous, snapshot, bytes)) = previous.as_ref() {
+        validate_file_name(
+            directory,
+            TEMP_FILE,
+            previous,
+            "previous BXRC checkpoint changed before cleanup",
+        )?;
+        if !same_stable_snapshot(file_snapshot(previous)?, *snapshot, 1)
+            || read_record_bytes(previous)? != *bytes
+        {
+            return Err(denied("previous BXRC checkpoint changed before cleanup"));
+        }
+        mutation_authority.validate()?;
+        // SAFETY: the fixed name is valid and relative to the live directory.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), c_name(TEMP_FILE).as_ptr(), 0) } != 0 {
+            return Err(Error::last_os_error());
+        }
+        if !same_stable_snapshot(file_snapshot(previous)?, *snapshot, 0)
+            || read_record_bytes(previous)? != *bytes
+        {
+            return Err(denied("previous BXRC checkpoint changed during cleanup"));
+        }
+        directory.sync_all()?;
+        if !same_stable_snapshot(file_snapshot(previous)?, *snapshot, 0)
+            || read_record_bytes(previous)? != *bytes
+        {
+            return Err(denied(
+                "previous BXRC checkpoint changed while cleanup was synced",
+            ));
+        }
+    }
+    mutation_authority.validate()?;
+    validate_file_name(
+        directory,
+        STATE_FILE,
+        &temporary,
+        "BXRC checkpoint changed after commit finalization",
+    )?;
+    if !same_stable_snapshot(file_snapshot(&temporary)?, temporary_snapshot, 1)
+        || read_record_bytes(&temporary)? != encoded
+    {
+        return Err(denied("BXRC checkpoint changed after commit finalization"));
+    }
     let (_, observed) = read_record(directory, key)?;
     if observed != anchor {
         return Err(invalid("BXRC checkpoint read-back mismatch"));
     }
     Ok(anchor)
+}
+
+fn write_record(
+    mutation_authority: MutationAuthority<'_>,
+    record: Record,
+    key: &[u8; 32],
+    expected: Option<ExternalFloorCustodianClientAnchor>,
+) -> io::Result<ExternalFloorCustodianClientAnchor> {
+    write_record_inner(mutation_authority, record, key, expected, || {})
 }
 
 fn open_directory(path: &Path) -> io::Result<File> {
@@ -434,6 +752,21 @@ fn open_directory(path: &Path) -> io::Result<File> {
         .open(path)?;
     validate_directory(&directory)?;
     Ok(directory)
+}
+
+fn validate_directory_name(path: &Path, directory: &File) -> io::Result<()> {
+    validate_directory(directory)?;
+    let named = open_directory(path)?;
+    let opened_metadata = directory.metadata()?;
+    let named_metadata = named.metadata()?;
+    if opened_metadata.dev() != named_metadata.dev()
+        || opened_metadata.ino() != named_metadata.ino()
+    {
+        return Err(denied(
+            "BXRC checkpoint directory pathname no longer names the opened directory",
+        ));
+    }
+    Ok(())
 }
 
 fn operation_commitment(
@@ -494,10 +827,50 @@ fn trusted_or_recoverable(
     }
 }
 
+fn compare_anchor_bound<S: ExternalFloorCustodianAnchorStore>(
+    authority: MutationAuthority<'_>,
+    store: &S,
+    expected: ExternalFloorCustodianClientAnchor,
+    replacement: ExternalFloorCustodianClientAnchor,
+    key: &[u8; 32],
+) -> io::Result<ExternalFloorCustodianAnchorCasOutcome> {
+    authority.validate()?;
+    let (_, actual, state, snapshot, bytes) = open_record(authority.directory, key)?;
+    if actual != replacement {
+        return Err(denied(
+            "local BXRC checkpoint does not match the anchor CAS replacement",
+        ));
+    }
+    validate_file_name(
+        authority.directory,
+        STATE_FILE,
+        &state,
+        "local BXRC checkpoint changed before anchor CAS",
+    )?;
+    if file_snapshot(&state)? != snapshot || read_record_bytes(&state)? != bytes {
+        return Err(denied("local BXRC checkpoint changed before anchor CAS"));
+    }
+    let outcome = store.compare_and_swap(expected, replacement);
+    // A failed post-check is ambiguous even when the backend reported a
+    // definite result: the CAS may now authorize a displaced local store.
+    authority.validate()?;
+    validate_file_name(
+        authority.directory,
+        STATE_FILE,
+        &state,
+        "local BXRC checkpoint changed during anchor CAS",
+    )?;
+    if file_snapshot(&state)? != snapshot || read_record_bytes(&state)? != bytes {
+        return Err(denied("local BXRC checkpoint changed during anchor CAS"));
+    }
+    outcome
+}
+
 /// A filesystem-backed authenticated custodian client.
 pub struct DurableAuthenticatedExternalFloorCustodian<T, A> {
     client: AuthenticatedExternalFloorCustodian<T>,
     anchor_store: A,
+    directory_path: PathBuf,
     directory: File,
     _lock: Lock,
     key: Zeroizing<[u8; 32]>,
@@ -507,6 +880,14 @@ pub struct DurableAuthenticatedExternalFloorCustodian<T, A> {
 }
 
 impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
+    fn mutation_authority(&self) -> MutationAuthority<'_> {
+        MutationAuthority {
+            directory_path: &self.directory_path,
+            directory: &self.directory,
+            lock: &self._lock,
+        }
+    }
+
     /// Explicitly creates a new store. Existing paths are never adopted.
     pub fn provision(
         path: &Path,
@@ -524,7 +905,7 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
             builder.mode(0o700);
             builder.create(path)?;
             let directory = open_directory(path)?;
-            let _lock = Lock::acquire(&directory)?;
+            let lock = Lock::acquire(&directory)?;
             let record = Record {
                 revision: 0,
                 phase: READY,
@@ -541,7 +922,16 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
                     commitment: [0; 32],
                 },
             };
-            write_record(&directory, record, &authentication_key, None)
+            write_record(
+                MutationAuthority {
+                    directory_path: path,
+                    directory: &directory,
+                    lock: &lock,
+                },
+                record,
+                &authentication_key,
+                None,
+            )
         })()
     }
 
@@ -581,6 +971,7 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
                 record.checkpoint,
             ),
             anchor_store,
+            directory_path: path.to_path_buf(),
             directory,
             _lock: lock,
             key: checkpoint_authentication_key,
@@ -643,10 +1034,25 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
             recovery: current_anchor,
         };
         self.poisoned.set(true);
-        let anchor = write_record(&self.directory, pending, &self.key, Some(current_anchor))?;
+        let anchor = write_record(
+            MutationAuthority {
+                directory_path: &self.directory_path,
+                directory: &self.directory,
+                lock: &self._lock,
+            },
+            pending,
+            &self.key,
+            Some(current_anchor),
+        )?;
         self.record.set(pending);
         self.anchor.set(anchor);
-        match self.anchor_store.compare_and_swap(current_anchor, anchor)? {
+        match compare_anchor_bound(
+            self.mutation_authority(),
+            &self.anchor_store,
+            current_anchor,
+            anchor,
+            &self.key,
+        )? {
             ExternalFloorCustodianAnchorCasOutcome::Committed => {
                 self.poisoned.set(false);
             }
@@ -679,11 +1085,26 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
             operation_commitment: [0; 32],
             recovery: pending.recovery,
         };
-        let anchor = write_record(&self.directory, ready, &self.key, Some(pending_anchor))?;
+        let anchor = write_record(
+            MutationAuthority {
+                directory_path: &self.directory_path,
+                directory: &self.directory,
+                lock: &self._lock,
+            },
+            ready,
+            &self.key,
+            Some(pending_anchor),
+        )?;
         self.record.set(ready);
         self.anchor.set(anchor);
         self.poisoned.set(true);
-        match self.anchor_store.compare_and_swap(pending_anchor, anchor) {
+        match compare_anchor_bound(
+            self.mutation_authority(),
+            &self.anchor_store,
+            pending_anchor,
+            anchor,
+            &self.key,
+        ) {
             Ok(ExternalFloorCustodianAnchorCasOutcome::Committed) => {
                 self.poisoned.set(false);
                 Ok(())
@@ -732,7 +1153,7 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
             return Err(invalid("BXRC checkpoint authentication key is all zero"));
         }
         let directory = open_directory(path)?;
-        let _lock = Lock::acquire(&directory)?;
+        let lock = Lock::acquire(&directory)?;
         reject_temp(&directory)?;
         let (record, actual) = read_record(&directory, &key)?;
         if actual != expected_local_anchor {
@@ -743,7 +1164,17 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         if trusted == actual {
             return Ok(actual);
         }
-        match anchor_store.compare_and_swap(trusted, actual)? {
+        match compare_anchor_bound(
+            MutationAuthority {
+                directory_path: path,
+                directory: &directory,
+                lock: &lock,
+            },
+            anchor_store,
+            trusted,
+            actual,
+            &key,
+        )? {
             ExternalFloorCustodianAnchorCasOutcome::Committed => Ok(actual),
             ExternalFloorCustodianAnchorCasOutcome::Conflict(_) => Err(denied(
                 "external BXRC anchor CAS conflict during anchor reconciliation",
@@ -765,7 +1196,7 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         }
         (|| {
             let directory = open_directory(path)?;
-            let _lock = Lock::acquire(&directory)?;
+            let lock = Lock::acquire(&directory)?;
             reject_temp(&directory)?;
             let (record, actual) = read_record(&directory, &key)?;
             let pending_anchor = anchor_store.load()?;
@@ -788,8 +1219,27 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
                 operation_commitment: [0; 32],
                 recovery: record.recovery,
             };
-            let ready_anchor = write_record(&directory, ready, &key, Some(actual))?;
-            match anchor_store.compare_and_swap(actual, ready_anchor)? {
+            let ready_anchor = write_record(
+                MutationAuthority {
+                    directory_path: path,
+                    directory: &directory,
+                    lock: &lock,
+                },
+                ready,
+                &key,
+                Some(actual),
+            )?;
+            match compare_anchor_bound(
+                MutationAuthority {
+                    directory_path: path,
+                    directory: &directory,
+                    lock: &lock,
+                },
+                anchor_store,
+                actual,
+                ready_anchor,
+                &key,
+            )? {
                 ExternalFloorCustodianAnchorCasOutcome::Committed => Ok(ready_anchor),
                 ExternalFloorCustodianAnchorCasOutcome::Conflict(_) => Err(denied(
                     "external BXRC anchor CAS conflict during reconciliation",
@@ -853,5 +1303,110 @@ impl<T: ExternalFloorCustodianTransport, A: ExternalFloorCustodianAnchorStore>
             expected,
             replacement,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bloch-bxrc-client-unit-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn record(revision: u64, parent: ExternalFloorCustodianClientAnchor) -> Record {
+        Record {
+            revision,
+            phase: READY,
+            operation: LOAD,
+            checkpoint: ExternalFloorCustodianTransportCheckpoint::new([0x85; 32], 0).unwrap(),
+            parent,
+            operation_sequence: 0,
+            operation_commitment: [0; 32],
+            recovery: parent,
+        }
+    }
+
+    #[test]
+    fn provisioning_refuses_state_raced_after_final_validation() {
+        let path = temp_path("create-race");
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_directory(&path).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let incident = b"incident evidence";
+        let state = path.join(STATE_FILE);
+        let result = write_record_inner(
+            MutationAuthority {
+                directory_path: &path,
+                directory: &directory,
+                lock: &lock,
+            },
+            record(
+                0,
+                ExternalFloorCustodianClientAnchor {
+                    revision: 0,
+                    commitment: [0; 32],
+                },
+            ),
+            &[0x52; 32],
+            None,
+            || {
+                fs::write(&state, incident).unwrap();
+                fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&state).unwrap(), incident);
+        assert!(path.join(TEMP_FILE).exists());
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn update_detects_predecessor_substitution_during_atomic_exchange() {
+        let path = temp_path("exchange-race");
+        let initial = DurableAuthenticatedExternalFloorCustodian::<(), ()>::provision(
+            &path,
+            ExternalFloorCustodianTransportCheckpoint::new([0x85; 32], 0).unwrap(),
+            [0x52; 32],
+        )
+        .unwrap();
+        let state = path.join(STATE_FILE);
+        let displaced = path.join("displaced-state");
+        let original = fs::read(&state).unwrap();
+        let directory = open_directory(&path).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let result = write_record_inner(
+            MutationAuthority {
+                directory_path: &path,
+                directory: &directory,
+                lock: &lock,
+            },
+            record(1, initial),
+            &[0x52; 32],
+            Some(initial),
+            || {
+                fs::rename(&state, &displaced).unwrap();
+                fs::write(&state, &original).unwrap();
+                fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&displaced).unwrap(), original);
+        assert!(path.join(TEMP_FILE).exists());
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(path).unwrap();
     }
 }

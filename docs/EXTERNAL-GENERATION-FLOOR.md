@@ -272,9 +272,23 @@ The store holds a nonblocking lifetime lock, uses descriptor-relative
 `O_NOFOLLOW` opens, rejects final directory symlinks, hardlinked/non-regular or
 group/world-accessible objects, and treats an orphan temporary record as an
 operator incident. Updates use exclusive temporary creation, file sync,
-atomic rename, directory sync, and authenticated read-back. It starts no
+atomic create-only install or exchange, directory sync, pinned predecessor and
+candidate read-back, and exact cleanup validation. It starts no
 listener, performs no retry, loads no keys, and cannot make a rollbackable
 filesystem or colocated key store independent.
+
+Immediately before and after each local mutation and external-anchor CAS, a
+client update reopens the configured directory pathname and persistent lock
+name and requires both to identify the exact directory and lock inodes retained
+by the live instance. An external CAS additionally keeps the authenticated
+local STATE descriptor, complete snapshot and bytes pinned across the backend
+call, and requires that exact record to be the CAS replacement on both sides of
+the call. An update keeps the synced candidate and predecessor
+descriptors open through atomic exchange and directory sync; it verifies their
+exact names, bytes and stable metadata before removing the displaced
+predecessor. Replacing the lock, directory, state or temporary name therefore
+fails closed, and an ambiguous external CAS retains local evidence for explicit
+reconciliation.
 
 `UnixExternalFloorCustodianAnchorStore` is the concrete Unix backend for the
 mandatory external anchor trait. Its create-once provisioning installs the
