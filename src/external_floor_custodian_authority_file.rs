@@ -357,12 +357,18 @@ fn read_checkpoint_file(
 }
 
 fn read_checkpoint(directory: &File) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    open_checkpoint(directory).map(|(checkpoint, _file)| checkpoint)
+}
+
+fn open_checkpoint(
+    directory: &File,
+) -> io::Result<(ExternalFloorCustodianAuthorityCheckpoint, File)> {
     if exists_at(directory, TEMP_FILE)? {
         return Err(invalid(
             "temporary BXRC authority record exists; operator inspection required",
         ));
     }
-    read_checkpoint_file(
+    open_checkpoint_file(
         directory,
         STATE_FILE,
         "BXRC authority record must be private and single-link",
@@ -412,13 +418,157 @@ fn remove_temporary_checkpoint(directory: &File, temporary: &File) -> io::Result
     directory.sync_all()
 }
 
+fn validate_replaced_checkpoint(previous: &File) -> io::Result<()> {
+    let metadata = previous.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 0
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(denied(
+            "previous BXRC authority record was not atomically displaced during commit",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_checkpoint_names(directory: &File) -> io::Result<()> {
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    let result = unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn exchange_checkpoint_names(directory: &File) -> io::Result<()> {
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn exchange_checkpoint_names(_directory: &File) -> io::Result<()> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "atomic BXRC authority checkpoint exchange is unavailable on this platform",
+    ))
+}
+
+fn commit_temporary_checkpoint_inner<F>(
+    directory: &File,
+    temporary: &File,
+    previous: Option<&File>,
+    before_replace: F,
+) -> io::Result<()>
+where
+    F: FnOnce(),
+{
+    if let Some(previous) = previous {
+        validate_file_name(
+            directory,
+            STATE_FILE,
+            previous,
+            "previous BXRC authority record changed before commit",
+        )?;
+    }
+    validate_file_name(
+        directory,
+        TEMP_FILE,
+        temporary,
+        "temporary BXRC authority record changed before commit",
+    )?;
+    before_replace();
+    if let Some(previous) = previous {
+        // Atomically exchange both names. Whatever occupied STATE at this
+        // instant is now inspectable at TEMP and must be the pinned predecessor.
+        exchange_checkpoint_names(directory)?;
+        validate_file_name(
+            directory,
+            STATE_FILE,
+            temporary,
+            "BXRC authority record changed during commit",
+        )?;
+        validate_file_name(
+            directory,
+            TEMP_FILE,
+            previous,
+            "BXRC authority predecessor changed during atomic exchange",
+        )?;
+        remove_temporary_checkpoint(directory, previous)?;
+    } else {
+        // Fresh provisioning has no predecessor to exchange. The containing
+        // directory is new and held under its exclusive process lock.
+        // SAFETY: both fixed names are relative to the same live descriptor.
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                c_name(TEMP_FILE).as_ptr(),
+                directory.as_raw_fd(),
+                c_name(STATE_FILE).as_ptr(),
+            )
+        } != 0
+        {
+            return Err(Error::last_os_error());
+        }
+        directory.sync_all()?;
+    }
+    // Keep the written descriptor live across rename and directory sync. A
+    // pathname substitution is ambiguous, never a successful commit.
+    validate_file_name(
+        directory,
+        STATE_FILE,
+        temporary,
+        "BXRC authority record changed during commit",
+    )?;
+    if let Some(previous) = previous {
+        validate_replaced_checkpoint(previous)?;
+    }
+    Ok(())
+}
+
+fn commit_temporary_checkpoint(
+    directory: &File,
+    temporary: &File,
+    previous: Option<&File>,
+) -> io::Result<()> {
+    commit_temporary_checkpoint_inner(directory, temporary, previous, || {})
+}
+
 fn write_checkpoint(
     directory: &File,
     transition_index: u64,
     authority: ExternalFloorCustodianAuthorityTuple,
     previous_record_hash: [u8; 32],
     create: bool,
+    previous_file: Option<&File>,
 ) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    if create == previous_file.is_some() {
+        return Err(invalid("invalid BXRC authority commit predecessor"));
+    }
     if exists_at(directory, TEMP_FILE)? || (create && exists_at(directory, STATE_FILE)?) {
         return Err(Error::new(
             ErrorKind::AlreadyExists,
@@ -436,19 +586,7 @@ fn write_checkpoint(
     validate_file(&temporary, "temporary BXRC authority record is unsafe")?;
     temporary.write_all(&encoded)?;
     temporary.sync_all()?;
-    // SAFETY: both fixed names are relative to the same live descriptor.
-    if unsafe {
-        libc::renameat(
-            directory.as_raw_fd(),
-            c_name(TEMP_FILE).as_ptr(),
-            directory.as_raw_fd(),
-            c_name(STATE_FILE).as_ptr(),
-        )
-    } != 0
-    {
-        return Err(Error::last_os_error());
-    }
-    directory.sync_all()?;
+    commit_temporary_checkpoint(directory, &temporary, previous_file)?;
     if read_checkpoint(directory)? != expected {
         return Err(invalid("BXRC authority checkpoint read-back mismatch"));
     }
@@ -536,6 +674,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
             },
             [0; 32],
             true,
+            None,
         )?;
         validate_directory_name(path, &directory)?;
         lock.validate_current(&directory)?;
@@ -579,9 +718,11 @@ impl UnixExternalFloorCustodianAuthorityStore {
     /// dual-signed approval. If the durable record is still the exact prior
     /// checkpoint and an orphan temporary file is the exact derived next
     /// checkpoint, reconciliation durably removes that uncommitted candidate
-    /// and returns `NotCommitted`. Any other record/temporary combination or
-    /// unreadable store fails closed without cleanup. The returned store is
-    /// pinned to the selected caller-derived checkpoint for restart checks.
+    /// and returns `NotCommitted`. The inverse exact pair left after atomic
+    /// exchange durably removes the displaced predecessor and returns
+    /// `Committed`. Any other record/temporary combination or unreadable store
+    /// fails closed without cleanup. The returned store is pinned to the
+    /// selected caller-derived checkpoint for restart checks.
     pub fn reconcile_continuity(
         path: &Path,
         previous: ExternalFloorCustodianAuthorityCheckpoint,
@@ -605,17 +746,21 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 TEMP_FILE,
                 "temporary BXRC authority record must be private and single-link",
             )?;
-            if durable != previous || temporary != next {
+            let selected = if durable == previous && temporary == next {
+                previous
+            } else if durable == next && temporary == previous {
+                next
+            } else {
                 return Err(denied(
                     "BXRC authority reconciliation found an unexpected temporary checkpoint",
                 ));
-            }
+            };
             remove_temporary_checkpoint(&directory, &temporary_file)?;
             validate_directory_name(path, &directory)?;
             let reread = read_checkpoint(&directory)?;
-            if reread != previous {
+            if reread != selected {
                 return Err(denied(
-                    "BXRC authority state changed while aborting an uncommitted checkpoint",
+                    "BXRC authority state changed while resolving an exchanged checkpoint",
                 ));
             }
             reread
@@ -684,7 +829,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let mut expected = self.expected()?;
         validate_directory_name(&self.path, &self.directory)?;
         self._lock.validate_current(&self.directory)?;
-        let previous = read_checkpoint(&self.directory)?;
+        let (previous, previous_file) = open_checkpoint(&self.directory)?;
         if previous != *expected {
             return Err(denied("BXRC authority state changed behind live instance"));
         }
@@ -695,6 +840,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
             derived.authority,
             derived.previous_record_hash,
             false,
+            Some(&previous_file),
         )?;
         // If the lock pathname was replaced during the write, the transition
         // is deliberately ambiguous: leave the in-memory expectation at the
@@ -745,6 +891,117 @@ mod tests {
         assert!(temporary.exists());
 
         drop(opened);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn temporary_commit_rejects_pathname_substitution() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-commit-identity-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        fs::write(&state, b"prior").unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&temporary, b"candidate").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = open_directory(&root).unwrap();
+        let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        fs::rename(&temporary, root.join("displaced-candidate")).unwrap();
+        fs::write(&temporary, b"replacement").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = commit_temporary_checkpoint(&directory, &opened, None).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&state).unwrap(), b"prior");
+        assert_eq!(fs::read(&temporary).unwrap(), b"replacement");
+
+        drop(opened);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn temporary_commit_rejects_predecessor_substitution() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-predecessor-identity-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        fs::write(&state, b"prior").unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&temporary, b"candidate").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = open_directory(&root).unwrap();
+        let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        fs::rename(&state, root.join("displaced-prior")).unwrap();
+        fs::write(&state, b"replacement").unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error =
+            commit_temporary_checkpoint(&directory, &candidate, Some(&previous)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&state).unwrap(), b"replacement");
+        assert_eq!(fs::read(&temporary).unwrap(), b"candidate");
+
+        drop(candidate);
+        drop(previous);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_exchange_detects_substitution_after_final_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-exchange-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        let displaced = root.join("displaced-prior");
+        fs::write(&state, b"prior").unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&temporary, b"candidate").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = open_directory(&root).unwrap();
+        let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let error =
+            commit_temporary_checkpoint_inner(&directory, &candidate, Some(&previous), || {
+                // This runs after the last pre-exchange identity checks and
+                // deterministically models a same-user writer in that window.
+                fs::rename(&state, &displaced).unwrap();
+                fs::write(&state, b"replacement").unwrap();
+                fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+
+        // The approved candidate may now be visible, but the displaced object
+        // at TEMP was not the pinned predecessor, so the outcome is ambiguous
+        // and all evidence is retained for explicit reconciliation.
+        assert_eq!(fs::read(&state).unwrap(), b"candidate");
+        assert_eq!(fs::read(&temporary).unwrap(), b"replacement");
+        assert_eq!(fs::read(&displaced).unwrap(), b"prior");
+
+        drop(candidate);
+        drop(previous);
         drop(directory);
         fs::remove_dir_all(root).unwrap();
     }

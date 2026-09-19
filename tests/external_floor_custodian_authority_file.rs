@@ -432,6 +432,49 @@ fn reconciliation_durably_aborts_only_an_exact_uncommitted_candidate() {
 }
 
 #[test]
+fn reconciliation_finishes_only_an_exact_post_exchange_commit() {
+    let temp = Temp::new();
+    let deployment = [0x9b; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(22, 0x75);
+    let next = anchor(23, 0x76);
+    let approval = continuity(&first, &second, deployment, initial, next);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    let prior = fs::read(temp.store.join(".bxrc-accepted-authority")).unwrap();
+    let checkpoint1 = store.accept_continuity(approval).unwrap();
+    drop(store);
+
+    // Recreate the exact namespace left by a crash after atomic exchange but
+    // before the displaced predecessor is removed.
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+    fs::write(&temporary, prior).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+        &temp.store,
+        checkpoint0,
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityReconciliation::Committed {
+            previous: checkpoint0,
+            current: checkpoint1,
+        }
+    );
+    assert!(!temporary.exists());
+    assert_eq!(reconciled.checkpoint().unwrap(), checkpoint1);
+}
+
+#[test]
 fn reconciliation_preserves_unexpected_or_unsafe_temporary_records() {
     let temp = Temp::new();
     let deployment = [0x9a; 32];

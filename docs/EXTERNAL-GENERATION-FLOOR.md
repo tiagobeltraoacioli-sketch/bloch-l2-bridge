@@ -416,8 +416,12 @@ record, invalid signature or unreadable store fails closed. One interrupted
 pre-rename write is recoverable without completing or retrying it: when the
 durable record is the exact retained prior receipt and the orphan temporary
 record is the exact derived next receipt, reconciliation durably removes only
-that private, single-link candidate and returns `NotCommitted`. Any other
-temporary-record combination is preserved as incident evidence and refused.
+that private, single-link candidate and returns `NotCommitted`. A crash after
+atomic exchange but before predecessor cleanup leaves the inverse exact pair:
+the durable record is the derived next receipt and the temporary record is the
+retained prior receipt. Reconciliation durably removes that displaced
+predecessor and returns `Committed`. Any other temporary-record combination is
+preserved as incident evidence and refused.
 The validated temporary descriptor stays open through cleanup, and its device
 and inode must still match the descriptor-relative pathname immediately before
 removal. The method never returns a tuple learned from disk. The returned store
@@ -433,7 +437,23 @@ descriptor-relative path. The configured directory pathname is likewise
 reopened and required to name the same device and inode before and after live
 operations. Renaming the locked directory and replacing its old pathname can
 therefore make an in-flight transition ambiguous, but cannot silently direct a
-live instance to keep accepting a displaced receipt store.
+live instance to keep accepting a displaced receipt store. A write also keeps
+its synced temporary descriptor open across the atomic rename, requiring that
+descriptor to match the temporary pathname immediately before rename and the
+durable pathname before and after the directory sync. Temporary-file
+substitution or hardlinking is therefore refused before commit when observed;
+a later race is reported as ambiguous rather than accepted. Updates also keep
+the validated predecessor descriptor open, require the durable pathname to
+still identify it immediately before an atomic `TEMP`/`STATE` exchange, and
+then require the displaced `TEMP` pathname to identify that exact predecessor.
+Only that pinned predecessor is removed and synced; afterward its link count
+must be zero and the durable pathname must still identify the candidate.
+Linux uses `renameat2(RENAME_EXCHANGE)`, macOS uses
+`renameatx_np(RENAME_SWAP)`, and other Unix targets fail closed rather than
+falling back to a racy overwrite. A same-user process cannot silently
+substitute a different durable record between validation and commit; any
+detected divergence leaves the transition unacknowledged with the exchanged
+objects retained for explicit reconciliation.
 This live checkpoint is authenticated operational evidence; it is not proof
 that an above-floor head descended from an earlier floor and it does not make
 either local filesystem anti-rollback storage.
