@@ -313,6 +313,37 @@ impl Drop for Lock {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MutationAuthority<'a> {
+    directory_path: &'a Path,
+    directory: &'a File,
+    lock: &'a Lock,
+}
+
+impl MutationAuthority<'_> {
+    fn validate(self) -> io::Result<()> {
+        // A same-user pathname replacement could otherwise create a second
+        // lock domain while this process still holds the displaced inode.
+        // Bind every filesystem mutation to both the configured directory and
+        // the exact persistent lock name immediately before issuing it.
+        validate_directory_name(self.directory_path, self.directory)?;
+        self.lock.validate_current(self.directory)
+    }
+}
+
+fn validate_mutation_authority(
+    directory_path: &Path,
+    directory: &File,
+    lock: &Lock,
+) -> io::Result<()> {
+    MutationAuthority {
+        directory_path,
+        directory,
+        lock,
+    }
+    .validate()
+}
+
 fn hash(prefix: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak::v256();
     hasher.update(RECORD_DOMAIN);
@@ -557,6 +588,7 @@ fn validate_newly_unlinked_checkpoint(
 fn remove_cleanup_checkpoint_inner<F, G>(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     cleanup: &File,
     evidence: CheckpointFileEvidence,
     before_evidence_check: F,
@@ -588,7 +620,7 @@ where
     // Keep the configured pathname identity check as the final operation
     // before unlinkat. Moving the directory after evidence validation must not
     // let a live instance remove a tombstone from the displaced store.
-    validate_directory_name(directory_path, directory)?;
+    validate_mutation_authority(directory_path, directory, lock)?;
     // SAFETY: the fixed name is valid and relative to the live directory fd.
     if unsafe { libc::unlinkat(directory.as_raw_fd(), c_name(CLEANUP_FILE).as_ptr(), 0) } != 0 {
         return Err(Error::last_os_error());
@@ -616,15 +648,25 @@ where
 fn remove_cleanup_checkpoint(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     cleanup: &File,
     evidence: CheckpointFileEvidence,
 ) -> io::Result<()> {
-    remove_cleanup_checkpoint_inner(directory_path, directory, cleanup, evidence, || {}, || {})
+    remove_cleanup_checkpoint_inner(
+        directory_path,
+        directory,
+        lock,
+        cleanup,
+        evidence,
+        || {},
+        || {},
+    )
 }
 
 fn remove_temporary_checkpoint_inner<F>(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     temporary: &File,
     evidence: CheckpointFileEvidence,
     before_stage: F,
@@ -644,7 +686,7 @@ where
         "temporary BXRC authority record content or metadata changed before cleanup",
     )?;
     before_stage();
-    validate_directory_name(directory_path, directory)?;
+    validate_mutation_authority(directory_path, directory, lock)?;
     // Atomically move whatever occupies TEMP to a reserved tombstone without
     // overwriting prior crash evidence. The moved object must be the descriptor
     // pinned above before it can be unlinked.
@@ -672,16 +714,17 @@ where
         staged_evidence,
         "BXRC authority cleanup tombstone content or metadata changed while staging was synced",
     )?;
-    remove_cleanup_checkpoint(directory_path, directory, temporary, staged_evidence)
+    remove_cleanup_checkpoint(directory_path, directory, lock, temporary, staged_evidence)
 }
 
 fn remove_temporary_checkpoint(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     temporary: &File,
     evidence: CheckpointFileEvidence,
 ) -> io::Result<()> {
-    remove_temporary_checkpoint_inner(directory_path, directory, temporary, evidence, || {})
+    remove_temporary_checkpoint_inner(directory_path, directory, lock, temporary, evidence, || {})
 }
 
 fn validate_replaced_checkpoint(
@@ -807,6 +850,7 @@ fn install_checkpoint_name(directory: &File) -> io::Result<()> {
 fn commit_temporary_checkpoint_inner<F>(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     temporary: &File,
     temporary_evidence: CheckpointFileEvidence,
     previous: Option<(&File, CheckpointFileEvidence)>,
@@ -840,7 +884,7 @@ where
         "temporary BXRC authority record content or metadata changed before commit",
     )?;
     before_replace();
-    validate_directory_name(directory_path, directory)?;
+    validate_mutation_authority(directory_path, directory, lock)?;
     let committed_evidence = if let Some((previous, previous_evidence)) = previous {
         // Atomically exchange both names. Whatever occupied STATE at this
         // instant is now inspectable at TEMP and must be the pinned predecessor.
@@ -867,7 +911,7 @@ where
             previous_evidence,
             "BXRC authority predecessor content or metadata changed during atomic exchange",
         )?;
-        remove_temporary_checkpoint(directory_path, directory, previous, displaced)?;
+        remove_temporary_checkpoint(directory_path, directory, lock, previous, displaced)?;
         committed
     } else {
         // Fresh provisioning has no predecessor to exchange. Refuse rather
@@ -903,6 +947,7 @@ where
 fn commit_temporary_checkpoint(
     directory_path: &Path,
     directory: &File,
+    lock: &Lock,
     temporary: &File,
     temporary_evidence: CheckpointFileEvidence,
     previous: Option<(&File, CheckpointFileEvidence)>,
@@ -910,6 +955,7 @@ fn commit_temporary_checkpoint(
     commit_temporary_checkpoint_inner(
         directory_path,
         directory,
+        lock,
         temporary,
         temporary_evidence,
         previous,
@@ -918,14 +964,18 @@ fn commit_temporary_checkpoint(
 }
 
 fn write_checkpoint(
-    directory_path: &Path,
-    directory: &File,
+    mutation_authority: MutationAuthority<'_>,
     transition_index: u64,
     authority: ExternalFloorCustodianAuthorityTuple,
     previous_record_hash: [u8; 32],
     create: bool,
     previous_file: Option<(&File, CheckpointFileEvidence)>,
 ) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    let MutationAuthority {
+        directory_path,
+        directory,
+        lock,
+    } = mutation_authority;
     if create == previous_file.is_some() {
         return Err(invalid("invalid BXRC authority commit predecessor"));
     }
@@ -940,7 +990,7 @@ fn write_checkpoint(
     }
     let encoded = encode(transition_index, authority, previous_record_hash)?;
     let expected = decode(&encoded)?;
-    validate_directory_name(directory_path, directory)?;
+    validate_mutation_authority(directory_path, directory, lock)?;
     let mut temporary = open_at(
         directory.as_raw_fd(),
         TEMP_FILE,
@@ -957,6 +1007,7 @@ fn write_checkpoint(
     commit_temporary_checkpoint(
         directory_path,
         directory,
+        lock,
         &temporary,
         temporary_evidence,
         previous_file,
@@ -1061,8 +1112,11 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
         let checkpoint = write_checkpoint(
-            path,
-            &directory,
+            MutationAuthority {
+                directory_path: path,
+                directory: &directory,
+                lock: &lock,
+            },
             expected.transition_index,
             expected.authority,
             expected.previous_record_hash,
@@ -1145,6 +1199,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 commit_temporary_checkpoint(
                     path,
                     &directory,
+                    &lock,
                     &candidate_file,
                     candidate_evidence,
                     None,
@@ -1176,6 +1231,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                     remove_temporary_checkpoint(
                         path,
                         &directory,
+                        &lock,
                         &candidate_file,
                         candidate_evidence,
                     )?;
@@ -1183,6 +1239,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                     remove_cleanup_checkpoint(
                         path,
                         &directory,
+                        &lock,
                         &candidate_file,
                         candidate_evidence,
                     )?;
@@ -1310,9 +1367,21 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 ));
             };
             if candidate_name == TEMP_FILE {
-                remove_temporary_checkpoint(path, &directory, &temporary_file, temporary_evidence)?;
+                remove_temporary_checkpoint(
+                    path,
+                    &directory,
+                    &lock,
+                    &temporary_file,
+                    temporary_evidence,
+                )?;
             } else {
-                remove_cleanup_checkpoint(path, &directory, &temporary_file, temporary_evidence)?;
+                remove_cleanup_checkpoint(
+                    path,
+                    &directory,
+                    &lock,
+                    &temporary_file,
+                    temporary_evidence,
+                )?;
             }
             validate_directory_name(path, &directory)?;
             let reread = read_checkpoint(&directory)?;
@@ -1393,8 +1462,11 @@ impl UnixExternalFloorCustodianAuthorityStore {
         }
         let derived = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
         let next = write_checkpoint(
-            &self.path,
-            &self.directory,
+            MutationAuthority {
+                directory_path: &self.path,
+                directory: &self.directory,
+                lock: &self._lock,
+            },
             derived.transition_index,
             derived.authority,
             derived.previous_record_hash,
@@ -1567,6 +1639,13 @@ mod tests {
             encoded: read_checkpoint_bytes(file).unwrap(),
             snapshot: checkpoint_snapshot(file).unwrap(),
         }
+    }
+
+    fn replace_test_lock(root: &Path) {
+        let lock_path = root.join(LOCK_FILE);
+        fs::rename(&lock_path, root.join("displaced-lock")).unwrap();
+        fs::write(&lock_path, b"replacement lock").unwrap();
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]
@@ -1771,16 +1850,18 @@ mod tests {
         write_test_checkpoint(&temporary, 0x41);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
-        let error = remove_temporary_checkpoint_inner(&root, &directory, &opened, evidence, || {
-            // This runs after pathname validation and before the atomic move.
-            // Model the exact unlink-and-replace race that used to delete the
-            // replacement through a pathname-based unlinkat.
-            fs::remove_file(&temporary).unwrap();
-            write_test_checkpoint(&temporary, 0x42);
-        })
-        .unwrap_err();
+        let error =
+            remove_temporary_checkpoint_inner(&root, &directory, &lock, &opened, evidence, || {
+                // This runs after pathname validation and before the atomic move.
+                // Model the exact unlink-and-replace race that used to delete the
+                // replacement through a pathname-based unlinkat.
+                fs::remove_file(&temporary).unwrap();
+                write_test_checkpoint(&temporary, 0x42);
+            })
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
 
         // The raced third-party inode is atomically displaced to the reserved
@@ -1810,12 +1891,14 @@ mod tests {
         write_test_checkpoint(&cleanup, 0x51);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let opened = open_at(directory.as_raw_fd(), CLEANUP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
         let original_inode = opened.metadata().unwrap().ino();
         let error = remove_cleanup_checkpoint_inner(
             &root,
             &directory,
+            &lock,
             &opened,
             evidence,
             || {
@@ -1850,13 +1933,15 @@ mod tests {
         write_test_checkpoint(&temporary, 0x12);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let opened_evidence = test_evidence(&opened);
         fs::rename(&temporary, root.join("displaced-candidate")).unwrap();
         write_test_checkpoint(&temporary, 0x13);
 
-        let error = commit_temporary_checkpoint(&root, &directory, &opened, opened_evidence, None)
-            .unwrap_err();
+        let error =
+            commit_temporary_checkpoint(&root, &directory, &lock, &opened, opened_evidence, None)
+                .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs::read(&state).unwrap()[0], 0x11);
         assert_eq!(fs::read(&temporary).unwrap()[0], 0x13);
@@ -1881,6 +1966,7 @@ mod tests {
         write_test_checkpoint(&temporary, 0x22);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
         let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let previous_evidence = test_evidence(&previous);
@@ -1891,6 +1977,7 @@ mod tests {
         let error = commit_temporary_checkpoint(
             &root,
             &directory,
+            &lock,
             &candidate,
             candidate_evidence,
             Some((&previous, previous_evidence)),
@@ -1922,6 +2009,7 @@ mod tests {
         write_test_checkpoint(&temporary, 0x32);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
         let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let previous_evidence = test_evidence(&previous);
@@ -1929,6 +2017,7 @@ mod tests {
         let error = commit_temporary_checkpoint_inner(
             &root,
             &directory,
+            &lock,
             &candidate,
             candidate_evidence,
             Some((&previous, previous_evidence)),
@@ -1969,11 +2058,13 @@ mod tests {
         write_test_checkpoint(&temporary, 0x41);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let candidate_evidence = test_evidence(&candidate);
         let error = commit_temporary_checkpoint_inner(
             &root,
             &directory,
+            &lock,
             &candidate,
             candidate_evidence,
             None,
@@ -1994,6 +2085,160 @@ mod tests {
     }
 
     #[test]
+    fn create_only_install_refuses_replaced_lock_before_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-lock-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        let displaced_lock = root.join("displaced-lock");
+        write_test_checkpoint(&temporary, 0x51);
+
+        let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let candidate_evidence = test_evidence(&candidate);
+        let error = commit_temporary_checkpoint_inner(
+            &root,
+            &directory,
+            &lock,
+            &candidate,
+            candidate_evidence,
+            None,
+            || {
+                // A replacement lock would let another process acquire an
+                // independent flock unless the exact pathname identity is
+                // rebound at the final pre-mutation boundary.
+                replace_test_lock(&root);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(!state.exists());
+        assert_eq!(fs::read(&temporary).unwrap()[0], 0x51);
+        assert!(displaced_lock.exists());
+        assert!(root.join(LOCK_FILE).exists());
+
+        drop(candidate);
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_exchange_refuses_replaced_lock_before_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-exchange-lock-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        write_test_checkpoint(&state, 0x61);
+        write_test_checkpoint(&temporary, 0x62);
+
+        let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let error = commit_temporary_checkpoint_inner(
+            &root,
+            &directory,
+            &lock,
+            &candidate,
+            test_evidence(&candidate),
+            Some((&previous, test_evidence(&previous))),
+            || replace_test_lock(&root),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&state).unwrap()[0], 0x61);
+        assert_eq!(fs::read(&temporary).unwrap()[0], 0x62);
+        assert!(!root.join(CLEANUP_FILE).exists());
+
+        drop(candidate);
+        drop(previous);
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn temporary_cleanup_refuses_replaced_lock_before_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-staging-lock-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let temporary = root.join(TEMP_FILE);
+        write_test_checkpoint(&temporary, 0x71);
+
+        let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let evidence = test_evidence(&opened);
+        let error =
+            remove_temporary_checkpoint_inner(&root, &directory, &lock, &opened, evidence, || {
+                replace_test_lock(&root)
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&temporary).unwrap()[0], 0x71);
+        assert!(!root.join(STATE_FILE).exists());
+        assert!(!root.join(CLEANUP_FILE).exists());
+
+        drop(opened);
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_refuses_replaced_lock_before_unlink() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-unlink-lock-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let cleanup = root.join(CLEANUP_FILE);
+        write_test_checkpoint(&cleanup, 0x81);
+
+        let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
+        let opened = open_at(directory.as_raw_fd(), CLEANUP_FILE, libc::O_RDONLY, 0).unwrap();
+        let evidence = test_evidence(&opened);
+        let error = remove_cleanup_checkpoint_inner(
+            &root,
+            &directory,
+            &lock,
+            &opened,
+            evidence,
+            || {},
+            || replace_test_lock(&root),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&cleanup).unwrap()[0], 0x81);
+        assert!(!root.join(STATE_FILE).exists());
+        assert!(!root.join(TEMP_FILE).exists());
+
+        drop(opened);
+        drop(lock);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn atomic_exchange_refuses_displaced_directory_before_commit() {
         let root = std::env::temp_dir().join(format!(
             "bloch-bxrc-authority-directory-commit-race-{}-{}",
@@ -2008,6 +2253,7 @@ mod tests {
         write_test_checkpoint(&temporary, 0x62);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
         let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let previous_evidence = test_evidence(&previous);
@@ -2016,6 +2262,7 @@ mod tests {
         let error = commit_temporary_checkpoint_inner(
             &root,
             &directory,
+            &lock,
             &candidate,
             candidate_evidence,
             Some((&previous, previous_evidence)),
@@ -2050,12 +2297,14 @@ mod tests {
         write_test_checkpoint(&cleanup, 0x71);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let opened = open_at(directory.as_raw_fd(), CLEANUP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
         let displaced = root.with_extension("displaced");
         let error = remove_cleanup_checkpoint_inner(
             &root,
             &directory,
+            &lock,
             &opened,
             evidence,
             || {},
@@ -2090,15 +2339,17 @@ mod tests {
         write_test_checkpoint(&temporary, 0x81);
 
         let directory = open_directory(&root).unwrap();
+        let lock = Lock::acquire(&directory).unwrap();
         let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
         let displaced = root.with_extension("displaced");
-        let error = remove_temporary_checkpoint_inner(&root, &directory, &opened, evidence, || {
-            fs::rename(&root, &displaced).unwrap();
-            fs::create_dir(&root).unwrap();
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        })
-        .unwrap_err();
+        let error =
+            remove_temporary_checkpoint_inner(&root, &directory, &lock, &opened, evidence, || {
+                fs::rename(&root, &displaced).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            })
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs::read(displaced.join(TEMP_FILE)).unwrap()[0], 0x81);
         assert!(!displaced.join(CLEANUP_FILE).exists());

@@ -442,15 +442,19 @@ Every live checkpoint read and continuity acceptance also revalidates that the
 private directory is still safe and that the persistent lock pathname still
 names the exact inode locked at open. Replacing or hardlinking the lock, or
 making the directory group/world-accessible, therefore fails closed before an
-authority write instead of permitting split locking. Record descriptors are
+authority write instead of permitting split locking. The directory and exact
+lock pathname identities are rebound together at the final deterministic
+boundary before each checkpoint install, exchange, tombstone staging, or
+unlink; an already observable replacement lock is refused there instead of
+allowing a mutation under a known displaced lock. Record descriptors are
 opened with nonblocking, no-controlling-terminal semantics before their type
 is inspected, so a same-user FIFO or terminal substitution cannot hang receipt
 opening or acquire a terminal. They are revalidated after their bounded read
 and must still match their
 descriptor-relative path. The configured directory pathname is likewise
 reopened and required to name the same device and inode before and after live
-operations, and again immediately before checkpoint install, exchange,
-tombstone staging, or unlink. Renaming the locked directory and replacing its
+operations, and again at those mutation boundaries. Renaming the locked
+directory and replacing its
 old pathname is therefore refused at the final deterministic pre-mutation
 boundary; a later kernel-level race remains ambiguous but cannot silently direct
 a live instance to keep accepting a displaced receipt store. A write also keeps
