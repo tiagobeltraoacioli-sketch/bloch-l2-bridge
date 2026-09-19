@@ -52,7 +52,8 @@ pub use release::{
 pub use reserves::{check_reserves, is_exactly_backed, ReserveCheck, ReserveStatement};
 #[cfg(unix)]
 pub use source_store::{
-    persist_versioned_source, restore_versioned_source, SourceGenerationFloor, SourceStoreError,
+    persist_versioned_source, restore_versioned_source, SourceFloorState, SourceGenerationFloor,
+    SourceStoreError,
 };
 pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,

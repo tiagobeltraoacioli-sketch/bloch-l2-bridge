@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Durable Unix backend for the staged-source generation floor.
+//! Durable Unix backend for the staged-source generation and byte commitment.
 //!
 //! The floor directory must be provisioned separately from the snapshot
 //! directory and protected from rollback by the host. This backend provides
-//! process-safe monotonic updates, crash recovery, and authenticated records on
-//! a local Unix filesystem. Authentication prevents record forgery and binds a
-//! floor to one configured domain, but coherent rollback of the entire floor
-//! directory by a storage administrator remains undetectable.
+//! process-safe monotonic updates, same-generation immutability, crash recovery,
+//! and authenticated records on a local Unix filesystem. Authentication
+//! prevents record forgery and binds a floor to one configured domain, but
+//! coherent rollback of the entire floor directory by a storage administrator
+//! remains undetectable.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Write};
@@ -17,14 +18,14 @@ use std::path::{Path, PathBuf};
 use tiny_keccak::{Hasher, Kmac};
 use zeroize::Zeroize;
 
-use crate::source_store::SourceGenerationFloor;
+use crate::source_store::{SourceFloorState, SourceGenerationFloor};
 
 const FLOOR_FILE: &str = ".source-generation-floor";
 const TEMPORARY_FILE: &str = ".source-generation-floor.tmp";
 const LOCK_FILE: &str = ".source-generation-floor.lock";
-const FLOOR_MAGIC: &[u8] = b"BLOCH-L2-SOURCE-FLOOR-v2\0";
+const FLOOR_MAGIC: &[u8] = b"BLOCH-L2-SOURCE-FLOOR-v3\0";
 const KMAC_CUSTOMIZATION: &[u8] = b"BLOCH-L2-SOURCE-FLOOR-AUTH-v1\0";
-const RECORD_SIZE: usize = FLOOR_MAGIC.len() + 8 + 32;
+const RECORD_SIZE: usize = FLOOR_MAGIC.len() + 8 + 1 + 32 + 32;
 
 const LOCK_EXCLUSIVE: i32 = 2;
 const LOCK_NONBLOCKING: i32 = 4;
@@ -136,35 +137,59 @@ fn tags_equal(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-fn encode_record(generation: u64, authentication: &UnixFloorAuthentication) -> [u8; RECORD_SIZE] {
+fn encode_record(
+    state: SourceFloorState,
+    authentication: &UnixFloorAuthentication,
+) -> [u8; RECORD_SIZE] {
     let mut record = [0; RECORD_SIZE];
     record[..FLOOR_MAGIC.len()].copy_from_slice(FLOOR_MAGIC);
     let generation_end = FLOOR_MAGIC.len() + 8;
-    record[FLOOR_MAGIC.len()..generation_end].copy_from_slice(&generation.to_be_bytes());
-    let tag = authentication_tag(authentication, &record[..generation_end]);
-    record[generation_end..].copy_from_slice(&tag);
+    record[FLOOR_MAGIC.len()..generation_end].copy_from_slice(&state.generation.to_be_bytes());
+    let commitment_end = generation_end + 1 + 32;
+    if let Some(commitment) = state.snapshot_commitment {
+        record[generation_end] = 1;
+        record[generation_end + 1..commitment_end].copy_from_slice(&commitment);
+    }
+    let tag = authentication_tag(authentication, &record[..commitment_end]);
+    record[commitment_end..].copy_from_slice(&tag);
     record
 }
 
-fn decode_record(record: &[u8], authentication: &UnixFloorAuthentication) -> std::io::Result<u64> {
+fn decode_record(
+    record: &[u8],
+    authentication: &UnixFloorAuthentication,
+) -> std::io::Result<SourceFloorState> {
     if record.len() != RECORD_SIZE || &record[..FLOOR_MAGIC.len()] != FLOOR_MAGIC {
         return Err(invalid_data("invalid generation floor record"));
     }
     let generation_end = FLOOR_MAGIC.len() + 8;
-    let expected = authentication_tag(authentication, &record[..generation_end]);
-    if !tags_equal(&record[generation_end..], &expected) {
+    let commitment_end = generation_end + 1 + 32;
+    let expected = authentication_tag(authentication, &record[..commitment_end]);
+    if !tags_equal(&record[commitment_end..], &expected) {
         return Err(invalid_data("generation floor authentication failed"));
     }
     let generation: [u8; 8] = record[FLOOR_MAGIC.len()..generation_end]
         .try_into()
         .expect("generation record slice has fixed length");
-    Ok(u64::from_be_bytes(generation))
+    let generation = u64::from_be_bytes(generation);
+    let commitment: [u8; 32] = record[generation_end + 1..commitment_end]
+        .try_into()
+        .expect("snapshot commitment slice has fixed length");
+    let snapshot_commitment = match record[generation_end] {
+        0 if generation == 0 && commitment == [0; 32] => None,
+        1 => Some(commitment),
+        _ => return Err(invalid_data("invalid generation floor binding state")),
+    };
+    Ok(SourceFloorState {
+        generation,
+        snapshot_commitment,
+    })
 }
 
 fn read_record(
     path: &Path,
     authentication: &UnixFloorAuthentication,
-) -> std::io::Result<Option<u64>> {
+) -> std::io::Result<Option<SourceFloorState>> {
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -305,7 +330,9 @@ pub struct UnixGenerationFloor {
 impl UnixGenerationFloor {
     /// Open a pre-provisioned, authenticated private floor directory,
     /// explicitly separated from the snapshot path. Both parent directories
-    /// must already exist. Existing unauthenticated v1 records are refused.
+    /// must already exist. Generation-only v1/v2 records are refused because
+    /// they cannot be migrated to a snapshot commitment without an explicit,
+    /// trusted reconciliation step.
     pub fn open_authenticated_separate(
         floor_dir: &Path,
         snapshot_path: &Path,
@@ -355,15 +382,22 @@ impl UnixGenerationFloor {
         operation(self)
     }
 
-    fn recover_and_read(&self) -> std::io::Result<u64> {
+    fn recover_and_read(&self) -> std::io::Result<SourceFloorState> {
         let floor_path = self.directory.join(FLOOR_FILE);
         let temporary_path = self.directory.join(TEMPORARY_FILE);
         let current = read_record(&floor_path, &self.authentication)?;
         if let Some(pending) = read_record(&temporary_path, &self.authentication)? {
-            if current.is_some_and(|current| pending < current) {
-                return Err(invalid_data(
-                    "temporary generation floor would roll back durable state",
-                ));
+            if let Some(current) = current {
+                if pending.generation < current.generation {
+                    return Err(invalid_data(
+                        "temporary generation floor would roll back durable state",
+                    ));
+                }
+                if pending.generation == current.generation && pending != current {
+                    return Err(invalid_data(
+                        "temporary generation floor conflicts at durable generation",
+                    ));
+                }
             }
             fs::rename(&temporary_path, &floor_path)?;
             sync_directory(&self.directory)?;
@@ -372,13 +406,17 @@ impl UnixGenerationFloor {
         match current {
             Some(generation) => Ok(generation),
             None => {
-                self.write_record(0)?;
-                Ok(0)
+                let initial = SourceFloorState {
+                    generation: 0,
+                    snapshot_commitment: None,
+                };
+                self.write_record(initial)?;
+                Ok(initial)
             }
         }
     }
 
-    fn write_record(&self, generation: u64) -> std::io::Result<()> {
+    fn write_record(&self, state: SourceFloorState) -> std::io::Result<()> {
         let temporary_path = self.directory.join(TEMPORARY_FILE);
         let floor_path = self.directory.join(FLOOR_FILE);
         let mut temporary = OpenOptions::new()
@@ -386,7 +424,7 @@ impl UnixGenerationFloor {
             .create_new(true)
             .mode(0o600)
             .open(&temporary_path)?;
-        temporary.write_all(&encode_record(generation, &self.authentication))?;
+        temporary.write_all(&encode_record(state, &self.authentication))?;
         temporary.sync_all()?;
         fs::rename(&temporary_path, &floor_path)?;
         sync_directory(&self.directory)
@@ -394,22 +432,37 @@ impl UnixGenerationFloor {
 }
 
 impl SourceGenerationFloor for UnixGenerationFloor {
-    fn current_generation(&self) -> std::io::Result<u64> {
+    fn current(&self) -> std::io::Result<SourceFloorState> {
         self.with_lock(Self::recover_and_read)
     }
 
-    fn advance_generation(&self, generation: u64) -> std::io::Result<()> {
+    fn advance(&self, requested: SourceFloorState) -> std::io::Result<()> {
         self.with_lock(|floor| {
             let current = floor.recover_and_read()?;
-            if generation < current {
+            if requested.snapshot_commitment.is_none() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "generation floor advance requires a snapshot commitment",
+                ));
+            }
+            if requested.generation < current.generation {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     "generation floor cannot move backwards",
                 ));
             }
-            if generation > current {
-                floor.write_record(generation)?;
+            if requested.generation == current.generation {
+                if current.snapshot_commitment.is_some() && requested != current {
+                    return Err(Error::new(
+                        ErrorKind::AlreadyExists,
+                        "generation is already bound to a different snapshot",
+                    ));
+                }
+                if requested == current {
+                    return Ok(());
+                }
             }
+            floor.write_record(requested)?;
             Ok(())
         })
     }

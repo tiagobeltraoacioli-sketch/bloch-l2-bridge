@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::watcher::MemorySource;
 use bloch_l2_bridge::{
-    persist_versioned_source, restore_versioned_source, L1Block, SourceGenerationFloor,
-    UnixFloorAuthentication, UnixGenerationFloor, VersionedMemorySource,
+    persist_versioned_source, restore_versioned_source, L1Block, SourceFloorState,
+    SourceGenerationFloor, UnixFloorAuthentication, UnixGenerationFloor, VersionedMemorySource,
 };
 
 const FLOOR_FILE: &str = ".source-generation-floor";
@@ -101,19 +101,26 @@ fn source() -> MemorySource {
     source
 }
 
+fn bound(generation: u64) -> SourceFloorState {
+    SourceFloorState {
+        generation,
+        snapshot_commitment: Some([generation as u8 + 1; 32]),
+    }
+}
+
 #[test]
 fn durable_floor_is_monotonic_across_reopen_and_integrates_with_snapshot_store() {
     let domain = TestDomain::new();
     let floor = domain.backend();
-    assert_eq!(floor.current_generation().unwrap(), 0);
-    floor.advance_generation(3).unwrap();
-    assert_eq!(floor.current_generation().unwrap(), 3);
+    assert_eq!(floor.current().unwrap().generation, 0);
+    floor.advance(bound(3)).unwrap();
+    assert_eq!(floor.current().unwrap(), bound(3));
     assert_eq!(
-        floor.advance_generation(2).unwrap_err().kind(),
+        floor.advance(bound(2)).unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
     drop(floor);
-    assert_eq!(domain.backend().current_generation().unwrap(), 3);
+    assert_eq!(domain.backend().current().unwrap(), bound(3));
 
     let adapter = VersionedMemorySource::new(source());
     adapter.install(source()).unwrap();
@@ -129,7 +136,7 @@ fn durable_floor_is_monotonic_across_reopen_and_integrates_with_snapshot_store()
 fn records_are_authenticated_and_bound_to_the_configured_domain() {
     let domain = TestDomain::new();
     let floor = domain.backend();
-    floor.advance_generation(9).unwrap();
+    floor.advance(bound(9)).unwrap();
     drop(floor);
 
     let wrong_key = UnixGenerationFloor::open_authenticated_separate(
@@ -139,7 +146,7 @@ fn records_are_authenticated_and_bound_to_the_configured_domain() {
     )
     .unwrap();
     assert_eq!(
-        wrong_key.current_generation().unwrap_err().kind(),
+        wrong_key.current().unwrap_err().kind(),
         ErrorKind::InvalidData
     );
 
@@ -150,25 +157,53 @@ fn records_are_authenticated_and_bound_to_the_configured_domain() {
     )
     .unwrap();
     assert_eq!(
-        wrong_domain.current_generation().unwrap_err().kind(),
+        wrong_domain.current().unwrap_err().kind(),
         ErrorKind::InvalidData
     );
 
-    assert_eq!(domain.backend().current_generation().unwrap(), 9);
+    assert_eq!(domain.backend().current().unwrap(), bound(9));
 
     let floor_path = domain.floor.join(FLOOR_FILE);
     let mut legacy = fs::read(&floor_path).unwrap();
     let version = legacy
         .windows(2)
-        .position(|window| window == b"v2")
+        .position(|window| window == b"v3")
         .expect("record contains its version marker");
-    legacy[version + 1] = b'1';
+    legacy[version + 1] = b'2';
     fs::write(floor_path, legacy).unwrap();
     assert_eq!(
-        domain.backend().current_generation().unwrap_err().kind(),
+        domain.backend().current().unwrap_err().kind(),
         ErrorKind::InvalidData,
-        "legacy unauthenticated v1 records must require explicit migration"
+        "legacy generation-only v2 records must require explicit migration"
     );
+}
+
+#[test]
+fn current_generation_binding_is_immutable_and_unbound_advances_are_refused() {
+    let domain = TestDomain::new();
+    let floor = domain.backend();
+    floor.advance(bound(3)).unwrap();
+
+    let conflicting = SourceFloorState {
+        generation: 3,
+        snapshot_commitment: Some([0x99; 32]),
+    };
+    assert_eq!(
+        floor.advance(conflicting).unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    assert_eq!(floor.current().unwrap(), bound(3));
+    assert_eq!(
+        floor
+            .advance(SourceFloorState {
+                generation: 4,
+                snapshot_commitment: None,
+            })
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(floor.current().unwrap(), bound(3));
 }
 
 #[test]
@@ -197,64 +232,81 @@ fn credentials_reject_null_configuration_and_redact_the_key() {
 fn valid_pending_record_is_recovered_but_regressive_or_torn_record_is_refused() {
     let domain = TestDomain::new();
     let floor = domain.backend();
-    floor.advance_generation(3).unwrap();
+    floor.advance(bound(3)).unwrap();
     let old_record = fs::read(domain.floor.join(FLOOR_FILE)).unwrap();
-    floor.advance_generation(4).unwrap();
+    floor.advance(bound(4)).unwrap();
     let new_record = fs::read(domain.floor.join(FLOOR_FILE)).unwrap();
 
     fs::write(domain.floor.join(FLOOR_FILE), &old_record).unwrap();
     private_write(&domain.floor.join(TEMPORARY_FILE), &new_record);
-    assert_eq!(floor.current_generation().unwrap(), 4);
+    assert_eq!(floor.current().unwrap(), bound(4));
     assert!(!domain.floor.join(TEMPORARY_FILE).exists());
 
     private_write(&domain.floor.join(TEMPORARY_FILE), &old_record);
-    assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
-        ErrorKind::InvalidData
-    );
+    assert_eq!(floor.current().unwrap_err().kind(), ErrorKind::InvalidData);
     fs::remove_file(domain.floor.join(TEMPORARY_FILE)).unwrap();
     private_write(&domain.floor.join(TEMPORARY_FILE), b"torn");
+    assert_eq!(floor.current().unwrap_err().kind(), ErrorKind::InvalidData);
+}
+
+#[test]
+fn pending_record_cannot_rebind_the_current_generation() {
+    let domain = TestDomain::new();
+    let floor = domain.backend();
+    floor.advance(bound(3)).unwrap();
+    let trusted_record = fs::read(domain.floor.join(FLOOR_FILE)).unwrap();
+
+    let conflicting_domain = TestDomain::new();
+    let conflicting_floor = conflicting_domain.backend();
+    conflicting_floor
+        .advance(SourceFloorState {
+            generation: 3,
+            snapshot_commitment: Some([0x99; 32]),
+        })
+        .unwrap();
+    let conflicting_record = fs::read(conflicting_domain.floor.join(FLOOR_FILE)).unwrap();
+    private_write(&domain.floor.join(TEMPORARY_FILE), &conflicting_record);
+
+    assert_eq!(floor.current().unwrap_err().kind(), ErrorKind::InvalidData);
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
-        ErrorKind::InvalidData
+        fs::read(domain.floor.join(FLOOR_FILE)).unwrap(),
+        trusted_record
     );
+    assert!(domain.floor.join(TEMPORARY_FILE).exists());
 }
 
 #[test]
 fn corrupt_symlinked_or_public_floor_state_is_refused() {
     let domain = TestDomain::new();
     let floor = domain.backend();
-    floor.advance_generation(7).unwrap();
+    floor.advance(bound(7)).unwrap();
     let floor_path = domain.floor.join(FLOOR_FILE);
     let mut corrupt = fs::read(&floor_path).unwrap();
     let last = corrupt.len() - 1;
     corrupt[last] ^= 1;
     fs::write(&floor_path, corrupt).unwrap();
-    assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
-        ErrorKind::InvalidData
-    );
+    assert_eq!(floor.current().unwrap_err().kind(), ErrorKind::InvalidData);
 
     fs::remove_file(&floor_path).unwrap();
     let target = domain.root.join("attacker-floor");
     fs::write(&target, b"not a floor").unwrap();
     symlink(&target, &floor_path).unwrap();
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
+        floor.current().unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
 
     fs::remove_file(&floor_path).unwrap();
-    assert_eq!(floor.current_generation().unwrap(), 0);
+    assert_eq!(floor.current().unwrap().generation, 0);
     fs::set_permissions(&floor_path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
+        floor.current().unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
     fs::set_permissions(&floor_path, fs::Permissions::from_mode(0o600)).unwrap();
     fs::set_permissions(&domain.floor, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
+        floor.current().unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
     fs::set_permissions(&domain.floor, fs::Permissions::from_mode(0o700)).unwrap();
@@ -269,14 +321,14 @@ fn symlinked_or_public_lock_file_is_refused() {
     let lock_path = domain.floor.join(LOCK_FILE);
     symlink(&target, &lock_path).unwrap();
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
+        floor.current().unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
     fs::remove_file(&lock_path).unwrap();
-    assert_eq!(floor.current_generation().unwrap(), 0);
+    assert_eq!(floor.current().unwrap().generation, 0);
     fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
-        floor.current_generation().unwrap_err().kind(),
+        floor.current().unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
 }
@@ -338,7 +390,7 @@ fn constructor_refuses_shared_nested_symlinked_and_public_domains() {
 fn concurrent_operation_is_refused_without_racing_the_counter() {
     let domain = TestDomain::new();
     let floor = domain.backend();
-    assert_eq!(floor.current_generation().unwrap(), 0);
+    assert_eq!(floor.current().unwrap().generation, 0);
     let lock = File::open(domain.floor.join(LOCK_FILE)).unwrap();
     // SAFETY: `lock` remains live until after the matching unlock below.
     assert_eq!(
@@ -346,11 +398,11 @@ fn concurrent_operation_is_refused_without_racing_the_counter() {
         0
     );
     assert_eq!(
-        floor.advance_generation(1).unwrap_err().kind(),
+        floor.advance(bound(1)).unwrap_err().kind(),
         ErrorKind::WouldBlock
     );
     // SAFETY: this releases the lock acquired above on the same live fd.
     assert_eq!(unsafe { flock(lock.as_raw_fd(), LOCK_RELEASE) }, 0);
-    floor.advance_generation(1).unwrap();
-    assert_eq!(floor.current_generation().unwrap(), 1);
+    floor.advance(bound(1)).unwrap();
+    assert_eq!(floor.current().unwrap(), bound(1));
 }

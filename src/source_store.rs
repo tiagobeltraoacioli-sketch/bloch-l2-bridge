@@ -15,26 +15,43 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tiny_keccak::{Hasher, Keccak};
 
 use crate::watcher::{
     L1Block, MemorySource, VersionedMemorySource, VersionedSourceRestoreError, VersionedSourceSeal,
 };
 
 const STORE_VERSION: u32 = 1;
+const SNAPSHOT_COMMITMENT_DOMAIN: &[u8] = b"BLOCH-L2-SOURCE-SNAPSHOT-v1\0";
 
-/// Independently durable monotonic generation floor.
+/// Authenticated state retained by an independent source-snapshot floor.
 ///
-/// `advance_generation` MUST durably store at least `generation` before it
-/// returns and MUST never lower the stored value. Implementations may use an
-/// HSM/NVRAM counter, an authenticated database in another failure domain, or
-/// equivalent host infrastructure. [`crate::UnixGenerationFloor`] is a durable,
-/// authenticated local implementation, but its KMAC key must be provisioned
+/// `snapshot_commitment == None` is valid only for a freshly provisioned
+/// floor that has never accepted a snapshot. Once bound, a generation and its
+/// commitment are immutable. A higher generation may replace both together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceFloorState {
+    /// Monotonic generation of the accepted source snapshot.
+    pub generation: u64,
+    /// Domain-separated commitment to the exact serialized snapshot bytes.
+    pub snapshot_commitment: Option<[u8; 32]>,
+}
+
+/// Independently durable monotonic generation and snapshot commitment.
+///
+/// `advance` MUST atomically and durably bind the requested generation to the
+/// exact commitment before it returns. It MUST reject a lower generation and
+/// a different commitment at the current generation. A plain monotonic
+/// counter is therefore insufficient: an HSM-backed integration needs a
+/// counter plus authenticated opaque state (or an equivalent transactional
+/// service) in the same anti-rollback boundary. [`crate::UnixGenerationFloor`]
+/// is a durable local implementation, but its KMAC key must be provisioned
 /// independently and the host must place its directory in a separately
 /// protected, non-rollbackable domain; merely using a second local directory
 /// does not defend against coherent rollback of the whole disk.
 pub trait SourceGenerationFloor {
-    fn current_generation(&self) -> std::io::Result<u64>;
-    fn advance_generation(&self, generation: u64) -> std::io::Result<()>;
+    fn current(&self) -> std::io::Result<SourceFloorState>;
+    fn advance(&self, requested: SourceFloorState) -> std::io::Result<()>;
 }
 
 #[derive(Debug)]
@@ -47,6 +64,7 @@ pub enum SourceStoreError {
     InvalidSource(&'static str),
     Rollback { minimum: u64, found: u64 },
     FloorChanged { expected: u64, actual: u64 },
+    SnapshotCommitmentMismatch,
     Seal(VersionedSourceRestoreError),
 }
 
@@ -66,6 +84,12 @@ impl core::fmt::Display for SourceStoreError {
                 f,
                 "source generation floor changed concurrently: expected {expected}, got {actual}"
             ),
+            Self::SnapshotCommitmentMismatch => {
+                write!(
+                    f,
+                    "source snapshot does not match its trusted floor commitment"
+                )
+            }
             Self::Seal(error) => error.fmt(f),
         }
     }
@@ -182,6 +206,16 @@ fn temporary_path(path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn snapshot_commitment(encoded: &[u8]) -> [u8; 32] {
+    let mut hash = Keccak::v256();
+    hash.update(SNAPSHOT_COMMITMENT_DOMAIN);
+    hash.update(&(encoded.len() as u64).to_be_bytes());
+    hash.update(encoded);
+    let mut commitment = [0; 32];
+    hash.finalize(&mut commitment);
+    commitment
+}
+
 /// Persist snapshot+seal atomically after advancing the independent floor.
 ///
 /// A leftover `.tmp` file is refused rather than overwritten; it is explicit
@@ -229,19 +263,24 @@ pub fn persist_versioned_source<F: SourceGenerationFloor>(
     }
     serialize_result?;
 
-    let current = floor.current_generation()?;
-    if seal.generation() < current {
+    let commitment = snapshot_commitment(&encoded.bytes);
+    let current = floor.current()?;
+    if seal.generation() < current.generation {
         return Err(SourceStoreError::Rollback {
-            minimum: current,
+            minimum: current.generation,
             found: seal.generation(),
         });
     }
-    floor.advance_generation(seal.generation())?;
-    let confirmed = floor.current_generation()?;
-    if confirmed != seal.generation() {
+    let requested = SourceFloorState {
+        generation: seal.generation(),
+        snapshot_commitment: Some(commitment),
+    };
+    floor.advance(requested)?;
+    let confirmed = floor.current()?;
+    if confirmed != requested {
         return Err(SourceStoreError::FloorChanged {
             expected: seal.generation(),
-            actual: confirmed,
+            actual: confirmed.generation,
         });
     }
 
@@ -294,6 +333,21 @@ pub fn restore_versioned_source<F: SourceGenerationFloor>(
             .push(block)
             .map_err(SourceStoreError::InvalidSource)?;
     }
-    let minimum = floor.current_generation()?;
-    VersionedMemorySource::restore(source, bundle.seal, minimum).map_err(Into::into)
+    let trusted = floor.current()?;
+    if bundle.seal.generation() < trusted.generation {
+        return Err(SourceStoreError::Rollback {
+            minimum: trusted.generation,
+            found: bundle.seal.generation(),
+        });
+    }
+    if bundle.seal.generation() > trusted.generation {
+        return Err(SourceStoreError::FloorChanged {
+            expected: bundle.seal.generation(),
+            actual: trusted.generation,
+        });
+    }
+    if trusted.snapshot_commitment != Some(snapshot_commitment(&encoded)) {
+        return Err(SourceStoreError::SnapshotCommitmentMismatch);
+    }
+    VersionedMemorySource::restore(source, bundle.seal, trusted.generation).map_err(Into::into)
 }

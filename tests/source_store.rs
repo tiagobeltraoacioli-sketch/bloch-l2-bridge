@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::watcher::MemorySource;
 use bloch_l2_bridge::{
-    persist_versioned_source, restore_versioned_source, L1Block, SourceGenerationFloor,
-    SourceStoreError, VersionedMemorySource, VersionedSourceRestoreError,
+    persist_versioned_source, restore_versioned_source, L1Block, SourceFloorState,
+    SourceGenerationFloor, SourceStoreError, VersionedMemorySource,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -41,22 +41,47 @@ impl Drop for TestDirectory {
     }
 }
 
-#[derive(Default)]
 struct TestFloor {
-    generation: Cell<u64>,
+    state: Cell<SourceFloorState>,
     fail_after_advance: Cell<bool>,
     overshoot: Cell<bool>,
 }
 
+impl Default for TestFloor {
+    fn default() -> Self {
+        Self {
+            state: Cell::new(SourceFloorState {
+                generation: 0,
+                snapshot_commitment: None,
+            }),
+            fail_after_advance: Cell::new(false),
+            overshoot: Cell::new(false),
+        }
+    }
+}
+
 impl SourceGenerationFloor for TestFloor {
-    fn current_generation(&self) -> io::Result<u64> {
-        Ok(self.generation.get())
+    fn current(&self) -> io::Result<SourceFloorState> {
+        Ok(self.state.get())
     }
 
-    fn advance_generation(&self, generation: u64) -> io::Result<()> {
-        self.generation.set(self.generation.get().max(generation));
+    fn advance(&self, requested: SourceFloorState) -> io::Result<()> {
+        let current = self.state.get();
+        if requested.generation < current.generation {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "rollback"));
+        }
+        if requested.generation == current.generation
+            && current.snapshot_commitment.is_some()
+            && requested != current
+        {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "conflict"));
+        }
+        self.state.set(requested);
         if self.overshoot.get() {
-            self.generation.set(generation.checked_add(1).unwrap());
+            self.state.set(SourceFloorState {
+                generation: requested.generation.checked_add(1).unwrap(),
+                snapshot_commitment: requested.snapshot_commitment,
+            });
         }
         if self.fail_after_advance.get() {
             return Err(io::Error::other("simulated failure after durable advance"));
@@ -98,7 +123,7 @@ fn snapshot_and_seal_round_trip_with_an_independent_floor() {
 
     persist_versioned_source(&path, &adapter, &floor, 16 * 1024).unwrap();
 
-    assert_eq!(floor.generation.get(), 1);
+    assert_eq!(floor.state.get().generation, 1);
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
@@ -123,17 +148,76 @@ fn floor_first_order_turns_an_interrupted_update_into_safe_refusal() {
         persist_versioned_source(&path, &adapter, &floor, 16 * 1024),
         Err(SourceStoreError::Io(_))
     ));
-    assert_eq!(floor.generation.get(), 1);
+    assert_eq!(floor.state.get().generation, 1);
     assert_eq!(fs::read(&path).unwrap(), old_bytes);
     assert!(matches!(
         restore_versioned_source(&path, &floor, 16 * 1024),
-        Err(SourceStoreError::Seal(
-            VersionedSourceRestoreError::Rollback {
-                minimum: 1,
-                found: 0
-            }
-        ))
+        Err(SourceStoreError::Rollback {
+            minimum: 1,
+            found: 0
+        })
     ));
+}
+
+#[test]
+fn same_generation_snapshot_substitution_is_refused() {
+    let trusted_directory = TestDirectory::new();
+    let attacker_directory = TestDirectory::new();
+    let trusted_path = trusted_directory.snapshot();
+    let attacker_path = attacker_directory.snapshot();
+    let trusted_floor = TestFloor::default();
+    let attacker_floor = TestFloor::default();
+
+    persist_versioned_source(
+        &trusted_path,
+        &VersionedMemorySource::new(source(1)),
+        &trusted_floor,
+        16 * 1024,
+    )
+    .unwrap();
+    persist_versioned_source(
+        &attacker_path,
+        &VersionedMemorySource::new(source(2)),
+        &attacker_floor,
+        16 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        trusted_floor.state.get().generation,
+        attacker_floor.state.get().generation
+    );
+
+    fs::copy(&attacker_path, &trusted_path).unwrap();
+    assert!(matches!(
+        restore_versioned_source(&trusted_path, &trusted_floor, 16 * 1024),
+        Err(SourceStoreError::SnapshotCommitmentMismatch)
+    ));
+}
+
+#[test]
+fn same_generation_cannot_be_rebound_during_persist() {
+    let directory = TestDirectory::new();
+    let path = directory.snapshot();
+    let floor = TestFloor::default();
+    persist_versioned_source(
+        &path,
+        &VersionedMemorySource::new(source(1)),
+        &floor,
+        16 * 1024,
+    )
+    .unwrap();
+    let original = fs::read(&path).unwrap();
+
+    assert!(matches!(
+        persist_versioned_source(
+            &path,
+            &VersionedMemorySource::new(source(2)),
+            &floor,
+            16 * 1024,
+        ),
+        Err(SourceStoreError::Io(ref error)) if error.kind() == io::ErrorKind::AlreadyExists
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
 }
 
 #[test]
@@ -149,7 +233,7 @@ fn stale_temporary_file_and_concurrent_floor_change_are_fail_closed() {
         persist_versioned_source(&path, &adapter, &floor, 16 * 1024),
         Err(SourceStoreError::UnsafePath("stale temporary snapshot"))
     ));
-    assert_eq!(floor.generation.get(), 0);
+    assert_eq!(floor.state.get().generation, 0);
     fs::remove_file(&temporary).unwrap();
 
     floor.overshoot.set(true);
@@ -174,7 +258,7 @@ fn serialization_limit_is_enforced_before_floor_or_file_changes() {
         persist_versioned_source(&path, &adapter, &floor, 1),
         Err(SourceStoreError::TooLarge { limit: 1 })
     ));
-    assert_eq!(floor.generation.get(), 0);
+    assert_eq!(floor.state.get().generation, 0);
     assert!(!path.exists());
     assert!(!temporary_path(&path).exists());
 }
