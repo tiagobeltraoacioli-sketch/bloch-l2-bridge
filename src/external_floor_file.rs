@@ -15,8 +15,12 @@ use std::path::Path;
 use tiny_keccak::{Hasher, Keccak};
 
 use crate::external_floor_auth::{
-    ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint, ExternalFloorReplayStore,
+    CustodiedDurableAuthenticatedExternalFloorServer, ExternalFloorDurableReplayError,
+    ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint,
+    ExternalFloorReplayStore,
 };
+use crate::ExternalFloorBoundary;
+use zeroize::Zeroize;
 
 const STATE_FILE: &str = ".external-floor-replay";
 const TEMP_FILE: &str = ".external-floor-replay.tmp";
@@ -259,6 +263,157 @@ pub struct UnixExternalFloorReplayStore {
     _lock: ExclusiveLock,
     #[cfg(test)]
     uncertain_after_rename: std::cell::Cell<bool>,
+}
+
+/// Explicit inputs required to construct the privileged Unix server path.
+///
+/// This type deliberately contains no defaults and no environment lookup.
+/// The checkpoint custodian supplied to [`Self::open`] must be independently
+/// administered and outside the replay directory's rollback domain.
+pub struct UnixExternalFloorServerConfig {
+    replay_directory: std::path::PathBuf,
+    trusted_checkpoint: ExternalFloorReplayCheckpoint,
+    authentication_key: [u8; 32],
+    client_peer: [u8; 32],
+    boundary_peer: [u8; 32],
+}
+
+impl core::fmt::Debug for UnixExternalFloorServerConfig {
+    fn fmt(&self, output: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        output
+            .debug_struct("UnixExternalFloorServerConfig")
+            .field("replay_directory", &self.replay_directory)
+            .field("trusted_checkpoint", &self.trusted_checkpoint)
+            .field("authentication_key", &"[REDACTED]")
+            .field("client_peer", &self.client_peer)
+            .field("boundary_peer", &self.boundary_peer)
+            .finish()
+    }
+}
+
+impl Drop for UnixExternalFloorServerConfig {
+    fn drop(&mut self) {
+        self.authentication_key.zeroize();
+    }
+}
+
+#[derive(Debug)]
+pub enum UnixExternalFloorServerOpenError {
+    InvalidConfiguration(&'static str),
+    Store(io::Error),
+    Replay(ExternalFloorDurableReplayError),
+}
+
+impl core::fmt::Display for UnixExternalFloorServerOpenError {
+    fn fmt(&self, output: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            output,
+            "Unix external-floor server refused to open: {self:?}"
+        )
+    }
+}
+
+impl std::error::Error for UnixExternalFloorServerOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Replay(error) => Some(error),
+            Self::InvalidConfiguration(_) => None,
+        }
+    }
+}
+
+/// Concrete server type produced by [`UnixExternalFloorServerConfig`].
+pub type UnixCustodiedExternalFloorServer<C, B> =
+    CustodiedDurableAuthenticatedExternalFloorServer<UnixExternalFloorReplayStore, C, B>;
+
+impl UnixExternalFloorServerConfig {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        replay_directory: std::path::PathBuf,
+        trusted_checkpoint: ExternalFloorReplayCheckpoint,
+        mut authentication_key: [u8; 32],
+        client_peer: [u8; 32],
+        boundary_peer: [u8; 32],
+    ) -> Result<Self, UnixExternalFloorServerOpenError> {
+        if !replay_directory.is_absolute() {
+            authentication_key.zeroize();
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "replay directory must be an absolute path",
+            ));
+        }
+        if trusted_checkpoint.session_nonce == [0; 32] {
+            authentication_key.zeroize();
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "trusted checkpoint session nonce is all zero",
+            ));
+        }
+        if authentication_key == [0; 32] {
+            authentication_key.zeroize();
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "authentication key is all zero",
+            ));
+        }
+        if client_peer == [0; 32] || boundary_peer == [0; 32] {
+            authentication_key.zeroize();
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "peer identity is all zero",
+            ));
+        }
+        if client_peer == boundary_peer {
+            authentication_key.zeroize();
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "client and boundary identities are equal",
+            ));
+        }
+        Ok(Self {
+            replay_directory,
+            trusted_checkpoint,
+            authentication_key,
+            client_peer,
+            boundary_peer,
+        })
+    }
+
+    /// Construct the only Unix production-oriented server path exposed by
+    /// this module: concrete durable replay plus a mandatory independent CAS
+    /// custodian. No socket or runtime is started.
+    pub fn open<C: ExternalFloorReplayStore, B: ExternalFloorBoundary>(
+        mut self,
+        custodian: C,
+        boundary: B,
+    ) -> Result<UnixCustodiedExternalFloorServer<C, B>, UnixExternalFloorServerOpenError> {
+        let canonical = self
+            .replay_directory
+            .canonicalize()
+            .map_err(UnixExternalFloorServerOpenError::Store)?;
+        if canonical != self.replay_directory {
+            return Err(UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "replay directory path must already be canonical",
+            ));
+        }
+        let authentication = ExternalFloorPeerAuthentication::new(
+            core::mem::take(&mut self.authentication_key),
+            self.client_peer,
+            self.boundary_peer,
+        )
+        .map_err(|_| {
+            UnixExternalFloorServerOpenError::InvalidConfiguration(
+                "invalid peer authentication configuration",
+            )
+        })?;
+        let store =
+            UnixExternalFloorReplayStore::open(&self.replay_directory, self.trusted_checkpoint)
+                .map_err(UnixExternalFloorServerOpenError::Store)?;
+        CustodiedDurableAuthenticatedExternalFloorServer::open(
+            store,
+            custodian,
+            self.trusted_checkpoint,
+            boundary,
+            authentication,
+        )
+        .map_err(UnixExternalFloorServerOpenError::Replay)
+    }
 }
 
 impl UnixExternalFloorReplayStore {

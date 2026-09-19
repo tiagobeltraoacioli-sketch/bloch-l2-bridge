@@ -173,6 +173,10 @@ pub enum ExternalFloorDurableReplayError {
         trusted: ExternalFloorReplayCheckpoint,
         stored: ExternalFloorReplayCheckpoint,
     },
+    CustodianCheckpointMismatch {
+        trusted: ExternalFloorReplayCheckpoint,
+        stored: ExternalFloorReplayCheckpoint,
+    },
     SessionNotAuthorized,
     ReplayOrOutOfOrder {
         expected: u64,
@@ -182,6 +186,9 @@ pub enum ExternalFloorDurableReplayError {
     RevisionExhausted,
     CompareAndSwapConflict(ExternalFloorReplayCheckpoint),
     CompareAndSwapUncertain,
+    CustodianCompareAndSwapConflict(ExternalFloorReplayCheckpoint),
+    CustodianCompareAndSwapUncertain,
+    CustodianReadbackMismatch(ExternalFloorReplayCheckpoint),
     Closed,
 }
 
@@ -521,15 +528,31 @@ impl<T: ExternalFloorByteTransport> ExternalFloorBoundary
     }
 }
 
-/// Server-side integration that durably consumes replay state before invoking
-/// the external generation-floor boundary.
+/// Low-level, single-store server integration.
 ///
 /// A lost response or boundary error leaves the sequence consumed. A boundary
 /// error also closes this server instance. Recovery may require a fresh
 /// authorized session and reconciliation, but never permits a potentially
-/// executed CAS to be replayed.
+/// executed CAS to be replayed. Production should use
+/// [`CustodiedDurableAuthenticatedExternalFloorServer`] so the independently
+/// retained checkpoint advances before invoking the boundary.
 pub struct DurableAuthenticatedExternalFloorServer<S, B> {
     replay: RefCell<DurableExternalFloorReplayGuard<S>>,
+    boundary: B,
+    authentication: ExternalFloorPeerAuthentication,
+}
+
+/// Server coordinator that requires both the operational replay store and an
+/// independently retained checkpoint custodian to advance before any boundary
+/// effect.
+///
+/// `C` deliberately uses the same exact CAS contract as the primary store,
+/// but production must place it in a separate administrative and rollback
+/// domain. A crash between the two CAS operations is fail-closed and requires
+/// reconciliation; the potentially stale request is never sent downstream.
+pub struct CustodiedDurableAuthenticatedExternalFloorServer<S, C, B> {
+    replay: RefCell<DurableExternalFloorReplayGuard<S>>,
+    custodian: C,
     boundary: B,
     authentication: ExternalFloorPeerAuthentication,
 }
@@ -587,6 +610,123 @@ impl<S: ExternalFloorReplayStore, B: ExternalFloorBoundary>
     pub fn is_closed(&self) -> bool {
         self.replay.borrow().is_closed()
     }
+}
+
+impl<S: ExternalFloorReplayStore, C: ExternalFloorReplayStore, B: ExternalFloorBoundary>
+    CustodiedDurableAuthenticatedExternalFloorServer<S, C, B>
+{
+    /// Open only when the primary store and independent custodian both exactly
+    /// match the externally selected trusted checkpoint.
+    pub fn open(
+        store: S,
+        custodian: C,
+        trusted: ExternalFloorReplayCheckpoint,
+        boundary: B,
+        authentication: ExternalFloorPeerAuthentication,
+    ) -> Result<Self, ExternalFloorDurableReplayError> {
+        validate_replay_checkpoint(trusted)?;
+        let retained = custodian
+            .load()
+            .map_err(ExternalFloorDurableReplayError::Store)?;
+        validate_replay_checkpoint(retained)?;
+        if retained != trusted {
+            return Err(
+                ExternalFloorDurableReplayError::CustodianCheckpointMismatch {
+                    trusted,
+                    stored: retained,
+                },
+            );
+        }
+        Ok(Self {
+            replay: RefCell::new(DurableExternalFloorReplayGuard::open(store, trusted)?),
+            custodian,
+            boundary,
+            authentication,
+        })
+    }
+
+    /// Authenticate, reserve in the primary store, durably publish to the
+    /// independent custodian, then and only then invoke the boundary.
+    pub fn handle(&self, encoded: &[u8]) -> io::Result<Vec<u8>> {
+        let request =
+            decode_authenticated_external_floor_request_inner(encoded, &self.authentication)
+                .map_err(auth_io_error)?;
+        let (previous, replacement) = {
+            let mut replay = self.replay.borrow_mut();
+            let previous = replay.checkpoint();
+            let replacement = replay
+                .reserve(request.session_nonce, request.sequence)
+                .map_err(durable_replay_io_error)?;
+            (previous, replacement)
+        };
+
+        let publication = match self.custodian.compare_and_swap(previous, replacement) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                return Err(error);
+            }
+        };
+        match publication {
+            ExternalFloorReplayCasOutcome::Committed => {}
+            ExternalFloorReplayCasOutcome::Conflict(current) => {
+                self.replay.borrow_mut().close();
+                return Err(durable_replay_io_error(
+                    ExternalFloorDurableReplayError::CustodianCompareAndSwapConflict(current),
+                ));
+            }
+            ExternalFloorReplayCasOutcome::Uncertain => {
+                self.replay.borrow_mut().close();
+                return Err(durable_replay_io_error(
+                    ExternalFloorDurableReplayError::CustodianCompareAndSwapUncertain,
+                ));
+            }
+        }
+        match self.custodian.load() {
+            Ok(current) if current == replacement => {}
+            Ok(current) => {
+                self.replay.borrow_mut().close();
+                return Err(durable_replay_io_error(
+                    ExternalFloorDurableReplayError::CustodianReadbackMismatch(current),
+                ));
+            }
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                return Err(error);
+            }
+        }
+
+        let response = match self.boundary.transact(request) {
+            Ok(response) => response,
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                return Err(error);
+            }
+        };
+        match encode_authenticated_external_floor_response(
+            &response,
+            &request,
+            &self.authentication,
+        ) {
+            Ok(encoded) => Ok(encoded),
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                Err(auth_io_error(error))
+            }
+        }
+    }
+
+    pub fn checkpoint(&self) -> ExternalFloorReplayCheckpoint {
+        self.replay.borrow().checkpoint()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.replay.borrow().is_closed()
+    }
+}
+
+fn durable_replay_io_error(error: ExternalFloorDurableReplayError) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, error)
 }
 
 fn auth_io_error(error: ExternalFloorAuthError) -> io::Error {

@@ -79,15 +79,17 @@ provisioned 256-bit secret and authenticates all of:
 - the byte-exact inner `BXFL` payload and its length.
 
 Decoding requires the expected direction and configured peer pair. The
-in-memory `ExternalFloorReplayGuard` remains suitable only for tests. A real
-server uses `DurableAuthenticatedExternalFloorServer` with an
-`ExternalFloorReplayStore` and an independently retained
-`ExternalFloorReplayCheckpoint`. The checkpoint binds an authorized session,
-exact next sequence, and monotonic revision. Opening after restart requires an
-exact match between durable state and the trusted checkpoint, exposing a
-rolled-back or unexpectedly advanced backend. A new session is authorized only
-by provisioning a new checkpoint through trusted administration; a nonce from
-the wire can never select or create a session.
+in-memory `ExternalFloorReplayGuard` remains suitable only for tests. The
+low-level single-store server uses `DurableAuthenticatedExternalFloorServer`;
+production uses `CustodiedDurableAuthenticatedExternalFloorServer` with a
+primary `ExternalFloorReplayStore` and a separately administered custodian
+implementing the same exact CAS contract. Both start from an independently
+retained `ExternalFloorReplayCheckpoint`. The checkpoint binds an authorized
+session, exact next sequence, and monotonic revision. Opening after restart
+requires an exact match between durable state and the trusted checkpoint,
+exposing a rolled-back or unexpectedly advanced backend. A new session is
+authorized only by provisioning a new checkpoint through trusted
+administration; a nonce from the wire can never select or create a session.
 
 For each request the server verifies KMAC, canonical inner encoding, duplicated
 outer fields, authorized session, and exact sequence before atomically changing
@@ -100,6 +102,14 @@ lost after successful encoding cannot be observed by this synchronous server,
 but its durable sequence is still consumed, so retransmission is rejected.
 Availability may require a newly authorized reconciliation session, but the
 potentially executed operation is never retried.
+
+The custodied coordinator commits the primary replay reservation, then advances
+and reads back the independent custodian before invoking the external boundary.
+A custodian mismatch at open, CAS conflict, uncertain result, I/O failure,
+false commit acknowledgement, or readback mismatch closes the instance before
+the boundary is called. A crash between the two CAS operations leaves the
+primary ahead and restart fails closed until explicit reconciliation. This is
+an availability cost, not permission to retry the request.
 
 A CAS conflict, storage error, or indeterminate CAS result permanently closes
 that server instance before any boundary effect. Do not automatically restart
@@ -139,6 +149,15 @@ it, atomically renames it, syncs the directory, and reads the record back.
 Failure at or after rename returns `Uncertain`, because commit may already be
 visible. A new session is therefore a separate trusted provisioning or
 operator migration event, never data accepted from a request.
+
+`UnixExternalFloorServerConfig` is the production-oriented construction path.
+It has no environment lookup or defaults: callers must provide an absolute,
+already canonical replay directory, exact trusted checkpoint, KMAC key and
+both peer identities. It always constructs the concrete Unix replay store and
+requires a checkpoint custodian argument. The key is redacted from debug
+output and zeroized on configuration failure, transfer or drop. This factory
+starts no listener or runtime and cannot prove that a caller placed the
+custodian in a separate failure domain; deployment must enforce that.
 
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it

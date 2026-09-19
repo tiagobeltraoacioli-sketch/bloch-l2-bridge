@@ -62,12 +62,12 @@ pub use external_floor::{
 pub use external_floor_auth::{
     decode_authenticated_external_floor_request, decode_authenticated_external_floor_response,
     encode_authenticated_external_floor_request, encode_authenticated_external_floor_response,
-    AuthenticatedExternalFloorBoundary, DurableAuthenticatedExternalFloorServer,
-    DurableExternalFloorReplayGuard, ExternalFloorAuthError, ExternalFloorByteTransport,
-    ExternalFloorDurableReplayError, ExternalFloorPeerAuthentication,
-    ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint, ExternalFloorReplayGuard,
-    ExternalFloorReplayStore, EXTERNAL_FLOOR_AUTH_MAGIC, EXTERNAL_FLOOR_AUTH_MAX_LEN,
-    EXTERNAL_FLOOR_AUTH_VERSION,
+    AuthenticatedExternalFloorBoundary, CustodiedDurableAuthenticatedExternalFloorServer,
+    DurableAuthenticatedExternalFloorServer, DurableExternalFloorReplayGuard,
+    ExternalFloorAuthError, ExternalFloorByteTransport, ExternalFloorDurableReplayError,
+    ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint,
+    ExternalFloorReplayGuard, ExternalFloorReplayStore, EXTERNAL_FLOOR_AUTH_MAGIC,
+    EXTERNAL_FLOOR_AUTH_MAX_LEN, EXTERNAL_FLOOR_AUTH_VERSION,
 };
 #[cfg(unix)]
 pub use external_floor_codec::{
@@ -76,7 +76,10 @@ pub use external_floor_codec::{
     EXTERNAL_FLOOR_CODEC_MAX_LEN, EXTERNAL_FLOOR_CODEC_VERSION,
 };
 #[cfg(unix)]
-pub use external_floor_file::{UnixExternalFloorReplayStore, EXTERNAL_FLOOR_REPLAY_RECORD_LEN};
+pub use external_floor_file::{
+    UnixCustodiedExternalFloorServer, UnixExternalFloorReplayStore, UnixExternalFloorServerConfig,
+    UnixExternalFloorServerOpenError, EXTERNAL_FLOOR_REPLAY_RECORD_LEN,
+};
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
     evaluate_release_checklist, AnchoredEpochView, CheckOutcome, ChecklistVerdict, NullifierLog,
