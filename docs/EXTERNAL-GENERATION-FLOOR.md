@@ -422,9 +422,20 @@ the durable record is the derived next receipt and the temporary record is the
 retained prior receipt. Reconciliation durably removes that displaced
 predecessor and returns `Committed`. Any other temporary-record combination is
 preserved as incident evidence and refused.
-The validated temporary descriptor stays open through cleanup, and its device
-and inode must still match the descriptor-relative pathname immediately before
-removal. The method never returns a tuple learned from disk. The returned store
+The validated temporary descriptor stays open through cleanup. Cleanup first
+moves `TEMP` with a create-only atomic rename to the reserved `CLEANUP`
+tombstone and requires that tombstone to identify the pinned descriptor before
+and after directory sync. The canonical bytes and complete file metadata
+snapshot retained during authenticated reading must also remain exact
+immediately before unlink. After unlink, every stable metadata field and the
+bytes must still match with `nlink == 0`; that post-unlink snapshot is checked
+again after directory sync. Only then is cleanup successful. An
+unlink-and-replace race therefore preserves the raced inode at `CLEANUP` and is
+reported as ambiguous instead of deleting it or producing a successful
+reconciliation. A crash may leave either the original `TEMP` or the staged
+`CLEANUP` name; explicit reconciliation accepts and removes either only when
+its record is one of the exact caller-derived admissible states. The method
+never returns a tuple learned from disk. The returned store
 remains pinned to the selected known receipt across an operator restart; export
 a `Committed.current` receipt before relying on it as the new restart floor.
 Every live checkpoint read and continuity acceptance also revalidates that the
@@ -464,8 +475,10 @@ trusting disk for authority: it derives the only genesis checkpoint from the
 separately supplied deployment, key, and signed approval before inspection. An
 exact durable genesis is retained, an exact temporary-only genesis is installed
 with the same create-only primitive, and an exact redundant temporary copy is
-removed beside an exact durable genesis. Missing evidence, invalid records, or
-any third STATE/TEMP combination is preserved and refused. The returned
+removed beside an exact durable genesis. An exact cleanup tombstone beside that
+same durable genesis is also removable after an interrupted cleanup. Missing
+evidence, invalid records, simultaneous TEMP/CLEANUP artifacts, or any third
+STATE/TEMP/CLEANUP combination is preserved and refused. The returned
 `Committed` or `Recovered` store remains pinned to the caller-derived genesis
 checkpoint, which still must be exported to the independent trust domain.
 This live checkpoint is authenticated operational evidence; it is not proof

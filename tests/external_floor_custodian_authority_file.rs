@@ -323,6 +323,42 @@ fn provisioning_reconciliation_cleans_only_an_exact_redundant_candidate() {
 }
 
 #[test]
+fn provisioning_reconciliation_finishes_an_exact_cleanup_tombstone() {
+    let temp = Temp::new();
+    let deployment = [0x85; 32];
+    let first = signer();
+    let initial = anchor(7, 0x36);
+    let approval = initial_approval(&first, deployment, initial);
+    let (store, checkpoint) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    drop(store);
+    let state = temp.store.join(".bxrc-accepted-authority");
+    let cleanup = temp.store.join(".bxrc-accepted-authority.cleanup");
+    fs::copy(&state, &cleanup).unwrap();
+
+    let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityProvisioningReconciliation::Committed {
+            current: checkpoint,
+        }
+    );
+    assert!(!cleanup.exists());
+    assert_eq!(reconciled.checkpoint().unwrap(), checkpoint);
+}
+
+#[test]
 fn provisioning_reconciliation_preserves_third_state_evidence() {
     let temp = Temp::new();
     let deployment = [0x84; 32];
@@ -356,9 +392,25 @@ fn provisioning_reconciliation_preserves_third_state_evidence() {
     assert_eq!(fs::read(&temporary).unwrap(), unexpected);
     assert!(state.exists());
 
+    // A crash-marker pathname does not make unexpected bytes disposable.
+    fs::remove_file(&temporary).unwrap();
+    let cleanup = temp.store.join(".bxrc-accepted-authority.cleanup");
+    fs::write(&cleanup, &unexpected).unwrap();
+    fs::set_permissions(&cleanup, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+            &temp.store,
+            deployment,
+            key(&first),
+            approval,
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&cleanup).unwrap(), unexpected);
+
     // A different internally valid genesis is still a third state; it is not
     // adopted merely because its record and signature are well formed.
-    fs::remove_file(&temporary).unwrap();
+    fs::remove_file(&cleanup).unwrap();
     let other_directory = temp.root.join("other-genesis");
     let other_anchor = anchor(7, 0x35);
     let (other_store, _) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
@@ -589,9 +641,9 @@ fn reconciliation_finishes_only_an_exact_post_exchange_commit() {
 
     // Recreate the exact namespace left by a crash after atomic exchange but
     // before the displaced predecessor is removed.
-    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
-    fs::write(&temporary, prior).unwrap();
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+    let cleanup = temp.store.join(".bxrc-accepted-authority.cleanup");
+    fs::write(&cleanup, prior).unwrap();
+    fs::set_permissions(&cleanup, fs::Permissions::from_mode(0o600)).unwrap();
 
     let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
         &temp.store,
@@ -606,7 +658,7 @@ fn reconciliation_finishes_only_an_exact_post_exchange_commit() {
             current: checkpoint1,
         }
     );
-    assert!(!temporary.exists());
+    assert!(!cleanup.exists());
     assert_eq!(reconciled.checkpoint().unwrap(), checkpoint1);
 }
 
