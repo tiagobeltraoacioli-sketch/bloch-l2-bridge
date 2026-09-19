@@ -37,6 +37,8 @@ pub mod external_floor_codec;
 #[cfg(unix)]
 pub mod external_floor_custodian;
 #[cfg(unix)]
+pub mod external_floor_custodian_file;
+#[cfg(unix)]
 pub mod external_floor_custodian_mtls;
 #[cfg(unix)]
 pub mod external_floor_custodian_tcp;
@@ -88,6 +90,13 @@ pub use external_floor_custodian::{
     ExternalFloorCustodianTransport, ExternalFloorCustodianTransportCheckpoint,
     EXTERNAL_FLOOR_CUSTODIAN_MAGIC, EXTERNAL_FLOOR_CUSTODIAN_MAX_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_MIN_LEN, EXTERNAL_FLOOR_CUSTODIAN_VERSION,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_file::{
+    DurableAuthenticatedExternalFloorCustodian, ExternalFloorCustodianAnchorCasOutcome,
+    ExternalFloorCustodianAnchorStore, ExternalFloorCustodianClientAnchor,
+    ExternalFloorCustodianClientInspection, ExternalFloorCustodianPendingInspection,
+    EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_mtls::{

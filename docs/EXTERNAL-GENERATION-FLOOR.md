@@ -237,6 +237,45 @@ application configuration is not key isolation. Proxy deployments must pin the
 immediate source and enforce original peer identity at the secure-channel
 layer; forwarded-IP headers are not accepted by this protocol.
 
+`external_floor_custodian_file` supplies the Unix filesystem checkpoint path
+for a BXRC client. Provisioning is an explicit create-once ceremony whose
+returned initial anchor must be installed in a separately administered
+`ExternalFloorCustodianAnchorStore`; opening never creates or adopts either
+store. Every client requires that external store, loads its exact anchor, and
+also requires a separate nonzero KMAC key. The key authenticates canonical
+fixed-size records, while the external anchor rejects an otherwise authentic
+older record. Neither belongs in the checkpoint directory's rollback domain.
+
+Before every network exchange the wrapper atomically writes and syncs a
+`Pending` record containing the consumed sequence and a domain-separated
+commitment to the operation, then durably compare-and-swaps the external
+anchor from the prior `Ready` anchor to that exact `Pending` anchor. Transport
+I/O is impossible until both commits complete. Only after a valid response
+does it write `Ready` and compare-and-swap the external anchor again. Any CAS
+conflict or I/O ambiguity poisons the live client. A transport error, malformed
+response, process crash, or uncertain filesystem completion therefore blocks
+further traffic instead of blindly retransmitting after restart. Invalid CAS
+transitions are rejected before reservation.
+
+Offline inspection accepts only the exact anchor, its authenticated one-step
+pending descendant, or its authenticated two-step completed descendant. A
+pending record can be abandoned only by explicitly supplying its exact anchor
+and operation commitment to `reconcile_pending`; that operation performs no
+network I/O and preserves the already advanced sequence. The next action
+should be a fresh authenticated load used to reconcile remote state. Every new
+anchor is committed by the mandatory external CAS before the previous anchor
+is retired. `reconcile_external_anchor` repairs only the exact authenticated
+one-step gap caused by a crash between a local write and external CAS; it does
+not perform transport I/O or permit rollback.
+
+The store holds a nonblocking lifetime lock, uses descriptor-relative
+`O_NOFOLLOW` opens, rejects final directory symlinks, hardlinked/non-regular or
+group/world-accessible objects, and treats an orphan temporary record as an
+operator incident. Updates use exclusive temporary creation, file sync,
+atomic rename, directory sync, and authenticated read-back. It starts no
+listener, performs no retry, loads no keys, and cannot make a rollbackable
+filesystem or colocated key store independent.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent
