@@ -329,6 +329,32 @@ runtime API. Operators must durably retain the accepted `(deployment id,
 public key, anchor)` tuple outside both filesystems before treating it as the
 input to a later transition.
 
+`UnixExternalFloorCustodianAuthorityStore` makes that accepted tuple an
+explicit, durable local receipt. Initial creation requires the existing
+offline approval. Each later update first verifies the dual-signed continuity
+record, increments a separate transition index (so a key-only rotation cannot
+look like a no-op), and atomically replaces a fixed-size record binding the
+deployment id, current public key, exact anchor, prior-record hash and current
+record hash. File and directory sync, a lifetime process lock, private
+ownership/permissions, `O_NOFOLLOW`, single-link checks, exact length,
+create-once provisioning and orphan-temporary refusal match the anchor-store
+failure boundary. A live instance also pins its last accepted checkpoint and
+fails if the file changes behind it.
+
+There is deliberately no unpinned `open`. `open_expected` requires the whole
+checkpoint, including transition index and record hash, retained through an
+independent trusted channel. The pure
+`external_floor_custodian_expected_authority_checkpoint` function derives the
+only valid next receipt from the prior receipt and dual-signed evidence, so an
+ambiguous local write can be resolved by attempting the exact prior and next
+states rather than adopting whatever disk contains. This is
+**anti-rollback-aware**, not anti-rollback storage: if an attacker restores
+both the ordinary-disk record and the caller's expected checkpoint, the local
+store cannot detect it. The latest receipt still needs retention in a truly
+independent, monotonic or rollback-detecting system. The receipt does not
+replace the runtime external anchor CAS, and two directories on one disk are
+not independent failure domains.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

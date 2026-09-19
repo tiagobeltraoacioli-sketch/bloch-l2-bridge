@@ -39,6 +39,8 @@ pub mod external_floor_custodian;
 #[cfg(unix)]
 pub mod external_floor_custodian_anchor_file;
 #[cfg(unix)]
+pub mod external_floor_custodian_authority_file;
+#[cfg(unix)]
 pub mod external_floor_custodian_file;
 #[cfg(unix)]
 pub mod external_floor_custodian_mtls;
@@ -104,6 +106,12 @@ pub use external_floor_custodian_anchor_file::{
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_authority_file::{
+    external_floor_custodian_expected_authority_checkpoint,
+    ExternalFloorCustodianAuthorityCheckpoint, ExternalFloorCustodianAuthorityTuple,
+    UnixExternalFloorCustodianAuthorityStore, EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_file::{
