@@ -454,6 +454,20 @@ falling back to a racy overwrite. A same-user process cannot silently
 substitute a different durable record between validation and commit; any
 detected divergence leaves the transition unacknowledged with the exchanged
 objects retained for explicit reconciliation.
+Fresh provisioning also installs its first record with create-only atomic
+rename (`RENAME_NOREPLACE` on Linux or `RENAME_EXCL` on macOS). A STATE raced
+into the new directory is preserved alongside the synced temporary candidate
+and provisioning fails; it is never overwritten or mistaken for the approved
+genesis receipt. Other Unix targets fail closed when that primitive is absent.
+`reconcile_provisioning` resolves the resulting restart boundary without
+trusting disk for authority: it derives the only genesis checkpoint from the
+separately supplied deployment, key, and signed approval before inspection. An
+exact durable genesis is retained, an exact temporary-only genesis is installed
+with the same create-only primitive, and an exact redundant temporary copy is
+removed beside an exact durable genesis. Missing evidence, invalid records, or
+any third STATE/TEMP combination is preserved and refused. The returned
+`Committed` or `Recovered` store remains pinned to the caller-derived genesis
+checkpoint, which still must be exported to the independent trust domain.
 This live checkpoint is authenticated operational evidence; it is not proof
 that an above-floor head descended from an earlier floor and it does not make
 either local filesystem anti-rollback storage.

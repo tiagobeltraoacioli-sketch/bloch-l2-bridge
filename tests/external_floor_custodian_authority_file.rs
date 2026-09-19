@@ -13,9 +13,10 @@ use bloch_l2_bridge::{
     external_floor_custodian_anchor_continuity_acceptance_message,
     external_floor_custodian_anchor_continuity_authorization_message,
     external_floor_custodian_expected_authority_checkpoint, ExternalFloorCustodianAnchorApproval,
-    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianAuthorityReconciliation,
-    ExternalFloorCustodianClientAnchor, UnixExternalFloorCustodianAuthorityStore,
-    EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
+    ExternalFloorCustodianAnchorContinuityApproval,
+    ExternalFloorCustodianAuthorityProvisioningReconciliation,
+    ExternalFloorCustodianAuthorityReconciliation, ExternalFloorCustodianClientAnchor,
+    UnixExternalFloorCustodianAuthorityStore, EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -246,6 +247,141 @@ fn wrong_expected_receipt_and_orphan_temp_are_rejected() {
     assert!(
         UnixExternalFloorCustodianAuthorityStore::open_expected(&temp.store, checkpoint).is_err()
     );
+}
+
+#[test]
+fn provisioning_reconciliation_installs_only_the_exact_temporary_genesis() {
+    let temp = Temp::new();
+    let deployment = [0x82; 32];
+    let first = signer();
+    let initial = anchor(4, 0x32);
+    let approval = initial_approval(&first, deployment, initial);
+    let (store, checkpoint) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    drop(store);
+    let state = temp.store.join(".bxrc-accepted-authority");
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+    fs::rename(&state, &temporary).unwrap();
+
+    let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityProvisioningReconciliation::Recovered {
+            current: checkpoint,
+        }
+    );
+    assert!(state.exists());
+    assert!(!temporary.exists());
+    assert_eq!(reconciled.checkpoint().unwrap(), checkpoint);
+}
+
+#[test]
+fn provisioning_reconciliation_cleans_only_an_exact_redundant_candidate() {
+    let temp = Temp::new();
+    let deployment = [0x83; 32];
+    let first = signer();
+    let initial = anchor(5, 0x33);
+    let approval = initial_approval(&first, deployment, initial);
+    let (store, checkpoint) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    drop(store);
+    let state = temp.store.join(".bxrc-accepted-authority");
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+    fs::copy(&state, &temporary).unwrap();
+
+    let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityProvisioningReconciliation::Committed {
+            current: checkpoint,
+        }
+    );
+    assert!(!temporary.exists());
+    assert_eq!(reconciled.checkpoint().unwrap(), checkpoint);
+}
+
+#[test]
+fn provisioning_reconciliation_preserves_third_state_evidence() {
+    let temp = Temp::new();
+    let deployment = [0x84; 32];
+    let first = signer();
+    let initial = anchor(6, 0x34);
+    let approval = initial_approval(&first, deployment, initial);
+    let (store, _) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        approval,
+    )
+    .unwrap();
+    drop(store);
+    let state = temp.store.join(".bxrc-accepted-authority");
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+    let mut unexpected = fs::read(&state).unwrap();
+    unexpected[88] ^= 1;
+    fs::write(&temporary, &unexpected).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+            &temp.store,
+            deployment,
+            key(&first),
+            approval,
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&temporary).unwrap(), unexpected);
+    assert!(state.exists());
+
+    // A different internally valid genesis is still a third state; it is not
+    // adopted merely because its record and signature are well formed.
+    fs::remove_file(&temporary).unwrap();
+    let other_directory = temp.root.join("other-genesis");
+    let other_anchor = anchor(7, 0x35);
+    let (other_store, _) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &other_directory,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, other_anchor),
+    )
+    .unwrap();
+    drop(other_store);
+    let other = fs::read(other_directory.join(".bxrc-accepted-authority")).unwrap();
+    fs::write(&state, &other).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::reconcile_provisioning(
+            &temp.store,
+            deployment,
+            key(&first),
+            approval,
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&state).unwrap(), other);
 }
 
 #[test]

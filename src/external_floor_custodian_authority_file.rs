@@ -71,6 +71,20 @@ pub enum ExternalFloorCustodianAuthorityReconciliation {
     },
 }
 
+/// Result of reconciling an interrupted initial authority provisioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFloorCustodianAuthorityProvisioningReconciliation {
+    /// The exact caller-derived genesis record was already durable.
+    Committed {
+        current: ExternalFloorCustodianAuthorityCheckpoint,
+    },
+    /// The exact caller-derived temporary genesis record was installed and
+    /// synced by explicit reconciliation.
+    Recovered {
+        current: ExternalFloorCustodianAuthorityCheckpoint,
+    },
+}
+
 fn invalid(message: &'static str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
@@ -478,6 +492,52 @@ fn exchange_checkpoint_names(_directory: &File) -> io::Result<()> {
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn install_checkpoint_name(directory: &File) -> io::Result<()> {
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    let result = unsafe {
+        libc::renameat2(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_checkpoint_name(directory: &File) -> io::Result<()> {
+    // SAFETY: both fixed names and the live directory descriptor are valid.
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            c_name(TEMP_FILE).as_ptr(),
+            directory.as_raw_fd(),
+            c_name(STATE_FILE).as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn install_checkpoint_name(_directory: &File) -> io::Result<()> {
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        "atomic create-only BXRC authority checkpoint rename is unavailable on this platform",
+    ))
+}
+
 fn commit_temporary_checkpoint_inner<F>(
     directory: &File,
     temporary: &File,
@@ -520,20 +580,9 @@ where
         )?;
         remove_temporary_checkpoint(directory, previous)?;
     } else {
-        // Fresh provisioning has no predecessor to exchange. The containing
-        // directory is new and held under its exclusive process lock.
-        // SAFETY: both fixed names are relative to the same live descriptor.
-        if unsafe {
-            libc::renameat(
-                directory.as_raw_fd(),
-                c_name(TEMP_FILE).as_ptr(),
-                directory.as_raw_fd(),
-                c_name(STATE_FILE).as_ptr(),
-            )
-        } != 0
-        {
-            return Err(Error::last_os_error());
-        }
+        // Fresh provisioning has no predecessor to exchange. Refuse rather
+        // than overwrite any STATE raced into the newly created directory.
+        install_checkpoint_name(directory)?;
         directory.sync_all()?;
     }
     // Keep the written descriptor live across rename and directory sync. A
@@ -631,6 +680,28 @@ pub fn external_floor_custodian_expected_authority_checkpoint(
     )?)
 }
 
+/// Derives the only genesis checkpoint authorized by an offline approval.
+pub fn external_floor_custodian_expected_initial_authority_checkpoint(
+    expected_deployment_id: [u8; 32],
+    verifying_key: [u8; 32],
+    approval: ExternalFloorCustodianAnchorApproval,
+) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    let anchor = verify_external_floor_custodian_anchor_approval(
+        expected_deployment_id,
+        verifying_key,
+        approval,
+    )?;
+    decode(&encode(
+        0,
+        ExternalFloorCustodianAuthorityTuple {
+            deployment_id: expected_deployment_id,
+            verifying_key,
+            anchor,
+        },
+        [0; 32],
+    )?)
+}
+
 /// A durable, process-exclusive local receipt of accepted authority state.
 ///
 /// This type intentionally has no unpinned `open`: callers must supply the
@@ -651,7 +722,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         verifying_key: [u8; 32],
         approval: ExternalFloorCustodianAnchorApproval,
     ) -> io::Result<(Self, ExternalFloorCustodianAuthorityCheckpoint)> {
-        let anchor = verify_external_floor_custodian_anchor_approval(
+        let expected = external_floor_custodian_expected_initial_authority_checkpoint(
             expected_deployment_id,
             verifying_key,
             approval,
@@ -666,13 +737,9 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let lock = Lock::acquire(&directory)?;
         let checkpoint = write_checkpoint(
             &directory,
-            0,
-            ExternalFloorCustodianAuthorityTuple {
-                deployment_id: expected_deployment_id,
-                verifying_key,
-                anchor,
-            },
-            [0; 32],
+            expected.transition_index,
+            expected.authority,
+            expected.previous_record_hash,
             true,
             None,
         )?;
@@ -686,6 +753,114 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 expected: Mutex::new(checkpoint),
             },
             checkpoint,
+        ))
+    }
+
+    /// Reconciles only exact artifacts from interrupted genesis provisioning.
+    ///
+    /// The admissible checkpoint is derived from the independently supplied
+    /// deployment, key, and signed approval before disk inspection. An exact
+    /// durable record is retained, an exact temporary-only candidate is
+    /// installed with the create-only primitive, and an exact redundant
+    /// temporary copy beside the durable record is removed. Missing artifacts,
+    /// third states, corrupt records, and unsafe files fail closed without
+    /// adopting or deleting disk evidence.
+    pub fn reconcile_provisioning(
+        path: &Path,
+        expected_deployment_id: [u8; 32],
+        verifying_key: [u8; 32],
+        approval: ExternalFloorCustodianAnchorApproval,
+    ) -> io::Result<(
+        Self,
+        ExternalFloorCustodianAuthorityProvisioningReconciliation,
+    )> {
+        let expected = external_floor_custodian_expected_initial_authority_checkpoint(
+            expected_deployment_id,
+            verifying_key,
+            approval,
+        )?;
+        let directory = open_directory(path)?;
+        let lock = Lock::acquire(&directory)?;
+        validate_directory_name(path, &directory)?;
+        let state_exists = exists_at(&directory, STATE_FILE)?;
+        let temporary_exists = exists_at(&directory, TEMP_FILE)?;
+        let recovered = match (state_exists, temporary_exists) {
+            (true, false) => {
+                if read_checkpoint_file(
+                    &directory,
+                    STATE_FILE,
+                    "BXRC authority record must be private and single-link",
+                )? != expected
+                {
+                    return Err(denied(
+                        "BXRC authority provisioning found an unexpected durable checkpoint",
+                    ));
+                }
+                false
+            }
+            (false, true) => {
+                let (candidate, candidate_file) = open_checkpoint_file(
+                    &directory,
+                    TEMP_FILE,
+                    "temporary BXRC authority record must be private and single-link",
+                )?;
+                if candidate != expected {
+                    return Err(denied(
+                        "BXRC authority provisioning found an unexpected temporary checkpoint",
+                    ));
+                }
+                commit_temporary_checkpoint(&directory, &candidate_file, None)?;
+                true
+            }
+            (true, true) => {
+                let durable = read_checkpoint_file(
+                    &directory,
+                    STATE_FILE,
+                    "BXRC authority record must be private and single-link",
+                )?;
+                let (candidate, candidate_file) = open_checkpoint_file(
+                    &directory,
+                    TEMP_FILE,
+                    "temporary BXRC authority record must be private and single-link",
+                )?;
+                if durable != expected || candidate != expected {
+                    return Err(denied(
+                        "BXRC authority provisioning found unexpected duplicate checkpoints",
+                    ));
+                }
+                remove_temporary_checkpoint(&directory, &candidate_file)?;
+                false
+            }
+            (false, false) => {
+                return Err(invalid(
+                    "BXRC authority provisioning has no checkpoint evidence to reconcile",
+                ));
+            }
+        };
+        validate_directory_name(path, &directory)?;
+        lock.validate_current(&directory)?;
+        if read_checkpoint(&directory)? != expected {
+            return Err(denied(
+                "BXRC authority provisioning changed while it was reconciled",
+            ));
+        }
+        let outcome = if recovered {
+            ExternalFloorCustodianAuthorityProvisioningReconciliation::Recovered {
+                current: expected,
+            }
+        } else {
+            ExternalFloorCustodianAuthorityProvisioningReconciliation::Committed {
+                current: expected,
+            }
+        };
+        Ok((
+            Self {
+                path: path.to_path_buf(),
+                directory,
+                _lock: lock,
+                expected: Mutex::new(expected),
+            },
+            outcome,
         ))
     }
 
@@ -1002,6 +1177,38 @@ mod tests {
 
         drop(candidate);
         drop(previous);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_only_install_refuses_state_raced_after_final_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-create-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        fs::write(&temporary, b"approved-genesis").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = open_directory(&root).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let error = commit_temporary_checkpoint_inner(&directory, &candidate, None, || {
+            // This runs after TEMP's last identity check and models a STATE
+            // raced into the fresh directory immediately before install.
+            fs::write(&state, b"raced-state").unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&state).unwrap(), b"raced-state");
+        assert_eq!(fs::read(&temporary).unwrap(), b"approved-genesis");
+
+        drop(candidate);
         drop(directory);
         fs::remove_dir_all(root).unwrap();
     }
