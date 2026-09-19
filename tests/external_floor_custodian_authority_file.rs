@@ -460,3 +460,71 @@ fn reconciliation_rejects_third_state_and_never_adopts_it() {
         checkpoint2
     );
 }
+
+#[test]
+fn live_store_fails_closed_when_lock_path_is_replaced() {
+    let temp = Temp::new();
+    let deployment = [0xb1; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(20, 0x71);
+    let next = anchor(21, 0x72);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+
+    let lock = temp.store.join(".bxrc-accepted-authority.lock");
+    let displaced = temp.store.join("displaced-lock");
+    fs::rename(&lock, &displaced).unwrap();
+    fs::write(&lock, []).unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let error = store.checkpoint().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let error = store
+        .accept_continuity(continuity(&first, &second, deployment, initial, next))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+
+    // Losing lock identity must not advance the durable authority state.
+    fs::remove_file(&lock).unwrap();
+    fs::rename(&displaced, &lock).unwrap();
+    assert_eq!(store.checkpoint().unwrap(), checkpoint0);
+}
+
+#[test]
+fn live_store_fails_closed_when_directory_becomes_public() {
+    let temp = Temp::new();
+    let deployment = [0xb2; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(30, 0x81);
+    let next = anchor(31, 0x82);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+
+    fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        store.checkpoint().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        store
+            .accept_continuity(continuity(&first, &second, deployment, initial, next))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(store.checkpoint().unwrap(), checkpoint0);
+}

@@ -413,6 +413,13 @@ and inode must still match the descriptor-relative pathname immediately before
 removal. The method never returns a tuple learned from disk. The returned store
 remains pinned to the selected known receipt across an operator restart; export
 a `Committed.current` receipt before relying on it as the new restart floor.
+Every live checkpoint read and continuity acceptance also revalidates that the
+private directory is still safe and that the persistent lock pathname still
+names the exact inode locked at open. Replacing or hardlinking the lock, or
+making the directory group/world-accessible, therefore fails closed before an
+authority write instead of permitting split locking. Record descriptors are
+revalidated after their bounded read and must still match their
+descriptor-relative path.
 This live checkpoint is authenticated operational evidence; it is not proof
 that an above-floor head descended from an earlier floor and it does not make
 either local filesystem anti-rollback storage.

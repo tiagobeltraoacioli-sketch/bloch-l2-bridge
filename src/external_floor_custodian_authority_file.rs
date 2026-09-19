@@ -191,7 +191,19 @@ impl Lock {
             return Err(Error::last_os_error());
         }
         validate_file(&lock, "BXRC authority lock changed while acquired")?;
-        Ok(Self(lock))
+        let acquired = Self(lock);
+        acquired.validate_current(directory)?;
+        Ok(acquired)
+    }
+
+    fn validate_current(&self, directory: &File) -> io::Result<()> {
+        validate_directory(directory)?;
+        validate_file_name(
+            directory,
+            LOCK_FILE,
+            &self.0,
+            "BXRC authority lock pathname no longer names the acquired private single-link file",
+        )
     }
 }
 
@@ -281,6 +293,10 @@ fn open_checkpoint_file(
     if file.read(&mut trailing)? != 0 {
         return Err(invalid("BXRC authority record has trailing data"));
     }
+    // Revalidate after reading so a concurrent permission/link or pathname
+    // change cannot turn bytes read from an obsolete descriptor into accepted
+    // state.
+    validate_file_name(directory, filename, &file, unsafe_file_message)?;
     Ok((decode(&encoded)?, file))
 }
 
@@ -330,9 +346,7 @@ fn validate_file_name(
     let named = unsafe { named.assume_init() };
     let opened = file.metadata()?;
     if opened.dev() != named.st_dev as u64 || opened.ino() != named.st_ino {
-        return Err(denied(
-            "temporary BXRC authority record changed before cleanup",
-        ));
+        return Err(denied(unsafe_file_message));
     }
     Ok(())
 }
@@ -475,6 +489,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
             [0; 32],
             true,
         )?;
+        lock.validate_current(&directory)?;
         Ok((
             Self {
                 directory,
@@ -497,6 +512,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 "BXRC authority checkpoint does not match expected state",
             ));
         }
+        lock.validate_current(&directory)?;
         Ok(Self {
             directory,
             _lock: lock,
@@ -570,6 +586,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 "BXRC authority reconciliation found neither exact prior nor derived next checkpoint",
             ));
         };
+        lock.validate_current(&directory)?;
         Ok((
             Self {
                 directory,
@@ -590,7 +607,10 @@ impl UnixExternalFloorCustodianAuthorityStore {
     /// record because every instance was opened against an expected value.
     pub fn checkpoint(&self) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
         let expected = self.expected()?;
-        if read_checkpoint(&self.directory)? != *expected {
+        self._lock.validate_current(&self.directory)?;
+        let actual = read_checkpoint(&self.directory)?;
+        self._lock.validate_current(&self.directory)?;
+        if actual != *expected {
             return Err(denied("BXRC authority state changed behind live instance"));
         }
         Ok(*expected)
@@ -604,6 +624,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         approval: ExternalFloorCustodianAnchorContinuityApproval,
     ) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
         let mut expected = self.expected()?;
+        self._lock.validate_current(&self.directory)?;
         let previous = read_checkpoint(&self.directory)?;
         if previous != *expected {
             return Err(denied("BXRC authority state changed behind live instance"));
@@ -616,6 +637,10 @@ impl UnixExternalFloorCustodianAuthorityStore {
             derived.previous_record_hash,
             false,
         )?;
+        // If the lock pathname was replaced during the write, the transition
+        // is deliberately ambiguous: leave the in-memory expectation at the
+        // prior checkpoint and require explicit reconciliation.
+        self._lock.validate_current(&self.directory)?;
         *expected = next;
         Ok(next)
     }
