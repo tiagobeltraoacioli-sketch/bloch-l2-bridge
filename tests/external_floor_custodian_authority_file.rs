@@ -606,3 +606,43 @@ fn live_store_fails_closed_when_directory_becomes_public() {
     fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(store.checkpoint().unwrap(), checkpoint0);
 }
+
+#[test]
+fn live_store_fails_closed_when_directory_path_is_replaced() {
+    let temp = Temp::new();
+    let deployment = [0xb3; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(40, 0x91);
+    let next = anchor(41, 0x92);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+
+    let displaced = temp.root.join("displaced-authority");
+    fs::rename(&temp.store, &displaced).unwrap();
+    fs::create_dir(&temp.store).unwrap();
+    fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(
+        store.checkpoint().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        store
+            .accept_continuity(continuity(&first, &second, deployment, initial, next))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    // The displaced store must not advance after its configured pathname no
+    // longer identifies it.
+    fs::remove_dir(&temp.store).unwrap();
+    fs::rename(&displaced, &temp.store).unwrap();
+    assert_eq!(store.checkpoint().unwrap(), checkpoint0);
+}

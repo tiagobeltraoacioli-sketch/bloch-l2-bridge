@@ -429,7 +429,11 @@ names the exact inode locked at open. Replacing or hardlinking the lock, or
 making the directory group/world-accessible, therefore fails closed before an
 authority write instead of permitting split locking. Record descriptors are
 revalidated after their bounded read and must still match their
-descriptor-relative path.
+descriptor-relative path. The configured directory pathname is likewise
+reopened and required to name the same device and inode before and after live
+operations. Renaming the locked directory and replacing its old pathname can
+therefore make an in-flight transition ambiguous, but cannot silently direct a
+live instance to keep accepting a displaced receipt store.
 This live checkpoint is authenticated operational evidence; it is not proof
 that an above-floor head descended from an earlier floor and it does not make
 either local filesystem anti-rollback storage.

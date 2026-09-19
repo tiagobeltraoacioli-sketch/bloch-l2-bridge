@@ -10,7 +10,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use tiny_keccak::{Hasher, Keccak};
@@ -159,6 +159,21 @@ fn open_directory(path: &Path) -> io::Result<File> {
         .open(path)?;
     validate_directory(&directory)?;
     Ok(directory)
+}
+
+fn validate_directory_name(path: &Path, directory: &File) -> io::Result<()> {
+    validate_directory(directory)?;
+    let named = open_directory(path)?;
+    let opened_metadata = directory.metadata()?;
+    let named_metadata = named.metadata()?;
+    if opened_metadata.dev() != named_metadata.dev()
+        || opened_metadata.ino() != named_metadata.ino()
+    {
+        return Err(denied(
+            "BXRC authority directory pathname no longer names the opened directory",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -483,6 +498,7 @@ pub fn external_floor_custodian_expected_authority_checkpoint(
 /// This type intentionally has no unpinned `open`: callers must supply the
 /// complete expected checkpoint or authenticated transition evidence.
 pub struct UnixExternalFloorCustodianAuthorityStore {
+    path: PathBuf,
     directory: File,
     _lock: Lock,
     expected: Mutex<ExternalFloorCustodianAuthorityCheckpoint>,
@@ -521,9 +537,11 @@ impl UnixExternalFloorCustodianAuthorityStore {
             [0; 32],
             true,
         )?;
+        validate_directory_name(path, &directory)?;
         lock.validate_current(&directory)?;
         Ok((
             Self {
+                path: path.to_path_buf(),
                 directory,
                 _lock: lock,
                 expected: Mutex::new(checkpoint),
@@ -544,8 +562,10 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 "BXRC authority checkpoint does not match expected state",
             ));
         }
+        validate_directory_name(path, &directory)?;
         lock.validate_current(&directory)?;
         Ok(Self {
+            path: path.to_path_buf(),
             directory,
             _lock: lock,
             expected: Mutex::new(expected),
@@ -573,6 +593,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let next = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
+        validate_directory_name(path, &directory)?;
         let current = if exists_at(&directory, TEMP_FILE)? {
             let durable = read_checkpoint_file(
                 &directory,
@@ -590,6 +611,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 ));
             }
             remove_temporary_checkpoint(&directory, &temporary_file)?;
+            validate_directory_name(path, &directory)?;
             let reread = read_checkpoint(&directory)?;
             if reread != previous {
                 return Err(denied(
@@ -600,6 +622,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         } else {
             read_checkpoint(&directory)?
         };
+        validate_directory_name(path, &directory)?;
         let (selected, reconciliation) = if current == previous {
             (
                 previous,
@@ -621,6 +644,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         lock.validate_current(&directory)?;
         Ok((
             Self {
+                path: path.to_path_buf(),
                 directory,
                 _lock: lock,
                 expected: Mutex::new(selected),
@@ -639,9 +663,11 @@ impl UnixExternalFloorCustodianAuthorityStore {
     /// record because every instance was opened against an expected value.
     pub fn checkpoint(&self) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
         let expected = self.expected()?;
+        validate_directory_name(&self.path, &self.directory)?;
         self._lock.validate_current(&self.directory)?;
         let actual = read_checkpoint(&self.directory)?;
         self._lock.validate_current(&self.directory)?;
+        validate_directory_name(&self.path, &self.directory)?;
         if actual != *expected {
             return Err(denied("BXRC authority state changed behind live instance"));
         }
@@ -656,6 +682,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         approval: ExternalFloorCustodianAnchorContinuityApproval,
     ) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
         let mut expected = self.expected()?;
+        validate_directory_name(&self.path, &self.directory)?;
         self._lock.validate_current(&self.directory)?;
         let previous = read_checkpoint(&self.directory)?;
         if previous != *expected {
@@ -673,6 +700,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         // is deliberately ambiguous: leave the in-memory expectation at the
         // prior checkpoint and require explicit reconciliation.
         self._lock.validate_current(&self.directory)?;
+        validate_directory_name(&self.path, &self.directory)?;
         *expected = next;
         Ok(next)
     }
