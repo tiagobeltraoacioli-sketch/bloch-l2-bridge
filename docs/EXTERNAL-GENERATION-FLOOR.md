@@ -203,12 +203,39 @@ one response and closes its write side. The helper creates no listener, loop,
 thread or service.
 
 IP pinning is routing policy, not cryptographic channel authentication, and
-raw TCP is not confidential. BXRC KMAC still detects peer/content forgery, but
-production must place this carrier behind a separately managed mTLS tunnel or
-equivalent mutually authenticated encrypted channel with certificate/public-key
-pinning. Proxy deployments must pin the immediate source and enforce the
-original client identity at that secure-channel layer; forwarded-IP headers are
-not accepted by this protocol.
+raw TCP is not confidential. BXRC KMAC still detects peer/content forgery. The
+`external_floor_custodian_mtls` module supplies the concrete secure carrier
+for deployments that do not use a separately managed equivalent tunnel.
+
+`MtlsExternalFloorCustodianTransport` reuses the strict numeric endpoint,
+egress-IP and timeout policy, but carries the framed BXRC exchange over TLS 1.3
+only. Configuration has no platform roots or environment defaults: it requires
+an explicit server name for certificate identity validation, explicit trust
+anchors, a client certificate chain and private key, and an independent
+SHA-256 pin of the expected server leaf certificate. The server helper likewise
+requires an application-accepted stream, pinned source IP, explicit client
+trust anchors, its own certificate chain and key, and an independent SHA-256
+pin of the expected client leaf certificate. A CA-valid but unpinned peer is
+rejected before BXRC authentication or durable store access.
+
+TLS `close_notify` is the authenticated end-of-message marker in both
+directions. Framing remains bounded before allocation, trailing plaintext is
+rejected, rustls buffers are capped, and handshake plus application I/O share
+one absolute deadline. Each call still makes one TCP connection and one BXRC
+exchange with no reconnect, fallback endpoint or retransmission. Consequently,
+all failures after connection—including handshake, pin, response and closure
+failures—remain ambiguous to the caller; the already-consumed BXRC transport
+sequence must be reconciled instead of blindly retried.
+
+The mTLS constructors accept in-memory DER credentials so deployment can load
+them from a separately controlled secret provider. They do not read certificate
+or key files, start listeners, spawn threads, rotate credentials or authorize
+sessions. The provided constructors consume exportable private-key DER and
+therefore are not an HSM integration. Production requiring non-exportable keys
+must add an audited rustls signing-key provider; embedding exportable keys in
+application configuration is not key isolation. Proxy deployments must pin the
+immediate source and enforce original peer identity at the secure-channel
+layer; forwarded-IP headers are not accepted by this protocol.
 
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it

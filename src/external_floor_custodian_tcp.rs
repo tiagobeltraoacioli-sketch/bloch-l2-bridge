@@ -74,6 +74,30 @@ impl ExternalFloorCustodianTcpClientConfig {
             expected_local_ip,
         })
     }
+
+    pub(crate) fn connect(&self) -> io::Result<TcpStream> {
+        let stream = TcpStream::connect_timeout(&self.remote, self.timeout)?;
+        configure_stream(&stream, self.timeout)?;
+        if stream.peer_addr()? != self.remote {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "custodian TCP peer address does not match the pinned endpoint",
+            ));
+        }
+        if let Some(expected) = self.expected_local_ip {
+            if stream.local_addr()?.ip() != expected {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "custodian TCP local address does not match the pinned egress address",
+                ));
+            }
+        }
+        Ok(stream)
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 /// Server-side policy for a stream already accepted by an application-owned
@@ -93,6 +117,21 @@ impl ExternalFloorCustodianTcpServerPolicy {
             timeout,
         })
     }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub(crate) fn validate_stream(&self, stream: &TcpStream) -> io::Result<()> {
+        configure_stream(stream, self.timeout)?;
+        if stream.peer_addr()?.ip() != self.allowed_client_ip {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "custodian TCP client IP does not match the pinned source",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Concrete synchronous TCP client. Each `exchange` performs exactly one
@@ -108,23 +147,7 @@ impl TcpExternalFloorCustodianTransport {
     }
 
     fn connect(&self) -> io::Result<TcpStream> {
-        let stream = TcpStream::connect_timeout(&self.config.remote, self.config.timeout)?;
-        configure_stream(&stream, self.config.timeout)?;
-        if stream.peer_addr()? != self.config.remote {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "custodian TCP peer address does not match the pinned endpoint",
-            ));
-        }
-        if let Some(expected) = self.config.expected_local_ip {
-            if stream.local_addr()?.ip() != expected {
-                return Err(Error::new(
-                    ErrorKind::PermissionDenied,
-                    "custodian TCP local address does not match the pinned egress address",
-                ));
-            }
-        }
-        Ok(stream)
+        self.config.connect()
     }
 }
 
