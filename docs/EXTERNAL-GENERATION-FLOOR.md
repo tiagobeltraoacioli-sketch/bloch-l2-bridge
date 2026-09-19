@@ -276,6 +276,27 @@ atomic rename, directory sync, and authenticated read-back. It starts no
 listener, performs no retry, loads no keys, and cannot make a rollbackable
 filesystem or colocated key store independent.
 
+`UnixExternalFloorCustodianAnchorStore` is the concrete Unix backend for the
+mandatory external anchor trait. Its create-once provisioning installs the
+explicit initial client anchor; later opens validate a fixed-size checksummed
+record and retain a nonblocking process lock. Exact CAS is serialized both
+between threads and processes, permits only the one- or two-revision advances
+used by normal commit and explicit crash reconciliation, writes by
+exclusive temporary creation plus file/directory sync and atomic rename, and
+returns the observed anchor on a conflict without modifying it. Symlinks,
+hardlinks, wrong ownership or permissions, trailing bytes, corruption and an
+orphan temporary file all fail closed.
+
+The backend is operational plumbing, not a claim that ordinary disk is
+rollback-resistant. Its absolute directory must be on separately administered
+storage whose platform policy prevents snapshot rollback, and must not share
+the checkpoint directory's volume, backup/restore authority or host
+credentials. The checksum is unkeyed and detects accidental corruption only.
+Provisioning must compare the initial anchor out of band before the client is
+opened. A restored but internally valid older anchor remains indistinguishable
+to this file backend unless the external storage platform itself prevents or
+detects rollback.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

@@ -37,6 +37,8 @@ pub mod external_floor_codec;
 #[cfg(unix)]
 pub mod external_floor_custodian;
 #[cfg(unix)]
+pub mod external_floor_custodian_anchor_file;
+#[cfg(unix)]
 pub mod external_floor_custodian_file;
 #[cfg(unix)]
 pub mod external_floor_custodian_mtls;
@@ -90,6 +92,10 @@ pub use external_floor_custodian::{
     ExternalFloorCustodianTransport, ExternalFloorCustodianTransportCheckpoint,
     EXTERNAL_FLOOR_CUSTODIAN_MAGIC, EXTERNAL_FLOOR_CUSTODIAN_MAX_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_MIN_LEN, EXTERNAL_FLOOR_CUSTODIAN_VERSION,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_anchor_file::{
+    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_file::{
