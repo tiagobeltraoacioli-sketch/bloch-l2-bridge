@@ -34,6 +34,8 @@ pub mod external_floor;
 pub mod external_floor_auth;
 #[cfg(unix)]
 pub mod external_floor_codec;
+#[cfg(unix)]
+pub mod external_floor_file;
 pub mod harness;
 pub mod hex;
 pub mod merkle;
@@ -73,6 +75,8 @@ pub use external_floor_codec::{
     encode_external_floor_response, ExternalFloorCodecError, EXTERNAL_FLOOR_CODEC_MAGIC,
     EXTERNAL_FLOOR_CODEC_MAX_LEN, EXTERNAL_FLOOR_CODEC_VERSION,
 };
+#[cfg(unix)]
+pub use external_floor_file::{UnixExternalFloorReplayStore, EXTERNAL_FLOOR_REPLAY_RECORD_LEN};
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
     evaluate_release_checklist, AnchoredEpochView, CheckOutcome, ChecklistVerdict, NullifierLog,

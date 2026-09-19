@@ -123,13 +123,30 @@ typed outcome must all agree. The typed adapter never retransmits an ambiguous
 CAS. Its reconciliation read uses the same authenticated framing with the new
 session nonce, so there is no weaker recovery message.
 
+On Unix, `UnixExternalFloorReplayStore` is a concrete privileged-host backend.
+Provisioning creates a new private directory and fixed-size `BXFR` v1 record;
+every later open requires the exact independently retained checkpoint. It
+holds a nonblocking exclusive lock for its lifetime, refuses symlinks,
+hardlinks, non-regular records and group/world-accessible objects, and opens
+relative files with `O_NOFOLLOW`. The lock inode persists permanently and a
+leftover temporary entry makes open and readiness checks fail; it is never
+silently removed or adopted.
+
+Its CAS compares revision, session and next sequence, then permits only an
+exact one-step revision/sequence advance within that session. It writes a
+canonical checksummed bounded record to an exclusive temporary file, syncs
+it, atomically renames it, syncs the directory, and reads the record back.
+Failure at or after rename returns `Uncertain`, because commit may already be
+visible. A new session is therefore a separate trusted provisioning or
+operator migration event, never data accepted from a request.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
-does not provide non-repudiation. This crate defines the durable replay-store
-contract but provides no production backend. Production still requires mTLS
+does not provide non-repudiation. The local backend cannot detect coherent
+filesystem rollback. Production still requires mTLS
 (or an equivalently authenticated and confidential channel), HSM-backed and
-separated key custody, rollback-resistant linearizable CAS storage in a
-different failure domain, independent checkpoint retention, tested operator
+separated key custody, a non-rollbackable replay directory in a different
+failure domain, independent checkpoint retention, tested operator
 reconciliation, rate/frame limits, backups, and monitoring. Crash after replay
 reservation but before response intentionally reduces availability; it must not
 be "fixed" by replaying the request. None of this establishes L1 canonicality
