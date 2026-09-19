@@ -313,6 +313,22 @@ legitimate transition. Approval authenticates operator intent; it does not
 make ordinary disk rollback-resistant and does not replace the mandatory
 runtime exact-CAS anchor comparison.
 
+Authority continuity is explicit rather than trust-on-first-use.
+`open_continuity_approved` takes the previously retained deployment id,
+verifying key and exact anchor as independent inputs. A continuity record
+binds those values to the next exact anchor and next verifying key. The
+current authority signs an `AUTH`-domain message and the next authority signs
+the same fields under a distinct `ACCEPT` domain; both signatures are
+mandatory. The next anchor may advance monotonically under the same key
+(routine reapproval), the key may rotate at the same exact anchor, or both may
+advance together. Rollback, no-op, zero identity, changed commitment without
+an increasing revision, disk/approval mismatch, missing acceptance and
+unilateral key substitution all fail closed. The authenticated next public key
+is returned for separate retention; private signing keys never enter the
+runtime API. Operators must durably retain the accepted `(deployment id,
+public key, anchor)` tuple outside both filesystems before treating it as the
+input to a later transition.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

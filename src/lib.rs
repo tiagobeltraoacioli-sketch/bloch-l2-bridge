@@ -96,8 +96,13 @@ pub use external_floor_custodian::{
 #[cfg(unix)]
 pub use external_floor_custodian_anchor_file::{
     external_floor_custodian_anchor_approval_message,
-    verify_external_floor_custodian_anchor_approval, ExternalFloorCustodianAnchorApproval,
-    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
+    external_floor_custodian_anchor_continuity_acceptance_message,
+    external_floor_custodian_anchor_continuity_authorization_message,
+    verify_external_floor_custodian_anchor_approval,
+    verify_external_floor_custodian_anchor_continuity, ExternalFloorCustodianAnchorApproval,
+    ExternalFloorCustodianAnchorContinuityApproval, UnixExternalFloorCustodianAnchorStore,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
 #[cfg(unix)]

@@ -9,10 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::{
     external_floor_custodian_anchor_approval_message,
-    verify_external_floor_custodian_anchor_approval, ExternalFloorCustodianAnchorApproval,
-    ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorStore,
-    ExternalFloorCustodianClientAnchor, UnixExternalFloorCustodianAnchorStore,
-    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+    external_floor_custodian_anchor_continuity_acceptance_message,
+    external_floor_custodian_anchor_continuity_authorization_message,
+    verify_external_floor_custodian_anchor_approval,
+    verify_external_floor_custodian_anchor_continuity, ExternalFloorCustodianAnchorApproval,
+    ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorContinuityApproval,
+    ExternalFloorCustodianAnchorStore, ExternalFloorCustodianClientAnchor,
+    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -74,6 +77,43 @@ fn approval(
         deployment_id,
         anchor,
         signature,
+    }
+}
+
+fn continuity_approval(
+    previous_signer: &Ed25519KeyPair,
+    next_signer: &Ed25519KeyPair,
+    deployment_id: [u8; 32],
+    previous_anchor: ExternalFloorCustodianClientAnchor,
+    next_anchor: ExternalFloorCustodianClientAnchor,
+) -> ExternalFloorCustodianAnchorContinuityApproval {
+    let previous_verifying_key = verifying_key(previous_signer);
+    let next_verifying_key = verifying_key(next_signer);
+    let authorization = external_floor_custodian_anchor_continuity_authorization_message(
+        deployment_id,
+        previous_verifying_key,
+        previous_anchor,
+        next_verifying_key,
+        next_anchor,
+    );
+    let acceptance = external_floor_custodian_anchor_continuity_acceptance_message(
+        deployment_id,
+        previous_verifying_key,
+        previous_anchor,
+        next_verifying_key,
+        next_anchor,
+    );
+    let mut authorization_signature = [0_u8; 64];
+    authorization_signature.copy_from_slice(previous_signer.sign(&authorization).as_ref());
+    let mut acceptance_signature = [0_u8; 64];
+    acceptance_signature.copy_from_slice(next_signer.sign(&acceptance).as_ref());
+    ExternalFloorCustodianAnchorContinuityApproval {
+        deployment_id,
+        previous_anchor,
+        next_anchor,
+        next_verifying_key,
+        authorization_signature,
+        acceptance_signature,
     }
 }
 
@@ -144,6 +184,214 @@ fn approved_provisioning_and_inspection_refuse_unapproved_disk_state() {
     )
     .unwrap();
     assert_eq!(inspected.load().unwrap(), next);
+}
+
+#[test]
+fn continuity_reapproval_and_key_rotation_require_both_offline_authorities() {
+    let deployment = [0x71; 32];
+    let previous_anchor = anchor(7, 0x41);
+    let next_anchor = anchor(11, 0x42);
+    let previous_signer = signer();
+    let next_signer = signer();
+    let previous_key = verifying_key(&previous_signer);
+    let next_key = verifying_key(&next_signer);
+    assert_ne!(
+        external_floor_custodian_anchor_continuity_authorization_message(
+            deployment,
+            previous_key,
+            previous_anchor,
+            next_key,
+            next_anchor,
+        ),
+        external_floor_custodian_anchor_continuity_acceptance_message(
+            deployment,
+            previous_key,
+            previous_anchor,
+            next_key,
+            next_anchor,
+        ),
+        "authorization and acceptance signatures must be role separated"
+    );
+    let approved = continuity_approval(
+        &previous_signer,
+        &next_signer,
+        deployment,
+        previous_anchor,
+        next_anchor,
+    );
+    assert_eq!(
+        verify_external_floor_custodian_anchor_continuity(
+            deployment,
+            previous_key,
+            previous_anchor,
+            approved,
+        )
+        .unwrap(),
+        (next_anchor, next_key)
+    );
+
+    let mut missing_acceptance = approved;
+    missing_acceptance.acceptance_signature = [0; 64];
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        previous_key,
+        previous_anchor,
+        missing_acceptance,
+    )
+    .is_err());
+    let mut missing_authorization = approved;
+    missing_authorization.authorization_signature = [0; 64];
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        previous_key,
+        previous_anchor,
+        missing_authorization,
+    )
+    .is_err());
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        verifying_key(&signer()),
+        previous_anchor,
+        approved,
+    )
+    .is_err());
+
+    // Reapproval under the same authority remains possible, but still uses
+    // distinct authorization and acceptance domains.
+    let reapproved = continuity_approval(
+        &previous_signer,
+        &previous_signer,
+        deployment,
+        previous_anchor,
+        next_anchor,
+    );
+    assert_eq!(
+        verify_external_floor_custodian_anchor_continuity(
+            deployment,
+            previous_key,
+            previous_anchor,
+            reapproved,
+        )
+        .unwrap(),
+        (next_anchor, previous_key)
+    );
+}
+
+#[test]
+fn continuity_refuses_rollback_noop_tampering_and_unapproved_disk_state() {
+    let temp = Temp::new();
+    let deployment = [0x72; 32];
+    let previous_anchor = anchor(8, 0x51);
+    let next_anchor = anchor(12, 0x52);
+    let previous_signer = signer();
+    let next_signer = signer();
+    let previous_key = verifying_key(&previous_signer);
+    let next_key = verifying_key(&next_signer);
+    let approved = continuity_approval(
+        &previous_signer,
+        &next_signer,
+        deployment,
+        previous_anchor,
+        next_anchor,
+    );
+
+    let store = UnixExternalFloorCustodianAnchorStore::provision(&temp.store, next_anchor).unwrap();
+    drop(store);
+    let (opened, authenticated_next_key) =
+        UnixExternalFloorCustodianAnchorStore::open_continuity_approved(
+            &temp.store,
+            deployment,
+            previous_key,
+            previous_anchor,
+            approved,
+        )
+        .unwrap();
+    assert_eq!(authenticated_next_key, next_key);
+    assert_eq!(opened.load().unwrap(), next_anchor);
+    drop(opened);
+
+    let wrong_disk = anchor(13, 0x53);
+    let store = UnixExternalFloorCustodianAnchorStore::open(&temp.store).unwrap();
+    assert_eq!(
+        store.compare_and_swap(next_anchor, wrong_disk).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    drop(store);
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::open_continuity_approved(
+            &temp.store,
+            deployment,
+            previous_key,
+            previous_anchor,
+            approved,
+        )
+        .is_err()
+    );
+
+    let rollback = continuity_approval(
+        &previous_signer,
+        &next_signer,
+        deployment,
+        previous_anchor,
+        anchor(7, 0x50),
+    );
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        previous_key,
+        previous_anchor,
+        rollback,
+    )
+    .is_err());
+    let no_op = continuity_approval(
+        &previous_signer,
+        &previous_signer,
+        deployment,
+        previous_anchor,
+        previous_anchor,
+    );
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        previous_key,
+        previous_anchor,
+        no_op,
+    )
+    .is_err());
+    let mut tampered_next_key = approved;
+    tampered_next_key.next_verifying_key = [0x99; 32];
+    assert!(verify_external_floor_custodian_anchor_continuity(
+        deployment,
+        previous_key,
+        previous_anchor,
+        tampered_next_key,
+    )
+    .is_err());
+}
+
+#[test]
+fn authority_rotation_can_reapprove_the_same_exact_anchor() {
+    let deployment = [0x73; 32];
+    let current_anchor = anchor(9, 0x61);
+    let previous_signer = signer();
+    let next_signer = signer();
+    let previous_key = verifying_key(&previous_signer);
+    let next_key = verifying_key(&next_signer);
+    let approved = continuity_approval(
+        &previous_signer,
+        &next_signer,
+        deployment,
+        current_anchor,
+        current_anchor,
+    );
+    assert_eq!(
+        verify_external_floor_custodian_anchor_continuity(
+            deployment,
+            previous_key,
+            current_anchor,
+            approved,
+        )
+        .unwrap(),
+        (current_anchor, next_key)
+    );
 }
 
 #[test]

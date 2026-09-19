@@ -30,12 +30,18 @@ const VERSION: u8 = 1;
 const PREFIX_LEN: usize = 48;
 const SEAL_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-EXTERNAL-ANCHOR-v1\0";
 const APPROVAL_DOMAIN: &[u8; 48] = b"BLOCH-L2-BXRC-EXTERNAL-ANCHOR-APPROVAL-v1\0\0\0\0\0\0\0";
+const CONTINUITY_AUTHORIZATION_DOMAIN: &[u8; 48] =
+    b"BLOCH-L2-BXRC-ANCHOR-CONTINUITY-AUTH-v1\0\0\0\0\0\0\0\0\0";
+const CONTINUITY_ACCEPTANCE_DOMAIN: &[u8; 48] =
+    b"BLOCH-L2-BXRC-ANCHOR-CONTINUITY-ACCEPT-v1\0\0\0\0\0\0\0";
 
 /// Exact canonical length of the external anchor record.
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN: usize = PREFIX_LEN + 32;
 /// Exact length of the domain-separated message signed by an offline anchor
 /// approver.
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN: usize = 120;
+/// Exact length of either role-separated anchor continuity message.
+pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN: usize = 224;
 
 /// An offline Ed25519 approval of one exact anchor in one deployment domain.
 ///
@@ -46,6 +52,23 @@ pub struct ExternalFloorCustodianAnchorApproval {
     pub deployment_id: [u8; 32],
     pub anchor: ExternalFloorCustodianClientAnchor,
     pub signature: [u8; 64],
+}
+
+/// Offline, two-party continuity evidence for anchor reapproval or authority
+/// rotation.
+///
+/// `authorization_signature` is made by the independently pinned current
+/// key. `acceptance_signature` is made by `next_verifying_key`. The backend
+/// accepts neither private key. Keeping the two role domains distinct proves
+/// that both authorities approved their respective side of the transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorContinuityApproval {
+    pub deployment_id: [u8; 32],
+    pub previous_anchor: ExternalFloorCustodianClientAnchor,
+    pub next_anchor: ExternalFloorCustodianClientAnchor,
+    pub next_verifying_key: [u8; 32],
+    pub authorization_signature: [u8; 64],
+    pub acceptance_signature: [u8; 64],
 }
 
 /// Builds the canonical message for an offline Ed25519 signer.
@@ -80,6 +103,115 @@ pub fn verify_external_floor_custodian_anchor_approval(
         .verify(&message, &approval.signature)
         .map_err(|_| denied("BXRC external anchor approval signature failed"))?;
     Ok(approval.anchor)
+}
+
+fn continuity_message(
+    domain: &[u8; 48],
+    deployment_id: [u8; 32],
+    previous_verifying_key: [u8; 32],
+    previous_anchor: ExternalFloorCustodianClientAnchor,
+    next_verifying_key: [u8; 32],
+    next_anchor: ExternalFloorCustodianClientAnchor,
+) -> [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN] {
+    let mut message = [0_u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN];
+    message[..48].copy_from_slice(domain);
+    message[48..80].copy_from_slice(&deployment_id);
+    message[80..112].copy_from_slice(&previous_verifying_key);
+    message[112..120].copy_from_slice(&previous_anchor.revision.to_be_bytes());
+    message[120..152].copy_from_slice(&previous_anchor.commitment);
+    message[152..184].copy_from_slice(&next_verifying_key);
+    message[184..192].copy_from_slice(&next_anchor.revision.to_be_bytes());
+    message[192..224].copy_from_slice(&next_anchor.commitment);
+    message
+}
+
+/// Builds the canonical message authorized by the currently pinned offline
+/// authority.
+pub fn external_floor_custodian_anchor_continuity_authorization_message(
+    deployment_id: [u8; 32],
+    previous_verifying_key: [u8; 32],
+    previous_anchor: ExternalFloorCustodianClientAnchor,
+    next_verifying_key: [u8; 32],
+    next_anchor: ExternalFloorCustodianClientAnchor,
+) -> [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN] {
+    continuity_message(
+        CONTINUITY_AUTHORIZATION_DOMAIN,
+        deployment_id,
+        previous_verifying_key,
+        previous_anchor,
+        next_verifying_key,
+        next_anchor,
+    )
+}
+
+/// Builds the canonical, role-separated message accepted by the next offline
+/// authority.
+pub fn external_floor_custodian_anchor_continuity_acceptance_message(
+    deployment_id: [u8; 32],
+    previous_verifying_key: [u8; 32],
+    previous_anchor: ExternalFloorCustodianClientAnchor,
+    next_verifying_key: [u8; 32],
+    next_anchor: ExternalFloorCustodianClientAnchor,
+) -> [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN] {
+    continuity_message(
+        CONTINUITY_ACCEPTANCE_DOMAIN,
+        deployment_id,
+        previous_verifying_key,
+        previous_anchor,
+        next_verifying_key,
+        next_anchor,
+    )
+}
+
+/// Verifies monotonic, two-party continuity from independently retained
+/// authority state. The prior key and anchor are parameters rather than data
+/// learned from the approval, preventing trust-on-first-use.
+pub fn verify_external_floor_custodian_anchor_continuity(
+    expected_deployment_id: [u8; 32],
+    expected_previous_verifying_key: [u8; 32],
+    expected_previous_anchor: ExternalFloorCustodianClientAnchor,
+    approval: ExternalFloorCustodianAnchorContinuityApproval,
+) -> io::Result<(ExternalFloorCustodianClientAnchor, [u8; 32])> {
+    if expected_deployment_id == [0; 32]
+        || expected_previous_verifying_key == [0; 32]
+        || expected_previous_anchor.commitment == [0; 32]
+        || approval.deployment_id != expected_deployment_id
+        || approval.previous_anchor != expected_previous_anchor
+        || approval.next_verifying_key == [0; 32]
+        || approval.next_anchor.commitment == [0; 32]
+    {
+        return Err(denied("invalid BXRC anchor continuity identity"));
+    }
+    let same_anchor = approval.next_anchor == expected_previous_anchor;
+    let same_key = approval.next_verifying_key == expected_previous_verifying_key;
+    if (same_anchor && same_key)
+        || (!same_anchor
+            && (approval.next_anchor.revision <= expected_previous_anchor.revision
+                || approval.next_anchor.commitment == expected_previous_anchor.commitment))
+    {
+        return Err(denied("non-monotonic BXRC anchor continuity transition"));
+    }
+    let authorization = external_floor_custodian_anchor_continuity_authorization_message(
+        expected_deployment_id,
+        expected_previous_verifying_key,
+        expected_previous_anchor,
+        approval.next_verifying_key,
+        approval.next_anchor,
+    );
+    UnparsedPublicKey::new(&ED25519, expected_previous_verifying_key)
+        .verify(&authorization, &approval.authorization_signature)
+        .map_err(|_| denied("BXRC anchor continuity authorization failed"))?;
+    let acceptance = external_floor_custodian_anchor_continuity_acceptance_message(
+        expected_deployment_id,
+        expected_previous_verifying_key,
+        expected_previous_anchor,
+        approval.next_verifying_key,
+        approval.next_anchor,
+    );
+    UnparsedPublicKey::new(&ED25519, approval.next_verifying_key)
+        .verify(&acceptance, &approval.acceptance_signature)
+        .map_err(|_| denied("BXRC anchor continuity acceptance failed"))?;
+    Ok((approval.next_anchor, approval.next_verifying_key))
 }
 
 fn invalid(message: &'static str) -> Error {
@@ -417,6 +549,33 @@ impl UnixExternalFloorCustodianAnchorStore {
             ));
         }
         Ok(store)
+    }
+
+    /// Opens only the exact anchor named by a valid continuity transition.
+    /// The returned public key is authenticated by both the independently
+    /// pinned prior authority and the next authority, and can be retained out
+    /// of band for the following transition. No private key enters runtime.
+    pub fn open_continuity_approved(
+        path: &Path,
+        expected_deployment_id: [u8; 32],
+        expected_previous_verifying_key: [u8; 32],
+        expected_previous_anchor: ExternalFloorCustodianClientAnchor,
+        approval: ExternalFloorCustodianAnchorContinuityApproval,
+    ) -> io::Result<(Self, [u8; 32])> {
+        let (approved_anchor, next_verifying_key) =
+            verify_external_floor_custodian_anchor_continuity(
+                expected_deployment_id,
+                expected_previous_verifying_key,
+                expected_previous_anchor,
+                approval,
+            )?;
+        let store = Self::open(path)?;
+        if store.load()? != approved_anchor {
+            return Err(denied(
+                "BXRC external anchor does not match the continuity approval",
+            ));
+        }
+        Ok((store, next_verifying_key))
     }
 
     fn gate(&self) -> io::Result<MutexGuard<'_, ()>> {
