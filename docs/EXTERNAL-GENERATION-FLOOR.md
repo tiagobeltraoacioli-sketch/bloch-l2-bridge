@@ -134,7 +134,15 @@ CAS. Its reconciliation read uses the same authenticated framing with the new
 session nonce, so there is no weaker recovery message.
 
 On Unix, `UnixExternalFloorReplayStore` is a concrete privileged-host backend.
-Provisioning creates a new private directory and fixed-size `BXFR` v1 record;
+Provisioning builds the complete fixed-size `BXFR` v1 record inside a private
+sibling staging directory, snapshots that directory's complete identity, and
+requires the first retained descriptor to match the creation snapshot. Only
+after the lock and state are durable and revalidated does it atomically publish
+that exact retained directory inode at the requested name with a create-only
+rename (`RENAME_NOREPLACE` on Linux or `RENAME_EXCL` on macOS). A target raced
+before publication is never opened or adopted; the complete staging tree is
+preserved for inspection. After publication, the requested name, lock and
+state must all resolve back to the retained descriptors before success;
 every later open requires the exact independently retained checkpoint. It
 holds a nonblocking exclusive lock for its lifetime, refuses symlinks,
 hardlinks, non-regular records and group/world-accessible objects, and opens
@@ -142,13 +150,30 @@ relative files with `O_NOFOLLOW`. The lock inode persists permanently and a
 leftover temporary entry makes open and readiness checks fail; it is never
 silently removed or adopted.
 
+Every live load and CAS reopens the configured absolute directory and lock
+names and requires them to identify the exact directory and locked inode kept
+at open. It also retains the exact STATE descriptor, bytes and complete stable
+metadata across an operation. Replacing the directory, lock or state therefore
+fails closed instead of allowing a displaced process to keep serving or
+mutating a store through stale descriptors.
+File evidence includes device, inode, ownership, mode, link count, size,
+nanosecond mtime and nanosecond ctime. Reads take snapshots both before and
+after the bounded bytes; a same-inode rewrite is therefore refused even if an
+attacker restores the original bytes and mtime. Expected ctime changes caused
+by atomic namespace operations are adopted only after exact descriptor, bytes
+and stable-metadata verification, then pinned for the next boundary.
+
 Its CAS compares revision, session and next sequence, then permits only an
 exact one-step revision/sequence advance within that session. It writes a
 canonical checksummed bounded record to an exclusive temporary file, syncs
-it, atomically renames it, syncs the directory, and reads the record back.
-Failure at or after rename returns `Uncertain`, because commit may already be
-visible. A new session is therefore a separate trusted provisioning or
-operator migration event, never data accepted from a request.
+it, and keeps that descriptor open. Provisioning uses an atomic create-only
+rename. Updates atomically exchange TEMP and STATE, verify that STATE is the
+exact candidate and TEMP is the pinned predecessor, sync the directory, then
+unlink the verified predecessor and sync again. Failures at or after exchange
+return `Uncertain`, because commit may already be visible; ambiguous evidence
+is not silently adopted or overwritten. A new session is therefore a separate
+trusted provisioning or operator migration event, never data accepted from a
+request.
 
 `UnixExternalFloorServerConfig` is the production-oriented construction path.
 It has no environment lookup or defaults: callers must provide an absolute,

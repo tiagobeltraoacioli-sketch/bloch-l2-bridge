@@ -179,6 +179,53 @@ fn lock_is_exclusive_persistent_and_unsafe_lock_is_rejected() {
 }
 
 #[test]
+fn live_store_rejects_displaced_lock_before_load_or_cas() {
+    let initial = checkpoint(3, 5);
+    let replacement = checkpoint(4, 6);
+    let temporary = provision("live-lock-replacement", initial);
+    let store = UnixExternalFloorReplayStore::open(&temporary.store(), initial).unwrap();
+    let lock = temporary.store().join(".external-floor-replay.lock");
+    let displaced = temporary.0.join("displaced-lock");
+    let before = fs::read(state(&temporary.store())).unwrap();
+
+    fs::rename(&lock, &displaced).unwrap();
+    let replacement_lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)
+        .unwrap();
+    replacement_lock.sync_all().unwrap();
+
+    assert!(store.load().is_err());
+    assert!(store.compare_and_swap(initial, replacement).is_err());
+    assert_eq!(fs::read(state(&temporary.store())).unwrap(), before);
+    assert!(!temporary
+        .store()
+        .join(".external-floor-replay.tmp")
+        .exists());
+}
+
+#[test]
+fn live_store_rejects_displaced_directory_before_load_or_cas() {
+    let initial = checkpoint(8, 13);
+    let replacement = checkpoint(9, 14);
+    let temporary = provision("live-directory-replacement", initial);
+    let store = UnixExternalFloorReplayStore::open(&temporary.store(), initial).unwrap();
+    let displaced = temporary.0.join("displaced-store");
+    let before = fs::read(state(&temporary.store())).unwrap();
+
+    fs::rename(temporary.store(), &displaced).unwrap();
+    fs::create_dir(temporary.store()).unwrap();
+    fs::set_permissions(temporary.store(), fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(store.load().is_err());
+    assert!(store.compare_and_swap(initial, replacement).is_err());
+    assert_eq!(fs::read(state(&displaced)).unwrap(), before);
+    assert!(!displaced.join(".external-floor-replay.tmp").exists());
+}
+
+#[test]
 fn stale_temporary_file_is_not_removed_or_adopted() {
     let initial = checkpoint(2, 3);
     let temporary = provision("orphan", initial);
