@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -436,6 +436,54 @@ fn create_once_exact_cas_is_durable_and_conflicts_are_non_mutating() {
 
     let bytes = fs::read(temp.store.join(".bxrc-external-anchor")).unwrap();
     assert_eq!(bytes.len(), EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN);
+}
+
+#[test]
+fn live_store_refuses_replaced_lock_before_load_or_cas() {
+    let temp = Temp::new();
+    let initial = anchor(2, 0x31);
+    let replacement = anchor(3, 0x32);
+    let store = UnixExternalFloorCustodianAnchorStore::provision(&temp.store, initial).unwrap();
+    let state = temp.store.join(".bxrc-external-anchor");
+    let lock = temp.store.join(".bxrc-external-anchor.lock");
+    let displaced = temp.root.join("displaced-anchor-lock");
+    let before = fs::read(&state).unwrap();
+
+    fs::rename(&lock, &displaced).unwrap();
+    let replacement_lock = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock)
+        .unwrap();
+    replacement_lock.sync_all().unwrap();
+
+    assert!(store.load().is_err());
+    assert!(store.compare_and_swap(initial, replacement).is_err());
+    assert_eq!(fs::read(state).unwrap(), before);
+    assert!(!temp.store.join(".bxrc-external-anchor.tmp").exists());
+}
+
+#[test]
+fn live_store_refuses_displaced_directory_before_load_or_cas() {
+    let temp = Temp::new();
+    let initial = anchor(4, 0x41);
+    let replacement = anchor(5, 0x42);
+    let store = UnixExternalFloorCustodianAnchorStore::provision(&temp.store, initial).unwrap();
+    let displaced = temp.root.join("displaced-anchor-store");
+    let before = fs::read(temp.store.join(".bxrc-external-anchor")).unwrap();
+
+    fs::rename(&temp.store, &displaced).unwrap();
+    fs::create_dir(&temp.store).unwrap();
+    fs::set_permissions(&temp.store, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(store.load().is_err());
+    assert!(store.compare_and_swap(initial, replacement).is_err());
+    assert_eq!(
+        fs::read(displaced.join(".bxrc-external-anchor")).unwrap(),
+        before
+    );
+    assert!(!displaced.join(".bxrc-external-anchor.tmp").exists());
 }
 
 #[test]

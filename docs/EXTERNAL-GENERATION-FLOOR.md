@@ -325,15 +325,56 @@ successfully report an anchor decision about checkpoint evidence that is no
 longer installed.
 
 `UnixExternalFloorCustodianAnchorStore` is the concrete Unix backend for the
-mandatory external anchor trait. Its create-once provisioning installs the
-explicit initial client anchor; later opens validate a fixed-size checksummed
-record and retain a nonblocking process lock. Exact CAS is serialized both
+mandatory external anchor trait. On Linux, its create-once provisioning
+installs the explicit initial client anchor; provisioning fails with
+`Unsupported` before mutation on macOS and every other non-Linux target.
+Later opens validate a fixed-size checksummed record and retain a nonblocking
+process lock. Exact CAS is serialized both
 between threads and processes, permits only the one- or two-revision advances
 used by normal commit and explicit crash reconciliation, writes by
 exclusive temporary creation plus file/directory sync and atomic rename, and
 returns the observed anchor on a conflict without modifying it. Symlinks,
 hardlinks, wrong ownership or permissions, trailing bytes, corruption and an
 orphan temporary file all fail closed.
+
+Every live load and CAS also reopens the configured absolute directory and
+persistent lock names before and after reading, and at each write boundary.
+They must still identify the exact retained directory and locked inode. A
+renamed directory or replaced lock therefore fails closed before a second
+process can use a different lock inode to authorize conflicting anchor state;
+post-rename divergence is reported as an error rather than acknowledged as a
+successful CAS.
+
+Anchor reads retain the state descriptor and bind its complete inode snapshot
+(including nanosecond modification/change times) to the exact bytes before
+accepting it. Load and open repeat that complete evidence after their final
+directory/lock checks and finish by rebinding the nominal state name to the
+retained inode. Final authority arms a kernel namespace guard before lock/state
+validation and rejects every namespace event or queue overflow, even if an
+attacker restores directory timestamps; retained and named directory identities
+must also remain stable and the public pathname is reopened before the final
+guard drain. Linux uses nonblocking `inotify`; macOS may use a vnode `kqueue`
+guard when validating an already provisioned store, and other Unix targets
+fail `Unsupported`. Updates use an atomic
+create-only install or inode exchange, so a
+concurrent pathname replacement is never silently overwritten; the displaced
+predecessor is moved create-only to a unique `.displaced.*` quarantine name and
+remains there after both sides are verified and synced. The live process never
+unlinks this pathname because a check immediately before `unlink` cannot prove
+that the same inode will still be named at the syscall boundary. Cleanup is an
+offline operator action: stop every writer, retain the evidence descriptor,
+validate its inode and exact bytes against durable history, move it create-only
+to an evidence directory, revalidate, and fsync both directories. Linux
+provisioning creates a cryptographically random staging name through the
+retained parent fd. The parent `inotify` guard is armed before `mkdirat` and
+accepts only the single expected named directory-create event before the new fd
+and identity are proved. A coalesced vnode event cannot prove that sequence, so
+macOS provisioning is deliberately unsupported. Linux then publishes that
+retained directory through its retained parent with an atomic no-replace rename, then
+proves the parent and public names again after every record readback. Both CAS
+and provisioning finish by reopening the nominal state entry and rebinding it
+to the retained descriptor, complete metadata snapshot and exact record bytes;
+a same-content inode substitution after the earlier readback is not accepted.
 
 The backend is operational plumbing, not a claim that ordinary disk is
 rollback-resistant. Its absolute directory must be on separately administered

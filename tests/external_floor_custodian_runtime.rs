@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::cell::{Cell, RefCell};
 use std::fs;
