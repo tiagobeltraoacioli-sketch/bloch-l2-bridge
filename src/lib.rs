@@ -52,6 +52,7 @@ pub use status::{
 pub use watcher::{
     BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint,
     SourceGenerationExhausted, SourceViewToken, VaultSet, VersionedMemorySource,
-    VersionedMemoryView, WatcherSnapshotError, WatcherState, WatcherSyncError, WatcherUpdate,
+    VersionedMemoryView, VersionedSourceRestoreError, VersionedSourceSeal, WatcherSnapshotError,
+    WatcherState, WatcherSyncError, WatcherUpdate,
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};

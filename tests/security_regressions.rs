@@ -5,8 +5,8 @@ use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
     BlockSource, BlockSourceView, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource,
-    SourceCheckpoint, VaultSet, VersionedMemorySource, WatcherSnapshotError, WatcherState,
-    WatcherSyncError,
+    SourceCheckpoint, VaultSet, VersionedMemorySource, VersionedSourceRestoreError,
+    VersionedSourceSeal, WatcherSnapshotError, WatcherState, WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -699,6 +699,63 @@ fn versioned_memory_adapter_invalidates_handles_and_prevents_aba() {
         Err(WatcherSyncError::ViewInvalidated)
     );
     assert_eq!(watcher.state(), stable);
+}
+
+#[test]
+fn versioned_source_seal_detects_restart_rollback_and_snapshot_mismatch() {
+    let (_, source) = fixture(1, 3);
+    let adapter = VersionedMemorySource::new(source.clone());
+    adapter.install(source.clone()).unwrap();
+    let seal = adapter.seal().unwrap();
+    assert_eq!(seal.generation(), 1);
+    assert_eq!(seal.checkpoint().unwrap().height, 2);
+
+    let encoded = serde_json::to_vec(&seal).unwrap();
+    let decoded: VersionedSourceSeal = serde_json::from_slice(&encoded).unwrap();
+    let restored = VersionedMemorySource::restore(source.clone(), decoded, 1).unwrap();
+    assert_eq!(restored.view().view_token(), adapter.view().view_token());
+    assert_eq!(restored.seal().unwrap(), seal);
+
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), seal, 2),
+        Err(VersionedSourceRestoreError::Rollback {
+            minimum: 2,
+            found: 1,
+        })
+    ));
+    let mut truncated = source.clone();
+    truncated.reorg_to(2);
+    assert!(matches!(
+        VersionedMemorySource::restore(truncated, seal, 1),
+        Err(VersionedSourceRestoreError::SourceMismatch)
+    ));
+
+    let mut tampered = serde_json::to_value(seal).unwrap();
+    tampered["source_commitment"][0] = serde_json::json!(255);
+    let tampered: VersionedSourceSeal = serde_json::from_value(tampered).unwrap();
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), tampered, 1),
+        Err(VersionedSourceRestoreError::SourceMismatch)
+    ));
+    let mut future = serde_json::to_value(seal).unwrap();
+    future["version"] = serde_json::json!(2);
+    let future: VersionedSourceSeal = serde_json::from_value(future).unwrap();
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), future, 1),
+        Err(VersionedSourceRestoreError::UnsupportedVersion { found: 2 })
+    ));
+
+    let same_content = VersionedMemorySource::new(source);
+    assert_eq!(
+        same_content.seal().unwrap().source_commitment(),
+        seal.source_commitment(),
+        "commitment must be reproducible independently of generation"
+    );
+    same_content.invalidate().unwrap();
+    assert!(matches!(
+        same_content.seal(),
+        Err(VersionedSourceRestoreError::Invalidated)
+    ));
 }
 
 #[test]

@@ -69,6 +69,7 @@ use std::collections::BTreeSet;
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
+use tiny_keccak::{Hasher, Keccak};
 
 use crate::envelope::{extract_deposit_envelope, TxOutput};
 use crate::status::{confirmation_depth, ConfirmationRequirement, DepositEvent};
@@ -264,6 +265,91 @@ impl core::fmt::Display for SourceGenerationExhausted {
 
 impl std::error::Error for SourceGenerationExhausted {}
 
+const SOURCE_SEAL_VERSION: u32 = 1;
+
+fn memory_source_commitment(source: &MemorySource) -> [u8; 32] {
+    let mut hash = Keccak::v256();
+    hash.update(b"BLOCH-L2-BLOCK-SOURCE-v1\0");
+    hash.update(&(source.blocks.len() as u64).to_be_bytes());
+    for block in &source.blocks {
+        hash.update(&block.height.to_be_bytes());
+        hash.update(&block.hash);
+        hash.update(&block.parent_hash);
+        hash.update(&(block.txs.len() as u64).to_be_bytes());
+        for tx in &block.txs {
+            hash.update(&tx.txid);
+            hash.update(&(tx.outputs.len() as u64).to_be_bytes());
+            for output in &tx.outputs {
+                hash.update(&output.value.to_be_bytes());
+                hash.update(&(output.script_pubkey.len() as u64).to_be_bytes());
+                hash.update(&output.script_pubkey);
+            }
+        }
+    }
+    let mut commitment = [0; 32];
+    hash.finalize(&mut commitment);
+    commitment
+}
+
+/// Persistable commitment to one published versioned source.
+///
+/// The host must atomically persist this seal with the source snapshot and
+/// retain `generation` (or a greater floor) in an independently protected,
+/// non-rollbackable store. Persisting the floor beside the same rollbackable
+/// bytes does not prevent rollback, and an attacker who can rewrite the
+/// snapshot, seal and floor together is outside this local contract. The
+/// commitment detects mismatched bytes; it is not a signature or proof of
+/// canonicality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionedSourceSeal {
+    version: u32,
+    generation: u64,
+    checkpoint: Option<SourceCheckpoint>,
+    source_commitment: [u8; 32],
+}
+
+impl VersionedSourceSeal {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn checkpoint(&self) -> Option<SourceCheckpoint> {
+        self.checkpoint
+    }
+
+    pub fn source_commitment(&self) -> [u8; 32] {
+        self.source_commitment
+    }
+}
+
+/// Fail-closed source seal/restore errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionedSourceRestoreError {
+    Invalidated,
+    UnsupportedVersion { found: u32 },
+    Rollback { minimum: u64, found: u64 },
+    SourceMismatch,
+}
+
+impl core::fmt::Display for VersionedSourceRestoreError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalidated => write!(f, "cannot seal an invalidated block source"),
+            Self::UnsupportedVersion { found } => {
+                write!(f, "unsupported block-source seal version {found}")
+            }
+            Self::Rollback { minimum, found } => write!(
+                f,
+                "block-source generation {found} is below trusted floor {minimum}"
+            ),
+            Self::SourceMismatch => write!(f, "block-source snapshot does not match its seal"),
+        }
+    }
+}
+
+impl std::error::Error for VersionedSourceRestoreError {}
+
 #[derive(Debug)]
 struct VersionedMemoryState {
     source: MemorySource,
@@ -298,6 +384,60 @@ impl VersionedMemorySource {
                 valid: true,
             }),
         }
+    }
+
+    /// Reconstruct a versioned adapter from atomically persisted source bytes
+    /// and a seal, enforcing an independently trusted generation floor.
+    pub fn restore(
+        source: MemorySource,
+        seal: VersionedSourceSeal,
+        minimum_generation: u64,
+    ) -> Result<Self, VersionedSourceRestoreError> {
+        if seal.version != SOURCE_SEAL_VERSION {
+            return Err(VersionedSourceRestoreError::UnsupportedVersion {
+                found: seal.version,
+            });
+        }
+        if seal.generation < minimum_generation {
+            return Err(VersionedSourceRestoreError::Rollback {
+                minimum: minimum_generation,
+                found: seal.generation,
+            });
+        }
+        let checkpoint = source.blocks.last().map(|block| SourceCheckpoint {
+            height: block.height,
+            hash: block.hash,
+        });
+        if seal.checkpoint != checkpoint
+            || seal.source_commitment != memory_source_commitment(&source)
+        {
+            return Err(VersionedSourceRestoreError::SourceMismatch);
+        }
+        Ok(Self {
+            state: RwLock::new(VersionedMemoryState {
+                source,
+                generation: seal.generation,
+                valid: true,
+            }),
+        })
+    }
+
+    /// Produce the small deterministic seal the host persists atomically with
+    /// the staged source snapshot.
+    pub fn seal(&self) -> Result<VersionedSourceSeal, VersionedSourceRestoreError> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        if !state.valid {
+            return Err(VersionedSourceRestoreError::Invalidated);
+        }
+        Ok(VersionedSourceSeal {
+            version: SOURCE_SEAL_VERSION,
+            generation: state.generation,
+            checkpoint: state.source.blocks.last().map(|block| SourceCheckpoint {
+                height: block.height,
+                hash: block.hash,
+            }),
+            source_commitment: memory_source_commitment(&state.source),
+        })
     }
 
     /// Capture a handle to the current generation. The handle itself does not
@@ -569,7 +709,8 @@ pub struct WatcherState {
 /// preserve it through a stronger trust/durability boundary. Bloch has no
 /// finite finality: an authenticated reorg at or below this height makes the
 /// check fail closed, and only the host's explicit fork policy may replace it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceCheckpoint {
     /// Absolute L1 block height.
     pub height: u64,
