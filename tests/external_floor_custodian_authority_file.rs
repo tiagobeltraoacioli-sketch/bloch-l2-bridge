@@ -11,8 +11,9 @@ use bloch_l2_bridge::{
     external_floor_custodian_anchor_continuity_acceptance_message,
     external_floor_custodian_anchor_continuity_authorization_message,
     external_floor_custodian_expected_authority_checkpoint, ExternalFloorCustodianAnchorApproval,
-    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianClientAnchor,
-    UnixExternalFloorCustodianAuthorityStore, EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
+    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianAuthorityReconciliation,
+    ExternalFloorCustodianClientAnchor, UnixExternalFloorCustodianAuthorityStore,
+    EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -242,5 +243,106 @@ fn wrong_expected_receipt_and_orphan_temp_are_rejected() {
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(
         UnixExternalFloorCustodianAuthorityStore::open_expected(&temp.store, checkpoint).is_err()
+    );
+}
+
+#[test]
+fn reconciliation_accepts_only_exact_prior_or_derived_next_across_restart() {
+    let temp = Temp::new();
+    let deployment = [0x91; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(5, 0x51);
+    let next = anchor(6, 0x52);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    drop(store);
+    let approval = continuity(&first, &second, deployment, initial, next);
+    let checkpoint1 =
+        external_floor_custodian_expected_authority_checkpoint(checkpoint0, approval).unwrap();
+
+    let (prior, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+        &temp.store,
+        checkpoint0,
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityReconciliation::NotCommitted {
+            current: checkpoint0
+        }
+    );
+    assert_eq!(prior.checkpoint().unwrap(), checkpoint0);
+    assert_eq!(prior.accept_continuity(approval).unwrap(), checkpoint1);
+    drop(prior);
+
+    // A new process can resolve an incomplete export using only the retained
+    // prior receipt and the same signed artifact.
+    let (restarted, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+        &temp.store,
+        checkpoint0,
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityReconciliation::Committed {
+            previous: checkpoint0,
+            current: checkpoint1
+        }
+    );
+    assert_eq!(restarted.checkpoint().unwrap(), checkpoint1);
+}
+
+#[test]
+fn reconciliation_rejects_third_state_and_never_adopts_it() {
+    let temp = Temp::new();
+    let deployment = [0xa1; 32];
+    let first = signer();
+    let second = signer();
+    let third = signer();
+    let initial = anchor(10, 0x61);
+    let next = anchor(11, 0x62);
+    let later = anchor(12, 0x63);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    let first_approval = continuity(&first, &second, deployment, initial, next);
+    let checkpoint1 = store.accept_continuity(first_approval).unwrap();
+    let checkpoint2 = store
+        .accept_continuity(continuity(&second, &third, deployment, next, later))
+        .unwrap();
+    drop(store);
+
+    let error = match UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+        &temp.store,
+        checkpoint0,
+        first_approval,
+    ) {
+        Ok(_) => panic!("third authority state must fail closed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    // The public receipt for the actual later state is still required to open;
+    // reconciliation did not expose or bless it.
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::open_expected(&temp.store, checkpoint1).is_err()
+    );
+    assert_eq!(
+        UnixExternalFloorCustodianAuthorityStore::open_expected(&temp.store, checkpoint2)
+            .unwrap()
+            .checkpoint()
+            .unwrap(),
+        checkpoint2
     );
 }

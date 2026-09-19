@@ -398,11 +398,17 @@ before operators rely on it for restart rollback detection. After export, a
 restart with the previous receipt fails, and restoring the operational anchor
 below the new floor also fails. A crash after the local receipt advances but
 before export is deliberately fail-closed: derive the candidate next receipt
-again from the retained prior receipt and the same signed continuity artifact,
-then try the exact prior and candidate states. Do not adopt the locally read
-receipt. This live checkpoint is authenticated operational evidence; it is
-not proof that an above-floor head descended from an earlier floor and it does
-not make either local filesystem anti-rollback storage.
+again from the retained prior receipt and the same signed continuity artifact.
+`UnixExternalFloorCustodianAuthorityStore::reconcile_continuity` performs that
+check once under the process lock and returns `NotCommitted` only for the exact
+prior receipt or `Committed` only for the exact derived next receipt. A third
+record, orphan temporary file, invalid signature or unreadable store fails
+closed. It does not retry the transition and never returns a tuple learned from
+disk. The returned store remains pinned to the selected known receipt across
+an operator restart; export a `Committed.current` receipt before relying on it
+as the new restart floor. This live checkpoint is authenticated operational
+evidence; it is not proof that an above-floor head descended from an earlier
+floor and it does not make either local filesystem anti-rollback storage.
 
 This composition still does not create independent anti-rollback storage.
 The expected authority checkpoint must come from another trust domain, and

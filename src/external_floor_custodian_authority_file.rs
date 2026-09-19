@@ -52,6 +52,25 @@ pub struct ExternalFloorCustodianAuthorityCheckpoint {
     pub record_hash: [u8; 32],
 }
 
+/// Exact result of reconciling one possibly ambiguous authority transition.
+///
+/// Both variants contain caller-derived checkpoints. The reconciliation never
+/// returns or adopts an authority tuple merely because it was found on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFloorCustodianAuthorityReconciliation {
+    /// The local write did not commit; the prior externally retained receipt
+    /// remains current.
+    NotCommitted {
+        current: ExternalFloorCustodianAuthorityCheckpoint,
+    },
+    /// The exact dual-signed transition committed locally and its receipt can
+    /// now be exported to the independent trust domain.
+    Committed {
+        previous: ExternalFloorCustodianAuthorityCheckpoint,
+        current: ExternalFloorCustodianAuthorityCheckpoint,
+    },
+}
+
 fn invalid(message: &'static str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
@@ -420,6 +439,53 @@ impl UnixExternalFloorCustodianAuthorityStore {
             _lock: lock,
             expected: Mutex::new(expected),
         })
+    }
+
+    /// Reconciles one possibly ambiguous continuity write without retrying it.
+    ///
+    /// The only admissible disk records are the exact externally retained
+    /// prior checkpoint and the exact next checkpoint derived from the same
+    /// dual-signed approval. Any other record, an orphan temporary file, or an
+    /// unreadable store fails closed. The returned store is pinned to the
+    /// selected caller-derived checkpoint for normal restart checks.
+    pub fn reconcile_continuity(
+        path: &Path,
+        previous: ExternalFloorCustodianAuthorityCheckpoint,
+        approval: ExternalFloorCustodianAnchorContinuityApproval,
+    ) -> io::Result<(Self, ExternalFloorCustodianAuthorityReconciliation)> {
+        // Derive and authenticate both admissible states before consulting the
+        // local rollbackable store. This prevents disk contents from becoming
+        // an authority-selection input.
+        let next = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
+        let directory = open_directory(path)?;
+        let lock = Lock::acquire(&directory)?;
+        let current = read_checkpoint(&directory)?;
+        let (selected, reconciliation) = if current == previous {
+            (
+                previous,
+                ExternalFloorCustodianAuthorityReconciliation::NotCommitted { current: previous },
+            )
+        } else if current == next {
+            (
+                next,
+                ExternalFloorCustodianAuthorityReconciliation::Committed {
+                    previous,
+                    current: next,
+                },
+            )
+        } else {
+            return Err(denied(
+                "BXRC authority reconciliation found neither exact prior nor derived next checkpoint",
+            ));
+        };
+        Ok((
+            Self {
+                directory,
+                _lock: lock,
+                expected: Mutex::new(selected),
+            },
+            reconciliation,
+        ))
     }
 
     fn expected(&self) -> io::Result<MutexGuard<'_, ExternalFloorCustodianAuthorityCheckpoint>> {
