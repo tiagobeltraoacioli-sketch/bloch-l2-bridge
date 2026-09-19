@@ -78,13 +78,42 @@ provisioned 256-bit secret and authenticates all of:
 - exact request binding; and
 - the byte-exact inner `BXFL` payload and its length.
 
-Decoding requires the expected direction and configured peer pair. A server
-uses `ExternalFloorReplayGuard`, provisioned with a pre-authorized session
-nonce and next sequence, to reject duplicate, skipped, reordered, or
-cross-session requests. It consumes the sequence only after the KMAC and the
-canonical inner record both verify. A new session needs a new guard only after
-that nonce is approved by the independently durable session registry; accepting
-arbitrary session changes from the wire would re-enable old-session replay.
+Decoding requires the expected direction and configured peer pair. The
+in-memory `ExternalFloorReplayGuard` remains suitable only for tests. A real
+server uses `DurableAuthenticatedExternalFloorServer` with an
+`ExternalFloorReplayStore` and an independently retained
+`ExternalFloorReplayCheckpoint`. The checkpoint binds an authorized session,
+exact next sequence, and monotonic revision. Opening after restart requires an
+exact match between durable state and the trusted checkpoint, exposing a
+rolled-back or unexpectedly advanced backend. A new session is authorized only
+by provisioning a new checkpoint through trusted administration; a nonce from
+the wire can never select or create a session.
+
+For each request the server verifies KMAC, canonical inner encoding, duplicated
+outer fields, authorized session, and exact sequence before atomically changing
+the complete checkpoint with compare-and-swap. The durable reservation commits
+before `ExternalFloorBoundary::transact` is called. Duplicate, skipped,
+reordered, cross-session, exhausted-sequence, and exhausted-revision requests
+therefore cannot reach the external CAS. A boundary error or invalid response
+leaves the request sequence consumed and closes the server instance. A response
+lost after successful encoding cannot be observed by this synchronous server,
+but its durable sequence is still consumed, so retransmission is rejected.
+Availability may require a newly authorized reconciliation session, but the
+potentially executed operation is never retried.
+
+A CAS conflict, storage error, or indeterminate CAS result permanently closes
+that server instance before any boundary effect. Do not automatically restart
+it. Reconcile the backend against the independently retained old and candidate
+checkpoints, then explicitly trust exactly one result. A backend returning
+`Committed` promises that the new state is already durable and visible to
+linearizable loads. Ordinary files, databases without linearizable CAS, and
+snapshots in the same rollback domain do not meet this contract.
+
+There is an intentional crash-availability tradeoff. If the process dies after
+the replay CAS but before publishing the replacement checkpoint to its
+independent custodian, restart with the older trusted checkpoint refuses to
+open. Operators must reconcile the old and candidate revisions; copying the
+backend value into the trusted-checkpoint input defeats rollback detection.
 
 `AuthenticatedExternalFloorBoundary` connects this framing to
 `ExternalGenerationFloor` through an application-supplied byte transport. A
@@ -96,9 +125,12 @@ session nonce, so there is no weaker recovery message.
 
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
-does not provide non-repudiation. The in-memory replay guard loses its state on
-restart. Production still requires mTLS (or an equivalently authenticated and
-confidential channel), HSM-backed/separated key custody, durable authorization
-and anti-replay state, rollback-resistant linearizable CAS storage, rate and
-frame limits, and independent service monitoring. None of this establishes L1
-canonicality or finality and none of it authorizes funds.
+does not provide non-repudiation. This crate defines the durable replay-store
+contract but provides no production backend. Production still requires mTLS
+(or an equivalently authenticated and confidential channel), HSM-backed and
+separated key custody, rollback-resistant linearizable CAS storage in a
+different failure domain, independent checkpoint retention, tested operator
+reconciliation, rate/frame limits, backups, and monitoring. Crash after replay
+reservation but before response intentionally reduces availability; it must not
+be "fixed" by replaying the request. None of this establishes L1 canonicality
+or finality and none of it authorizes funds.

@@ -60,9 +60,12 @@ pub use external_floor::{
 pub use external_floor_auth::{
     decode_authenticated_external_floor_request, decode_authenticated_external_floor_response,
     encode_authenticated_external_floor_request, encode_authenticated_external_floor_response,
-    AuthenticatedExternalFloorBoundary, ExternalFloorAuthError, ExternalFloorByteTransport,
-    ExternalFloorPeerAuthentication, ExternalFloorReplayGuard, EXTERNAL_FLOOR_AUTH_MAGIC,
-    EXTERNAL_FLOOR_AUTH_MAX_LEN, EXTERNAL_FLOOR_AUTH_VERSION,
+    AuthenticatedExternalFloorBoundary, DurableAuthenticatedExternalFloorServer,
+    DurableExternalFloorReplayGuard, ExternalFloorAuthError, ExternalFloorByteTransport,
+    ExternalFloorDurableReplayError, ExternalFloorPeerAuthentication,
+    ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint, ExternalFloorReplayGuard,
+    ExternalFloorReplayStore, EXTERNAL_FLOOR_AUTH_MAGIC, EXTERNAL_FLOOR_AUTH_MAX_LEN,
+    EXTERNAL_FLOOR_AUTH_VERSION,
 };
 #[cfg(unix)]
 pub use external_floor_codec::{

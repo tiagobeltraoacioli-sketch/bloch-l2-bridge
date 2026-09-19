@@ -451,6 +451,14 @@ serialization before wiring the RPC source.
   guard advances only after full verification. This remains symmetric-key,
   in-memory defense in depth and does not replace mTLS, HSM custody, a durable
   anti-replay/session registry, or rollback-resistant CAS storage.
+* **External-floor durable replay interface** — the authenticated server path
+  now checks an independently retained `(revision, authorized session,
+  next_sequence)` checkpoint and durably CAS-reserves the sequence before any
+  external floor operation. Restart mismatch, replay, gap, reorder, session
+  substitution, exhaustion, CAS conflict, and ambiguous storage outcome fail
+  closed. This is an interface and ordering guarantee, not a deployed backend:
+  production still needs rollback-resistant linearizable storage, external
+  checkpoint custody, mTLS, HSM key separation, and operator reconciliation.
 * **`ATOM_SCALE`** — exact both ways; `u64::MAX · 10¹⁰` fits u128; dust and
   overflow are typed refusals; the Solidity `_initiate` enforces the same
   `% ATOM_SCALE == 0` and `≤ uint64::max` rules.

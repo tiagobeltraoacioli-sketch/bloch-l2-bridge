@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Authenticated, role-bound framing for canonical `BXFL` records.
 //!
-//! This module deliberately stops at message authentication. It supplies no
-//! network transport, confidentiality, durable replay journal, key isolation,
-//! or rollback-resistant CAS storage. Production deployments still need mTLS
-//! (or an equivalent authenticated channel), HSM-backed key custody, and a
-//! durable server-side session/sequence registry.
+//! This module supplies message authentication plus an interface for durable,
+//! linearizable replay-state CAS. It supplies no network transport,
+//! confidentiality, storage backend, key isolation, or physical anti-rollback
+//! boundary. Production deployments still need mTLS (or an equivalent
+//! authenticated channel), HSM-backed key custody, and an independently
+//! retained replay checkpoint.
 
 use core::fmt;
+use std::cell::RefCell;
 use std::io;
 
 use tiny_keccak::{Hasher, Kmac};
@@ -101,6 +103,217 @@ impl Drop for ExternalFloorPeerAuthentication {
 pub struct ExternalFloorReplayGuard {
     session_nonce: [u8; 32],
     next_sequence: u64,
+}
+
+/// Independently retained checkpoint for one authorized server session.
+///
+/// Production callers must retain this value outside the rollback domain of
+/// the replay store and supply it again after restart. Equality with the
+/// store's value is required before traffic is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalFloorReplayCheckpoint {
+    pub revision: u64,
+    pub session_nonce: [u8; 32],
+    pub next_sequence: u64,
+}
+
+impl ExternalFloorReplayCheckpoint {
+    pub fn new(
+        revision: u64,
+        session_nonce: [u8; 32],
+        next_sequence: u64,
+    ) -> Result<Self, ExternalFloorDurableReplayError> {
+        if session_nonce == [0; 32] {
+            return Err(ExternalFloorDurableReplayError::InvalidCheckpoint(
+                "authorized session nonce is all zero",
+            ));
+        }
+        Ok(Self {
+            revision,
+            session_nonce,
+            next_sequence,
+        })
+    }
+}
+
+/// Result of an atomic replay-checkpoint compare-and-swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFloorReplayCasOutcome {
+    /// The replacement is durably committed and visible to later loads.
+    Committed,
+    /// The expected checkpoint did not match the current durable checkpoint.
+    Conflict(ExternalFloorReplayCheckpoint),
+    /// The caller cannot determine whether the replacement committed.
+    Uncertain,
+}
+
+/// Durable, linearizable storage used by the authenticated server path.
+///
+/// `compare_and_swap` must compare the complete checkpoint, durably commit the
+/// complete replacement atomically, and be linearizable with `load`. An I/O
+/// error or [`ExternalFloorReplayCasOutcome::Uncertain`] is treated as an
+/// ambiguous write: the server instance closes and no external operation is
+/// executed. Recovery then requires an independently trusted checkpoint and
+/// reconciliation with the backend; blind retry is forbidden.
+pub trait ExternalFloorReplayStore {
+    fn load(&self) -> io::Result<ExternalFloorReplayCheckpoint>;
+
+    fn compare_and_swap(
+        &self,
+        expected: ExternalFloorReplayCheckpoint,
+        replacement: ExternalFloorReplayCheckpoint,
+    ) -> io::Result<ExternalFloorReplayCasOutcome>;
+}
+
+#[derive(Debug)]
+pub enum ExternalFloorDurableReplayError {
+    InvalidCheckpoint(&'static str),
+    Store(io::Error),
+    CheckpointMismatch {
+        trusted: ExternalFloorReplayCheckpoint,
+        stored: ExternalFloorReplayCheckpoint,
+    },
+    SessionNotAuthorized,
+    ReplayOrOutOfOrder {
+        expected: u64,
+        found: u64,
+    },
+    SequenceExhausted,
+    RevisionExhausted,
+    CompareAndSwapConflict(ExternalFloorReplayCheckpoint),
+    CompareAndSwapUncertain,
+    Closed,
+}
+
+impl fmt::Display for ExternalFloorDurableReplayError {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            output,
+            "durable external floor replay state rejected: {self:?}"
+        )
+    }
+}
+
+impl std::error::Error for ExternalFloorDurableReplayError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Fail-closed owner of one exact durable replay checkpoint.
+pub struct DurableExternalFloorReplayGuard<S> {
+    store: S,
+    checkpoint: ExternalFloorReplayCheckpoint,
+    closed: bool,
+}
+
+impl<S: ExternalFloorReplayStore> DurableExternalFloorReplayGuard<S> {
+    /// Open only when durable state exactly matches independently retained
+    /// trusted state. This makes rollback and unexpected advancement visible.
+    pub fn open(
+        store: S,
+        trusted: ExternalFloorReplayCheckpoint,
+    ) -> Result<Self, ExternalFloorDurableReplayError> {
+        validate_replay_checkpoint(trusted)?;
+        let stored = store
+            .load()
+            .map_err(ExternalFloorDurableReplayError::Store)?;
+        validate_replay_checkpoint(stored)?;
+        if stored != trusted {
+            return Err(ExternalFloorDurableReplayError::CheckpointMismatch { trusted, stored });
+        }
+        Ok(Self {
+            store,
+            checkpoint: trusted,
+            closed: false,
+        })
+    }
+
+    pub fn checkpoint(&self) -> ExternalFloorReplayCheckpoint {
+        self.checkpoint
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Refuse all later reservations after an ambiguous downstream outcome.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    /// Atomically consume the exact next request sequence.
+    ///
+    /// Call this only after authenticating and canonically decoding the full
+    /// request, and before performing any operation described by that request.
+    pub fn reserve(
+        &mut self,
+        session_nonce: [u8; 32],
+        sequence: u64,
+    ) -> Result<ExternalFloorReplayCheckpoint, ExternalFloorDurableReplayError> {
+        if self.closed {
+            return Err(ExternalFloorDurableReplayError::Closed);
+        }
+        if session_nonce != self.checkpoint.session_nonce {
+            return Err(ExternalFloorDurableReplayError::SessionNotAuthorized);
+        }
+        if sequence != self.checkpoint.next_sequence {
+            return Err(ExternalFloorDurableReplayError::ReplayOrOutOfOrder {
+                expected: self.checkpoint.next_sequence,
+                found: sequence,
+            });
+        }
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(ExternalFloorDurableReplayError::SequenceExhausted)?;
+        let revision = self
+            .checkpoint
+            .revision
+            .checked_add(1)
+            .ok_or(ExternalFloorDurableReplayError::RevisionExhausted)?;
+        let replacement = ExternalFloorReplayCheckpoint {
+            revision,
+            session_nonce,
+            next_sequence,
+        };
+        let outcome = match self.store.compare_and_swap(self.checkpoint, replacement) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.closed = true;
+                return Err(ExternalFloorDurableReplayError::Store(error));
+            }
+        };
+        match outcome {
+            ExternalFloorReplayCasOutcome::Committed => {
+                self.checkpoint = replacement;
+                Ok(replacement)
+            }
+            ExternalFloorReplayCasOutcome::Conflict(current) => {
+                self.closed = true;
+                Err(ExternalFloorDurableReplayError::CompareAndSwapConflict(
+                    current,
+                ))
+            }
+            ExternalFloorReplayCasOutcome::Uncertain => {
+                self.closed = true;
+                Err(ExternalFloorDurableReplayError::CompareAndSwapUncertain)
+            }
+        }
+    }
+}
+
+fn validate_replay_checkpoint(
+    checkpoint: ExternalFloorReplayCheckpoint,
+) -> Result<(), ExternalFloorDurableReplayError> {
+    if checkpoint.session_nonce == [0; 32] {
+        return Err(ExternalFloorDurableReplayError::InvalidCheckpoint(
+            "authorized session nonce is all zero",
+        ));
+    }
+    Ok(())
 }
 
 impl ExternalFloorReplayGuard {
@@ -203,6 +416,17 @@ pub fn decode_authenticated_external_floor_request(
     authentication: &ExternalFloorPeerAuthentication,
     replay_guard: &mut ExternalFloorReplayGuard,
 ) -> Result<ExternalFloorRequest, ExternalFloorAuthError> {
+    let request = decode_authenticated_external_floor_request_inner(encoded, authentication)?;
+    // Consume replay state only after both authentication and canonical inner
+    // decoding succeed, so malformed traffic cannot advance the window.
+    replay_guard.accept(request.session_nonce, request.sequence)?;
+    Ok(request)
+}
+
+fn decode_authenticated_external_floor_request_inner(
+    encoded: &[u8],
+    authentication: &ExternalFloorPeerAuthentication,
+) -> Result<ExternalFloorRequest, ExternalFloorAuthError> {
     let envelope = decode_envelope(
         encoded,
         REQUEST_DIRECTION,
@@ -212,9 +436,6 @@ pub fn decode_authenticated_external_floor_request(
     )?;
     let request = decode_external_floor_request(envelope.payload)?;
     validate_outer_binding(&envelope, &request)?;
-    // Consume replay state only after both authentication and canonical inner
-    // decoding succeed, so malformed traffic cannot advance the window.
-    replay_guard.accept(request.session_nonce, request.sequence)?;
     Ok(request)
 }
 
@@ -297,6 +518,74 @@ impl<T: ExternalFloorByteTransport> ExternalFloorBoundary
         let response = self.transport.exchange(&encoded)?;
         decode_authenticated_external_floor_response(&response, &request, &self.authentication)
             .map_err(auth_io_error)
+    }
+}
+
+/// Server-side integration that durably consumes replay state before invoking
+/// the external generation-floor boundary.
+///
+/// A lost response or boundary error leaves the sequence consumed. A boundary
+/// error also closes this server instance. Recovery may require a fresh
+/// authorized session and reconciliation, but never permits a potentially
+/// executed CAS to be replayed.
+pub struct DurableAuthenticatedExternalFloorServer<S, B> {
+    replay: RefCell<DurableExternalFloorReplayGuard<S>>,
+    boundary: B,
+    authentication: ExternalFloorPeerAuthentication,
+}
+
+impl<S: ExternalFloorReplayStore, B: ExternalFloorBoundary>
+    DurableAuthenticatedExternalFloorServer<S, B>
+{
+    pub fn open(
+        store: S,
+        trusted: ExternalFloorReplayCheckpoint,
+        boundary: B,
+        authentication: ExternalFloorPeerAuthentication,
+    ) -> Result<Self, ExternalFloorDurableReplayError> {
+        Ok(Self {
+            replay: RefCell::new(DurableExternalFloorReplayGuard::open(store, trusted)?),
+            boundary,
+            authentication,
+        })
+    }
+
+    pub fn handle(&self, encoded: &[u8]) -> io::Result<Vec<u8>> {
+        let request =
+            decode_authenticated_external_floor_request_inner(encoded, &self.authentication)
+                .map_err(auth_io_error)?;
+        self.replay
+            .borrow_mut()
+            .reserve(request.session_nonce, request.sequence)
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+
+        // The durable reservation deliberately precedes all boundary effects.
+        let response = match self.boundary.transact(request) {
+            Ok(response) => response,
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                return Err(error);
+            }
+        };
+        match encode_authenticated_external_floor_response(
+            &response,
+            &request,
+            &self.authentication,
+        ) {
+            Ok(encoded) => Ok(encoded),
+            Err(error) => {
+                self.replay.borrow_mut().close();
+                Err(auth_io_error(error))
+            }
+        }
+    }
+
+    pub fn checkpoint(&self) -> ExternalFloorReplayCheckpoint {
+        self.replay.borrow().checkpoint()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.replay.borrow().is_closed()
     }
 }
 
