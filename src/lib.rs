@@ -95,7 +95,10 @@ pub use external_floor_custodian::{
 };
 #[cfg(unix)]
 pub use external_floor_custodian_anchor_file::{
-    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+    external_floor_custodian_anchor_approval_message,
+    verify_external_floor_custodian_anchor_approval, ExternalFloorCustodianAnchorApproval,
+    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_file::{

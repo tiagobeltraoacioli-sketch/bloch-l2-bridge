@@ -8,10 +8,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::{
+    external_floor_custodian_anchor_approval_message,
+    verify_external_floor_custodian_anchor_approval, ExternalFloorCustodianAnchorApproval,
     ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorStore,
     ExternalFloorCustodianClientAnchor, UnixExternalFloorCustodianAnchorStore,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -47,6 +51,99 @@ fn anchor(revision: u64, byte: u8) -> ExternalFloorCustodianClientAnchor {
         revision,
         commitment: [byte; 32],
     }
+}
+
+fn signer() -> Ed25519KeyPair {
+    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap()
+}
+
+fn verifying_key(signer: &Ed25519KeyPair) -> [u8; 32] {
+    signer.public_key().as_ref().try_into().unwrap()
+}
+
+fn approval(
+    signer: &Ed25519KeyPair,
+    deployment_id: [u8; 32],
+    anchor: ExternalFloorCustodianClientAnchor,
+) -> ExternalFloorCustodianAnchorApproval {
+    let message = external_floor_custodian_anchor_approval_message(deployment_id, anchor);
+    let mut signature = [0_u8; 64];
+    signature.copy_from_slice(signer.sign(&message).as_ref());
+    ExternalFloorCustodianAnchorApproval {
+        deployment_id,
+        anchor,
+        signature,
+    }
+}
+
+#[test]
+fn offline_approval_binds_deployment_anchor_and_verifying_key() {
+    let deployment = [0x44; 32];
+    let approved_anchor = anchor(7, 0x55);
+    let signer = signer();
+    let verifying_key = verifying_key(&signer);
+    let approved = approval(&signer, deployment, approved_anchor);
+    assert_eq!(
+        verify_external_floor_custodian_anchor_approval(deployment, verifying_key, approved)
+            .unwrap(),
+        approved_anchor
+    );
+
+    assert!(
+        verify_external_floor_custodian_anchor_approval([0x45; 32], verifying_key, approved)
+            .is_err()
+    );
+    assert!(
+        verify_external_floor_custodian_anchor_approval(deployment, [0x99; 32], approved).is_err()
+    );
+    let mut tampered = approved;
+    tampered.anchor.revision += 1;
+    assert!(
+        verify_external_floor_custodian_anchor_approval(deployment, verifying_key, tampered)
+            .is_err()
+    );
+}
+
+#[test]
+fn approved_provisioning_and_inspection_refuse_unapproved_disk_state() {
+    let temp = Temp::new();
+    let deployment = [0x66; 32];
+    let initial = anchor(0, 0x11);
+    let next = anchor(1, 0x22);
+    let signer = signer();
+    let verifying_key = verifying_key(&signer);
+    let initial_approval = approval(&signer, deployment, initial);
+    let store = UnixExternalFloorCustodianAnchorStore::provision_approved(
+        &temp.store,
+        deployment,
+        verifying_key,
+        initial_approval,
+    )
+    .unwrap();
+    assert_eq!(store.load().unwrap(), initial);
+    assert_eq!(
+        store.compare_and_swap(initial, next).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    drop(store);
+
+    assert!(UnixExternalFloorCustodianAnchorStore::open_approved(
+        &temp.store,
+        deployment,
+        verifying_key,
+        initial_approval,
+    )
+    .is_err());
+    let next_approval = approval(&signer, deployment, next);
+    let inspected = UnixExternalFloorCustodianAnchorStore::open_approved(
+        &temp.store,
+        deployment,
+        verifying_key,
+        next_approval,
+    )
+    .unwrap();
+    assert_eq!(inspected.load().unwrap(), next);
 }
 
 #[test]

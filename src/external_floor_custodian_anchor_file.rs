@@ -14,6 +14,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use ring::signature::{UnparsedPublicKey, ED25519};
 use tiny_keccak::{Hasher, Keccak};
 
 use crate::{
@@ -28,9 +29,58 @@ const MAGIC: [u8; 4] = *b"BXCA";
 const VERSION: u8 = 1;
 const PREFIX_LEN: usize = 48;
 const SEAL_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-EXTERNAL-ANCHOR-v1\0";
+const APPROVAL_DOMAIN: &[u8; 48] = b"BLOCH-L2-BXRC-EXTERNAL-ANCHOR-APPROVAL-v1\0\0\0\0\0\0\0";
 
 /// Exact canonical length of the external anchor record.
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN: usize = PREFIX_LEN + 32;
+/// Exact length of the domain-separated message signed by an offline anchor
+/// approver.
+pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN: usize = 120;
+
+/// An offline Ed25519 approval of one exact anchor in one deployment domain.
+///
+/// The signing key is never needed by this backend. Callers should pin the
+/// verifying key and the deployment id through separate trusted channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorApproval {
+    pub deployment_id: [u8; 32],
+    pub anchor: ExternalFloorCustodianClientAnchor,
+    pub signature: [u8; 64],
+}
+
+/// Builds the canonical message for an offline Ed25519 signer.
+pub fn external_floor_custodian_anchor_approval_message(
+    deployment_id: [u8; 32],
+    anchor: ExternalFloorCustodianClientAnchor,
+) -> [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN] {
+    let mut message = [0_u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN];
+    message[..APPROVAL_DOMAIN.len()].copy_from_slice(APPROVAL_DOMAIN);
+    message[48..80].copy_from_slice(&deployment_id);
+    message[80..88].copy_from_slice(&anchor.revision.to_be_bytes());
+    message[88..120].copy_from_slice(&anchor.commitment);
+    message
+}
+
+/// Verifies an offline approval against independently pinned identity data.
+pub fn verify_external_floor_custodian_anchor_approval(
+    expected_deployment_id: [u8; 32],
+    verifying_key: [u8; 32],
+    approval: ExternalFloorCustodianAnchorApproval,
+) -> io::Result<ExternalFloorCustodianClientAnchor> {
+    if expected_deployment_id == [0; 32]
+        || verifying_key == [0; 32]
+        || approval.deployment_id != expected_deployment_id
+        || approval.anchor.commitment == [0; 32]
+    {
+        return Err(denied("invalid BXRC external anchor approval identity"));
+    }
+    let message =
+        external_floor_custodian_anchor_approval_message(approval.deployment_id, approval.anchor);
+    UnparsedPublicKey::new(&ED25519, verifying_key)
+        .verify(&message, &approval.signature)
+        .map_err(|_| denied("BXRC external anchor approval signature failed"))?;
+    Ok(approval.anchor)
+}
 
 fn invalid(message: &'static str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
@@ -316,6 +366,22 @@ impl UnixExternalFloorCustodianAnchorStore {
         })
     }
 
+    /// Verifies an offline approval before creating a store for its exact
+    /// anchor. No signing key is loaded or accepted by this process.
+    pub fn provision_approved(
+        path: &Path,
+        expected_deployment_id: [u8; 32],
+        verifying_key: [u8; 32],
+        approval: ExternalFloorCustodianAnchorApproval,
+    ) -> io::Result<Self> {
+        let initial = verify_external_floor_custodian_anchor_approval(
+            expected_deployment_id,
+            verifying_key,
+            approval,
+        )?;
+        Self::provision(path, initial)
+    }
+
     /// Opens an existing validated store and retains its exclusive process
     /// lock for this instance's lifetime.
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -327,6 +393,30 @@ impl UnixExternalFloorCustodianAnchorStore {
             _lock: lock,
             gate: Mutex::new(()),
         })
+    }
+
+    /// Opens a store only when its current value exactly matches a valid
+    /// offline approval for the independently pinned deployment and key.
+    /// This is intended for provisioning and operator inspection, not for
+    /// silently adopting a value discovered on local disk.
+    pub fn open_approved(
+        path: &Path,
+        expected_deployment_id: [u8; 32],
+        verifying_key: [u8; 32],
+        approval: ExternalFloorCustodianAnchorApproval,
+    ) -> io::Result<Self> {
+        let approved = verify_external_floor_custodian_anchor_approval(
+            expected_deployment_id,
+            verifying_key,
+            approval,
+        )?;
+        let store = Self::open(path)?;
+        if store.load()? != approved {
+            return Err(denied(
+                "BXRC external anchor does not match the offline approval",
+            ));
+        }
+        Ok(store)
     }
 
     fn gate(&self) -> io::Result<MutexGuard<'_, ()>> {

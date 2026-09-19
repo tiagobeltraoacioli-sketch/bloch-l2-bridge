@@ -14,6 +14,7 @@ version = "0.0.0-scaffold"
 dependencies = [
  "libc",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

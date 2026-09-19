@@ -297,6 +297,22 @@ opened. A restored but internally valid older anchor remains indistinguishable
 to this file backend unless the external storage platform itself prevents or
 detects rollback.
 
+For machine-checked offline provisioning and inspection,
+`provision_approved` and `open_approved` require an Ed25519 approval over the
+exact deployment id, revision and commitment. The public key and expected
+deployment id must arrive through independent trusted channels; neither is
+read from the anchor directory. The backend exposes the canonical approval
+message so an offline/HSM signer can produce the signature, but accepts no
+private signing key. The canonical 120-byte message is the 48-byte padded
+`BLOCH-L2-BXRC-EXTERNAL-ANCHOR-APPROVAL-v1` domain, 32-byte deployment id,
+big-endian 64-bit revision and 32-byte commitment. `open_approved` refuses
+even a structurally valid record
+when it differs from the signed anchor, making operator inspection explicit
+instead of trust-on-first-use. A fresh approval is required after every
+legitimate transition. Approval authenticates operator intent; it does not
+make ordinary disk rollback-resistant and does not replace the mandatory
+runtime exact-CAS anchor comparison.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent
