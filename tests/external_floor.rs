@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bloch_l2_bridge::watcher::MemorySource;
 use bloch_l2_bridge::{
     persist_versioned_source, ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome,
-    ExternalFloorRequest, ExternalFloorResponse, ExternalGenerationFloor, L1Block,
-    SourceFloorState, SourceGenerationFloor, VersionedMemorySource,
+    ExternalFloorReconciliation, ExternalFloorRequest, ExternalFloorResponse,
+    ExternalGenerationFloor, L1Block, SourceFloorState, SourceGenerationFloor,
+    VersionedMemorySource,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -57,7 +58,9 @@ fn bound(generation: u64, byte: u8) -> SourceFloorState {
 enum Mode {
     Normal,
     ConflictOnCas,
+    FailBeforeCas,
     FailAfterCas,
+    FailRead,
     WrongCasAcknowledgement,
     ImpossibleConflict,
 }
@@ -87,6 +90,11 @@ impl Boundary {
 impl ExternalFloorBoundary for Boundary {
     fn transact(&self, request: ExternalFloorRequest) -> io::Result<ExternalFloorResponse> {
         self.0.requests.borrow_mut().push(request);
+        if self.0.mode.get() == Mode::FailRead
+            && matches!(request.operation, ExternalFloorOperation::Read)
+        {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"));
+        }
         if let Some(response) = self.0.replay.get() {
             return Ok(response);
         }
@@ -99,6 +107,12 @@ impl ExternalFloorBoundary for Boundary {
                 expected,
                 requested,
             } => {
+                if self.0.mode.get() == Mode::FailBeforeCas {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "request was not delivered",
+                    ));
+                }
                 if self.0.mode.get() == Mode::ImpossibleConflict {
                     return Ok(ExternalFloorResponse {
                         request_binding: request.binding,
@@ -236,9 +250,116 @@ fn lost_cas_acknowledgement_poisoning_blocks_every_retry() {
     assert_eq!(shared.requests.borrow().len(), request_count);
 
     shared.mode.set(Mode::Normal);
-    let boundary = floor.into_boundary();
-    let reconciled = adapter(boundary, 5);
-    assert_eq!(reconciled.current().unwrap(), requested);
+    assert_eq!(
+        floor.reconcile([5; 32]).unwrap(),
+        ExternalFloorReconciliation::Committed {
+            previous: fresh(),
+            current: requested,
+        }
+    );
+    assert!(!floor.is_uncertain());
+    assert_eq!(floor.current().unwrap(), requested);
+    let requests = shared.requests.borrow();
+    assert!(matches!(
+        requests[2].operation,
+        ExternalFloorOperation::Read
+    ));
+    assert_eq!(requests[2].session_nonce, [5; 32]);
+    assert_eq!(requests[2].sequence, 0);
+    assert_eq!(requests[3].session_nonce, [5; 32]);
+    assert_eq!(requests[3].sequence, 1);
+}
+
+#[test]
+fn reconciliation_distinguishes_not_committed_from_conflict_without_retrying_cas() {
+    let (boundary, shared) = Boundary::new();
+    shared.mode.set(Mode::FailBeforeCas);
+    let floor = adapter(boundary, 12);
+    let requested = bound(1, 0x51);
+
+    assert!(floor.advance(requested).is_err());
+    assert_eq!(shared.state.get(), fresh());
+    shared.mode.set(Mode::Normal);
+    assert_eq!(
+        floor.reconcile([13; 32]).unwrap(),
+        ExternalFloorReconciliation::NotCommitted { current: fresh() }
+    );
+    assert!(!floor.is_uncertain());
+    assert_eq!(
+        shared
+            .requests
+            .borrow()
+            .iter()
+            .filter(|request| matches!(
+                request.operation,
+                ExternalFloorOperation::CompareAndSwap { .. }
+            ))
+            .count(),
+        1,
+        "reconciliation must never resubmit the CAS"
+    );
+
+    shared.mode.set(Mode::FailBeforeCas);
+    assert!(floor.advance(requested).is_err());
+    shared.state.set(bound(2, 0x52));
+    shared.mode.set(Mode::Normal);
+    assert_eq!(
+        floor.reconcile([14; 32]).unwrap(),
+        ExternalFloorReconciliation::Conflict {
+            current: bound(2, 0x52)
+        }
+    );
+    assert!(!floor.is_uncertain());
+}
+
+#[test]
+fn every_failed_reconciliation_consumes_its_fresh_session_and_stays_closed() {
+    let (boundary, shared) = Boundary::new();
+    shared.mode.set(Mode::FailAfterCas);
+    let floor = adapter(boundary, 15);
+    let requested = bound(1, 0x61);
+    assert!(floor.advance(requested).is_err());
+
+    assert_eq!(
+        floor.reconcile([15; 32]).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    shared.mode.set(Mode::FailRead);
+    assert_eq!(
+        floor.reconcile([16; 32]).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert!(floor.is_uncertain());
+    let count = shared.requests.borrow().len();
+    assert_eq!(
+        floor.reconcile([16; 32]).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(shared.requests.borrow().len(), count);
+    assert!(floor.current().is_err());
+
+    shared.mode.set(Mode::Normal);
+    assert!(matches!(
+        floor.reconcile([17; 32]).unwrap(),
+        ExternalFloorReconciliation::Committed { current, .. } if current == requested
+    ));
+}
+
+#[test]
+fn impossible_reconciliation_state_remains_poisoned() {
+    let (boundary, shared) = Boundary::new();
+    shared.state.set(bound(2, 0x70));
+    shared.mode.set(Mode::FailBeforeCas);
+    let floor = adapter(boundary, 18);
+    assert!(floor.advance(bound(3, 0x71)).is_err());
+
+    shared.state.set(bound(1, 0x72));
+    shared.mode.set(Mode::Normal);
+    let error = floor.reconcile([19; 32]).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("impossible state"));
+    assert!(floor.is_uncertain());
+    assert!(floor.current().is_err());
 }
 
 #[test]

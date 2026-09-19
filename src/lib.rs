@@ -48,8 +48,9 @@ pub use atoms::{atoms_to_wei, wei_to_atoms, AtomConversionError, ATOM_SCALE};
 pub use envelope::{extract_deposit_envelope, DecodeError, DepositEnvelope, TxOutput};
 #[cfg(unix)]
 pub use external_floor::{
-    ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome, ExternalFloorRequest,
-    ExternalFloorResponse, ExternalGenerationFloor,
+    ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome,
+    ExternalFloorReconciliation, ExternalFloorRequest, ExternalFloorResponse,
+    ExternalGenerationFloor,
 };
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
