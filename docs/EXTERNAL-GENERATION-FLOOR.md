@@ -355,6 +355,16 @@ independent, monotonic or rollback-detecting system. The receipt does not
 replace the runtime external anchor CAS, and two directories on one disk are
 not independent failure domains.
 
+`encode_external_floor_custodian_authority_checkpoint` exports that complete
+checkpoint as the fixed-size, versioned canonical record, and
+`decode_external_floor_custodian_authority_checkpoint` strictly validates an
+imported receipt's length, reserved bytes, tuple and history invariants, and
+record hash. The portable bytes are exactly the durable record bytes, which
+makes byte-for-byte backup verification possible without inventing a second
+format. Decoding proves only internal integrity: the receipt still has to
+arrive through the independently authenticated, rollback-detecting channel
+whose expected value is passed to `open_expected` or reconciliation.
+
 `UnixExternalFloorCustodianRuntimeConfig` is the no-default construction path
 that carries this receipt into the running coordinator. It requires distinct
 absolute checkpoint, operational-anchor and authority-receipt directories,

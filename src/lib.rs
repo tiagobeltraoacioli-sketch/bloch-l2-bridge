@@ -111,6 +111,8 @@ pub use external_floor_custodian_anchor_file::{
 };
 #[cfg(unix)]
 pub use external_floor_custodian_authority_file::{
+    decode_external_floor_custodian_authority_checkpoint,
+    encode_external_floor_custodian_authority_checkpoint,
     external_floor_custodian_expected_authority_checkpoint,
     ExternalFloorCustodianAuthorityCheckpoint, ExternalFloorCustodianAuthorityReconciliation,
     ExternalFloorCustodianAuthorityTuple, UnixExternalFloorCustodianAuthorityStore,

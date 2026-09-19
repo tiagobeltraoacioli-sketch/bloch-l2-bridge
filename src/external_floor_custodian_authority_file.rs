@@ -280,6 +280,38 @@ fn decode(encoded: &[u8]) -> io::Result<ExternalFloorCustodianAuthorityCheckpoin
     Ok(checkpoint)
 }
 
+/// Encodes an authority checkpoint as the canonical portable receipt.
+///
+/// The returned bytes are identical to the durable on-disk record and include
+/// its version, complete authority tuple, history link, and record hash. This
+/// function validates the complete checkpoint instead of silently
+/// canonicalizing inconsistent caller input.
+pub fn encode_external_floor_custodian_authority_checkpoint(
+    checkpoint: ExternalFloorCustodianAuthorityCheckpoint,
+) -> io::Result<[u8; EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN]> {
+    let encoded = encode(
+        checkpoint.transition_index,
+        checkpoint.authority,
+        checkpoint.previous_record_hash,
+    )?;
+    if decode(&encoded)? != checkpoint {
+        return Err(invalid("invalid BXRC authority checkpoint receipt"));
+    }
+    Ok(encoded)
+}
+
+/// Decodes and validates one canonical portable authority checkpoint receipt.
+///
+/// This enforces the exact versioned length, reserved bytes, tuple invariants,
+/// history-link invariants, and record hash. Successful decoding establishes
+/// internal integrity only; callers must still obtain these bytes from their
+/// independently authenticated, rollback-detecting receipt channel.
+pub fn decode_external_floor_custodian_authority_checkpoint(
+    encoded: &[u8],
+) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    decode(encoded)
+}
+
 fn open_checkpoint_file(
     directory: &File,
     filename: &'static str,

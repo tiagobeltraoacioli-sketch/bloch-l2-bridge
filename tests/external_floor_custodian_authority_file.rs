@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::{
+    decode_external_floor_custodian_authority_checkpoint,
+    encode_external_floor_custodian_authority_checkpoint,
     external_floor_custodian_anchor_approval_message,
     external_floor_custodian_anchor_continuity_acceptance_message,
     external_floor_custodian_anchor_continuity_authorization_message,
@@ -244,6 +246,82 @@ fn wrong_expected_receipt_and_orphan_temp_are_rejected() {
     assert!(
         UnixExternalFloorCustodianAuthorityStore::open_expected(&temp.store, checkpoint).is_err()
     );
+}
+
+#[test]
+fn portable_receipt_round_trips_exact_durable_record() {
+    let temp = Temp::new();
+    let deployment = [0x89; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(4, 0x41);
+    let next = anchor(5, 0x42);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+
+    let encoded0 = encode_external_floor_custodian_authority_checkpoint(checkpoint0).unwrap();
+    assert_eq!(
+        encoded0.as_slice(),
+        fs::read(temp.store.join(".bxrc-accepted-authority"))
+            .unwrap()
+            .as_slice()
+    );
+    assert_eq!(
+        decode_external_floor_custodian_authority_checkpoint(&encoded0).unwrap(),
+        checkpoint0
+    );
+
+    let checkpoint1 = store
+        .accept_continuity(continuity(&first, &second, deployment, initial, next))
+        .unwrap();
+    let encoded1 = encode_external_floor_custodian_authority_checkpoint(checkpoint1).unwrap();
+    assert_eq!(
+        decode_external_floor_custodian_authority_checkpoint(&encoded1).unwrap(),
+        checkpoint1
+    );
+    assert_ne!(encoded0, encoded1);
+}
+
+#[test]
+fn portable_receipt_rejects_noncanonical_or_tampered_input() {
+    let temp = Temp::new();
+    let deployment = [0x8a; 32];
+    let first = signer();
+    let initial = anchor(6, 0x43);
+    let (store, checkpoint) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    drop(store);
+    let encoded = encode_external_floor_custodian_authority_checkpoint(checkpoint).unwrap();
+
+    let mut tampered = encoded;
+    tampered[88] ^= 1;
+    assert!(decode_external_floor_custodian_authority_checkpoint(&tampered).is_err());
+
+    let mut reserved = encoded;
+    reserved[5] = 1;
+    assert!(decode_external_floor_custodian_authority_checkpoint(&reserved).is_err());
+
+    let mut trailing = encoded.to_vec();
+    trailing.push(0);
+    assert!(decode_external_floor_custodian_authority_checkpoint(&trailing).is_err());
+    assert!(
+        decode_external_floor_custodian_authority_checkpoint(&encoded[..encoded.len() - 1])
+            .is_err()
+    );
+
+    let mut inconsistent = checkpoint;
+    inconsistent.record_hash[0] ^= 1;
+    assert!(encode_external_floor_custodian_authority_checkpoint(inconsistent).is_err());
 }
 
 #[test]
