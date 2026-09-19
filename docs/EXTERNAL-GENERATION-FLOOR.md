@@ -402,13 +402,20 @@ again from the retained prior receipt and the same signed continuity artifact.
 `UnixExternalFloorCustodianAuthorityStore::reconcile_continuity` performs that
 check once under the process lock and returns `NotCommitted` only for the exact
 prior receipt or `Committed` only for the exact derived next receipt. A third
-record, orphan temporary file, invalid signature or unreadable store fails
-closed. It does not retry the transition and never returns a tuple learned from
-disk. The returned store remains pinned to the selected known receipt across
-an operator restart; export a `Committed.current` receipt before relying on it
-as the new restart floor. This live checkpoint is authenticated operational
-evidence; it is not proof that an above-floor head descended from an earlier
-floor and it does not make either local filesystem anti-rollback storage.
+record, invalid signature or unreadable store fails closed. One interrupted
+pre-rename write is recoverable without completing or retrying it: when the
+durable record is the exact retained prior receipt and the orphan temporary
+record is the exact derived next receipt, reconciliation durably removes only
+that private, single-link candidate and returns `NotCommitted`. Any other
+temporary-record combination is preserved as incident evidence and refused.
+The validated temporary descriptor stays open through cleanup, and its device
+and inode must still match the descriptor-relative pathname immediately before
+removal. The method never returns a tuple learned from disk. The returned store
+remains pinned to the selected known receipt across an operator restart; export
+a `Committed.current` receipt before relying on it as the new restart floor.
+This live checkpoint is authenticated operational evidence; it is not proof
+that an above-floor head descended from an earlier floor and it does not make
+either local filesystem anti-rollback storage.
 
 This composition still does not create independent anti-rollback storage.
 The expected authority checkpoint must come from another trust domain, and

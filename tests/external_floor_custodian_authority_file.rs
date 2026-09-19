@@ -301,6 +301,120 @@ fn reconciliation_accepts_only_exact_prior_or_derived_next_across_restart() {
 }
 
 #[test]
+fn reconciliation_durably_aborts_only_an_exact_uncommitted_candidate() {
+    let temp = Temp::new();
+    let deployment = [0x99; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(20, 0x71);
+    let next = anchor(21, 0x72);
+    let approval = continuity(&first, &second, deployment, initial, next);
+
+    // Produce the exact bytes that the interrupted transition would have
+    // synced before its atomic rename.
+    let candidate_directory = temp.root.join("candidate");
+    let (candidate_store, _) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &candidate_directory,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    let checkpoint1 = candidate_store.accept_continuity(approval).unwrap();
+    drop(candidate_store);
+    let candidate = fs::read(candidate_directory.join(".bxrc-accepted-authority")).unwrap();
+
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    drop(store);
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+    fs::write(&temporary, candidate).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (reconciled, outcome) = UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+        &temp.store,
+        checkpoint0,
+        approval,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ExternalFloorCustodianAuthorityReconciliation::NotCommitted {
+            current: checkpoint0
+        }
+    );
+    assert!(!temporary.exists());
+    assert_eq!(reconciled.checkpoint().unwrap(), checkpoint0);
+    assert_eq!(reconciled.accept_continuity(approval).unwrap(), checkpoint1);
+}
+
+#[test]
+fn reconciliation_preserves_unexpected_or_unsafe_temporary_records() {
+    let temp = Temp::new();
+    let deployment = [0x9a; 32];
+    let first = signer();
+    let second = signer();
+    let initial = anchor(30, 0x73);
+    let next = anchor(31, 0x74);
+    let approval = continuity(&first, &second, deployment, initial, next);
+    let (store, checkpoint0) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &temp.store,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    drop(store);
+    let state = temp.store.join(".bxrc-accepted-authority");
+    let temporary = temp.store.join(".bxrc-accepted-authority.tmp");
+
+    // A valid but unexpected candidate is evidence, not safe garbage.
+    fs::copy(&state, &temporary).unwrap();
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+            &temp.store,
+            checkpoint0,
+            approval,
+        )
+        .is_err()
+    );
+    assert!(temporary.exists());
+    fs::remove_file(&temporary).unwrap();
+
+    // Even exact bytes are not cleaned up when the candidate has another
+    // filesystem name and could therefore be modified through that alias.
+    let candidate_directory = temp.root.join("hardlink-candidate");
+    let (candidate_store, _) = UnixExternalFloorCustodianAuthorityStore::provision_approved(
+        &candidate_directory,
+        deployment,
+        key(&first),
+        initial_approval(&first, deployment, initial),
+    )
+    .unwrap();
+    candidate_store.accept_continuity(approval).unwrap();
+    drop(candidate_store);
+    fs::hard_link(
+        candidate_directory.join(".bxrc-accepted-authority"),
+        &temporary,
+    )
+    .unwrap();
+    assert!(
+        UnixExternalFloorCustodianAuthorityStore::reconcile_continuity(
+            &temp.store,
+            checkpoint0,
+            approval,
+        )
+        .is_err()
+    );
+    assert!(temporary.exists());
+}
+
+#[test]
 fn reconciliation_rejects_third_state_and_never_adopts_it() {
     let temp = Temp::new();
     let deployment = [0xa1; 32];

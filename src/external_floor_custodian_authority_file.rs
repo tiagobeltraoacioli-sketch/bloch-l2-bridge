@@ -268,24 +268,87 @@ fn decode(encoded: &[u8]) -> io::Result<ExternalFloorCustodianAuthorityCheckpoin
     Ok(checkpoint)
 }
 
-fn read_checkpoint(directory: &File) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
-    if exists_at(directory, TEMP_FILE)? {
-        return Err(invalid(
-            "temporary BXRC authority record exists; operator inspection required",
-        ));
-    }
-    let mut file = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0)?;
-    validate_file(
-        &file,
-        "BXRC authority record must be private and single-link",
-    )?;
+fn open_checkpoint_file(
+    directory: &File,
+    filename: &'static str,
+    unsafe_file_message: &'static str,
+) -> io::Result<(ExternalFloorCustodianAuthorityCheckpoint, File)> {
+    let mut file = open_at(directory.as_raw_fd(), filename, libc::O_RDONLY, 0)?;
+    validate_file(&file, unsafe_file_message)?;
     let mut encoded = [0_u8; EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN];
     file.read_exact(&mut encoded)?;
     let mut trailing = [0_u8; 1];
     if file.read(&mut trailing)? != 0 {
         return Err(invalid("BXRC authority record has trailing data"));
     }
-    decode(&encoded)
+    Ok((decode(&encoded)?, file))
+}
+
+fn read_checkpoint_file(
+    directory: &File,
+    filename: &'static str,
+    unsafe_file_message: &'static str,
+) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    open_checkpoint_file(directory, filename, unsafe_file_message)
+        .map(|(checkpoint, _file)| checkpoint)
+}
+
+fn read_checkpoint(directory: &File) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+    if exists_at(directory, TEMP_FILE)? {
+        return Err(invalid(
+            "temporary BXRC authority record exists; operator inspection required",
+        ));
+    }
+    read_checkpoint_file(
+        directory,
+        STATE_FILE,
+        "BXRC authority record must be private and single-link",
+    )
+}
+
+fn validate_file_name(
+    directory: &File,
+    filename: &'static str,
+    file: &File,
+    unsafe_file_message: &'static str,
+) -> io::Result<()> {
+    validate_file(file, unsafe_file_message)?;
+    let mut named = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: all pointers and the directory descriptor are valid.
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            c_name(filename).as_ptr(),
+            named.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: successful `fstatat` initialized the structure.
+    let named = unsafe { named.assume_init() };
+    let opened = file.metadata()?;
+    if opened.dev() != named.st_dev as u64 || opened.ino() != named.st_ino {
+        return Err(denied(
+            "temporary BXRC authority record changed before cleanup",
+        ));
+    }
+    Ok(())
+}
+
+fn remove_temporary_checkpoint(directory: &File, temporary: &File) -> io::Result<()> {
+    validate_file_name(
+        directory,
+        TEMP_FILE,
+        temporary,
+        "temporary BXRC authority record changed before cleanup",
+    )?;
+    // SAFETY: the fixed name is valid and relative to the live directory fd.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), c_name(TEMP_FILE).as_ptr(), 0) } != 0 {
+        return Err(Error::last_os_error());
+    }
+    directory.sync_all()
 }
 
 fn write_checkpoint(
@@ -445,9 +508,12 @@ impl UnixExternalFloorCustodianAuthorityStore {
     ///
     /// The only admissible disk records are the exact externally retained
     /// prior checkpoint and the exact next checkpoint derived from the same
-    /// dual-signed approval. Any other record, an orphan temporary file, or an
-    /// unreadable store fails closed. The returned store is pinned to the
-    /// selected caller-derived checkpoint for normal restart checks.
+    /// dual-signed approval. If the durable record is still the exact prior
+    /// checkpoint and an orphan temporary file is the exact derived next
+    /// checkpoint, reconciliation durably removes that uncommitted candidate
+    /// and returns `NotCommitted`. Any other record/temporary combination or
+    /// unreadable store fails closed without cleanup. The returned store is
+    /// pinned to the selected caller-derived checkpoint for restart checks.
     pub fn reconcile_continuity(
         path: &Path,
         previous: ExternalFloorCustodianAuthorityCheckpoint,
@@ -459,7 +525,33 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let next = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
-        let current = read_checkpoint(&directory)?;
+        let current = if exists_at(&directory, TEMP_FILE)? {
+            let durable = read_checkpoint_file(
+                &directory,
+                STATE_FILE,
+                "BXRC authority record must be private and single-link",
+            )?;
+            let (temporary, temporary_file) = open_checkpoint_file(
+                &directory,
+                TEMP_FILE,
+                "temporary BXRC authority record must be private and single-link",
+            )?;
+            if durable != previous || temporary != next {
+                return Err(denied(
+                    "BXRC authority reconciliation found an unexpected temporary checkpoint",
+                ));
+            }
+            remove_temporary_checkpoint(&directory, &temporary_file)?;
+            let reread = read_checkpoint(&directory)?;
+            if reread != previous {
+                return Err(denied(
+                    "BXRC authority state changed while aborting an uncommitted checkpoint",
+                ));
+            }
+            reread
+        } else {
+            read_checkpoint(&directory)?
+        };
         let (selected, reconciliation) = if current == previous {
             (
                 previous,
@@ -526,5 +618,49 @@ impl UnixExternalFloorCustodianAuthorityStore {
         )?;
         *expected = next;
         Ok(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PATH_IDENTITY_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn temporary_cleanup_rejects_pathname_substitution() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-path-identity-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let temporary = root.join(TEMP_FILE);
+        fs::write(&temporary, b"original").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let directory = open_directory(&root).unwrap();
+        let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        fs::rename(&temporary, root.join("displaced")).unwrap();
+        fs::write(&temporary, b"replacement").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = validate_file_name(
+            &directory,
+            TEMP_FILE,
+            &opened,
+            "unsafe temporary checkpoint",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(temporary.exists());
+
+        drop(opened);
+        drop(directory);
+        fs::remove_dir_all(root).unwrap();
     }
 }
