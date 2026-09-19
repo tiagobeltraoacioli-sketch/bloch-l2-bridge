@@ -34,6 +34,7 @@ description = "DESIGN SCAFFOLD — unaudited, not a working L2, nothing here mov
 [workspace]
 
 [dependencies]
-tiny-keccak = { version = "2.0", features = ["keccak"] }
+tiny-keccak = { version = "2.0", features = ["keccak", "kmac"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+zeroize = "1.8"

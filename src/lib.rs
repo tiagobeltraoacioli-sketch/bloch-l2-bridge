@@ -58,7 +58,7 @@ pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };
 #[cfg(unix)]
-pub use unix_floor::UnixGenerationFloor;
+pub use unix_floor::{UnixFloorAuthentication, UnixGenerationFloor};
 pub use watcher::{
     BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint,
     SourceGenerationExhausted, SourceViewToken, VaultSet, VersionedMemorySource,

@@ -27,8 +27,9 @@ const STORE_VERSION: u32 = 1;
 /// `advance_generation` MUST durably store at least `generation` before it
 /// returns and MUST never lower the stored value. Implementations may use an
 /// HSM/NVRAM counter, an authenticated database in another failure domain, or
-/// equivalent host infrastructure. [`crate::UnixGenerationFloor`] is a durable
-/// local implementation, but the host must place its directory in a separately
+/// equivalent host infrastructure. [`crate::UnixGenerationFloor`] is a durable,
+/// authenticated local implementation, but its KMAC key must be provisioned
+/// independently and the host must place its directory in a separately
 /// protected, non-rollbackable domain; merely using a second local directory
 /// does not defend against coherent rollback of the whole disk.
 pub trait SourceGenerationFloor {

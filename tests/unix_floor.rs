@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bloch_l2_bridge::watcher::MemorySource;
 use bloch_l2_bridge::{
     persist_versioned_source, restore_versioned_source, L1Block, SourceGenerationFloor,
-    UnixGenerationFloor, VersionedMemorySource,
+    UnixFloorAuthentication, UnixGenerationFloor, VersionedMemorySource,
 };
 
 const FLOOR_FILE: &str = ".source-generation-floor";
@@ -20,6 +20,8 @@ const LOCK_FILE: &str = ".source-generation-floor.lock";
 const LOCK_EXCLUSIVE: i32 = 2;
 const LOCK_NONBLOCKING: i32 = 4;
 const LOCK_RELEASE: i32 = 8;
+const AUTHENTICATION_KEY: [u8; 32] = [0x42; 32];
+const AUTHENTICATION_DOMAIN: [u8; 32] = [0x24; 32];
 
 unsafe extern "C" {
     fn flock(file_descriptor: i32, operation: i32) -> i32;
@@ -60,7 +62,12 @@ impl TestDomain {
     }
 
     fn backend(&self) -> UnixGenerationFloor {
-        UnixGenerationFloor::open_separate(&self.floor, &self.snapshot_path()).unwrap()
+        UnixGenerationFloor::open_authenticated_separate(
+            &self.floor,
+            &self.snapshot_path(),
+            UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap(),
+        )
+        .unwrap()
     }
 }
 
@@ -116,6 +123,74 @@ fn durable_floor_is_monotonic_across_reopen_and_integrates_with_snapshot_store()
     persist_versioned_source(&snapshot_path, &adapter, &fresh_floor, 16 * 1024).unwrap();
     let restored = restore_versioned_source(&snapshot_path, &fresh_floor, 16 * 1024).unwrap();
     assert_eq!(restored.seal().unwrap(), adapter.seal().unwrap());
+}
+
+#[test]
+fn records_are_authenticated_and_bound_to_the_configured_domain() {
+    let domain = TestDomain::new();
+    let floor = domain.backend();
+    floor.advance_generation(9).unwrap();
+    drop(floor);
+
+    let wrong_key = UnixGenerationFloor::open_authenticated_separate(
+        &domain.floor,
+        &domain.snapshot_path(),
+        UnixFloorAuthentication::new([0x43; 32], AUTHENTICATION_DOMAIN).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        wrong_key.current_generation().unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+
+    let wrong_domain = UnixGenerationFloor::open_authenticated_separate(
+        &domain.floor,
+        &domain.snapshot_path(),
+        UnixFloorAuthentication::new(AUTHENTICATION_KEY, [0x25; 32]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        wrong_domain.current_generation().unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
+
+    assert_eq!(domain.backend().current_generation().unwrap(), 9);
+
+    let floor_path = domain.floor.join(FLOOR_FILE);
+    let mut legacy = fs::read(&floor_path).unwrap();
+    let version = legacy
+        .windows(2)
+        .position(|window| window == b"v2")
+        .expect("record contains its version marker");
+    legacy[version + 1] = b'1';
+    fs::write(floor_path, legacy).unwrap();
+    assert_eq!(
+        domain.backend().current_generation().unwrap_err().kind(),
+        ErrorKind::InvalidData,
+        "legacy unauthenticated v1 records must require explicit migration"
+    );
+}
+
+#[test]
+fn credentials_reject_null_configuration_and_redact_the_key() {
+    assert_eq!(
+        UnixFloorAuthentication::new([0; 32], AUTHENTICATION_DOMAIN)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        UnixFloorAuthentication::new(AUTHENTICATION_KEY, [0; 32])
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    let debug = format!(
+        "{:?}",
+        UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap()
+    );
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("66, 66"));
 }
 
 #[test]
@@ -211,33 +286,49 @@ fn constructor_refuses_shared_nested_symlinked_and_public_domains() {
     let domain = TestDomain::new();
     let snapshot_path = domain.snapshot_path();
     assert_eq!(
-        UnixGenerationFloor::open_separate(&domain.snapshot, &snapshot_path)
-            .unwrap_err()
-            .kind(),
+        UnixGenerationFloor::open_authenticated_separate(
+            &domain.snapshot,
+            &snapshot_path,
+            UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap(),
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::InvalidInput
     );
     let nested = domain.snapshot.join("nested-floor");
     fs::create_dir(&nested).unwrap();
     fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
-        UnixGenerationFloor::open_separate(&nested, &snapshot_path)
-            .unwrap_err()
-            .kind(),
+        UnixGenerationFloor::open_authenticated_separate(
+            &nested,
+            &snapshot_path,
+            UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap(),
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::InvalidInput
     );
     let link = domain.root.join("floor-link");
     symlink(&domain.floor, &link).unwrap();
     assert_eq!(
-        UnixGenerationFloor::open_separate(&link, &snapshot_path)
-            .unwrap_err()
-            .kind(),
+        UnixGenerationFloor::open_authenticated_separate(
+            &link,
+            &snapshot_path,
+            UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap(),
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::PermissionDenied
     );
     fs::set_permissions(&domain.floor, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
-        UnixGenerationFloor::open_separate(&domain.floor, &snapshot_path)
-            .unwrap_err()
-            .kind(),
+        UnixGenerationFloor::open_authenticated_separate(
+            &domain.floor,
+            &snapshot_path,
+            UnixFloorAuthentication::new(AUTHENTICATION_KEY, AUTHENTICATION_DOMAIN).unwrap(),
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::PermissionDenied
     );
     fs::set_permissions(&domain.floor, fs::Permissions::from_mode(0o700)).unwrap();
