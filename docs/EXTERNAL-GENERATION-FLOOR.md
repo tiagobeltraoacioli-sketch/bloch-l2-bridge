@@ -290,6 +290,15 @@ predecessor. Replacing the lock, directory, state or temporary name therefore
 fails closed, and an ambiguous external CAS retains local evidence for explicit
 reconciliation.
 
+Opening, offline inspection and both reconciliation paths apply the same
+binding around every external-anchor load. They retain the authenticated STATE
+descriptor, complete snapshot and bytes across that load, then require the
+configured directory, persistent lock and STATE name to still identify the
+same objects, with no temporary checkpoint present. A concurrent replacement
+or newly exposed interrupted-write artifact therefore cannot make an operation
+successfully report an anchor decision about checkpoint evidence that is no
+longer installed.
+
 `UnixExternalFloorCustodianAnchorStore` is the concrete Unix backend for the
 mandatory external anchor trait. Its create-once provisioning installs the
 explicit initial client anchor; later opens validate a fixed-size checksummed

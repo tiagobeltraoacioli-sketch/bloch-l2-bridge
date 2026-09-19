@@ -88,6 +88,7 @@ struct AnchorStore {
     state: Arc<Mutex<ExternalFloorCustodianClientAnchor>>,
     fail_after_commit: Arc<AtomicUsize>,
     after_commit: Arc<Mutex<AfterCommit>>,
+    after_load: Arc<Mutex<AfterCommit>>,
 }
 
 type AfterCommit = Option<Box<dyn FnOnce() + Send>>;
@@ -98,6 +99,7 @@ impl AnchorStore {
             state: Arc::new(Mutex::new(anchor)),
             fail_after_commit: Arc::new(AtomicUsize::new(0)),
             after_commit: Arc::new(Mutex::new(None)),
+            after_load: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -108,11 +110,19 @@ impl AnchorStore {
     fn after_next_commit(&self, action: impl FnOnce() + Send + 'static) {
         *self.after_commit.lock().unwrap() = Some(Box::new(action));
     }
+
+    fn after_next_load(&self, action: impl FnOnce() + Send + 'static) {
+        *self.after_load.lock().unwrap() = Some(Box::new(action));
+    }
 }
 
 impl ExternalFloorCustodianAnchorStore for AnchorStore {
     fn load(&self) -> io::Result<ExternalFloorCustodianClientAnchor> {
-        Ok(*self.state.lock().unwrap())
+        let state = *self.state.lock().unwrap();
+        if let Some(action) = self.after_load.lock().unwrap().take() {
+            action();
+        }
+        Ok(state)
     }
 
     fn compare_and_swap(
@@ -224,6 +234,60 @@ fn successful_exchange_is_reserved_then_finalized_and_reopens_exactly() {
     )
     .unwrap();
     assert_eq!(reopened.transport_checkpoint(), transport_checkpoint(1));
+}
+
+#[test]
+fn open_rejects_state_replacement_during_external_anchor_load() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let state = temp.store.join(".bxrc-client-checkpoint");
+    let displaced = temp.store.join("displaced-checkpoint");
+    let replacement = fs::read(&state).unwrap();
+    anchor_store.after_next_load(move || {
+        fs::rename(&state, &displaced).unwrap();
+        fs::write(&state, replacement).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    });
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let error = DurableAuthenticatedExternalFloorCustodian::open(
+        &temp.store,
+        anchor_store,
+        FailingTransport(attempts),
+        authentication(),
+        CHECKPOINT_KEY,
+    )
+    .err()
+    .expect("state replacement during anchor load must fail closed");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn inspection_rejects_temp_created_during_external_anchor_load() {
+    let temp = Temp::new();
+    let initial_anchor = provision(&temp.store);
+    let anchor_store = AnchorStore::new(initial_anchor);
+    let temporary = temp.store.join(".bxrc-client-checkpoint.tmp");
+    anchor_store.after_next_load(move || {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(temporary)
+            .unwrap()
+            .write_all(b"interrupted checkpoint evidence")
+            .unwrap();
+    });
+
+    let error =
+        DurableAuthenticatedExternalFloorCustodian::<FailingTransport, AnchorStore>::inspect(
+            &temp.store,
+            &anchor_store,
+            CHECKPOINT_KEY,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
 
 #[test]

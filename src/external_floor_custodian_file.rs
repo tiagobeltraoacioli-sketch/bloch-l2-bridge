@@ -835,6 +835,7 @@ fn compare_anchor_bound<S: ExternalFloorCustodianAnchorStore>(
     key: &[u8; 32],
 ) -> io::Result<ExternalFloorCustodianAnchorCasOutcome> {
     authority.validate()?;
+    reject_temp(authority.directory)?;
     let (_, actual, state, snapshot, bytes) = open_record(authority.directory, key)?;
     if actual != replacement {
         return Err(denied(
@@ -854,6 +855,7 @@ fn compare_anchor_bound<S: ExternalFloorCustodianAnchorStore>(
     // A failed post-check is ambiguous even when the backend reported a
     // definite result: the CAS may now authorize a displaced local store.
     authority.validate()?;
+    reject_temp(authority.directory)?;
     validate_file_name(
         authority.directory,
         STATE_FILE,
@@ -864,6 +866,44 @@ fn compare_anchor_bound<S: ExternalFloorCustodianAnchorStore>(
         return Err(denied("local BXRC checkpoint changed during anchor CAS"));
     }
     outcome
+}
+
+fn load_anchor_bound<S: ExternalFloorCustodianAnchorStore>(
+    authority: MutationAuthority<'_>,
+    store: &S,
+    key: &[u8; 32],
+) -> io::Result<(
+    Record,
+    ExternalFloorCustodianClientAnchor,
+    ExternalFloorCustodianClientAnchor,
+)> {
+    authority.validate()?;
+    reject_temp(authority.directory)?;
+    let (record, actual, state, snapshot, bytes) = open_record(authority.directory, key)?;
+    validate_file_name(
+        authority.directory,
+        STATE_FILE,
+        &state,
+        "local BXRC checkpoint changed before anchor load",
+    )?;
+    if file_snapshot(&state)? != snapshot || read_record_bytes(&state)? != bytes {
+        return Err(denied("local BXRC checkpoint changed before anchor load"));
+    }
+    let trusted = store.load();
+    // Complete the local checks even when the external read failed. A backend
+    // error must not hide a concurrent replacement of the state it observed.
+    authority.validate()?;
+    reject_temp(authority.directory)?;
+    validate_file_name(
+        authority.directory,
+        STATE_FILE,
+        &state,
+        "local BXRC checkpoint changed during anchor load",
+    )?;
+    if file_snapshot(&state)? != snapshot || read_record_bytes(&state)? != bytes {
+        return Err(denied("local BXRC checkpoint changed during anchor load"));
+    }
+    Ok((record, actual, trusted?))
 }
 
 /// A filesystem-backed authenticated custodian client.
@@ -953,8 +993,15 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
         reject_temp(&directory)?;
-        let (record, anchor) = read_record(&directory, &checkpoint_authentication_key)?;
-        let trusted_anchor = anchor_store.load()?;
+        let (record, anchor, trusted_anchor) = load_anchor_bound(
+            MutationAuthority {
+                directory_path: path,
+                directory: &directory,
+                lock: &lock,
+            },
+            &anchor_store,
+            &checkpoint_authentication_key,
+        )?;
         if anchor != trusted_anchor {
             return Err(denied("BXRC checkpoint does not match the trusted anchor"));
         }
@@ -1129,10 +1176,17 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         }
         (|| {
             let directory = open_directory(path)?;
-            let _lock = Lock::acquire(&directory)?;
+            let lock = Lock::acquire(&directory)?;
             reject_temp(&directory)?;
-            let (record, actual) = read_record(&directory, &key)?;
-            let trusted_anchor = anchor_store.load()?;
+            let (record, actual, trusted_anchor) = load_anchor_bound(
+                MutationAuthority {
+                    directory_path: path,
+                    directory: &directory,
+                    lock: &lock,
+                },
+                anchor_store,
+                &key,
+            )?;
             trusted_or_recoverable(record, actual, trusted_anchor)?;
             Ok(inspect_record(record, actual))
         })()
@@ -1155,11 +1209,18 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
         reject_temp(&directory)?;
-        let (record, actual) = read_record(&directory, &key)?;
+        let (record, actual, trusted) = load_anchor_bound(
+            MutationAuthority {
+                directory_path: path,
+                directory: &directory,
+                lock: &lock,
+            },
+            anchor_store,
+            &key,
+        )?;
         if actual != expected_local_anchor {
             return Err(denied("local BXRC anchor reconciliation mismatch"));
         }
-        let trusted = anchor_store.load()?;
         trusted_or_recoverable(record, actual, trusted)?;
         if trusted == actual {
             return Ok(actual);
@@ -1198,8 +1259,15 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
             let directory = open_directory(path)?;
             let lock = Lock::acquire(&directory)?;
             reject_temp(&directory)?;
-            let (record, actual) = read_record(&directory, &key)?;
-            let pending_anchor = anchor_store.load()?;
+            let (record, actual, pending_anchor) = load_anchor_bound(
+                MutationAuthority {
+                    directory_path: path,
+                    directory: &directory,
+                    lock: &lock,
+                },
+                anchor_store,
+                &key,
+            )?;
             if actual != pending_anchor
                 || record.phase != PENDING
                 || record.operation_commitment != expected_operation_commitment
