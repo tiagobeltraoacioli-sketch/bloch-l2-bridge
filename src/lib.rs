@@ -45,6 +45,8 @@ pub mod external_floor_custodian_file;
 #[cfg(unix)]
 pub mod external_floor_custodian_mtls;
 #[cfg(unix)]
+pub mod external_floor_custodian_runtime;
+#[cfg(unix)]
 pub mod external_floor_custodian_tcp;
 #[cfg(unix)]
 pub mod external_floor_file;
@@ -124,6 +126,11 @@ pub use external_floor_custodian_file::{
 pub use external_floor_custodian_mtls::{
     handle_external_floor_custodian_mtls_connection, ExternalFloorCustodianMtlsClientConfig,
     ExternalFloorCustodianMtlsServerPolicy, MtlsExternalFloorCustodianTransport,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_runtime::{
+    AuthorityPinnedUnixExternalFloorCustodianAnchorStore,
+    UnixAuthorityPinnedExternalFloorCustodian, UnixExternalFloorCustodianRuntimeConfig,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_tcp::{

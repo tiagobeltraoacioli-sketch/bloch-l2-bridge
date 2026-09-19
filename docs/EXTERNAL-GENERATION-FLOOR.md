@@ -355,6 +355,39 @@ independent, monotonic or rollback-detecting system. The receipt does not
 replace the runtime external anchor CAS, and two directories on one disk are
 not independent failure domains.
 
+`UnixExternalFloorCustodianRuntimeConfig` is the no-default construction path
+that carries this receipt into the running coordinator. It requires distinct
+absolute checkpoint, operational-anchor and authority-receipt directories,
+the complete externally retained authority checkpoint, explicit BXRC
+authentication and the local checkpoint authentication key. Before creating
+any transport-capable client it opens the authority receipt with
+`open_expected`, opens the operational anchor store, and requires the anchor
+not to be below the approved anchor floor. At the same revision the commitment
+must match exactly. A wrong record hash, lower operational revision, or a
+different commitment at the approved revision therefore stops startup before
+network I/O. A later operational head is allowed so a clean restart after
+normal client reservations does not require a new offline signature. Secret
+material is redacted from `Debug` and zeroized on failure or drop.
+
+The resulting authority-pinned anchor adapter keeps the receipt locked and
+rechecks its exact checkpoint around every operational-anchor load and CAS. A
+live rewrite fails closed; if it is detected after a CAS, the outcome remains
+ambiguous and the durable client remains poisoned for explicit reconciliation.
+The receipt pins an accepted authority tuple and an operational-anchor
+**floor**, not every later head. Normal client reservations advance the
+operational anchor without pretending that an offline signer approved every
+runtime write. A head above the floor is trusted to the independently
+administered operational anchor store: this adapter has no retained history
+with which to prove that the head descends from the floor. The durable client
+can be lent by reference to `UnixExternalFloorServerConfig`, preserving access
+to its transport checkpoint and anchor after coordinator-open failures.
+
+This composition still does not create independent anti-rollback storage.
+The expected authority checkpoint must come from another trust domain, and
+the operational anchor directory must still be placed in independently
+administered monotonic or rollback-detecting storage. Restoring all local
+directories together with an old expected receipt remains undetectable.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

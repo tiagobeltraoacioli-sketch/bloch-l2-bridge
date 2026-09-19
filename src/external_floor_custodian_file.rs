@@ -598,6 +598,12 @@ impl<T, A> DurableAuthenticatedExternalFloorCustodian<T, A> {
         self.record.get().checkpoint
     }
 
+    /// Access the operational anchor backend for explicit checkpoint export
+    /// and authority-receipt inspection by the composing runtime.
+    pub fn anchor_store(&self) -> &A {
+        &self.anchor_store
+    }
+
     fn reserve(
         &self,
         operation: u8,
@@ -827,5 +833,25 @@ impl<T: ExternalFloorCustodianTransport, A: ExternalFloorCustodianAnchorStore>
         let value = result?;
         self.finish()?;
         Ok(value)
+    }
+}
+
+impl<T: ExternalFloorCustodianTransport, A: ExternalFloorCustodianAnchorStore>
+    ExternalFloorReplayStore for &DurableAuthenticatedExternalFloorCustodian<T, A>
+{
+    fn load(&self) -> io::Result<ExternalFloorReplayCheckpoint> {
+        <DurableAuthenticatedExternalFloorCustodian<T, A> as ExternalFloorReplayStore>::load(*self)
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: ExternalFloorReplayCheckpoint,
+        replacement: ExternalFloorReplayCheckpoint,
+    ) -> io::Result<ExternalFloorReplayCasOutcome> {
+        <DurableAuthenticatedExternalFloorCustodian<T, A> as ExternalFloorReplayStore>::compare_and_swap(
+            *self,
+            expected,
+            replacement,
+        )
     }
 }
