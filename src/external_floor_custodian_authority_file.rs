@@ -554,14 +554,17 @@ fn validate_newly_unlinked_checkpoint(
     Ok(actual)
 }
 
-fn remove_cleanup_checkpoint_inner<F>(
+fn remove_cleanup_checkpoint_inner<F, G>(
+    directory_path: &Path,
     directory: &File,
     cleanup: &File,
     evidence: CheckpointFileEvidence,
-    before_unlink: F,
+    before_evidence_check: F,
+    before_directory_check: G,
 ) -> io::Result<()>
 where
     F: FnOnce(),
+    G: FnOnce(),
 {
     validate_file_name(
         directory,
@@ -569,7 +572,7 @@ where
         cleanup,
         "BXRC authority cleanup tombstone changed before removal",
     )?;
-    before_unlink();
+    before_evidence_check();
     validate_file_name(
         directory,
         CLEANUP_FILE,
@@ -581,6 +584,11 @@ where
         evidence,
         "BXRC authority cleanup tombstone content or metadata changed before unlink",
     )?;
+    before_directory_check();
+    // Keep the configured pathname identity check as the final operation
+    // before unlinkat. Moving the directory after evidence validation must not
+    // let a live instance remove a tombstone from the displaced store.
+    validate_directory_name(directory_path, directory)?;
     // SAFETY: the fixed name is valid and relative to the live directory fd.
     if unsafe { libc::unlinkat(directory.as_raw_fd(), c_name(CLEANUP_FILE).as_ptr(), 0) } != 0 {
         return Err(Error::last_os_error());
@@ -606,14 +614,16 @@ where
 }
 
 fn remove_cleanup_checkpoint(
+    directory_path: &Path,
     directory: &File,
     cleanup: &File,
     evidence: CheckpointFileEvidence,
 ) -> io::Result<()> {
-    remove_cleanup_checkpoint_inner(directory, cleanup, evidence, || {})
+    remove_cleanup_checkpoint_inner(directory_path, directory, cleanup, evidence, || {}, || {})
 }
 
 fn remove_temporary_checkpoint_inner<F>(
+    directory_path: &Path,
     directory: &File,
     temporary: &File,
     evidence: CheckpointFileEvidence,
@@ -634,6 +644,7 @@ where
         "temporary BXRC authority record content or metadata changed before cleanup",
     )?;
     before_stage();
+    validate_directory_name(directory_path, directory)?;
     // Atomically move whatever occupies TEMP to a reserved tombstone without
     // overwriting prior crash evidence. The moved object must be the descriptor
     // pinned above before it can be unlinked.
@@ -661,15 +672,16 @@ where
         staged_evidence,
         "BXRC authority cleanup tombstone content or metadata changed while staging was synced",
     )?;
-    remove_cleanup_checkpoint(directory, temporary, staged_evidence)
+    remove_cleanup_checkpoint(directory_path, directory, temporary, staged_evidence)
 }
 
 fn remove_temporary_checkpoint(
+    directory_path: &Path,
     directory: &File,
     temporary: &File,
     evidence: CheckpointFileEvidence,
 ) -> io::Result<()> {
-    remove_temporary_checkpoint_inner(directory, temporary, evidence, || {})
+    remove_temporary_checkpoint_inner(directory_path, directory, temporary, evidence, || {})
 }
 
 fn validate_replaced_checkpoint(
@@ -793,6 +805,7 @@ fn install_checkpoint_name(directory: &File) -> io::Result<()> {
 }
 
 fn commit_temporary_checkpoint_inner<F>(
+    directory_path: &Path,
     directory: &File,
     temporary: &File,
     temporary_evidence: CheckpointFileEvidence,
@@ -827,6 +840,7 @@ where
         "temporary BXRC authority record content or metadata changed before commit",
     )?;
     before_replace();
+    validate_directory_name(directory_path, directory)?;
     let committed_evidence = if let Some((previous, previous_evidence)) = previous {
         // Atomically exchange both names. Whatever occupied STATE at this
         // instant is now inspectable at TEMP and must be the pinned predecessor.
@@ -853,7 +867,7 @@ where
             previous_evidence,
             "BXRC authority predecessor content or metadata changed during atomic exchange",
         )?;
-        remove_temporary_checkpoint(directory, previous, displaced)?;
+        remove_temporary_checkpoint(directory_path, directory, previous, displaced)?;
         committed
     } else {
         // Fresh provisioning has no predecessor to exchange. Refuse rather
@@ -887,15 +901,24 @@ where
 }
 
 fn commit_temporary_checkpoint(
+    directory_path: &Path,
     directory: &File,
     temporary: &File,
     temporary_evidence: CheckpointFileEvidence,
     previous: Option<(&File, CheckpointFileEvidence)>,
 ) -> io::Result<()> {
-    commit_temporary_checkpoint_inner(directory, temporary, temporary_evidence, previous, || {})
+    commit_temporary_checkpoint_inner(
+        directory_path,
+        directory,
+        temporary,
+        temporary_evidence,
+        previous,
+        || {},
+    )
 }
 
 fn write_checkpoint(
+    directory_path: &Path,
     directory: &File,
     transition_index: u64,
     authority: ExternalFloorCustodianAuthorityTuple,
@@ -917,6 +940,7 @@ fn write_checkpoint(
     }
     let encoded = encode(transition_index, authority, previous_record_hash)?;
     let expected = decode(&encoded)?;
+    validate_directory_name(directory_path, directory)?;
     let mut temporary = open_at(
         directory.as_raw_fd(),
         TEMP_FILE,
@@ -930,7 +954,13 @@ fn write_checkpoint(
         encoded,
         snapshot: checkpoint_snapshot(&temporary)?,
     };
-    commit_temporary_checkpoint(directory, &temporary, temporary_evidence, previous_file)?;
+    commit_temporary_checkpoint(
+        directory_path,
+        directory,
+        &temporary,
+        temporary_evidence,
+        previous_file,
+    )?;
     if read_checkpoint(directory)? != expected {
         return Err(invalid("BXRC authority checkpoint read-back mismatch"));
     }
@@ -1031,6 +1061,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         let directory = open_directory(path)?;
         let lock = Lock::acquire(&directory)?;
         let checkpoint = write_checkpoint(
+            path,
             &directory,
             expected.transition_index,
             expected.authority,
@@ -1111,7 +1142,13 @@ impl UnixExternalFloorCustodianAuthorityStore {
                         "BXRC authority provisioning found an unexpected temporary checkpoint",
                     ));
                 }
-                commit_temporary_checkpoint(&directory, &candidate_file, candidate_evidence, None)?;
+                commit_temporary_checkpoint(
+                    path,
+                    &directory,
+                    &candidate_file,
+                    candidate_evidence,
+                    None,
+                )?;
                 true
             }
             (true, true, false) | (true, false, true) => {
@@ -1136,9 +1173,19 @@ impl UnixExternalFloorCustodianAuthorityStore {
                     ));
                 }
                 if temporary_exists {
-                    remove_temporary_checkpoint(&directory, &candidate_file, candidate_evidence)?;
+                    remove_temporary_checkpoint(
+                        path,
+                        &directory,
+                        &candidate_file,
+                        candidate_evidence,
+                    )?;
                 } else {
-                    remove_cleanup_checkpoint(&directory, &candidate_file, candidate_evidence)?;
+                    remove_cleanup_checkpoint(
+                        path,
+                        &directory,
+                        &candidate_file,
+                        candidate_evidence,
+                    )?;
                 }
                 false
             }
@@ -1263,9 +1310,9 @@ impl UnixExternalFloorCustodianAuthorityStore {
                 ));
             };
             if candidate_name == TEMP_FILE {
-                remove_temporary_checkpoint(&directory, &temporary_file, temporary_evidence)?;
+                remove_temporary_checkpoint(path, &directory, &temporary_file, temporary_evidence)?;
             } else {
-                remove_cleanup_checkpoint(&directory, &temporary_file, temporary_evidence)?;
+                remove_cleanup_checkpoint(path, &directory, &temporary_file, temporary_evidence)?;
             }
             validate_directory_name(path, &directory)?;
             let reread = read_checkpoint(&directory)?;
@@ -1346,6 +1393,7 @@ impl UnixExternalFloorCustodianAuthorityStore {
         }
         let derived = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
         let next = write_checkpoint(
+            &self.path,
             &self.directory,
             derived.transition_index,
             derived.authority,
@@ -1725,7 +1773,7 @@ mod tests {
         let directory = open_directory(&root).unwrap();
         let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
-        let error = remove_temporary_checkpoint_inner(&directory, &opened, evidence, || {
+        let error = remove_temporary_checkpoint_inner(&root, &directory, &opened, evidence, || {
             // This runs after pathname validation and before the atomic move.
             // Model the exact unlink-and-replace race that used to delete the
             // replacement through a pathname-based unlinkat.
@@ -1765,11 +1813,18 @@ mod tests {
         let opened = open_at(directory.as_raw_fd(), CLEANUP_FILE, libc::O_RDONLY, 0).unwrap();
         let evidence = test_evidence(&opened);
         let original_inode = opened.metadata().unwrap().ino();
-        let error = remove_cleanup_checkpoint_inner(&directory, &opened, evidence, || {
-            // Preserve the pathname and inode while changing authenticated
-            // content in the last deterministic pre-unlink window.
-            write_test_checkpoint(&cleanup, 0x52);
-        })
+        let error = remove_cleanup_checkpoint_inner(
+            &root,
+            &directory,
+            &opened,
+            evidence,
+            || {
+                // Preserve the pathname and inode while changing authenticated
+                // content in the last deterministic pre-unlink window.
+                write_test_checkpoint(&cleanup, 0x52);
+            },
+            || {},
+        )
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs::metadata(&cleanup).unwrap().ino(), original_inode);
@@ -1800,8 +1855,8 @@ mod tests {
         fs::rename(&temporary, root.join("displaced-candidate")).unwrap();
         write_test_checkpoint(&temporary, 0x13);
 
-        let error =
-            commit_temporary_checkpoint(&directory, &opened, opened_evidence, None).unwrap_err();
+        let error = commit_temporary_checkpoint(&root, &directory, &opened, opened_evidence, None)
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
         assert_eq!(fs::read(&state).unwrap()[0], 0x11);
         assert_eq!(fs::read(&temporary).unwrap()[0], 0x13);
@@ -1834,6 +1889,7 @@ mod tests {
         write_test_checkpoint(&state, 0x23);
 
         let error = commit_temporary_checkpoint(
+            &root,
             &directory,
             &candidate,
             candidate_evidence,
@@ -1871,6 +1927,7 @@ mod tests {
         let previous_evidence = test_evidence(&previous);
         let candidate_evidence = test_evidence(&candidate);
         let error = commit_temporary_checkpoint_inner(
+            &root,
             &directory,
             &candidate,
             candidate_evidence,
@@ -1915,6 +1972,7 @@ mod tests {
         let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
         let candidate_evidence = test_evidence(&candidate);
         let error = commit_temporary_checkpoint_inner(
+            &root,
             &directory,
             &candidate,
             candidate_evidence,
@@ -1933,5 +1991,121 @@ mod tests {
         drop(candidate);
         drop(directory);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_exchange_refuses_displaced_directory_before_commit() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-directory-commit-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = root.join(STATE_FILE);
+        let temporary = root.join(TEMP_FILE);
+        write_test_checkpoint(&state, 0x61);
+        write_test_checkpoint(&temporary, 0x62);
+
+        let directory = open_directory(&root).unwrap();
+        let previous = open_at(directory.as_raw_fd(), STATE_FILE, libc::O_RDONLY, 0).unwrap();
+        let candidate = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let previous_evidence = test_evidence(&previous);
+        let candidate_evidence = test_evidence(&candidate);
+        let displaced = root.with_extension("displaced");
+        let error = commit_temporary_checkpoint_inner(
+            &root,
+            &directory,
+            &candidate,
+            candidate_evidence,
+            Some((&previous, previous_evidence)),
+            || {
+                fs::rename(&root, &displaced).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(displaced.join(STATE_FILE)).unwrap()[0], 0x61);
+        assert_eq!(fs::read(displaced.join(TEMP_FILE)).unwrap()[0], 0x62);
+
+        drop(candidate);
+        drop(previous);
+        drop(directory);
+        fs::remove_dir(&root).unwrap();
+        fs::remove_dir_all(displaced).unwrap();
+    }
+
+    #[test]
+    fn cleanup_refuses_displaced_directory_before_unlink() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-directory-cleanup-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let cleanup = root.join(CLEANUP_FILE);
+        write_test_checkpoint(&cleanup, 0x71);
+
+        let directory = open_directory(&root).unwrap();
+        let opened = open_at(directory.as_raw_fd(), CLEANUP_FILE, libc::O_RDONLY, 0).unwrap();
+        let evidence = test_evidence(&opened);
+        let displaced = root.with_extension("displaced");
+        let error = remove_cleanup_checkpoint_inner(
+            &root,
+            &directory,
+            &opened,
+            evidence,
+            || {},
+            || {
+                // This hook runs after pathname and evidence validation, at
+                // the final directory-identity boundary before unlinkat.
+                fs::rename(&root, &displaced).unwrap();
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(displaced.join(CLEANUP_FILE)).unwrap()[0], 0x71);
+
+        drop(opened);
+        drop(directory);
+        fs::remove_dir(&root).unwrap();
+        fs::remove_dir_all(displaced).unwrap();
+    }
+
+    #[test]
+    fn temporary_cleanup_refuses_displaced_directory_before_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-directory-staging-race-{}-{}",
+            std::process::id(),
+            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let temporary = root.join(TEMP_FILE);
+        write_test_checkpoint(&temporary, 0x81);
+
+        let directory = open_directory(&root).unwrap();
+        let opened = open_at(directory.as_raw_fd(), TEMP_FILE, libc::O_RDONLY, 0).unwrap();
+        let evidence = test_evidence(&opened);
+        let displaced = root.with_extension("displaced");
+        let error = remove_temporary_checkpoint_inner(&root, &directory, &opened, evidence, || {
+            fs::rename(&root, &displaced).unwrap();
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(displaced.join(TEMP_FILE)).unwrap()[0], 0x81);
+        assert!(!displaced.join(CLEANUP_FILE).exists());
+
+        drop(opened);
+        drop(directory);
+        fs::remove_dir(&root).unwrap();
+        fs::remove_dir_all(displaced).unwrap();
     }
 }

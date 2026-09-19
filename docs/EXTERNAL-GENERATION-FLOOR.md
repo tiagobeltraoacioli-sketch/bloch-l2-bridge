@@ -449,9 +449,11 @@ opening or acquire a terminal. They are revalidated after their bounded read
 and must still match their
 descriptor-relative path. The configured directory pathname is likewise
 reopened and required to name the same device and inode before and after live
-operations. Renaming the locked directory and replacing its old pathname can
-therefore make an in-flight transition ambiguous, but cannot silently direct a
-live instance to keep accepting a displaced receipt store. A write also keeps
+operations, and again immediately before checkpoint install, exchange,
+tombstone staging, or unlink. Renaming the locked directory and replacing its
+old pathname is therefore refused at the final deterministic pre-mutation
+boundary; a later kernel-level race remains ambiguous but cannot silently direct
+a live instance to keep accepting a displaced receipt store. A write also keeps
 its synced temporary descriptor open across the atomic rename, requiring that
 descriptor to match the temporary pathname immediately before rename and the
 durable pathname before and after the directory sync. Temporary-file
