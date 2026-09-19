@@ -28,6 +28,8 @@
 
 pub mod atoms;
 pub mod envelope;
+#[cfg(unix)]
+pub mod external_floor;
 pub mod harness;
 pub mod hex;
 pub mod merkle;
@@ -44,6 +46,11 @@ pub mod withdrawal;
 
 pub use atoms::{atoms_to_wei, wei_to_atoms, AtomConversionError, ATOM_SCALE};
 pub use envelope::{extract_deposit_envelope, DecodeError, DepositEnvelope, TxOutput};
+#[cfg(unix)]
+pub use external_floor::{
+    ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome, ExternalFloorRequest,
+    ExternalFloorResponse, ExternalGenerationFloor,
+};
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
     evaluate_release_checklist, AnchoredEpochView, CheckOutcome, ChecklistVerdict, NullifierLog,

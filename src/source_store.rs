@@ -44,11 +44,14 @@ pub struct SourceFloorState {
 /// a different commitment at the current generation. A plain monotonic
 /// counter is therefore insufficient: an HSM-backed integration needs a
 /// counter plus authenticated opaque state (or an equivalent transactional
-/// service) in the same anti-rollback boundary. [`crate::UnixGenerationFloor`]
-/// is a durable local implementation, but its KMAC key must be provisioned
-/// independently and the host must place its directory in a separately
-/// protected, non-rollbackable domain; merely using a second local directory
-/// does not defend against coherent rollback of the whole disk.
+/// service) in the same anti-rollback boundary.
+/// [`crate::ExternalGenerationFloor`] supplies a fail-closed CAS protocol
+/// adapter but deliberately supplies neither transport authentication nor the
+/// protected service. [`crate::UnixGenerationFloor`] is a durable local
+/// implementation, but its KMAC key must be provisioned independently and the
+/// host must place its directory in a separately protected, non-rollbackable
+/// domain; merely using a second local directory does not defend against
+/// coherent rollback of the whole disk.
 pub trait SourceGenerationFloor {
     fn current(&self) -> std::io::Result<SourceFloorState>;
     fn advance(&self, requested: SourceFloorState) -> std::io::Result<()>;
