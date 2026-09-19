@@ -723,6 +723,12 @@ impl<S: ExternalFloorReplayStore, C: ExternalFloorReplayStore, B: ExternalFloorB
     pub fn is_closed(&self) -> bool {
         self.replay.borrow().is_closed()
     }
+
+    /// Access the custodian so callers can persist transport-specific request
+    /// identity after every attempted exchange, including failures.
+    pub fn custodian(&self) -> &C {
+        &self.custodian
+    }
 }
 
 fn durable_replay_io_error(error: ExternalFloorDurableReplayError) -> io::Error {

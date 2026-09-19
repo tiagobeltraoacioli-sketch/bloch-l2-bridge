@@ -159,6 +159,34 @@ output and zeroized on configuration failure, transfer or drop. This factory
 starts no listener or runtime and cannot prove that a caller placed the
 custodian in a separate failure domain; deployment must enforce that.
 
+The `external_floor_custodian` module provides the transport-neutral `BXRC` v1
+protocol and an `AuthenticatedExternalFloorCustodian` that implements the
+custodian CAS trait. Frames are canonical and capped at 274 bytes. KMAC256
+authenticates direction, fixed peer identities, transport session and sequence,
+operation, exact payload, request binding and response. Responses are accepted
+only for the exact in-flight request. Invalid transitions are rejected before
+I/O, every attempted exchange consumes its sequence, and the client never
+retries a transport error or malformed response automatically.
+
+The server treats an exact repeated CAS whose replacement is already current
+as committed without executing the underlying CAS again. Any other stale CAS
+returns the current conflict, and an underlying indeterminate result remains
+`Uncertain`. This makes byte-for-byte delivery duplication safe without turning
+an ambiguous outcome into a blind retry of a different operation.
+
+`ExternalFloorCustodianTransportCheckpoint` is security state, not a local
+convenience counter. After each attempted exchange its session and exact next
+sequence must be retained independently, or restart must use a fresh
+unpredictable authorized session. Rolling it back can make a recorded `load`
+response valid again. `BXRC` supplies neither session authorization nor that
+retention mechanism. The client implements the store contract by value and by
+shared reference; production coordinators should borrow it so an open failure
+does not destroy access to the advanced transport checkpoint. A running
+custodied server also exposes its custodian reference for checkpoint export.
+As with `BXFA`, symmetric KMAC does not replace mTLS,
+HSM-backed key custody, endpoint authorization or physical failure-domain
+separation.
+
 `BXFA` is defense in depth, not a replacement for transport or storage
 security. KMAC is symmetric: either holder can impersonate the other and it
 does not provide non-repudiation. The local backend cannot detect coherent

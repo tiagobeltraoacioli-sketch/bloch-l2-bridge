@@ -11,16 +11,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::{
     decode_authenticated_external_floor_response, encode_authenticated_external_floor_request,
-    ExternalFloorBoundary, ExternalFloorOutcome, ExternalFloorPeerAuthentication,
-    ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint, ExternalFloorReplayStore,
-    ExternalFloorRequest, ExternalFloorResponse, ExternalGenerationFloor, SourceFloorState,
-    SourceGenerationFloor, UnixExternalFloorReplayStore, UnixExternalFloorServerConfig,
+    AuthenticatedExternalFloorCustodian, AuthenticatedExternalFloorCustodianServer,
+    ExternalFloorBoundary, ExternalFloorCustodianAuthentication,
+    ExternalFloorCustodianTransportCheckpoint, ExternalFloorOutcome,
+    ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint,
+    ExternalFloorReplayStore, ExternalFloorRequest, ExternalFloorResponse, ExternalGenerationFloor,
+    SourceFloorState, SourceGenerationFloor, UnixExternalFloorReplayStore,
+    UnixExternalFloorServerConfig,
 };
 
 const KEY: [u8; 32] = [0x31; 32];
 const CLIENT: [u8; 32] = [0xc1; 32];
 const BOUNDARY: [u8; 32] = [0xb2; 32];
 const SESSION: [u8; 32] = [0x5a; 32];
+const CUSTODIAN_KEY: [u8; 32] = [0x73; 32];
+const CUSTODIAN_CLIENT: [u8; 32] = [0x84; 32];
+const CUSTODIAN_SERVER: [u8; 32] = [0x95; 32];
+const CUSTODIAN_SESSION: [u8; 32] = [0xa6; 32];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct TemporaryDirectory(PathBuf);
@@ -55,6 +62,11 @@ fn checkpoint(revision: u64, sequence: u64) -> ExternalFloorReplayCheckpoint {
 
 fn authentication() -> ExternalFloorPeerAuthentication {
     ExternalFloorPeerAuthentication::new(KEY, CLIENT, BOUNDARY).unwrap()
+}
+
+fn custodian_authentication() -> ExternalFloorCustodianAuthentication {
+    ExternalFloorCustodianAuthentication::new(CUSTODIAN_KEY, CUSTODIAN_CLIENT, CUSTODIAN_SERVER)
+        .unwrap()
 }
 
 fn config(path: PathBuf, trusted: ExternalFloorReplayCheckpoint) -> UnixExternalFloorServerConfig {
@@ -189,6 +201,40 @@ fn concrete_coordinator_advances_both_stores_before_effect_and_survives_restart(
     let next_wire = encode_authenticated_external_floor_request(&next, &authentication()).unwrap();
     restarted.handle(&next_wire).unwrap();
     assert_eq!(calls.get(), 2);
+}
+
+#[test]
+fn production_coordinator_accepts_the_authenticated_transport_custodian() {
+    let temporary = TemporaryDirectory::new();
+    let initial = checkpoint(12, 0);
+    UnixExternalFloorReplayStore::provision(&temporary.replay(), initial).unwrap();
+    let remote_store = Custodian::new(initial);
+    let remote_server = AuthenticatedExternalFloorCustodianServer::new(
+        remote_store.clone(),
+        custodian_authentication(),
+    );
+    let remote_client = AuthenticatedExternalFloorCustodian::new(
+        &remote_server,
+        custodian_authentication(),
+        ExternalFloorCustodianTransportCheckpoint::new(CUSTODIAN_SESSION, 0).unwrap(),
+    );
+    let calls = Rc::new(Cell::new(0));
+    let boundary = Boundary {
+        calls: calls.clone(),
+        custodian: remote_store.clone(),
+    };
+    let coordinator = config(temporary.replay(), initial)
+        .open(&remote_client, boundary)
+        .unwrap();
+    let request = requests()[0];
+    let wire = encode_authenticated_external_floor_request(&request, &authentication()).unwrap();
+    coordinator.handle(&wire).unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(*remote_store.state.borrow(), coordinator.checkpoint());
+    assert_eq!(
+        coordinator.custodian().transport_checkpoint().next_sequence,
+        3
+    );
 }
 
 #[test]
