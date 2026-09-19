@@ -27,9 +27,10 @@ const STORE_VERSION: u32 = 1;
 /// `advance_generation` MUST durably store at least `generation` before it
 /// returns and MUST never lower the stored value. Implementations may use an
 /// HSM/NVRAM counter, an authenticated database in another failure domain, or
-/// equivalent host infrastructure. This crate intentionally provides no local
-/// file implementation because colocating it with the snapshot would pretend
-/// to provide rollback protection that does not exist.
+/// equivalent host infrastructure. [`crate::UnixGenerationFloor`] is a durable
+/// local implementation, but the host must place its directory in a separately
+/// protected, non-rollbackable domain; merely using a second local directory
+/// does not defend against coherent rollback of the whole disk.
 pub trait SourceGenerationFloor {
     fn current_generation(&self) -> std::io::Result<u64>;
     fn advance_generation(&self, generation: u64) -> std::io::Result<()>;

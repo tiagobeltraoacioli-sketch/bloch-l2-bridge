@@ -37,6 +37,8 @@ pub mod reserves;
 pub mod source_store;
 pub mod status;
 pub mod stubs;
+#[cfg(unix)]
+pub mod unix_floor;
 pub mod watcher;
 pub mod withdrawal;
 
@@ -55,6 +57,8 @@ pub use source_store::{
 pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };
+#[cfg(unix)]
+pub use unix_floor::UnixGenerationFloor;
 pub use watcher::{
     BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint,
     SourceGenerationExhausted, SourceViewToken, VaultSet, VersionedMemorySource,
