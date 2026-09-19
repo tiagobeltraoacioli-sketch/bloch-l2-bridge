@@ -1367,10 +1367,147 @@ impl UnixExternalFloorCustodianAuthorityStore {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     static NEXT_PATH_IDENTITY_TEMP: AtomicU64 = AtomicU64::new(0);
+    const FIFO_HELPER_ROOT_ENV: &str = "BLOCH_BXRC_FIFO_HELPER_ROOT";
+    const FIFO_HELPER_TOKEN_ENV: &str = "BLOCH_BXRC_FIFO_HELPER_TOKEN";
+    const FIFO_HELPER_FD_ENV: &str = "BLOCH_BXRC_FIFO_HELPER_FD";
+    const FIFO_HELPER_TEST: &str = concat!(
+        "external_floor_custodian_authority_file::tests::",
+        "checkpoint_open_rejects_fifos_with_a_watchdog"
+    );
+
+    struct RemoveTestDirectory(PathBuf);
+
+    impl Drop for RemoveTestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct ChildGuard(Option<Child>);
+
+    impl ChildGuard {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.0.as_mut().unwrap().try_wait()
+        }
+
+        fn kill_and_reap(&mut self) -> (Option<ErrorKind>, io::Result<Option<ExitStatus>>) {
+            let child = self.0.as_mut().unwrap();
+            let kill_error = child.kill().err().map(|error| error.kind());
+            let reap_result = if kill_error.is_none() {
+                child.wait().map(Some)
+            } else {
+                child.try_wait()
+            };
+            if matches!(&reap_result, Ok(Some(_))) {
+                self.0.take();
+            }
+            (kill_error, reap_result)
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                if !matches!(child.try_wait(), Ok(Some(_))) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+
+    fn fifo_helper_invocation() -> Option<(PathBuf, UnixStream, Vec<u8>)> {
+        let root = PathBuf::from(std::env::var_os(FIFO_HELPER_ROOT_ENV)?);
+        let token = std::env::var(FIFO_HELPER_TOKEN_ENV).ok()?.into_bytes();
+        if token.len() != 64 || !token.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let inherited_fd = std::env::var(FIFO_HELPER_FD_ENV)
+            .ok()?
+            .parse::<RawFd>()
+            .ok()?;
+        if inherited_fd < 3 {
+            return None;
+        }
+        // Duplicate the inherited descriptor so a fabricated environment can
+        // never make this test close an unrelated descriptor owned by libtest.
+        // SAFETY: fcntl validates inherited_fd and returns a new owned fd.
+        let duplicated = unsafe { libc::fcntl(inherited_fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicated < 0 {
+            return None;
+        }
+        // SAFETY: duplicated is a new descriptor owned by this UnixStream.
+        let mut channel = unsafe { UnixStream::from_raw_fd(duplicated) };
+        let mut socket_type = 0_i32;
+        let mut socket_type_len = std::mem::size_of::<i32>() as libc::socklen_t;
+        // SAFETY: all pointers refer to initialized storage with the reported length.
+        if unsafe {
+            libc::getsockopt(
+                channel.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut socket_type as *mut i32).cast(),
+                &mut socket_type_len,
+            )
+        } != 0
+            || socket_type != libc::SOCK_STREAM
+        {
+            return None;
+        }
+        channel.set_nonblocking(true).ok()?;
+        let mut received = vec![0_u8; token.len()];
+        channel.read_exact(&mut received).ok()?;
+        channel.set_nonblocking(false).ok()?;
+        (received == token).then_some((root, channel, token))
+    }
+
+    fn random_fifo_helper_token() -> Vec<u8> {
+        let mut random = [0_u8; 32];
+        File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut random)
+            .unwrap();
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn descriptor_flags(stream: &UnixStream) -> i32 {
+        // SAFETY: stream owns a live descriptor and fcntl does not retain pointers.
+        let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        flags
+    }
+
+    fn inherit_only_in_child(command: &mut Command, descriptor: RawFd) {
+        // SAFETY: this callback runs after fork and before exec. It invokes
+        // only async-signal-safe fcntl calls and changes the child's descriptor
+        // table; the parent's copy remains CLOEXEC during concurrent tests.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(Error::last_os_error());
+                }
+                if libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                    return Err(Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     fn write_test_checkpoint(path: &Path, byte: u8) {
         fs::write(path, [byte; EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN]).unwrap();
@@ -1419,31 +1556,157 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_open_rejects_fifo_without_waiting_for_a_writer() {
+    fn checkpoint_open_rejects_fifos_with_a_watchdog() {
+        if let Some((root, mut channel, token)) = fifo_helper_invocation() {
+            let directory = open_directory(&root).unwrap();
+            for (filename, unsafe_file_message) in [
+                (
+                    STATE_FILE,
+                    "BXRC authority record must be private and single-link",
+                ),
+                (
+                    TEMP_FILE,
+                    "temporary BXRC authority record must be private and single-link",
+                ),
+                (
+                    CLEANUP_FILE,
+                    "BXRC authority cleanup candidate must be private and single-link",
+                ),
+            ] {
+                let error =
+                    open_checkpoint_file(&directory, filename, unsafe_file_message).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+            }
+            channel.write_all(&token).unwrap();
+            return;
+        }
+
+        let path_identity = NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "bloch-bxrc-authority-fifo-{}-{}",
             std::process::id(),
-            NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed)
+            path_identity
         ));
         fs::create_dir(&root).unwrap();
+        let _remove_root = RemoveTestDirectory(root.clone());
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let state = root.join(STATE_FILE);
-        let state_name = std::ffi::CString::new(state.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: state_name is a valid NUL-terminated pathname.
-        assert_eq!(unsafe { libc::mkfifo(state_name.as_ptr(), 0o600) }, 0);
+        let helper_token = random_fifo_helper_token();
+        for filename in [STATE_FILE, TEMP_FILE, CLEANUP_FILE] {
+            let path = root.join(filename);
+            let path_name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: path_name is a valid NUL-terminated pathname.
+            assert_eq!(unsafe { libc::mkfifo(path_name.as_ptr(), 0o600) }, 0);
+        }
 
-        let directory = open_directory(&root).unwrap();
-        let error = open_checkpoint_file(
-            &directory,
-            STATE_FILE,
-            "BXRC authority record must be private and single-link",
+        // Run the potentially blocking opens in a separate test process. If
+        // O_NONBLOCK is ever removed, this watchdog kills the helper instead
+        // of allowing the complete test suite to hang indefinitely.
+        let (mut parent_channel, child_channel) = UnixStream::pair().unwrap();
+        assert_ne!(descriptor_flags(&child_channel) & libc::FD_CLOEXEC, 0);
+        parent_channel.write_all(&helper_token).unwrap();
+        let child_descriptor = child_channel.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg(FIFO_HELPER_TEST)
+            .arg("--test-threads=1")
+            .env(FIFO_HELPER_ROOT_ENV, &root)
+            .env(
+                FIFO_HELPER_TOKEN_ENV,
+                std::str::from_utf8(&helper_token).unwrap(),
+            )
+            .env(FIFO_HELPER_FD_ENV, child_descriptor.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        inherit_only_in_child(&mut command, child_descriptor);
+        let child = command.spawn().unwrap();
+        assert_ne!(descriptor_flags(&child_channel) & libc::FD_CLOEXEC, 0);
+        drop(child_channel);
+        let mut child = ChildGuard(Some(child));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let (kill_error, reap_result) = child.kill_and_reap();
+                panic!(
+                    "checkpoint FIFO opens exceeded the ten-second watchdog; kill error: \
+                     {kill_error:?}; reap result: {reap_result:?}"
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let mut helper_completed = vec![0_u8; helper_token.len()];
+        let helper_completion = parent_channel.read_exact(&mut helper_completed);
+        let artifacts_preserved =
+            [STATE_FILE, TEMP_FILE, CLEANUP_FILE].map(|filename| root.join(filename).exists());
+        assert!(status.success(), "checkpoint FIFO helper failed: {status}");
+        helper_completion.unwrap();
+        assert_eq!(helper_completed, helper_token);
+        assert_eq!(artifacts_preserved, [true; 3]);
+    }
+
+    #[test]
+    fn fifo_helper_refuses_fabricated_environment_and_symlink_markers() {
+        let path_identity = NEXT_PATH_IDENTITY_TEMP.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "bloch-bxrc-authority-fabricated-helper-{}-{}",
+            std::process::id(),
+            path_identity
+        ));
+        fs::create_dir(&root).unwrap();
+        let _remove_root = RemoveTestDirectory(root.clone());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        for filename in [STATE_FILE, TEMP_FILE, CLEANUP_FILE] {
+            let path = root.join(filename);
+            let path_name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: path_name is a valid NUL-terminated pathname.
+            assert_eq!(unsafe { libc::mkfifo(path_name.as_ptr(), 0o600) }, 0);
+        }
+
+        let token = "00".repeat(32);
+        let invocation_target = root.join("fabricated-invocation-target");
+        let completion_target = root.join("fabricated-completion-target");
+        fs::write(&invocation_target, &token).unwrap();
+        fs::write(&completion_target, b"must remain unchanged").unwrap();
+        std::os::unix::fs::symlink(
+            &invocation_target,
+            root.join(".bxrc-test-fifo-helper-invocation"),
         )
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
-        assert!(state.exists());
+        .unwrap();
+        std::os::unix::fs::symlink(
+            &completion_target,
+            root.join(".bxrc-test-fifo-helper-complete"),
+        )
+        .unwrap();
 
-        drop(directory);
-        fs::remove_dir_all(root).unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(FIFO_HELPER_TEST)
+            .arg("--test-threads=1")
+            .env(FIFO_HELPER_ROOT_ENV, &root)
+            .env(FIFO_HELPER_TOKEN_ENV, &token)
+            .env(FIFO_HELPER_FD_ENV, "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "watchdog parent subprocess failed: {status}"
+        );
+        assert_eq!(
+            fs::read(completion_target).unwrap(),
+            b"must remain unchanged"
+        );
+        assert_eq!(
+            [STATE_FILE, TEMP_FILE, CLEANUP_FILE].map(|filename| root.join(filename).exists()),
+            [true; 3]
+        );
     }
 
     #[test]
