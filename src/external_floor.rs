@@ -417,7 +417,7 @@ fn update_state(hash: &mut Keccak, state: SourceFloorState) {
     }
 }
 
-fn request_binding(request: &ExternalFloorRequest) -> [u8; 32] {
+pub(crate) fn request_binding(request: &ExternalFloorRequest) -> [u8; 32] {
     let mut hash = Keccak::v256();
     hash.update(REQUEST_DOMAIN);
     hash.update(&request.deployment_domain);

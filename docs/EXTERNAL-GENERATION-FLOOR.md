@@ -38,3 +38,30 @@ reconciliation result. After `NotCommitted` or `Conflict`, any later advance is
 a new business decision and a new CAS—not an automatic retry. Reconciliation
 does not establish L1 canonicality, finality, source-snapshot correctness, key
 custody, network authenticity, or availability.
+
+## Canonical wire codec
+
+The optional `external_floor_codec` module maps the typed request and response
+boundary to a versioned, transport-neutral binary representation. Version 1
+uses the `BXFL` magic, explicit message and variant tags, big-endian integers,
+fixed-size state commitment slots, and exact per-variant lengths. Decoding is
+bounded to 193 bytes. It rejects unknown versions and tags, truncation,
+trailing or duplicated fields, nonzero bytes in an absent commitment slot,
+invalid states, request mutations not covered by the request binding, and a
+response that does not exactly match the caller-supplied request and binding.
+Each response also ends in a domain-separated Keccak commitment over its full
+canonical payload (including the echoed request binding and outcome), so no
+response field is outside the codec's integrity check.
+
+Reconciliation has no privileged wire operation: it is the same canonical
+`Read` request under the fresh session nonce enforced by the typed adapter.
+This avoids giving transports a second, weaker reconciliation path.
+
+The codec is not a network client or server and has no keys. A production
+integration must independently enforce mutually authenticated transport (or a
+response attestation), authorize the deployment domain, reject replayed or
+out-of-order session sequences, protect service identity and CAS state in an
+HSM or equivalent administrative boundary, and cap transport frames before
+passing them to the decoder. The Keccak request and response bindings are not
+MACs or peer identities, and canonical encoding does not provide
+confidentiality, availability, finality, or anti-rollback storage.

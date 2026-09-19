@@ -30,6 +30,8 @@ pub mod atoms;
 pub mod envelope;
 #[cfg(unix)]
 pub mod external_floor;
+#[cfg(unix)]
+pub mod external_floor_codec;
 pub mod harness;
 pub mod hex;
 pub mod merkle;
@@ -51,6 +53,12 @@ pub use external_floor::{
     ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome,
     ExternalFloorReconciliation, ExternalFloorRequest, ExternalFloorResponse,
     ExternalGenerationFloor,
+};
+#[cfg(unix)]
+pub use external_floor_codec::{
+    decode_external_floor_request, decode_external_floor_response, encode_external_floor_request,
+    encode_external_floor_response, ExternalFloorCodecError, EXTERNAL_FLOOR_CODEC_MAGIC,
+    EXTERNAL_FLOOR_CODEC_MAX_LEN, EXTERNAL_FLOOR_CODEC_VERSION,
 };
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
