@@ -382,6 +382,28 @@ with which to prove that the head descends from the floor. The durable client
 can be lent by reference to `UnixExternalFloorServerConfig`, preserving access
 to its transport checkpoint and anchor after coordinator-open failures.
 
+An idle live runtime may close that explicit gap with
+`accept_authority_continuity`. The adapter first derives the only next receipt
+from the current checkpoint and the old-authority authorization plus
+new-authority acceptance signatures. It accepts the transition only when its
+next anchor is the **exact** current operational head, rather than merely a
+lower floor. It then atomically advances the local authority receipt and pins
+the returned checkpoint for all later operations. This supports routine floor
+advancement and authority-key rotation without restarting or adopting data
+from disk. A different, future or stale anchor refuses without changing the
+receipt.
+
+The returned checkpoint must be exported to the independent trust domain
+before operators rely on it for restart rollback detection. After export, a
+restart with the previous receipt fails, and restoring the operational anchor
+below the new floor also fails. A crash after the local receipt advances but
+before export is deliberately fail-closed: derive the candidate next receipt
+again from the retained prior receipt and the same signed continuity artifact,
+then try the exact prior and candidate states. Do not adopt the locally read
+receipt. This live checkpoint is authenticated operational evidence; it is
+not proof that an above-floor head descended from an earlier floor and it does
+not make either local filesystem anti-rollback storage.
+
 This composition still does not create independent anti-rollback storage.
 The expected authority checkpoint must come from another trust domain, and
 the operational anchor directory must still be placed in independently

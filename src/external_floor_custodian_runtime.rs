@@ -6,17 +6,19 @@
 //! floor and stays pinned for the runtime lifetime. This composition does not
 //! turn either local directory into independent anti-rollback storage.
 
+use std::cell::Cell;
 use std::io::{self, Error, ErrorKind};
 use std::path::PathBuf;
 
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    external_floor_custodian_expected_authority_checkpoint,
     DurableAuthenticatedExternalFloorCustodian, ExternalFloorCustodianAnchorCasOutcome,
-    ExternalFloorCustodianAnchorStore, ExternalFloorCustodianAuthentication,
-    ExternalFloorCustodianAuthorityCheckpoint, ExternalFloorCustodianClientAnchor,
-    ExternalFloorCustodianTransport, UnixExternalFloorCustodianAnchorStore,
-    UnixExternalFloorCustodianAuthorityStore,
+    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianAnchorStore,
+    ExternalFloorCustodianAuthentication, ExternalFloorCustodianAuthorityCheckpoint,
+    ExternalFloorCustodianClientAnchor, ExternalFloorCustodianTransport,
+    UnixExternalFloorCustodianAnchorStore, UnixExternalFloorCustodianAuthorityStore,
 };
 
 fn invalid(message: &'static str) -> Error {
@@ -34,7 +36,7 @@ fn invalid(message: &'static str) -> Error {
 pub struct AuthorityPinnedUnixExternalFloorCustodianAnchorStore {
     authority: UnixExternalFloorCustodianAuthorityStore,
     anchor: UnixExternalFloorCustodianAnchorStore,
-    accepted: ExternalFloorCustodianAuthorityCheckpoint,
+    accepted: Cell<ExternalFloorCustodianAuthorityCheckpoint>,
 }
 
 impl AuthorityPinnedUnixExternalFloorCustodianAnchorStore {
@@ -66,22 +68,55 @@ impl AuthorityPinnedUnixExternalFloorCustodianAnchorStore {
         Ok(Self {
             authority,
             anchor,
-            accepted: expected_authority,
+            accepted: Cell::new(expected_authority),
         })
     }
 
     pub fn accepted_authority(&self) -> ExternalFloorCustodianAuthorityCheckpoint {
-        self.accepted
+        self.accepted.get()
     }
 
     fn verify_authority(&self) -> io::Result<()> {
-        if self.authority.checkpoint()? != self.accepted {
+        if self.authority.checkpoint()? != self.accepted.get() {
             return Err(Error::new(
                 ErrorKind::PermissionDenied,
                 "BXRC accepted authority changed during runtime",
             ));
         }
         Ok(())
+    }
+
+    /// Advances the live authority floor to the exact current operational
+    /// head after validating dual-signed continuity.
+    ///
+    /// Requiring equality prevents this operation from blessing an
+    /// unaccounted-for head above the proposed floor. The returned checkpoint
+    /// must be exported to an independent trust domain before it is relied on
+    /// for restart rollback detection.
+    pub fn accept_authority_continuity(
+        &self,
+        approval: ExternalFloorCustodianAnchorContinuityApproval,
+    ) -> io::Result<ExternalFloorCustodianAuthorityCheckpoint> {
+        self.verify_authority()?;
+        let previous = self.accepted.get();
+        let next = external_floor_custodian_expected_authority_checkpoint(previous, approval)?;
+        let operational = self.anchor.load()?;
+        if operational != next.authority.anchor {
+            return Err(Error::new(
+                ErrorKind::PermissionDenied,
+                "BXRC authority transition must name the exact operational anchor head",
+            ));
+        }
+        self.verify_authority()?;
+        let accepted = self.authority.accept_continuity(approval)?;
+        if accepted != next {
+            return Err(Error::other(
+                "BXRC accepted authority transition differed from derived checkpoint",
+            ));
+        }
+        self.accepted.set(accepted);
+        self.verify_authority()?;
+        Ok(accepted)
     }
 }
 

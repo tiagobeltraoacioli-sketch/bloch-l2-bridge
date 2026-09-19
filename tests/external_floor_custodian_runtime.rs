@@ -11,15 +11,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bloch_l2_bridge::{
     encode_authenticated_external_floor_request, external_floor_custodian_anchor_approval_message,
+    external_floor_custodian_anchor_continuity_acceptance_message,
+    external_floor_custodian_anchor_continuity_authorization_message,
     AuthenticatedExternalFloorCustodianServer, DurableAuthenticatedExternalFloorCustodian,
     ExternalFloorBoundary, ExternalFloorCustodianAnchorApproval,
-    ExternalFloorCustodianAuthentication, ExternalFloorCustodianClientAnchor,
-    ExternalFloorCustodianTransportCheckpoint, ExternalFloorOutcome,
-    ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint,
-    ExternalFloorReplayStore, ExternalFloorRequest, ExternalFloorResponse, ExternalGenerationFloor,
-    SourceFloorState, SourceGenerationFloor, UnixExternalFloorCustodianAnchorStore,
-    UnixExternalFloorCustodianAuthorityStore, UnixExternalFloorCustodianRuntimeConfig,
-    UnixExternalFloorReplayStore, UnixExternalFloorServerConfig,
+    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianAuthentication,
+    ExternalFloorCustodianClientAnchor, ExternalFloorCustodianTransportCheckpoint,
+    ExternalFloorOutcome, ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome,
+    ExternalFloorReplayCheckpoint, ExternalFloorReplayStore, ExternalFloorRequest,
+    ExternalFloorResponse, ExternalGenerationFloor, SourceFloorState, SourceGenerationFloor,
+    UnixExternalFloorCustodianAnchorStore, UnixExternalFloorCustodianAuthorityStore,
+    UnixExternalFloorCustodianRuntimeConfig, UnixExternalFloorReplayStore,
+    UnixExternalFloorServerConfig,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -114,6 +117,41 @@ fn approval(
     }
 }
 
+fn continuity(
+    previous: &Ed25519KeyPair,
+    next: &Ed25519KeyPair,
+    deployment_id: [u8; 32],
+    previous_anchor: ExternalFloorCustodianClientAnchor,
+    next_anchor: ExternalFloorCustodianClientAnchor,
+) -> ExternalFloorCustodianAnchorContinuityApproval {
+    let authorization = external_floor_custodian_anchor_continuity_authorization_message(
+        deployment_id,
+        key(previous),
+        previous_anchor,
+        key(next),
+        next_anchor,
+    );
+    let acceptance = external_floor_custodian_anchor_continuity_acceptance_message(
+        deployment_id,
+        key(previous),
+        previous_anchor,
+        key(next),
+        next_anchor,
+    );
+    let mut authorization_signature = [0; 64];
+    authorization_signature.copy_from_slice(previous.sign(&authorization).as_ref());
+    let mut acceptance_signature = [0; 64];
+    acceptance_signature.copy_from_slice(next.sign(&acceptance).as_ref());
+    ExternalFloorCustodianAnchorContinuityApproval {
+        deployment_id,
+        previous_anchor,
+        next_anchor,
+        next_verifying_key: key(next),
+        authorization_signature,
+        acceptance_signature,
+    }
+}
+
 fn custodian_authentication() -> ExternalFloorCustodianAuthentication {
     ExternalFloorCustodianAuthentication::new(CUSTODIAN_KEY, CUSTODIAN_CLIENT, CUSTODIAN_SERVER)
         .unwrap()
@@ -125,6 +163,7 @@ fn provision(
 ) -> (
     bloch_l2_bridge::ExternalFloorCustodianAuthorityCheckpoint,
     RemoteStore,
+    Ed25519KeyPair,
 ) {
     let checkpoint = temp.path("checkpoint");
     let anchor = DurableAuthenticatedExternalFloorCustodian::<(), ()>::provision(
@@ -159,6 +198,7 @@ fn provision(
             state: Rc::new(RefCell::new(initial)),
             loads: Rc::new(Cell::new(0)),
         },
+        signer,
     )
 }
 
@@ -203,7 +243,7 @@ fn request() -> ExternalFloorRequest {
 fn authority_pinned_runtime_composes_with_production_coordinator() {
     let temp = Temp::new();
     let initial = ExternalFloorReplayCheckpoint::new(7, REQUEST_SESSION, 0).unwrap();
-    let (receipt, remote) = provision(&temp, initial);
+    let (receipt, remote, _) = provision(&temp, initial);
     let remote_server =
         AuthenticatedExternalFloorCustodianServer::new(remote.clone(), custodian_authentication());
     let runtime = runtime_config(&temp, receipt).open(&remote_server).unwrap();
@@ -255,6 +295,81 @@ fn authority_pinned_runtime_composes_with_production_coordinator() {
 }
 
 #[test]
+fn live_dual_signed_transition_checkpoints_exact_head_and_controls_restart() {
+    let temp = Temp::new();
+    let initial = ExternalFloorReplayCheckpoint::new(8, REQUEST_SESSION, 0).unwrap();
+    let (receipt, remote, first) = provision(&temp, initial);
+    let server =
+        AuthenticatedExternalFloorCustodianServer::new(remote.clone(), custodian_authentication());
+    let old_anchor_record = fs::read(temp.path("anchor").join(".bxrc-external-anchor")).unwrap();
+    let runtime = runtime_config(&temp, receipt).open(&server).unwrap();
+
+    runtime.load().unwrap();
+    let operational_head = runtime.anchor();
+    assert!(operational_head.revision > receipt.authority.anchor.revision);
+    let next_signer = signer();
+    let signed = continuity(
+        &first,
+        &next_signer,
+        receipt.authority.deployment_id,
+        receipt.authority.anchor,
+        operational_head,
+    );
+    let next_receipt = runtime
+        .anchor_store()
+        .accept_authority_continuity(signed)
+        .unwrap();
+    assert_eq!(next_receipt.transition_index, receipt.transition_index + 1);
+    assert_eq!(next_receipt.previous_record_hash, receipt.record_hash);
+    assert_eq!(next_receipt.authority.anchor, operational_head);
+    assert_eq!(next_receipt.authority.verifying_key, key(&next_signer));
+    assert_eq!(runtime.anchor_store().accepted_authority(), next_receipt);
+    drop(runtime);
+
+    assert!(runtime_config(&temp, receipt).open(&server).is_err());
+    let restarted = runtime_config(&temp, next_receipt).open(&server).unwrap();
+    assert_eq!(restarted.anchor(), operational_head);
+    drop(restarted);
+
+    // Rolling the operational file back below the newly exported floor is
+    // rejected when the independently retained next receipt is supplied.
+    let anchor_path = temp.path("anchor").join(".bxrc-external-anchor");
+    fs::write(&anchor_path, old_anchor_record).unwrap();
+    fs::set_permissions(&anchor_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(runtime_config(&temp, next_receipt).open(&server).is_err());
+}
+
+#[test]
+fn live_transition_refuses_to_bless_a_floor_other_than_exact_head() {
+    let temp = Temp::new();
+    let initial = ExternalFloorReplayCheckpoint::new(9, REQUEST_SESSION, 0).unwrap();
+    let (receipt, remote, first) = provision(&temp, initial);
+    let server = AuthenticatedExternalFloorCustodianServer::new(remote, custodian_authentication());
+    let runtime = runtime_config(&temp, receipt).open(&server).unwrap();
+    runtime.load().unwrap();
+    let operational_head = runtime.anchor();
+    let mismatched = ExternalFloorCustodianClientAnchor {
+        revision: operational_head.revision + 1,
+        commitment: [0xd1; 32],
+    };
+    let next_signer = signer();
+    let signed = continuity(
+        &first,
+        &next_signer,
+        receipt.authority.deployment_id,
+        receipt.authority.anchor,
+        mismatched,
+    );
+
+    assert!(runtime
+        .anchor_store()
+        .accept_authority_continuity(signed)
+        .is_err());
+    assert_eq!(runtime.anchor_store().accepted_authority(), receipt);
+    assert_eq!(runtime.anchor(), operational_head);
+}
+
+#[test]
 fn startup_rejects_anchor_not_named_by_authority_before_transport() {
     let temp = Temp::new();
     let initial = ExternalFloorReplayCheckpoint::new(1, REQUEST_SESSION, 0).unwrap();
@@ -297,7 +412,7 @@ fn startup_rejects_anchor_not_named_by_authority_before_transport() {
 fn wrong_receipt_and_live_authority_replacement_fail_closed() {
     let temp = Temp::new();
     let initial = ExternalFloorReplayCheckpoint::new(2, REQUEST_SESSION, 0).unwrap();
-    let (receipt, remote) = provision(&temp, initial);
+    let (receipt, remote, _) = provision(&temp, initial);
     let mut wrong = receipt;
     wrong.record_hash[0] ^= 1;
     let server =
@@ -319,7 +434,7 @@ fn wrong_receipt_and_live_authority_replacement_fail_closed() {
 fn runtime_config_has_no_relative_or_shared_paths_and_redacts_keys() {
     let temp = Temp::new();
     let initial = ExternalFloorReplayCheckpoint::new(3, REQUEST_SESSION, 0).unwrap();
-    let (receipt, _) = provision(&temp, initial);
+    let (receipt, _, _) = provision(&temp, initial);
     assert!(UnixExternalFloorCustodianRuntimeConfig::new(
         PathBuf::from("relative"),
         temp.path("anchor"),
