@@ -134,7 +134,8 @@ impl std::error::Error for DecodeError {}
 
 /// A transaction output as this layer sees it (value in L1 atoms/sats plus
 /// the raw script_pubkey). Mirrors the shape bloch-tokens reads over RPC.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TxOutput {
     /// Output value in L1 atoms. Envelopes MUST be zero-value.
     pub value: u64,

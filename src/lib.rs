@@ -33,6 +33,8 @@ pub mod hex;
 pub mod merkle;
 pub mod release;
 pub mod reserves;
+#[cfg(unix)]
+pub mod source_store;
 pub mod status;
 pub mod stubs;
 pub mod watcher;
@@ -46,6 +48,10 @@ pub use release::{
     ReleaseChecklist, ReleaseObservation, WithdrawalProofBundle, WithdrawalQueue,
 };
 pub use reserves::{check_reserves, is_exactly_backed, ReserveCheck, ReserveStatement};
+#[cfg(unix)]
+pub use source_store::{
+    persist_versioned_source, restore_versioned_source, SourceGenerationFloor, SourceStoreError,
+};
 pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };

@@ -138,7 +138,8 @@ impl core::fmt::Display for WatcherSyncError {
 impl std::error::Error for WatcherSyncError {}
 
 /// A Bloch L1 transaction as this layer sees it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L1Tx {
     /// Transaction id.
     pub txid: [u8; 32],
@@ -147,7 +148,8 @@ pub struct L1Tx {
 }
 
 /// A Bloch L1 block as this layer sees it. Heights are contiguous from 0.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L1Block {
     /// Block height.
     pub height: u64,
@@ -438,6 +440,25 @@ impl VersionedMemorySource {
             }),
             source_commitment: memory_source_commitment(&state.source),
         })
+    }
+
+    pub(crate) fn snapshot_and_seal(
+        &self,
+    ) -> Result<(Vec<L1Block>, VersionedSourceSeal), VersionedSourceRestoreError> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        if !state.valid {
+            return Err(VersionedSourceRestoreError::Invalidated);
+        }
+        let seal = VersionedSourceSeal {
+            version: SOURCE_SEAL_VERSION,
+            generation: state.generation,
+            checkpoint: state.source.blocks.last().map(|block| SourceCheckpoint {
+                height: block.height,
+                hash: block.hash,
+            }),
+            source_commitment: memory_source_commitment(&state.source),
+        };
+        Ok((state.source.blocks.clone(), seal))
     }
 
     /// Capture a handle to the current generation. The handle itself does not
