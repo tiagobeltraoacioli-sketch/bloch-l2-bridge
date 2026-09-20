@@ -7,6 +7,15 @@ administrator mint or reserve rescue. This is **federated custody**, not a light
 client: a colluding quorum can fabricate burn attestations and steal reserves.
 An unavailable committee or token issuer freeze can block redemption.
 
+The vault is deployed with both deposits and releases disabled. There is no
+single administrator or implicit deployer privilege. Any change to these two
+controls requires the same threshold committee certificate used for custody,
+bound to `block.chainid`, the vault address, route ID, exact new flags, a
+strictly increasing `uint64` control nonce and an inclusive deadline. A replay,
+expired certificate, no-op transition or certificate for another deployment is
+refused. Operators can enable deposits and releases separately and can return
+both to the paused state, but a colluding quorum can also change these controls.
+
 Ethereum ERC-20 and TRON TRC-20 are separate routes with separate deployments,
 source domains, vault addresses and reserve accounts. Both routes can back the
 same native asset when enabled before issuance. Holdings then become fungible,
@@ -68,6 +77,11 @@ Signatures are 65-byte `r || s || v`, low-s, v=27/28, provided in strictly ascen
 recovered signer-address order. The deadline is inclusive. Certificates bind the
 whole release and deadline. Both nonce and native burn have permanent nullifiers.
 
+Control authorization hashes `abi.encode(bytes32("BLOCH-USDT-CONTROLS-v1"),
+block.chainid, vault, routeId, depositsEnabled, releasesEnabled, controlNonce,
+validUntil)` with Keccak-256 and then applies the same EIP-191 32-byte envelope.
+It uses the same low-s, sorted threshold certificate rules as a release.
+
 A source payout reduces `totalLocked`; deposit and release token calls run under
 a reentrancy guard. Failed transfers roll back counters, liabilities, nullifiers
 and token state. Unsolicited donations do not mint liabilities and are not
@@ -93,4 +107,7 @@ verification, a relayer, keys, node consensus activation, or production deployme
 Tests exercise normal/no-return tokens, configured false-on-success behavior,
 false/no-transfer, taxes, blacklisting/revert, callback reentrancy, rollback,
 malformed/duplicate/unordered signatures, expiry, replay and distinct domains.
+They also prove the deployment starts paused, partial enablement blocks the
+opposite operation, control certificates cannot replay and a threshold pause
+closes both operations again.
 No mainnet funds or external deployments are used.

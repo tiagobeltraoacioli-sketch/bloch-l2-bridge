@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity 0.8.24;
+
 import {USDTSourceVault} from "../contracts/usdt/USDTSourceVault.sol";
 
 interface UsdtVm {
@@ -50,7 +51,11 @@ contract MockSourceUSDT {
             (callbackSucceeded,) =
                 callback.call(abi.encodeCall(USDTSourceVault.deposit, (uint64(1), bytes32(uint256(1)))));
         }
-        if (mode == 1) assembly { return(0, 0) }
+        if (mode == 1) {
+            assembly {
+                return(0, 0)
+            }
+        }
         return mode != 5;
     }
 }
@@ -71,10 +76,40 @@ contract USDTSourceVaultTest {
         s[1] = vm.addr(key1);
     }
 
-    function deploy(uint8 mode, bytes32 domain) private returns (USDTSourceVault) {
+    function deployPaused(uint8 mode, bytes32 domain) private returns (USDTSourceVault) {
         return new USDTSourceVault(
             domain, bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, mode, committee(), 2
         );
+    }
+
+    function controlCert(
+        USDTSourceVault subject,
+        bool depositsEnabled,
+        bool releasesEnabled,
+        uint64 nonce,
+        uint256 deadline
+    ) private returns (bytes[] memory sigs) {
+        sigs = new bytes[](2);
+        bytes32 h = subject.controlDigest(depositsEnabled, releasesEnabled, nonce, deadline);
+        (uint8 v, bytes32 rr, bytes32 ss) = vm.sign(key0, h);
+        sigs[0] = abi.encodePacked(rr, ss, v);
+        (v, rr, ss) = vm.sign(key1, h);
+        sigs[1] = abi.encodePacked(rr, ss, v);
+    }
+
+    function controls(USDTSourceVault subject, bool depositsEnabled, bool releasesEnabled, uint64 nonce) private {
+        subject.setControls(
+            depositsEnabled,
+            releasesEnabled,
+            nonce,
+            100,
+            controlCert(subject, depositsEnabled, releasesEnabled, nonce, 100)
+        );
+    }
+
+    function deploy(uint8 mode, bytes32 domain) private returns (USDTSourceVault subject) {
+        subject = deployPaused(mode, domain);
+        controls(subject, true, true, 0);
     }
 
     function setUp() public {
@@ -87,17 +122,77 @@ contract USDTSourceVaultTest {
         r = USDTSourceVault.Release(vault.routeId(), 0, address(123), 40, bytes32(uint256(99)));
     }
 
-    function cert(USDTSourceVault.Release memory r, uint256 deadline) private returns (bytes[] memory sigs) {
+    function certFor(USDTSourceVault subject, USDTSourceVault.Release memory r, uint256 deadline)
+        private
+        returns (bytes[] memory sigs)
+    {
         sigs = new bytes[](2);
-        bytes32 h = vault.releaseDigest(r, deadline);
+        bytes32 h = subject.releaseDigest(r, deadline);
         (uint8 v, bytes32 rr, bytes32 ss) = vm.sign(key0, h);
         sigs[0] = abi.encodePacked(rr, ss, v);
         (v, rr, ss) = vm.sign(key1, h);
         sigs[1] = abi.encodePacked(rr, ss, v);
     }
 
+    function cert(USDTSourceVault.Release memory r, uint256 deadline) private returns (bytes[] memory sigs) {
+        return certFor(vault, r, deadline);
+    }
+
     function deposit() private {
         vault.deposit(100, bytes32(uint256(8)));
+    }
+
+    function testDeploymentStartsPausedAndThresholdControlsAreReplayProtected() public {
+        USDTSourceVault subject = deployPaused(0, bytes32(uint256(91)));
+        require(!subject.depositsEnabled() && !subject.releasesEnabled() && subject.controlNonce() == 0);
+        vm.expectRevert(USDTSourceVault.InvalidTransfer.selector);
+        subject.deposit(1, bytes32(uint256(1)));
+
+        bytes[] memory short = new bytes[](1);
+        short[0] = controlCert(subject, true, false, 0, 100)[0];
+        vm.expectRevert(USDTSourceVault.InvalidCertificate.selector);
+        subject.setControls(true, false, 0, 100, short);
+
+        controls(subject, true, false, 0);
+        require(subject.depositsEnabled() && !subject.releasesEnabled() && subject.controlNonce() == 1);
+        subject.deposit(100, bytes32(uint256(8)));
+        USDTSourceVault.Release memory r =
+            USDTSourceVault.Release(subject.routeId(), 0, address(123), 40, bytes32(uint256(99)));
+        bytes[] memory releaseSignatures = certFor(subject, r, 100);
+        vm.expectRevert(USDTSourceVault.InvalidRelease.selector);
+        subject.release(r, 100, releaseSignatures);
+
+        bytes[] memory noOpSignatures = controlCert(subject, true, false, 1, 100);
+        vm.expectRevert(USDTSourceVault.InvalidControls.selector);
+        subject.setControls(true, false, 1, 100, noOpSignatures);
+
+        bytes[] memory replaySignatures = controlCert(subject, true, false, 0, 100);
+        vm.expectRevert(USDTSourceVault.InvalidControls.selector);
+        subject.setControls(true, false, 0, 100, replaySignatures);
+
+        bytes[] memory wrongFlagsSignatures = controlCert(subject, true, false, 1, 100);
+        vm.expectRevert(USDTSourceVault.InvalidCertificate.selector);
+        subject.setControls(true, true, 1, 100, wrongFlagsSignatures);
+
+        USDTSourceVault other = deployPaused(0, bytes32(uint256(91)));
+        bytes[] memory wrongVaultSignatures = controlCert(subject, true, true, 1, 100);
+        vm.expectRevert(USDTSourceVault.InvalidCertificate.selector);
+        other.setControls(true, true, 0, 100, wrongVaultSignatures);
+
+        controls(subject, true, true, 1);
+        subject.release(r, 100, certFor(subject, r, 100));
+        controls(subject, false, false, 2);
+        vm.expectRevert(USDTSourceVault.InvalidTransfer.selector);
+        subject.deposit(1, bytes32(uint256(1)));
+        require(!subject.depositsEnabled() && !subject.releasesEnabled() && subject.controlNonce() == 3);
+    }
+
+    function testExpiredControlCertificateIsRejected() public {
+        USDTSourceVault subject = deployPaused(0, bytes32(uint256(92)));
+        bytes[] memory signatures = controlCert(subject, true, false, 0, 100);
+        vm.warp(101);
+        vm.expectRevert(USDTSourceVault.InvalidControls.selector);
+        subject.setControls(true, false, 0, 100, signatures);
     }
 
     function testCommitteeReadbackIsCompleteAndStableAcrossDeposit() public {

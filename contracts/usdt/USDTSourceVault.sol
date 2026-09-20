@@ -18,6 +18,9 @@ contract USDTSourceVault {
     mapping(address => bool) public isSigner;
     uint64 public depositCount;
     uint64 public totalLocked;
+    uint64 public controlNonce;
+    bool public depositsEnabled;
+    bool public releasesEnabled;
     mapping(uint64 => bool) public releasedNonce;
     mapping(bytes32 => bool) public releasedBurn;
     bool private entered;
@@ -30,16 +33,20 @@ contract USDTSourceVault {
         uint64 amount;
         bytes32 nativeBurn;
     }
+
     event Deposited(
         bytes32 indexed id, bytes32 indexed route, uint64 nonce, address sender, uint64 amount, bytes32 pqRecipientHash
     );
     event Released(
         bytes32 indexed id, bytes32 indexed route, uint64 nonce, address recipient, uint64 amount, bytes32 nativeBurn
     );
+    event ControlsUpdated(bytes32 indexed route, uint64 indexed nonce, bool depositsEnabled, bool releasesEnabled);
+
     error InvalidConfiguration();
     error InvalidTransfer();
     error InvalidRelease();
     error InvalidCertificate();
+    error InvalidControls();
     error InsufficientBacking();
     error Reentrancy();
 
@@ -74,6 +81,7 @@ contract USDTSourceVault {
         threshold = threshold_;
         transferMode = transferMode_;
     }
+
     modifier nonReentrant() {
         if (entered) revert Reentrancy();
         entered = true;
@@ -132,9 +140,44 @@ contract USDTSourceVault {
         return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", authorization));
     }
 
+    function controlDigest(bool deposits_, bool releases_, uint64 nonce, uint256 validUntil)
+        public
+        view
+        returns (bytes32)
+    {
+        bytes32 authorization = keccak256(
+            abi.encode(
+                bytes32("BLOCH-USDT-CONTROLS-v1"),
+                block.chainid,
+                address(this),
+                routeId(),
+                deposits_,
+                releases_,
+                nonce,
+                validUntil
+            )
+        );
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", authorization));
+    }
+
+    function setControls(bool deposits_, bool releases_, uint64 nonce, uint256 validUntil, bytes[] calldata signatures)
+        external
+        nonReentrant
+    {
+        if (
+            block.timestamp > validUntil || nonce != controlNonce || nonce == type(uint64).max
+                || (deposits_ == depositsEnabled && releases_ == releasesEnabled)
+        ) revert InvalidControls();
+        _checkCertificate(controlDigest(deposits_, releases_, nonce, validUntil), signatures);
+        controlNonce = nonce + 1;
+        depositsEnabled = deposits_;
+        releasesEnabled = releases_;
+        emit ControlsUpdated(routeId(), nonce, deposits_, releases_);
+    }
+
     function deposit(uint64 amount, bytes32 pqRecipientHash) external nonReentrant returns (bytes32 id) {
         if (
-            amount == 0 || pqRecipientHash == 0 || uint256(totalLocked) + amount > cap
+            !depositsEnabled || amount == 0 || pqRecipientHash == 0 || uint256(totalLocked) + amount > cap
                 || depositCount == type(uint64).max
         ) revert InvalidTransfer();
         uint256 beforeBalance = _balance(address(this));
@@ -154,12 +197,27 @@ contract USDTSourceVault {
 
     function release(Release calldata item, uint256 validUntil, bytes[] calldata signatures) external nonReentrant {
         if (
-            item.route != routeId() || item.amount == 0 || item.recipient == address(0)
+            !releasesEnabled || item.route != routeId() || item.amount == 0 || item.recipient == address(0)
                 || item.recipient == address(this) || item.nativeBurn == 0 || item.amount > totalLocked
                 || block.timestamp > validUntil || releasedNonce[item.nonce] || releasedBurn[item.nativeBurn]
         ) revert InvalidRelease();
+        _checkCertificate(releaseDigest(item, validUntil), signatures);
+        uint256 beforeVault = _balance(address(this));
+        if (beforeVault < totalLocked) revert InsufficientBacking();
+        uint256 beforeRecipient = _balance(item.recipient);
+        releasedNonce[item.nonce] = true;
+        releasedBurn[item.nativeBurn] = true;
+        totalLocked -= item.amount;
+        _call(abi.encodeWithSignature("transfer(address,uint256)", item.recipient, uint256(item.amount)));
+        if (
+            _balance(address(this)) + item.amount != beforeVault
+                || _balance(item.recipient) != beforeRecipient + item.amount
+        ) revert InvalidTransfer();
+        emit Released(releaseId(item), item.route, item.nonce, item.recipient, item.amount, item.nativeBurn);
+    }
+
+    function _checkCertificate(bytes32 digest, bytes[] calldata signatures) private view {
         if (signatures.length < threshold || signatures.length > signers.length) revert InvalidCertificate();
-        bytes32 digest = releaseDigest(item, validUntil);
         address previous;
         for (uint256 i; i < signatures.length; ++i) {
             bytes calldata signature = signatures[i];
@@ -177,18 +235,6 @@ contract USDTSourceVault {
             if (signer <= previous || !isSigner[signer]) revert InvalidCertificate();
             previous = signer;
         }
-        uint256 beforeVault = _balance(address(this));
-        if (beforeVault < totalLocked) revert InsufficientBacking();
-        uint256 beforeRecipient = _balance(item.recipient);
-        releasedNonce[item.nonce] = true;
-        releasedBurn[item.nativeBurn] = true;
-        totalLocked -= item.amount;
-        _call(abi.encodeWithSignature("transfer(address,uint256)", item.recipient, uint256(item.amount)));
-        if (
-            _balance(address(this)) + item.amount != beforeVault
-                || _balance(item.recipient) != beforeRecipient + item.amount
-        ) revert InvalidTransfer();
-        emit Released(releaseId(item), item.route, item.nonce, item.recipient, item.amount, item.nativeBurn);
     }
 
     function _balance(address owner) private view returns (uint256) {

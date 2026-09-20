@@ -67,7 +67,9 @@ class StablecoinRuntimeTest(unittest.TestCase):
     def test_collection_uses_canonical_hash_and_rechecks_block(self):
         source = Mock()
         config = self.runtime['configuration']
-        reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
+        reads = [v for k, v in config.items()
+                 if k not in ('signers', 'memberships', 'controls')]
+        reads.extend(config['controls'].values())
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
         reads.extend(self.runtime['reserves'].values())
@@ -92,7 +94,9 @@ class StablecoinRuntimeTest(unittest.TestCase):
     def test_reorg_during_runtime_collection_refused(self):
         source = Mock()
         config = self.runtime['configuration']
-        reads = [v for k, v in config.items() if k not in ('signers', 'memberships')]
+        reads = [v for k, v in config.items()
+                 if k not in ('signers', 'memberships', 'controls')]
+        reads.extend(config['controls'].values())
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
         reads.extend(self.runtime['reserves'].values())

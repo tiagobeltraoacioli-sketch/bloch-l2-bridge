@@ -11,6 +11,11 @@ SELECTORS = {
     'threshold': '42cde4e8', 'transferMode': '6b3b64a1', 'routeId': '7360fd1e',
     'signerCount': '7ca548c6',
 }
+CONTROL_SELECTORS = {
+    'controlNonce': '4faac8ca',
+    'depositsEnabled': '5392fd1c',
+    'releasesEnabled': '175b818c',
+}
 SIGNERS = '2079fb9a'
 IS_SIGNER = '7df73e27'
 
@@ -39,7 +44,7 @@ def expected_words(route):
 def validate_configuration(route, configuration):
     expected = expected_words(route)
     require(type(configuration) is dict
-            and set(configuration) == set(expected) | {'signers', 'memberships'},
+            and set(configuration) == set(expected) | {'signers', 'memberships', 'controls'},
             'exact vault configuration evidence required')
     for name, value in expected.items():
         require(word(configuration[name], 32) == value, 'vault configuration mismatch')
@@ -52,6 +57,14 @@ def validate_configuration(route, configuration):
         require(word(signer, 32) == word(configured, 20).rjust(32, b'\0'),
                 'vault committee mismatch')
         require(word(member, 32) == abi_uint(1), 'vault signer membership mismatch')
+    controls = configuration['controls']
+    require(type(controls) is dict and set(controls) == set(CONTROL_SELECTORS),
+            'exact vault controls required')
+    nonce = int.from_bytes(word(controls['controlNonce'], 32), 'big')
+    require(nonce <= (1 << 64) - 1, 'invalid vault control nonce')
+    for name in ('depositsEnabled', 'releasesEnabled'):
+        require(word(controls[name], 32) in (abi_uint(0), abi_uint(1)),
+                'invalid vault control flag')
 
 
 def collect_configuration(route, block_hash, source):
@@ -68,6 +81,9 @@ def collect_configuration(route, block_hash, source):
         value = call(selector)
         require(word(value, 32) == expected[name], 'vault configuration mismatch')
         result[name] = value
+    result['controls'] = {}
+    for name, selector in CONTROL_SELECTORS.items():
+        result['controls'][name] = call(selector)
     # Bound requests using the validated manifest, never an RPC-supplied count.
     result['signers'], result['memberships'] = [], []
     for index, signer in enumerate(route['committee_signers']):

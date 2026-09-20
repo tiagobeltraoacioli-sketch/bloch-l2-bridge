@@ -79,18 +79,23 @@ stablecoin CLI is refused rather than silently using the legacy path.
 The stablecoin Ethereum CLI also requires block-bound `eth_call` readback of
 `sourceDomain()`, `nativeDomain()`, `nativeAsset()`, `token()`, `decimals()`,
 `cap()`, `threshold()`, `transferMode()`, `routeId()` and `signerCount()`.
+It additionally captures `controlNonce()`, `depositsEnabled()` and
+`releasesEnabled()` so an observation retains the exact operational state at
+the same block.
 Each exact 32-byte ABI result must match the validated catalog, including zero
 address padding and integer widths. It then checks `signers(i)` in order and
 `isSigner(address)` for every configured member. `signerCount()` ensures the
 configured list is complete; a matching prefix alone is not accepted.
 
-The `configuration` evidence object uses these ten getter names without
-parentheses, with their raw 0x-prefixed 32-byte results, plus `signers` and
-`memberships` arrays of raw ABI words. Missing or unknown fields, extra committee
-members, malformed ABI words and noncanonical booleans are refused before the
-journal write. All calls use the deposit block hash and `requireCanonical: true`;
+The `configuration` evidence object uses the ten immutable/configuration getter
+names without parentheses, with their raw 0x-prefixed 32-byte results, plus
+`signers` and `memberships` arrays and an exact `controls` object containing the
+three operational getter results. The nonce must fit `uint64`; both flags must
+be canonical ABI booleans. Missing or unknown fields, extra committee members,
+malformed ABI words and noncanonical booleans are refused before the journal
+write. All calls use the deposit block hash and `requireCanonical: true`;
 the canonical block is rechecked after the entire read. Requests are bounded by
-the validated committee (2..16), at most 42 getter calls, each limited to 100,000
+the validated committee (2..16), at most 45 getter calls, each limited to 100,000
 gas and subject to the existing overall collection deadline. No response can
 increase the number of requested signer entries.
 
@@ -99,12 +104,13 @@ be fabricated by an untrusted endpoint or contract; the reviewed runtime pin
 and authenticated deployment still matter. This does not prove balances or
 native liabilities, or authorize emission.
 
-The source contract adds the read-only `signerCount()` getter without changing
-storage layout or route/deposit/release digest formats. Its compiled runtime
+The source contract exposes `signerCount()` and the three control getters. Its
+route/deposit/release digest formats remain unchanged, but its compiled runtime
 changes and therefore requires a new reviewed deployment/runtime pin. Existing
-contracts without this getter are refused by this stricter observer; there is
-no fallback to partial committee verification. No contract is deployed by this
-code change. Legacy USDT and TRON observation formats remain unchanged.
+contracts without the complete getters are refused by this stricter observer;
+there is no fallback to partial committee or control verification. No contract
+is deployed by this code change. Legacy USDT and TRON observation formats remain
+unchanged.
 
 ### Source reserve consistency
 
@@ -113,7 +119,7 @@ with exactly `total_locked` and `token_balance`, both raw 0x-prefixed 32-byte AB
 words. It reads `totalLocked()` from the configured vault and `balanceOf(vault)`
 from the configured token, using the same canonical deposit block hash as the
 other calls. Both reads have a 100,000 gas limit; the canonical block is checked
-again after all reads. The total maximum is now 44 getter calls, within the
+again after all reads. The total maximum is now 47 getter calls, within the
 existing collection deadline, without any fallback to `latest` or block height.
 
 The reported liability must fit uint64 and the route cap. The token balance is
