@@ -41,3 +41,12 @@ with the CSP, permissions, referrer and content-type protections intact. The
 copy now reflects the selected Ethereum USDC to Bloch L1 bUSDC qualification
 path. It still exposes no wallet or transfer flow and explicitly says transfers
 are not enabled. Previous deployment for rollback: `4b5735df.blochbridge.pages.dev`.
+
+Republished the four-file artifact after pinning both public source links to the
+reviewed paused-vault commit `29a9aea`. Deployment:
+`b41f738e.blochbridge.pages.dev`. Both the deployment URL and custom domain
+returned the exact reviewed `index.html` SHA-256
+`dde99b69be5e72e38ece76f48851c7fef177c84a9542dc732b35d9bd8ff1902b`
+with the required CSP, permissions, referrer and content-type protections. The
+site still contains no wallet, approval or transfer endpoint. Previous
+deployment for rollback: `e669c488.blochbridge.pages.dev`.
