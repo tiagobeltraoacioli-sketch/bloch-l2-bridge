@@ -393,13 +393,21 @@ an unchanged prefix: an unchanged current anchor requires the identical
 history, while an advanced current anchor requires the former current anchor
 with its previously pinned verifying key to be the first newly retained
 predecessor. Every later predecessor added in the same extension must carry
-that same key. The ordinary next-checkpoint constructor also requires the
-current verifying key to remain unchanged: a caller-selected, self-signed
-replacement key is not authority continuity. Key rotation remains outside this
-receipt API until it is explicitly bound to the existing dual-signed anchor-continuity
-protocol. Lower revisions, equal revisions with different commitments, gaps
-created by removal, and rewritten historical approvals are rejected.
-Consequently an old, otherwise valid approved
+that same key. The ordinary next-checkpoint constructor requires the current
+verifying key to remain unchanged: a caller-selected, self-signed replacement
+key is not authority continuity.
+
+`external_floor_custodian_expected_rotated_quarantine_checkpoint` is the only
+key-rotation path. It derives both the next key and exact current anchor from an
+`ExternalFloorCustodianAnchorContinuityApproval` signed in separate role
+domains by the previously pinned key and the accepting next key. The former
+current anchor must be the first new quarantine under the former key; any
+later intermediate predecessor must be approved by the next key. A key-only
+rotation requires an unchanged inventory. Wrong-old-key, wrong-new-key,
+one-sided, replayed-predecessor and self-signed rotations fail closed. Lower
+revisions, equal revisions with different commitments, gaps created by removal,
+and rewritten historical approvals are rejected. Consequently an old,
+otherwise valid approved
 inventory cannot satisfy a caller that supplies the independently retained
 newer checkpoint. Deliberate cleanup requires a separate future authorization
 protocol; it cannot be smuggled through this receipt API. The checkpoint is a

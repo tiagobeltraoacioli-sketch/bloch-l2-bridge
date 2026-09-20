@@ -366,6 +366,60 @@ pub fn external_floor_custodian_expected_next_quarantine_checkpoint(
         current_approval,
         quarantine_approvals,
     )?;
+    derive_next_quarantine_checkpoint(previous, current_verifying_key, inventory, None)
+}
+
+/// Derives a next quarantine checkpoint across an exact dual-signed authority
+/// rotation.
+///
+/// The next key and current anchor come exclusively from `continuity`; callers
+/// cannot inject either as an unsigned parameter. The former current record
+/// must be retained under the former key, while every later newly retained
+/// predecessor must be approved by the new key.
+pub fn external_floor_custodian_expected_rotated_quarantine_checkpoint(
+    previous: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    continuity: ExternalFloorCustodianAnchorContinuityApproval,
+    current_approval: ExternalFloorCustodianAnchorApproval,
+    quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+    validate_quarantine_checkpoint(previous)?;
+    let (authorized_current, next_verifying_key) =
+        verify_external_floor_custodian_anchor_continuity(
+            previous.deployment_id,
+            previous.current_verifying_key,
+            previous.current,
+            continuity,
+        )?;
+    if next_verifying_key == previous.current_verifying_key {
+        return Err(denied(
+            "BXRC anchor quarantine rotation must change the verifying key",
+        ));
+    }
+    let inventory = approved_quarantine_inventory(
+        previous.deployment_id,
+        next_verifying_key,
+        current_approval,
+        quarantine_approvals,
+    )?;
+    if inventory.current != authorized_current {
+        return Err(denied(
+            "BXRC anchor quarantine rotation does not name the approved current anchor",
+        ));
+    }
+    derive_next_quarantine_checkpoint(
+        previous,
+        next_verifying_key,
+        inventory,
+        Some(next_verifying_key),
+    )
+}
+
+fn derive_next_quarantine_checkpoint(
+    previous: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    current_verifying_key: [u8; 32],
+    inventory: ApprovedQuarantineInventory,
+    rotated_to: Option<[u8; 32]>,
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
     if inventory.current.revision < previous.current.revision
         || (inventory.current.revision == previous.current.revision
             && inventory.current != previous.current)
@@ -389,15 +443,34 @@ pub fn external_floor_custodian_expected_next_quarantine_checkpoint(
             "BXRC anchor quarantine history does not extend retained checkpoint",
         ));
     }
-    if inventory
-        .records
-        .iter()
-        .skip(previous_count)
-        .any(|(_, key)| *key != previous.current_verifying_key)
-    {
-        return Err(denied(
-            "BXRC anchor quarantine history changes authority without dual-signed continuity",
-        ));
+    match rotated_to {
+        None => {
+            if inventory
+                .records
+                .iter()
+                .skip(previous_count)
+                .any(|(_, key)| *key != previous.current_verifying_key)
+            {
+                return Err(denied(
+                    "BXRC anchor quarantine history changes authority without dual-signed continuity",
+                ));
+            }
+        }
+        Some(next_key) => {
+            let added_after_predecessor = if inventory.current == previous.current {
+                &inventory.records[previous_count..]
+            } else {
+                &inventory.records[previous_count + 1..]
+            };
+            if added_after_predecessor
+                .iter()
+                .any(|(_, key)| *key != next_key)
+            {
+                return Err(denied(
+                    "BXRC anchor quarantine rotation has an unauthorized historical key",
+                ));
+            }
+        }
     }
     if inventory.current != previous.current {
         let mut prior = previous.current;
@@ -2330,6 +2403,43 @@ mod quarantine_checkpoint_tests {
         }
     }
 
+    fn continuity(
+        previous_signer: &Ed25519KeyPair,
+        next_signer: &Ed25519KeyPair,
+        deployment_id: [u8; 32],
+        previous_anchor: ExternalFloorCustodianClientAnchor,
+        next_anchor: ExternalFloorCustodianClientAnchor,
+    ) -> ExternalFloorCustodianAnchorContinuityApproval {
+        let previous_key = previous_signer.public_key().as_ref().try_into().unwrap();
+        let next_key = next_signer.public_key().as_ref().try_into().unwrap();
+        let authorization = external_floor_custodian_anchor_continuity_authorization_message(
+            deployment_id,
+            previous_key,
+            previous_anchor,
+            next_key,
+            next_anchor,
+        );
+        let acceptance = external_floor_custodian_anchor_continuity_acceptance_message(
+            deployment_id,
+            previous_key,
+            previous_anchor,
+            next_key,
+            next_anchor,
+        );
+        let mut authorization_signature = [0; 64];
+        authorization_signature.copy_from_slice(previous_signer.sign(&authorization).as_ref());
+        let mut acceptance_signature = [0; 64];
+        acceptance_signature.copy_from_slice(next_signer.sign(&acceptance).as_ref());
+        ExternalFloorCustodianAnchorContinuityApproval {
+            deployment_id,
+            previous_anchor,
+            next_anchor,
+            next_verifying_key: next_key,
+            authorization_signature,
+            acceptance_signature,
+        }
+    }
+
     #[test]
     fn checkpoint_chain_rejects_tampering_and_current_rollback() {
         let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
@@ -2444,6 +2554,128 @@ mod quarantine_checkpoint_tests {
         let mut forged = next;
         forged.inventory_hash[0] ^= 1;
         assert!(verify_external_floor_custodian_quarantine_checkpoint(forged).is_err());
+    }
+
+    #[test]
+    fn rotated_checkpoint_requires_both_keys_and_exact_historical_key_boundary() {
+        let previous_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let previous_signer = Ed25519KeyPair::from_pkcs8(previous_document.as_ref()).unwrap();
+        let next_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let next_signer = Ed25519KeyPair::from_pkcs8(next_document.as_ref()).unwrap();
+        let previous_key = previous_signer.public_key().as_ref().try_into().unwrap();
+        let next_key = next_signer.public_key().as_ref().try_into().unwrap();
+        let deployment = [0x92; 32];
+        let old = ExternalFloorCustodianClientAnchor {
+            revision: 7,
+            commitment: [0x81; 32],
+        };
+        let previous_current = ExternalFloorCustodianClientAnchor {
+            revision: 8,
+            commitment: [0x82; 32],
+        };
+        let intermediate = ExternalFloorCustodianClientAnchor {
+            revision: 9,
+            commitment: [0x83; 32],
+        };
+        let next_current = ExternalFloorCustodianClientAnchor {
+            revision: 10,
+            commitment: [0x84; 32],
+        };
+        let old_record = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: previous_key,
+            approval: signed(&previous_signer, deployment, old),
+        };
+        let previous = external_floor_custodian_expected_initial_quarantine_checkpoint(
+            deployment,
+            previous_key,
+            signed(&previous_signer, deployment, previous_current),
+            &[old_record],
+        )
+        .unwrap();
+        let previous_record = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: previous_key,
+            approval: signed(&previous_signer, deployment, previous_current),
+        };
+        let intermediate_record = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: next_key,
+            approval: signed(&next_signer, deployment, intermediate),
+        };
+        let transition = continuity(
+            &previous_signer,
+            &next_signer,
+            deployment,
+            previous_current,
+            next_current,
+        );
+        let rotated = external_floor_custodian_expected_rotated_quarantine_checkpoint(
+            previous,
+            transition,
+            signed(&next_signer, deployment, next_current),
+            &[old_record, previous_record, intermediate_record],
+        )
+        .unwrap();
+        assert_eq!(rotated.current_verifying_key, next_key);
+        assert_eq!(rotated.current, next_current);
+        assert_eq!(rotated.previous_checkpoint_hash, previous.checkpoint_hash);
+
+        let wrong_previous_record = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: next_key,
+            approval: signed(&next_signer, deployment, previous_current),
+        };
+        assert!(
+            external_floor_custodian_expected_rotated_quarantine_checkpoint(
+                previous,
+                transition,
+                signed(&next_signer, deployment, next_current),
+                &[old_record, wrong_previous_record, intermediate_record],
+            )
+            .is_err()
+        );
+        let wrong_intermediate_record = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: previous_key,
+            approval: signed(&previous_signer, deployment, intermediate),
+        };
+        assert!(
+            external_floor_custodian_expected_rotated_quarantine_checkpoint(
+                previous,
+                transition,
+                signed(&next_signer, deployment, next_current),
+                &[old_record, previous_record, wrong_intermediate_record],
+            )
+            .is_err()
+        );
+
+        let mut one_sided = transition;
+        one_sided.authorization_signature = one_sided.acceptance_signature;
+        assert!(
+            external_floor_custodian_expected_rotated_quarantine_checkpoint(
+                previous,
+                one_sided,
+                signed(&next_signer, deployment, next_current),
+                &[old_record, previous_record, intermediate_record],
+            )
+            .is_err()
+        );
+
+        let key_only_transition = continuity(
+            &previous_signer,
+            &next_signer,
+            deployment,
+            previous_current,
+            previous_current,
+        );
+        let key_only = external_floor_custodian_expected_rotated_quarantine_checkpoint(
+            previous,
+            key_only_transition,
+            signed(&next_signer, deployment, previous_current),
+            &[old_record],
+        )
+        .unwrap();
+        assert_eq!(key_only.current, previous_current);
+        assert_eq!(
+            key_only.quarantine_history_hash,
+            previous.quarantine_history_hash
+        );
     }
 }
 

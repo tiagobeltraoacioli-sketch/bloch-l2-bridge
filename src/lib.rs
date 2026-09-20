@@ -104,6 +104,7 @@ pub use external_floor_custodian_anchor_file::{
     external_floor_custodian_anchor_continuity_authorization_message,
     external_floor_custodian_expected_initial_quarantine_checkpoint,
     external_floor_custodian_expected_next_quarantine_checkpoint,
+    external_floor_custodian_expected_rotated_quarantine_checkpoint,
     verify_external_floor_custodian_anchor_approval,
     verify_external_floor_custodian_anchor_continuity,
     verify_external_floor_custodian_quarantine_checkpoint, ExternalFloorCustodianAnchorApproval,

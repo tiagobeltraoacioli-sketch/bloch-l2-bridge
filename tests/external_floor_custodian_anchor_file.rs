@@ -13,6 +13,7 @@ use bloch_l2_bridge::{
     external_floor_custodian_anchor_continuity_authorization_message,
     external_floor_custodian_expected_initial_quarantine_checkpoint,
     external_floor_custodian_expected_next_quarantine_checkpoint,
+    external_floor_custodian_expected_rotated_quarantine_checkpoint,
     verify_external_floor_custodian_anchor_approval,
     verify_external_floor_custodian_anchor_continuity, ExternalFloorCustodianAnchorApproval,
     ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorContinuityApproval,
@@ -395,6 +396,27 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         &[second_quarantine, first_quarantine],
     )
     .unwrap();
+
+    let next_signer = signer();
+    let rotated_checkpoint = external_floor_custodian_expected_rotated_quarantine_checkpoint(
+        next,
+        continuity_approval(&signer, &next_signer, deployment, third, third),
+        approval(&next_signer, deployment, third),
+        &[first_quarantine, second_quarantine],
+    )
+    .unwrap();
+    let rotated_receipt = UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
+        &temp.store,
+        rotated_checkpoint,
+        approval(&next_signer, deployment, third),
+        &[second_quarantine, first_quarantine],
+    )
+    .unwrap();
+    assert_eq!(
+        rotated_receipt.checkpoint.current_verifying_key,
+        verifying_key(&next_signer)
+    );
+    assert_eq!(rotated_receipt.inspection.quarantined, vec![first, second]);
 
     assert!(
         UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
