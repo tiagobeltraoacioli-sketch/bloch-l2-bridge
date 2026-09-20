@@ -1481,10 +1481,10 @@ impl DepositWatcher {
             // valid deposit omitted from the snapshot. Refuse that detectable
             // truncation instead of silently accepting an incomplete replay.
             for deposit in verifier.tracked.keys() {
-                if !self
+                if self
                     .tracked
                     .get(deposit)
-                    .is_some_and(|tracked| tracked.event.l1_block_height < keep as u64)
+                    .is_none_or(|tracked| tracked.event.l1_block_height >= keep as u64)
                 {
                     return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
                 }

@@ -333,13 +333,13 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
     let first = anchor(1, 0x51);
     let second = anchor(2, 0x52);
     let third = anchor(3, 0x53);
-    let signer = signer();
-    let key = verifying_key(&signer);
+    let current_signer = signer();
+    let key = verifying_key(&current_signer);
     let store = UnixExternalFloorCustodianAnchorStore::provision_approved(
         &temp.store,
         deployment,
         key,
-        approval(&signer, deployment, first),
+        approval(&current_signer, deployment, first),
     )
     .unwrap();
     assert_eq!(
@@ -348,18 +348,18 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
     );
     drop(store);
 
-    let first_quarantine = quarantine_approval(&signer, deployment, first);
+    let first_quarantine = quarantine_approval(&current_signer, deployment, first);
     let initial = external_floor_custodian_expected_initial_quarantine_checkpoint(
         deployment,
         key,
-        approval(&signer, deployment, second),
+        approval(&current_signer, deployment, second),
         &[first_quarantine],
     )
     .unwrap();
     let receipt = UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
         &temp.store,
         initial,
-        approval(&signer, deployment, second),
+        approval(&current_signer, deployment, second),
         &[first_quarantine],
     )
     .unwrap();
@@ -371,7 +371,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         &temp.store,
         deployment,
         key,
-        approval(&signer, deployment, second),
+        approval(&current_signer, deployment, second),
     )
     .unwrap();
     assert_eq!(
@@ -379,11 +379,11 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         ExternalFloorCustodianAnchorCasOutcome::Committed
     );
     drop(store);
-    let second_quarantine = quarantine_approval(&signer, deployment, second);
+    let second_quarantine = quarantine_approval(&current_signer, deployment, second);
     let next = external_floor_custodian_expected_next_quarantine_checkpoint(
         initial,
         key,
-        approval(&signer, deployment, third),
+        approval(&current_signer, deployment, third),
         &[first_quarantine, second_quarantine],
     )
     .unwrap();
@@ -392,7 +392,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
     UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
         &temp.store,
         next,
-        approval(&signer, deployment, third),
+        approval(&current_signer, deployment, third),
         &[second_quarantine, first_quarantine],
     )
     .unwrap();
@@ -400,7 +400,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
     let next_signer = signer();
     let rotated_checkpoint = external_floor_custodian_expected_rotated_quarantine_checkpoint(
         next,
-        continuity_approval(&signer, &next_signer, deployment, third, third),
+        continuity_approval(&current_signer, &next_signer, deployment, third, third),
         approval(&next_signer, deployment, third),
         &[first_quarantine, second_quarantine],
     )
@@ -422,7 +422,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
             &temp.store,
             initial,
-            approval(&signer, deployment, third),
+            approval(&current_signer, deployment, third),
             &[first_quarantine, second_quarantine],
         )
         .is_err()
@@ -431,7 +431,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         external_floor_custodian_expected_next_quarantine_checkpoint(
             next,
             key,
-            approval(&signer, deployment, second),
+            approval(&current_signer, deployment, second),
             &[first_quarantine],
         )
         .is_err()
@@ -443,7 +443,7 @@ fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
         UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
             &temp.store,
             forged,
-            approval(&signer, deployment, third),
+            approval(&current_signer, deployment, third),
             &[first_quarantine, second_quarantine],
         )
         .is_err()

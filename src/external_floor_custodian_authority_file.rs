@@ -528,7 +528,11 @@ fn validate_file_name(
     // SAFETY: successful `fstatat` initialized the structure.
     let named = unsafe { named.assume_init() };
     let opened = file.metadata()?;
-    if opened.dev() != named.st_dev as u64 || opened.ino() != named.st_ino {
+    // `dev_t` is already `u64` on Linux but narrower on other supported Unix
+    // targets, so keep the explicit portable normalization.
+    #[allow(clippy::unnecessary_cast)]
+    let named_device = named.st_dev as u64;
+    if opened.dev() != named_device || opened.ino() != named.st_ino {
         return Err(denied(unsafe_file_message));
     }
     Ok(())
