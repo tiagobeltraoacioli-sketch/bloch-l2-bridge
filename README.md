@@ -18,6 +18,12 @@ catalog with distinct token, native asset and custody-route identities. It
 supports USDC source evidence on Ethereum while preserving the legacy USDT
 routes and refusing cross-asset observation reassignment. It remains read-only.
 
+The [custody deployment preflight](docs/CUSTODY-DEPLOYMENT-PREFLIGHT.md) validates
+an inert public plan for Ethereum USDC and Bloch mainnet bUSDC. It requires
+three-of-five custody, separate issuer and sponsor authorities, explicit caps,
+runtime pins and paused/disabled controls. It never authorizes deployment,
+broadcast or activation.
+
 The [stablecoin release inspector](docs/STABLECOIN-RELEASE-OBSERVER.md) matches
 Ethereum payout events and token transfers to a supplied native release record.
 It retains the vault checks and does not authenticate native finality or settle
