@@ -82,7 +82,7 @@ def validate_custody_deployment_manifest(manifest):
                     "transfer_mode "
                     "token_proxy_runtime_sha256 token_implementation_address "
                     "token_implementation_runtime_sha256 vault_address vault_runtime_sha256 "
-                    "vault_build_sha256", "Ethereum source")
+                    "vault_build_sha256 vault_creation_input_sha256", "Ethereum source")
     require(source["network"] == "ethereum-mainnet" and source["chain_id"] == "eip155:1",
             "Ethereum mainnet source required")
     require(source["genesis_hash"].lower() == ETHEREUM_GENESIS,
@@ -104,6 +104,7 @@ def validate_custody_deployment_manifest(manifest):
     vault = _pin(source["vault_address"], 20, "source vault")
     _pin(source["vault_runtime_sha256"], 32, "source vault runtime")
     _pin(source["vault_build_sha256"], 32, "source vault reviewed build")
+    _pin(source["vault_creation_input_sha256"], 32, "source vault creation input")
     require(len({token, implementation, vault}) == 3,
             "token, implementation and vault identities must differ")
 

@@ -14,7 +14,8 @@
     "token_implementation_runtime_sha256": null,
     "vault_address": null,
     "vault_runtime_sha256": null,
-    "vault_build_sha256": null
+    "vault_build_sha256": null,
+    "vault_creation_input_sha256": null
   },
   "native": {
     "network": "bloch-mainnet",

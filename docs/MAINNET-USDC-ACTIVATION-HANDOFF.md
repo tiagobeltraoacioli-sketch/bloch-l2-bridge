@@ -30,8 +30,8 @@ Provide an independently reviewed `mainnet-custody/manifest.pending.json` with:
    and custody-attestation fingerprints. They must be distinct from one another
    and from every custodian.
 4. The independently reviewed custody-independence report hash.
-5. The reviewed vault build hash and, after deployment, the vault address and
-   exact runtime hash.
+5. The reviewed vault build hash, exact creation-transaction input hash and,
+   after deployment, the vault address and exact runtime hash.
 6. The canonical USDC proxy runtime hash, current implementation address and
    implementation runtime hash at the selected finalized checkpoint.
 7. The future bUSDC asset ID, gateway runtime hash and gateway-manifest hash.
@@ -49,6 +49,10 @@ artifact hash. The deployment transaction must then be reviewed separately and
 must create an empty vault with deposits and releases disabled. The preflight
 itself always reports `readyForDeployment: false`, `activationAuthorized: false`
 and `broadcastAllowed: false`; passing it is not an authorization.
+
+After finalization, capture and check the exact receipt, creation transaction,
+runtime and state with `scripts/check-custody-deployment-evidence.py` as described
+in `CUSTODY-DEPLOYMENT-EVIDENCE.md`. Its report also remains non-authorizing.
 
 ## Activation gate
 

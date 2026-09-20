@@ -10,7 +10,8 @@ BPOSMAN1 Bloch mainnet domain and genesis. It requires an explicit six-decimal
 `uint64` supply cap; the canonical Ethereum source domain; ERC-20 transfer mode
 zero; distinct token, implementation and vault identities; and
 hash pins for the USDC proxy runtime, its current implementation runtime, the
-reviewed vault build/runtime, and the Bloch gateway runtime/manifest.
+reviewed vault build/runtime, the exact creation transaction input, and the
+Bloch gateway runtime/manifest.
 
 Custody is fixed at three-of-five. Each of the five sorted Ethereum signer
 records must have a distinct operator identity, organization identity, Bloch
@@ -58,3 +59,7 @@ native supply policy and reserves; complete third-party security review; and
 obtain explicit deployment and activation approvals. Activation must remain a
 separate, delayed operation after the deployed vault is observed paused and
 empty.
+
+After a deployment, use `CUSTODY-DEPLOYMENT-EVIDENCE.md` to verify its finalized
+receipt, complete creation input, runtime, constructor state, committee and
+zero/paused readback. Passing that offline check remains non-authorizing.

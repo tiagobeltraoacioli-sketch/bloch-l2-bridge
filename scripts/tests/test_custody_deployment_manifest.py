@@ -62,6 +62,7 @@ def candidate():
             "vault_address": pin("vault", 20),
             "vault_runtime_sha256": pin("vault-runtime"),
             "vault_build_sha256": pin("vault-build"),
+            "vault_creation_input_sha256": pin("vault-creation-input"),
         },
         "native": {
             "network": "bloch-mainnet",
@@ -191,6 +192,7 @@ class CustodyDeploymentManifestTest(unittest.TestCase):
             lambda value: value["source"].update(token_address=pin("other-token", 20)),
             lambda value: value["source"].update(vault_address=value["source"]["token_address"]),
             lambda value: value["source"].update(vault_runtime_sha256="0x" + "11" * 32),
+            lambda value: value["source"].update(vault_creation_input_sha256=None),
             lambda value: value["native"].update(format="BPOSLAB1"),
             lambda value: value["native"].update(domain=pin("other-domain")),
             lambda value: value["native"].update(asset_symbol="USDC"),
