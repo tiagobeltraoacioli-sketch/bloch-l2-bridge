@@ -30,3 +30,14 @@ The files already matched Cloudflare's asset store; this is a verified
 republication, not new bridge activation. Desktop/mobile browser checks,
 anchors and published styles/favicon passed. Transfers remain disabled.
 Previous deployment for rollback: `5f9a35c9-9a4a-4250-8b36-9bc11a44af13`.
+
+## Publication on 20 September 2026
+
+Published the four reviewed public files from commit `ee010dc` to the existing
+`blochbridge` Pages project. Deployment: `e669c488.blochbridge.pages.dev`.
+The custom domain returned the exact reviewed `index.html` SHA-256
+`3b52b254af8e9e893762abfb40c8877e0577ca4753604913ccb3fa1922aa2d60`
+with the CSP, permissions, referrer and content-type protections intact. The
+copy now reflects the selected Ethereum USDC to Bloch L1 bUSDC qualification
+path. It still exposes no wallet or transfer flow and explicitly says transfers
+are not enabled. Previous deployment for rollback: `4b5735df.blochbridge.pages.dev`.

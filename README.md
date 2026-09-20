@@ -24,6 +24,10 @@ three-of-five custody, separate issuer and sponsor authorities, explicit caps,
 runtime pins and paused/disabled controls. It never authorizes deployment,
 broadcast or activation.
 
+The [mainnet USDC activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md)
+lists the public operator decisions and independent evidence required before a
+paused deployment can be proposed. It explicitly excludes private key material.
+
 The [stablecoin release inspector](docs/STABLECOIN-RELEASE-OBSERVER.md) matches
 Ethereum payout events and token transfers to a supplied native release record.
 It retains the vault checks and does not authenticate native finality or settle
