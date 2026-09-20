@@ -362,9 +362,25 @@ predecessor is moved create-only to a unique `.displaced.*` quarantine name and
 remains there after both sides are verified and synced. The live process never
 unlinks this pathname because a check immediately before `unlink` cannot prove
 that the same inode will still be named at the syscall boundary. Cleanup is an
-offline operator action: stop every writer, retain the evidence descriptor,
-validate its inode and exact bytes against durable history, move it create-only
-to an evidence directory, revalidate, and fsync both directories. Linux
+offline operator action, never a runtime API.
+`inspect_quarantines_approved` provides the machine-checked Linux inspection
+boundary: stop every writer, supply an independently pinned deployment id,
+current verifying key and approval, plus a separately pinned verifying key and
+Ed25519 approval for every expected predecessor. Per-record keys allow an exact
+inventory across legitimate authority rotations without trusting keys found on
+disk. The method acquires only the already-existing persistent
+lock, arms `inotify` before descriptor-relative enumeration, retains every
+quarantine descriptor, and requires the exact approved set, bytes, inode
+evidence, names, current STATE and directory authority to remain unchanged
+through the final guard drain. Every Linux directory, STATE and quarantine
+descriptor used by inspection is opened with `O_NOATIME`; inspection therefore
+does not silently mutate access timestamps that may be part of external
+forensic evidence. Missing, duplicate, extra, malformed or raced
+quarantines fail closed. The method returns decoded approved anchors only and
+does not unlink, rename, create a lock, or expose discovered pathnames as
+cleanup authority. Operators may copy retained evidence only in a separate,
+audited ceremony after inspection; no local record or filename is trust on
+first use. Linux
 provisioning creates a cryptographically random staging name through the
 retained parent fd. The parent `inotify` guard is armed before `mkdirat` and
 accepts only the single expected named directory-create event before the new fd

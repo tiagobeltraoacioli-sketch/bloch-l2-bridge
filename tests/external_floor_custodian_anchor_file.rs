@@ -14,8 +14,9 @@ use bloch_l2_bridge::{
     verify_external_floor_custodian_anchor_approval,
     verify_external_floor_custodian_anchor_continuity, ExternalFloorCustodianAnchorApproval,
     ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorContinuityApproval,
-    ExternalFloorCustodianAnchorStore, ExternalFloorCustodianClientAnchor,
-    UnixExternalFloorCustodianAnchorStore, EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+    ExternalFloorCustodianAnchorQuarantineApproval, ExternalFloorCustodianAnchorStore,
+    ExternalFloorCustodianClientAnchor, UnixExternalFloorCustodianAnchorStore,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -77,6 +78,17 @@ fn approval(
         deployment_id,
         anchor,
         signature,
+    }
+}
+
+fn quarantine_approval(
+    signer: &Ed25519KeyPair,
+    deployment_id: [u8; 32],
+    anchor: ExternalFloorCustodianClientAnchor,
+) -> ExternalFloorCustodianAnchorQuarantineApproval {
+    ExternalFloorCustodianAnchorQuarantineApproval {
+        verifying_key: verifying_key(signer),
+        approval: approval(signer, deployment_id, anchor),
     }
 }
 
@@ -184,6 +196,131 @@ fn approved_provisioning_and_inspection_refuse_unapproved_disk_state() {
     )
     .unwrap();
     assert_eq!(inspected.load().unwrap(), next);
+}
+
+#[test]
+fn offline_quarantine_inspection_requires_the_exact_approved_inventory() {
+    let temp = Temp::new();
+    let deployment = [0x68; 32];
+    let first = anchor(1, 0x11);
+    let second = anchor(2, 0x22);
+    let current = anchor(3, 0x33);
+    let signer = signer();
+    let key = verifying_key(&signer);
+    let store = UnixExternalFloorCustodianAnchorStore::provision_approved(
+        &temp.store,
+        deployment,
+        key,
+        approval(&signer, deployment, first),
+    )
+    .unwrap();
+    assert_eq!(
+        store.compare_and_swap(first, second).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    assert_eq!(
+        store.compare_and_swap(second, current).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    drop(store);
+
+    let mut before = fs::read_dir(&temp.store)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bxrc-external-anchor.displaced.")
+        })
+        .map(|entry| (entry.file_name(), fs::read(entry.path()).unwrap()))
+        .collect::<Vec<_>>();
+    before.sort_by(|left, right| left.0.cmp(&right.0));
+    let current_approval = approval(&signer, deployment, current);
+    let first_approval = quarantine_approval(&signer, deployment, first);
+    let second_approval = quarantine_approval(&signer, deployment, second);
+
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::inspect_quarantines_approved(
+            &temp.store,
+            deployment,
+            key,
+            current_approval,
+            &[first_approval],
+        )
+        .is_err()
+    );
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::inspect_quarantines_approved(
+            &temp.store,
+            deployment,
+            key,
+            current_approval,
+            &[
+                first_approval,
+                quarantine_approval(&signer, deployment, anchor(9, 0x99))
+            ],
+        )
+        .is_err()
+    );
+
+    let inspected = UnixExternalFloorCustodianAnchorStore::inspect_quarantines_approved(
+        &temp.store,
+        deployment,
+        key,
+        current_approval,
+        &[second_approval, first_approval],
+    )
+    .unwrap();
+    assert_eq!(inspected.current, current);
+    assert_eq!(inspected.quarantined, vec![first, second]);
+    let mut after = fs::read_dir(&temp.store)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".bxrc-external-anchor.displaced.")
+        })
+        .map(|entry| (entry.file_name(), fs::read(entry.path()).unwrap()))
+        .collect::<Vec<_>>();
+    after.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(after, before, "inspection must not mutate quarantines");
+}
+
+#[test]
+fn offline_quarantine_inspection_never_creates_a_missing_lock() {
+    let temp = Temp::new();
+    let deployment = [0x69; 32];
+    let current = anchor(1, 0x41);
+    let signer = signer();
+    let key = verifying_key(&signer);
+    drop(
+        UnixExternalFloorCustodianAnchorStore::provision_approved(
+            &temp.store,
+            deployment,
+            key,
+            approval(&signer, deployment, current),
+        )
+        .unwrap(),
+    );
+    let lock = temp.store.join(".bxrc-external-anchor.lock");
+    fs::remove_file(&lock).unwrap();
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::inspect_quarantines_approved(
+            &temp.store,
+            deployment,
+            key,
+            approval(&signer, deployment, current),
+            &[],
+        )
+        .is_err()
+    );
+    assert!(
+        !lock.exists(),
+        "offline inspection must not create authority"
+    );
 }
 
 #[test]

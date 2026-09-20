@@ -15,6 +15,8 @@ use std::io::Read;
 use std::io::{self, Error, ErrorKind, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,6 +33,8 @@ use crate::{
 const STATE_FILE: &str = ".bxrc-external-anchor";
 const TEMP_FILE: &str = ".bxrc-external-anchor.tmp";
 const LOCK_FILE: &str = ".bxrc-external-anchor.lock";
+#[cfg(target_os = "linux")]
+const QUARANTINE_PREFIX: &[u8] = b".bxrc-external-anchor.displaced.";
 const MAGIC: [u8; 4] = *b"BXCA";
 const VERSION: u8 = 1;
 const PREFIX_LEN: usize = 48;
@@ -43,6 +47,11 @@ const CONTINUITY_ACCEPTANCE_DOMAIN: &[u8; 48] =
 #[cfg(target_os = "linux")]
 static NEXT_PROVISION_STAGING: AtomicU64 = AtomicU64::new(0);
 static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "linux")]
+const NOATIME: i32 = libc::O_NOATIME;
+#[cfg(not(target_os = "linux"))]
+const NOATIME: i32 = 0;
 
 /// Exact canonical length of the external anchor record.
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN: usize = PREFIX_LEN + 32;
@@ -61,6 +70,29 @@ pub struct ExternalFloorCustodianAnchorApproval {
     pub deployment_id: [u8; 32],
     pub anchor: ExternalFloorCustodianClientAnchor,
     pub signature: [u8; 64],
+}
+
+/// One expected quarantine anchor and its independently pinned offline
+/// verifying key.
+///
+/// Supplying the key per record permits exact inventory inspection across
+/// legitimate authority rotations without deriving any authority from disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorQuarantineApproval {
+    pub verifying_key: [u8; 32],
+    pub approval: ExternalFloorCustodianAnchorApproval,
+}
+
+/// Exact offline-approved inventory of a live anchor and every retained
+/// predecessor quarantine.
+///
+/// The inventory contains decoded anchors only. Quarantine pathnames remain
+/// an internal implementation detail and are never returned as cleanup
+/// authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorQuarantineInspection {
+    pub current: ExternalFloorCustodianClientAnchor,
+    pub quarantined: Vec<ExternalFloorCustodianClientAnchor>,
 }
 
 /// Offline, two-party continuity evidence for anchor reapproval or authority
@@ -611,7 +643,7 @@ fn validate_file_path_name(
     let named = open_at_name(
         directory.as_raw_fd(),
         filename,
-        libc::O_RDONLY | libc::O_NONBLOCK,
+        libc::O_RDONLY | libc::O_NONBLOCK | NOATIME,
         0,
     )?;
     let retained = file.metadata()?;
@@ -674,6 +706,80 @@ fn reject_temp(directory: &File) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct DirectoryStream(*mut libc::DIR);
+
+#[cfg(target_os = "linux")]
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is owned by this wrapper and remains valid until
+        // this single `closedir` call.
+        let _ = unsafe { libc::closedir(self.0) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn quarantine_names(
+    directory: &File,
+    expected_count: usize,
+) -> io::Result<Vec<std::ffi::OsString>> {
+    let duplicate = open_at_name(
+        directory.as_raw_fd(),
+        std::ffi::OsStr::new("."),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOATIME,
+        0,
+    )?;
+    use std::os::fd::IntoRawFd;
+    let descriptor = duplicate.into_raw_fd();
+    // SAFETY: `descriptor` is a newly owned directory descriptor. Ownership
+    // transfers to the returned DIR stream on success.
+    let stream = unsafe { libc::fdopendir(descriptor) };
+    if stream.is_null() {
+        let error = Error::last_os_error();
+        // SAFETY: `fdopendir` failed and therefore did not take ownership.
+        let _ = unsafe { libc::close(descriptor) };
+        return Err(error);
+    }
+    let stream = DirectoryStream(stream);
+    let mut names = Vec::with_capacity(expected_count);
+    loop {
+        // SAFETY: Linux exposes the thread-local errno pointer and assigning
+        // zero distinguishes end-of-directory from a failed `readdir` call.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: the owned DIR stream is valid and accessed by one thread.
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let error = Error::last_os_error();
+            if error.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error);
+        }
+        // SAFETY: `readdir` returned a live dirent whose d_name is NUL
+        // terminated for the duration of this iteration.
+        let bytes = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes.starts_with(QUARANTINE_PREFIX) {
+            if names.len() == expected_count {
+                return Err(denied(
+                    "BXRC anchor quarantine inventory exceeds offline approvals",
+                ));
+            }
+            names.push(std::ffi::OsString::from_vec(bytes.to_vec()));
+        }
+    }
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+struct QuarantineEvidence {
+    name: std::ffi::OsString,
+    anchor: ExternalFloorCustodianClientAnchor,
+    file: File,
+    snapshot: FileSnapshot,
+    bytes: [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN],
+}
+
 #[derive(Debug)]
 struct Lock(File);
 
@@ -695,6 +801,21 @@ impl Lock {
             }
             Err(error) => return Err(error),
         };
+        Self::acquire_file(directory, lock)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn acquire_existing(directory: &File) -> io::Result<Self> {
+        let lock = open_at(
+            directory.as_raw_fd(),
+            LOCK_FILE,
+            libc::O_RDWR | libc::O_NOATIME,
+            0,
+        )?;
+        Self::acquire_file(directory, lock)
+    }
+
+    fn acquire_file(directory: &File, lock: File) -> io::Result<Self> {
         validate_file(
             &lock,
             "BXRC external anchor lock is not a private single-link file",
@@ -718,7 +839,7 @@ impl Lock {
             &self.0,
             "BXRC external anchor lock pathname no longer names the acquired private single-link file",
         )?;
-        let named = open_at(directory.as_raw_fd(), LOCK_FILE, libc::O_RDWR, 0)?;
+        let named = open_at(directory.as_raw_fd(), LOCK_FILE, libc::O_RDWR | NOATIME, 0)?;
         validate_file(
             &named,
             "BXRC external anchor lock pathname no longer names the acquired private single-link file",
@@ -747,7 +868,7 @@ fn open_directory(path: &Path) -> io::Result<File> {
     }
     let directory = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY | NOATIME)
         .open(path)?;
     validate_directory(&directory)?;
     Ok(directory)
@@ -968,11 +1089,23 @@ fn open_anchor(
     FileSnapshot,
     [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN],
 )> {
+    open_anchor_with_flags(directory, 0)
+}
+
+fn open_anchor_with_flags(
+    directory: &File,
+    additional_flags: i32,
+) -> io::Result<(
+    ExternalFloorCustodianClientAnchor,
+    File,
+    FileSnapshot,
+    [u8; EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN],
+)> {
     reject_temp(directory)?;
     let file = open_at(
         directory.as_raw_fd(),
         STATE_FILE,
-        libc::O_RDONLY | libc::O_NONBLOCK,
+        libc::O_RDONLY | libc::O_NONBLOCK | additional_flags,
         0,
     )?;
     validate_file_name(
@@ -1030,6 +1163,109 @@ where
         },
     )?;
     Ok(anchor)
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_quarantines_inner<F>(
+    directory_path: &Path,
+    directory: &File,
+    lock: &Lock,
+    expected_current: ExternalFloorCustodianClientAnchor,
+    expected_quarantined: &[ExternalFloorCustodianClientAnchor],
+    after_inventory: F,
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineInspection>
+where
+    F: FnOnce(),
+{
+    let namespace = NamespaceGuard::arm(directory)?;
+    let directory_snapshot = directory_seqlock_start(directory_path, directory)?;
+    lock.validate_current(directory)?;
+    let (current, state, state_snapshot, state_bytes) =
+        open_anchor_with_flags(directory, libc::O_NOATIME)?;
+    if current != expected_current {
+        return Err(denied(
+            "current BXRC anchor does not match its offline approval",
+        ));
+    }
+
+    let names = quarantine_names(directory, expected_quarantined.len())?;
+    if names.len() != expected_quarantined.len() {
+        return Err(denied(
+            "BXRC anchor quarantine inventory does not match offline approvals",
+        ));
+    }
+    let mut evidence = Vec::with_capacity(names.len());
+    for name in names {
+        let file = open_at_name(
+            directory.as_raw_fd(),
+            &name,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOATIME,
+            0,
+        )?;
+        validate_file_path_name(
+            directory,
+            &name,
+            &file,
+            "BXRC anchor quarantine is not a private retained record",
+        )?;
+        let before = file_snapshot(&file)?;
+        let bytes = read_anchor_bytes(&file)?;
+        let after = file_snapshot(&file)?;
+        if before != after {
+            return Err(denied("BXRC anchor quarantine changed while read"));
+        }
+        let anchor = decode(&bytes)?;
+        evidence.push(QuarantineEvidence {
+            name,
+            anchor,
+            file,
+            snapshot: after,
+            bytes,
+        });
+    }
+    after_inventory();
+
+    let mut actual = evidence.iter().map(|item| item.anchor).collect::<Vec<_>>();
+    actual.sort_by_key(|anchor| (anchor.revision, anchor.commitment));
+    if actual != expected_quarantined {
+        return Err(denied(
+            "BXRC anchor quarantine inventory does not match offline approvals",
+        ));
+    }
+
+    lock.validate_current(directory)?;
+    validate_named_evidence(
+        directory,
+        STATE_FILE,
+        &state,
+        state_snapshot,
+        &state_bytes,
+        "current BXRC anchor changed during quarantine inspection",
+    )?;
+    for item in &evidence {
+        validate_file_path_name(
+            directory,
+            &item.name,
+            &item.file,
+            "BXRC anchor quarantine changed during inspection",
+        )?;
+        if !evidence_matches(&item.file, item.snapshot, 1, &item.bytes) {
+            return Err(denied("BXRC anchor quarantine changed during inspection"));
+        }
+        validate_file_path_name(
+            directory,
+            &item.name,
+            &item.file,
+            "BXRC anchor quarantine changed during inspection",
+        )?;
+    }
+    reject_temp(directory)?;
+    directory_seqlock_finish(directory_path, directory, directory_snapshot)?;
+    namespace.assert_quiet()?;
+    Ok(ExternalFloorCustodianAnchorQuarantineInspection {
+        current,
+        quarantined: actual,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1579,6 +1815,58 @@ impl UnixExternalFloorCustodianAnchorStore {
         Ok(store)
     }
 
+    /// Inspects the exact current anchor and complete predecessor-quarantine
+    /// inventory against independently supplied offline approvals.
+    ///
+    /// This operation is deliberately read-only: it never unlinks, renames,
+    /// or treats a pathname discovered on disk as cleanup authority. It also
+    /// requires the persistent lock to exist and be exclusively acquirable,
+    /// so operators must stop every writer first. Linux `inotify` protects the
+    /// complete enumeration and evidence-validation window; other platforms
+    /// fail with [`ErrorKind::Unsupported`].
+    pub fn inspect_quarantines_approved(
+        path: &Path,
+        expected_deployment_id: [u8; 32],
+        verifying_key: [u8; 32],
+        current_approval: ExternalFloorCustodianAnchorApproval,
+        quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+    ) -> io::Result<ExternalFloorCustodianAnchorQuarantineInspection> {
+        let current = verify_external_floor_custodian_anchor_approval(
+            expected_deployment_id,
+            verifying_key,
+            current_approval,
+        )?;
+        let mut quarantined = Vec::with_capacity(quarantine_approvals.len());
+        for expected in quarantine_approvals {
+            quarantined.push(verify_external_floor_custodian_anchor_approval(
+                expected_deployment_id,
+                expected.verifying_key,
+                expected.approval,
+            )?);
+        }
+        quarantined.sort_by_key(|anchor| (anchor.revision, anchor.commitment));
+        if quarantined.windows(2).any(|pair| pair[0] == pair[1]) || quarantined.contains(&current) {
+            return Err(invalid(
+                "duplicate BXRC anchor offline approval in quarantine inventory",
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let directory = open_directory(path)?;
+            let lock = Lock::acquire_existing(&directory)?;
+            inspect_quarantines_inner(path, &directory, &lock, current, &quarantined, || {})
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, current, quarantined);
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "secure BXRC anchor quarantine inspection requires Linux inotify",
+            ))
+        }
+    }
+
     /// Opens only the exact anchor named by a valid continuity transition.
     /// The returned public key is authenticated by both the independently
     /// pinned prior authority and the next authority, and can be retained out
@@ -1705,6 +1993,34 @@ mod tests {
             .unwrap();
         file.write_all(bytes).unwrap();
         file.sync_all().unwrap();
+    }
+
+    fn set_old_atime(path: &Path, directory: bool) -> (i64, i64) {
+        let flags =
+            libc::O_NOFOLLOW | libc::O_NOATIME | if directory { libc::O_DIRECTORY } else { 0 };
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(path)
+            .unwrap();
+        let metadata = file.metadata().unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: 946_684_800,
+                tv_nsec: 123_456_789,
+            },
+            libc::timespec {
+                tv_sec: metadata.mtime(),
+                tv_nsec: metadata.mtime_nsec(),
+            },
+        ];
+        // SAFETY: the descriptor and two-element timespec array are valid.
+        assert_eq!(
+            unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) },
+            0
+        );
+        let metadata = file.metadata().unwrap();
+        (metadata.atime(), metadata.atime_nsec())
     }
 
     fn rewrite_same_inode_restoring_mtime(path: &Path) {
@@ -2055,6 +2371,81 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_inspection_rejects_same_bytes_path_replacement() {
+        let path = test_path("quarantine-inspection-race");
+        let store = UnixExternalFloorCustodianAnchorStore::provision(&path, anchor(1)).unwrap();
+        assert_eq!(
+            store.compare_and_swap(anchor(1), anchor(2)).unwrap(),
+            ExternalFloorCustodianAnchorCasOutcome::Committed
+        );
+        let quarantine = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().as_bytes().starts_with(QUARANTINE_PREFIX))
+            .unwrap()
+            .path();
+        let retained = path.join("retained-quarantine-race");
+        let result = inspect_quarantines_inner(
+            &path,
+            &store.directory,
+            &store._lock,
+            anchor(2),
+            &[anchor(1)],
+            || {
+                let bytes = fs::read(&quarantine).unwrap();
+                fs::rename(&quarantine, &retained).unwrap();
+                create_private_file(&quarantine, &bytes);
+            },
+        );
+        assert!(result.is_err());
+        assert!(retained.exists());
+        drop(store);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn quarantine_inspection_preserves_all_record_and_directory_atimes() {
+        let path = test_path("quarantine-inspection-atime");
+        let store = UnixExternalFloorCustodianAnchorStore::provision(&path, anchor(1)).unwrap();
+        assert_eq!(
+            store.compare_and_swap(anchor(1), anchor(2)).unwrap(),
+            ExternalFloorCustodianAnchorCasOutcome::Committed
+        );
+        let quarantine = fs::read_dir(&path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().as_bytes().starts_with(QUARANTINE_PREFIX))
+            .unwrap()
+            .path();
+        let state = path.join(STATE_FILE);
+        let state_atime = set_old_atime(&state, false);
+        let quarantine_atime = set_old_atime(&quarantine, false);
+        // Set the directory last because discovering the records reads it.
+        let directory_atime = set_old_atime(&path, true);
+
+        let inspected = inspect_quarantines_inner(
+            &path,
+            &store.directory,
+            &store._lock,
+            anchor(2),
+            &[anchor(1)],
+            || {},
+        )
+        .unwrap();
+        assert_eq!(inspected.current, anchor(2));
+        assert_eq!(inspected.quarantined, vec![anchor(1)]);
+        let atime = |target: &Path| {
+            let metadata = fs::metadata(target).unwrap();
+            (metadata.atime(), metadata.atime_nsec())
+        };
+        assert_eq!(atime(&state), state_atime);
+        assert_eq!(atime(&quarantine), quarantine_atime);
+        assert_eq!(atime(&path), directory_atime);
+        drop(store);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn provisioning_never_adopts_target_raced_before_publication() {
         let path = test_path("provision-target-race");
         let staging = RefCell::new(None);
@@ -2150,6 +2541,8 @@ mod tests {
 #[cfg(all(test, not(target_os = "linux")))]
 mod unsupported_provision_tests {
     use super::*;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
 
     #[test]
     fn provisioning_fails_unsupported_before_creating_any_path() {
@@ -2161,6 +2554,37 @@ mod unsupported_provision_tests {
                 revision: 1,
                 commitment: [0x41; 32],
             },
+        );
+        assert!(matches!(result, Err(ref error) if error.kind() == ErrorKind::Unsupported));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn quarantine_inspection_fails_unsupported_before_opening_any_path() {
+        let path = std::env::temp_dir().join(format!(
+            "bloch-anchor-inspection-unsupported-{}",
+            std::process::id()
+        ));
+        let deployment_id = [0x51; 32];
+        let anchor = ExternalFloorCustodianClientAnchor {
+            revision: 1,
+            commitment: [0x52; 32],
+        };
+        let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let signer = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+        let message = external_floor_custodian_anchor_approval_message(deployment_id, anchor);
+        let mut signature = [0_u8; 64];
+        signature.copy_from_slice(signer.sign(&message).as_ref());
+        let result = UnixExternalFloorCustodianAnchorStore::inspect_quarantines_approved(
+            &path,
+            deployment_id,
+            signer.public_key().as_ref().try_into().unwrap(),
+            ExternalFloorCustodianAnchorApproval {
+                deployment_id,
+                anchor,
+                signature,
+            },
+            &[],
         );
         assert!(matches!(result, Err(ref error) if error.kind() == ErrorKind::Unsupported));
         assert!(!path.exists());
