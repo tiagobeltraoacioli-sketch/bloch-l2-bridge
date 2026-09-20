@@ -22,6 +22,8 @@ The evidence object has exactly these top-level fields:
   finalized block, using the existing Ethereum observer schema;
 - `transaction`: exact transaction/block binding, sender, null destination and
   complete creation input;
+- `token_runtime`: canonical USDC proxy and implementation runtime bytes, plus
+  the proxy implementation slot and `implementation()` getter at that block;
 - `vault_runtime`: block-bound runtime bytecode, getter readback, complete
   committee membership and reserve readback, using the stablecoin observer
   schema.
@@ -31,6 +33,16 @@ vault address, inclusion at the receipt's transaction index, an empty constructo
 log list, the manifest-pinned SHA-256 of the complete creation input and the
 manifest-pinned runtime SHA-256. State readback must match every constructor
 identity, route ID, cap, transfer policy and all five ordered committee members.
+The canonical USDC proxy and selected implementation must both match their
+manifest-pinned runtime hashes. The proxy's Zeppelinos implementation storage
+slot and its public `implementation()` getter must independently return the
+same manifest-pinned implementation address.
+
+The exact Circle proxy slot is
+`0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3`,
+the Keccak-256 hash of `org.zeppelinos.proxy.implementation`; the getter selector
+is `0x5c60da1b`. Evidence must be collected with both mechanisms at the deployment
+block hash, never `latest`.
 
 The same canonical block must show:
 
@@ -52,6 +64,6 @@ captured file can lie. The report deliberately keeps `sourceRpcAuthenticated`,
 `deploymentAuthenticated`, `activationAuthorized` and `broadcastAllowed` false.
 Independent operators must reproduce the build and creation-input hashes, query
 authenticated Ethereum nodes, retain the finalized receipt and compare results
-before treating the deployment as real. Token-proxy implementation
-authentication, native gateway registration, reserve/liability reconciliation,
-disposable-value rehearsal and activation approval remain separate gates.
+before treating the deployment as real. Native gateway registration,
+reserve/liability reconciliation, disposable-value rehearsal and activation
+approval remain separate gates.

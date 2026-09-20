@@ -61,5 +61,6 @@ separate, delayed operation after the deployed vault is observed paused and
 empty.
 
 After a deployment, use `CUSTODY-DEPLOYMENT-EVIDENCE.md` to verify its finalized
-receipt, complete creation input, runtime, constructor state, committee and
-zero/paused readback. Passing that offline check remains non-authorizing.
+receipt, complete creation input, USDC proxy/implementation identity, runtime,
+constructor state, committee and zero/paused readback. Passing that offline
+check remains non-authorizing.

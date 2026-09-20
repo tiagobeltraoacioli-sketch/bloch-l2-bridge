@@ -30,10 +30,18 @@ def hx(value):
 def fixture():
     manifest = candidate()
     runtime_code = bytes.fromhex("60006000fd")
+    proxy_code = bytes.fromhex("60016000fd")
+    implementation_code = bytes.fromhex("60026000fd")
     creation_input = bytes.fromhex("60016000556002600055")
     manifest["source"]["vault_runtime_sha256"] = hx(hashlib.sha256(runtime_code).digest())
     manifest["source"]["vault_creation_input_sha256"] = hx(
         hashlib.sha256(creation_input).digest()
+    )
+    manifest["source"]["token_proxy_runtime_sha256"] = hx(
+        hashlib.sha256(proxy_code).digest()
+    )
+    manifest["source"]["token_implementation_runtime_sha256"] = hx(
+        hashlib.sha256(implementation_code).digest()
     )
     route = _route(manifest, 100)
     configuration = {name: hx(value) for name, value in expected_words(route).items()}
@@ -83,6 +91,23 @@ def fixture():
             "to": None,
             "input": hx(creation_input),
         },
+        "token_runtime": {
+            "block_hash": block_hash,
+            "block_number": "0x64",
+            "proxy_address": manifest["source"]["token_address"],
+            "proxy_code": hx(proxy_code),
+            "implementation_address": manifest["source"]["token_implementation_address"],
+            "implementation_code": hx(implementation_code),
+            "implementation_slot_key": (
+                "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
+            ),
+            "implementation_slot": hx(
+                bytes(12) + bytes.fromhex(
+                    manifest["source"]["token_implementation_address"][2:])),
+            "implementation_getter": hx(
+                bytes(12) + bytes.fromhex(
+                    manifest["source"]["token_implementation_address"][2:])),
+        },
         "vault_runtime": {
             "block_hash": block_hash,
             "block_number": "0x64",
@@ -106,6 +131,7 @@ class CustodyDeploymentEvidenceTest(unittest.TestCase):
         self.assertTrue(report["finalizedReceiptConsistent"])
         self.assertTrue(report["constructorStateMatched"])
         self.assertTrue(report["committeeMatched"])
+        self.assertTrue(report["tokenProxyImplementationMatched"])
         self.assertTrue(report["paused"])
         self.assertTrue(report["empty"])
         self.assertFalse(report["sourceRpcAuthenticated"])
@@ -160,6 +186,16 @@ class CustodyDeploymentEvidenceTest(unittest.TestCase):
             lambda evidence: evidence["source_evidence"]["finalized_block"].update(number="0x63"),
             lambda evidence: evidence["source_evidence"]["canonical_block"].update(
                 transactions=["0x" + "72" * 32]),
+            lambda evidence: evidence["token_runtime"].update(proxy_code="0x60036000fd"),
+            lambda evidence: evidence["token_runtime"].update(
+                implementation_code="0x60046000fd"),
+            lambda evidence: evidence["token_runtime"].update(
+                implementation_slot="0x" + "73" * 32),
+            lambda evidence: evidence["token_runtime"].update(
+                implementation_slot_key="0x" + "75" * 32),
+            lambda evidence: evidence["token_runtime"].update(
+                implementation_getter="0x" + "74" * 32),
+            lambda evidence: evidence["token_runtime"].update(block_number="0x65"),
         ]
         for mutate in mutations:
             manifest, evidence = fixture()

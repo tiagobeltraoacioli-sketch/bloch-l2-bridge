@@ -11,15 +11,19 @@ from custody_deployment_manifest import (
 )
 from usdt_observer.common import abi_uint, quantity, require, word
 from usdt_observer.ethereum import validate_events
-from usdt_observer.runtime import validate_runtime
+from usdt_observer.runtime import MAX_CODE, validate_runtime
 
 
 MAX_CREATION_INPUT = 262144
+USDC_IMPLEMENTATION_SLOT = bytes.fromhex(
+    "7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3"
+)
 EVIDENCE_FIELDS = {
     "schema",
     "manifest_canonical_sha256",
     "source_evidence",
     "transaction",
+    "token_runtime",
     "vault_runtime",
 }
 TRANSACTION_FIELDS = {
@@ -30,6 +34,17 @@ TRANSACTION_FIELDS = {
     "from",
     "to",
     "input",
+}
+TOKEN_RUNTIME_FIELDS = {
+    "block_hash",
+    "block_number",
+    "proxy_address",
+    "proxy_code",
+    "implementation_address",
+    "implementation_code",
+    "implementation_slot_key",
+    "implementation_slot",
+    "implementation_getter",
 }
 
 
@@ -82,6 +97,44 @@ def _creation_input(value):
     return word(value, (len(value) - 2) // 2)
 
 
+def _runtime_code(value, label):
+    require(type(value) is str and value.startswith("0x") and len(value) % 2 == 0
+            and 6 <= len(value) <= 2 + 2 * MAX_CODE, label + " runtime required")
+    return word(value, (len(value) - 2) // 2)
+
+
+def _validate_token_runtime(manifest, receipt, evidence):
+    require(type(evidence) is dict and set(evidence) == TOKEN_RUNTIME_FIELDS,
+            "exact USDC runtime evidence required")
+    require(word(evidence["block_hash"], 32) == word(receipt["blockHash"], 32)
+            and quantity(evidence["block_number"]) == quantity(receipt["blockNumber"]),
+            "USDC runtime is from another block")
+    source = manifest["source"]
+    proxy = word(source["token_address"], 20)
+    implementation = word(source["token_implementation_address"], 20)
+    require(word(evidence["proxy_address"], 20) == proxy
+            and word(evidence["implementation_address"], 20) == implementation,
+            "USDC runtime address mismatch")
+    proxy_code = _runtime_code(evidence["proxy_code"], "USDC proxy")
+    implementation_code = _runtime_code(
+        evidence["implementation_code"], "USDC implementation")
+    proxy_digest = hashlib.sha256(proxy_code).digest()
+    implementation_digest = hashlib.sha256(implementation_code).digest()
+    require(proxy_digest == word(source["token_proxy_runtime_sha256"], 32),
+            "USDC proxy runtime mismatch")
+    require(implementation_digest == word(
+        source["token_implementation_runtime_sha256"], 32),
+        "USDC implementation runtime mismatch")
+    encoded_implementation = implementation.rjust(32, b"\0")
+    require(word(evidence["implementation_slot_key"], 32) == USDC_IMPLEMENTATION_SLOT,
+            "unexpected USDC implementation slot")
+    require(word(evidence["implementation_slot"], 32) == encoded_implementation,
+            "USDC proxy implementation slot mismatch")
+    require(word(evidence["implementation_getter"], 32) == encoded_implementation,
+            "USDC proxy implementation getter mismatch")
+    return proxy_digest, implementation_digest
+
+
 def validate_custody_deployment_evidence(manifest, evidence):
     """Validate exact finalized, empty and paused deployment evidence."""
     validate_custody_deployment_manifest(manifest)
@@ -132,6 +185,9 @@ def validate_custody_deployment_evidence(manifest, evidence):
         manifest["source"]["vault_creation_input_sha256"], 32),
         "vault creation input mismatch")
 
+    proxy_digest, implementation_digest = _validate_token_runtime(
+        manifest, receipt, evidence["token_runtime"])
+
     runtime = evidence["vault_runtime"]
     report = validate_runtime(route, source_evidence, runtime)
     configuration = runtime["configuration"]
@@ -155,10 +211,13 @@ def validate_custody_deployment_evidence(manifest, evidence):
         "vaultAddress": "0x" + vault.hex(),
         "routeId": route["route_id"],
         "creationInputSha256": "0x" + creation_digest.hex(),
+        "tokenProxyRuntimeSha256": "0x" + proxy_digest.hex(),
+        "tokenImplementationRuntimeSha256": "0x" + implementation_digest.hex(),
         "vaultRuntimeSha256": report["runtime_sha256"],
         "finalizedReceiptConsistent": True,
         "constructorStateMatched": True,
         "committeeMatched": True,
+        "tokenProxyImplementationMatched": True,
         "paused": True,
         "empty": True,
         "sourceRpcAuthenticated": False,
