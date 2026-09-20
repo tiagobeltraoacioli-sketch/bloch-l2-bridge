@@ -7,7 +7,8 @@ broadcast, fund, or activate anything.
 
 The schema accepts exactly canonical Ethereum mainnet USDC and the pinned
 BPOSMAN1 Bloch mainnet domain and genesis. It requires an explicit six-decimal
-`uint64` supply cap; distinct token, implementation and vault identities; and
+`uint64` supply cap; the canonical Ethereum source domain; ERC-20 transfer mode
+zero; distinct token, implementation and vault identities; and
 hash pins for the USDC proxy runtime, its current implementation runtime, the
 reviewed vault build/runtime, and the Bloch gateway runtime/manifest.
 
@@ -41,6 +42,12 @@ python3 scripts/check-custody-deployment-manifest.py \
 The checked-in template intentionally fails because every operator, cap,
 deployment and review input that requires a human decision is `null` or empty.
 Do not fill it with generated placeholders merely to make the command pass.
+
+The Ethereum source domain is pinned to
+`0x73bd35826bda75b28ae57affe8843be087e0bf664624e0b947cf3b8c93642e47`,
+the SHA-256 convention defined in `USDT-ROUTE-VALIDATION.md` over the canonical
+network name and Ethereum genesis. It is a constructor argument, as is transfer
+mode `0`; neither may be inferred from a deployed address or token symbol.
 
 Even a fully consistent manifest returns `readyForDeployment: false`,
 `activationAuthorized: false` and `broadcastAllowed: false`. A later procedure

@@ -13,6 +13,10 @@ ETHEREUM_GENESIS = (
     "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3"
 )
 ETHEREUM_USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+ETHEREUM_SOURCE_DOMAIN = "0x" + hashlib.sha256(
+    b"BLOCH-USDT-SOURCE-CONFIG-v1\0ethereum-mainnet\0"
+    + bytes.fromhex(ETHEREUM_GENESIS[2:])
+).hexdigest()
 BLOCH_MAINNET_DOMAIN = (
     "0xf47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966"
 )
@@ -74,7 +78,8 @@ def validate_custody_deployment_manifest(manifest):
             "unsupported custody deployment schema")
 
     source = manifest["source"]
-    _fields(source, "network chain_id genesis_hash token_symbol token_address token_decimals "
+    _fields(source, "network chain_id genesis_hash source_domain token_symbol token_address token_decimals "
+                    "transfer_mode "
                     "token_proxy_runtime_sha256 token_implementation_address "
                     "token_implementation_runtime_sha256 vault_address vault_runtime_sha256 "
                     "vault_build_sha256", "Ethereum source")
@@ -82,8 +87,12 @@ def validate_custody_deployment_manifest(manifest):
             "Ethereum mainnet source required")
     require(source["genesis_hash"].lower() == ETHEREUM_GENESIS,
             "canonical Ethereum genesis required")
+    require(source["source_domain"].lower() == ETHEREUM_SOURCE_DOMAIN,
+            "canonical Ethereum source domain required")
     require(source["token_symbol"] == "USDC" and source["token_decimals"] == 6,
             "six-decimal USDC source required")
+    require(type(source["transfer_mode"]) is int and source["transfer_mode"] == 0,
+            "Ethereum ERC-20 transfer mode required")
     token = _pin(source["token_address"], 20, "USDC token")
     require("0x" + token.hex() == ETHEREUM_USDC, "canonical Ethereum USDC required")
     _pin(source["token_proxy_runtime_sha256"], 32, "USDC proxy runtime")
@@ -172,6 +181,8 @@ def validate_custody_deployment_manifest(manifest):
         "target": "Ethereum USDC to Bloch mainnet bUSDC",
         "custodianCount": 5,
         "custodyThreshold": 3,
+        "sourceDomain": ETHEREUM_SOURCE_DOMAIN,
+        "transferMode": 0,
         "issuerSponsorSeparated": True,
         "paused": True,
         "offlineOnly": True,

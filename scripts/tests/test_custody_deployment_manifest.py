@@ -17,6 +17,7 @@ from custody_deployment_manifest import (  # noqa: E402
     BLOCH_MAINNET_DOMAIN,
     BLOCH_MAINNET_GENESIS,
     ETHEREUM_GENESIS,
+    ETHEREUM_SOURCE_DOMAIN,
     ETHEREUM_USDC,
     validate_custody_deployment_manifest,
 )
@@ -50,9 +51,11 @@ def candidate():
             "network": "ethereum-mainnet",
             "chain_id": "eip155:1",
             "genesis_hash": ETHEREUM_GENESIS,
+            "source_domain": ETHEREUM_SOURCE_DOMAIN,
             "token_symbol": "USDC",
             "token_address": ETHEREUM_USDC,
             "token_decimals": 6,
+            "transfer_mode": 0,
             "token_proxy_runtime_sha256": pin("proxy-runtime"),
             "token_implementation_address": pin("implementation", 20),
             "token_implementation_runtime_sha256": pin("implementation-runtime"),
@@ -96,10 +99,16 @@ def candidate():
 
 class CustodyDeploymentManifestTest(unittest.TestCase):
     def test_valid_plan_is_still_inert_and_non_authorizing(self):
+        self.assertEqual(
+            ETHEREUM_SOURCE_DOMAIN,
+            "0x73bd35826bda75b28ae57affe8843be087e0bf664624e0b947cf3b8c93642e47",
+        )
         report = validate_custody_deployment_manifest(candidate())
         self.assertTrue(report["configurationConsistent"])
         self.assertEqual(report["custodianCount"], 5)
         self.assertEqual(report["custodyThreshold"], 3)
+        self.assertEqual(report["sourceDomain"], ETHEREUM_SOURCE_DOMAIN)
+        self.assertEqual(report["transferMode"], 0)
         self.assertTrue(report["paused"])
         for field in ("keysLoaded", "fundsObserved", "deploymentObserved",
                       "readyForDeployment", "activationAuthorized", "broadcastAllowed"):
@@ -176,6 +185,9 @@ class CustodyDeploymentManifestTest(unittest.TestCase):
             lambda value: value["cap"].update(base_units=True),
             lambda value: value["cap"].update(base_units=1 << 64),
             lambda value: value["source"].update(chain_id="eip155:11155111"),
+            lambda value: value["source"].update(source_domain=pin("other-source-domain")),
+            lambda value: value["source"].update(transfer_mode=1),
+            lambda value: value["source"].update(transfer_mode=False),
             lambda value: value["source"].update(token_address=pin("other-token", 20)),
             lambda value: value["source"].update(vault_address=value["source"]["token_address"]),
             lambda value: value["source"].update(vault_runtime_sha256="0x" + "11" * 32),

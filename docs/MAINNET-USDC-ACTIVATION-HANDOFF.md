@@ -21,6 +21,8 @@ unsigned transactions in this repository or send them through chat.
 Provide an independently reviewed `mainnet-custody/manifest.pending.json` with:
 
 1. The selected positive `uint64` supply cap in six-decimal USDC base units.
+   The source domain remains the repository-pinned canonical Ethereum domain
+   and the transfer mode remains ERC-20 mode `0`; neither is operator-selected.
 2. Five sorted Ethereum custodian addresses. Each custodian must have a unique
    operator ID, organization ID, Bloch public-key SHA-256 fingerprint and
    custody-attestation SHA-256.
