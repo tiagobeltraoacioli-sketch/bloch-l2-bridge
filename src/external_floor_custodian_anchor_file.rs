@@ -46,6 +46,20 @@ const CONTINUITY_ACCEPTANCE_DOMAIN: &[u8; 48] =
     b"BLOCH-L2-BXRC-ANCHOR-CONTINUITY-ACCEPT-v1\0\0\0\0\0\0\0";
 const QUARANTINE_INVENTORY_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-ANCHOR-QUARANTINE-INVENTORY-v1\0";
 const QUARANTINE_CHECKPOINT_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-ANCHOR-QUARANTINE-CHECKPOINT-v1\0";
+const QUARANTINE_ROTATION_RECEIPT_DOMAIN: &[u8] =
+    b"BLOCH-L2-BXRC-ANCHOR-QUARANTINE-ROTATION-RECEIPT-v1\0";
+const QUARANTINE_ROTATION_RECEIPT_MAGIC: [u8; 4] = *b"BXQR";
+const QUARANTINE_ROTATION_RECEIPT_VERSION: u8 = 1;
+const QUARANTINE_ROTATION_RECEIPT_HEADER_LEN: usize = 16;
+const QUARANTINE_CHECKPOINT_LEN: usize = 248;
+const QUARANTINE_CONTINUITY_LEN: usize = 272;
+const QUARANTINE_APPROVAL_LEN: usize = 136;
+const QUARANTINE_KEYED_APPROVAL_LEN: usize = 168;
+const QUARANTINE_ROTATION_RECEIPT_FIXED_LEN: usize = QUARANTINE_ROTATION_RECEIPT_HEADER_LEN
+    + QUARANTINE_CHECKPOINT_LEN * 2
+    + QUARANTINE_CONTINUITY_LEN
+    + QUARANTINE_APPROVAL_LEN
+    + 32;
 #[cfg(target_os = "linux")]
 static NEXT_PROVISION_STAGING: AtomicU64 = AtomicU64::new(0);
 static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +76,15 @@ pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN: usize = PREFIX_LEN + 32;
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN: usize = 120;
 /// Exact length of either role-separated anchor continuity message.
 pub const EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN: usize = 224;
+/// Maximum number of signed quarantine records accepted in one portable
+/// authority-rotation receipt.
+pub const EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS: usize = 4096;
+/// Maximum canonical encoded length of one portable authority-rotation
+/// receipt.
+pub const EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_LEN: usize =
+    QUARANTINE_ROTATION_RECEIPT_FIXED_LEN
+        + EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS
+            * QUARANTINE_KEYED_APPROVAL_LEN;
 
 /// An offline Ed25519 approval of one exact anchor in one deployment domain.
 ///
@@ -138,6 +161,24 @@ pub struct ExternalFloorCustodianAnchorContinuityApproval {
     pub next_verifying_key: [u8; 32],
     pub authorization_signature: [u8; 64],
     pub acceptance_signature: [u8; 64],
+}
+
+/// Self-contained, canonically serializable evidence for one quarantine
+/// checkpoint authority rotation.
+///
+/// Authenticity is not inferred from the unkeyed `receipt_hash`: verification
+/// repeats both role-separated continuity signatures, every embedded anchor
+/// approval and the deterministic checkpoint transition. The hash only gives
+/// operators one exact value to retain outside the anchor store. This receipt
+/// grants no cleanup, adoption or mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorQuarantineRotationReceipt {
+    pub previous_checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    pub continuity: ExternalFloorCustodianAnchorContinuityApproval,
+    pub current_approval: ExternalFloorCustodianAnchorApproval,
+    pub quarantine_approvals: Vec<ExternalFloorCustodianAnchorQuarantineApproval>,
+    pub next_checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    pub receipt_hash: [u8; 32],
 }
 
 /// Builds the canonical message for an offline Ed25519 signer.
@@ -508,6 +549,328 @@ fn derive_next_quarantine_checkpoint(
     };
     checkpoint.checkpoint_hash = quarantine_checkpoint_hash(&checkpoint);
     Ok(checkpoint)
+}
+
+fn encode_quarantine_checkpoint(
+    output: &mut Vec<u8>,
+    checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+) {
+    output.extend_from_slice(&checkpoint.inspection_index.to_be_bytes());
+    output.extend_from_slice(&checkpoint.deployment_id);
+    output.extend_from_slice(&checkpoint.current_verifying_key);
+    output.extend_from_slice(&checkpoint.current.revision.to_be_bytes());
+    output.extend_from_slice(&checkpoint.current.commitment);
+    output.extend_from_slice(&checkpoint.quarantine_count.to_be_bytes());
+    output.extend_from_slice(&checkpoint.quarantine_history_hash);
+    output.extend_from_slice(&checkpoint.inventory_hash);
+    output.extend_from_slice(&checkpoint.previous_checkpoint_hash);
+    output.extend_from_slice(&checkpoint.checkpoint_hash);
+}
+
+fn encode_quarantine_approval(
+    output: &mut Vec<u8>,
+    approval: ExternalFloorCustodianAnchorApproval,
+) {
+    output.extend_from_slice(&approval.deployment_id);
+    output.extend_from_slice(&approval.anchor.revision.to_be_bytes());
+    output.extend_from_slice(&approval.anchor.commitment);
+    output.extend_from_slice(&approval.signature);
+}
+
+fn encode_quarantine_rotation_receipt_body(
+    receipt: &ExternalFloorCustodianAnchorQuarantineRotationReceipt,
+) -> io::Result<Vec<u8>> {
+    if receipt.quarantine_approvals.len()
+        > EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS
+    {
+        return Err(invalid(
+            "BXRC anchor quarantine rotation receipt has too many records",
+        ));
+    }
+    let count = u64::try_from(receipt.quarantine_approvals.len())
+        .map_err(|_| invalid("BXRC anchor quarantine rotation receipt count is invalid"))?;
+    let capacity = QUARANTINE_ROTATION_RECEIPT_FIXED_LEN
+        .checked_sub(32)
+        .and_then(|fixed| {
+            receipt
+                .quarantine_approvals
+                .len()
+                .checked_mul(QUARANTINE_KEYED_APPROVAL_LEN)
+                .and_then(|records| fixed.checked_add(records))
+        })
+        .ok_or_else(|| invalid("BXRC anchor quarantine rotation receipt length overflow"))?;
+    let mut output = Vec::with_capacity(capacity);
+    output.extend_from_slice(&QUARANTINE_ROTATION_RECEIPT_MAGIC);
+    output.push(QUARANTINE_ROTATION_RECEIPT_VERSION);
+    output.extend_from_slice(&[0; 3]);
+    output.extend_from_slice(&count.to_be_bytes());
+    encode_quarantine_checkpoint(&mut output, receipt.previous_checkpoint);
+    output.extend_from_slice(&receipt.continuity.deployment_id);
+    output.extend_from_slice(&receipt.continuity.previous_anchor.revision.to_be_bytes());
+    output.extend_from_slice(&receipt.continuity.previous_anchor.commitment);
+    output.extend_from_slice(&receipt.continuity.next_anchor.revision.to_be_bytes());
+    output.extend_from_slice(&receipt.continuity.next_anchor.commitment);
+    output.extend_from_slice(&receipt.continuity.next_verifying_key);
+    output.extend_from_slice(&receipt.continuity.authorization_signature);
+    output.extend_from_slice(&receipt.continuity.acceptance_signature);
+    encode_quarantine_approval(&mut output, receipt.current_approval);
+    for approval in &receipt.quarantine_approvals {
+        output.extend_from_slice(&approval.verifying_key);
+        encode_quarantine_approval(&mut output, approval.approval);
+    }
+    encode_quarantine_checkpoint(&mut output, receipt.next_checkpoint);
+    debug_assert_eq!(output.len(), capacity);
+    Ok(output)
+}
+
+fn quarantine_rotation_receipt_hash(
+    receipt: &ExternalFloorCustodianAnchorQuarantineRotationReceipt,
+) -> io::Result<[u8; 32]> {
+    let body = encode_quarantine_rotation_receipt_body(receipt)?;
+    Ok(keccak_parts(QUARANTINE_ROTATION_RECEIPT_DOMAIN, &[&body]))
+}
+
+/// Constructs a portable rotation receipt only after verifying the complete
+/// dual-signed transition and every historical approval.
+pub fn external_floor_custodian_expected_rotated_quarantine_receipt(
+    previous_checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    continuity: ExternalFloorCustodianAnchorContinuityApproval,
+    current_approval: ExternalFloorCustodianAnchorApproval,
+    quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineRotationReceipt> {
+    if quarantine_approvals.len() > EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS
+    {
+        return Err(invalid(
+            "BXRC anchor quarantine rotation receipt has too many records",
+        ));
+    }
+    let mut canonical_approvals = quarantine_approvals.to_vec();
+    canonical_approvals.sort_by_key(|approval| {
+        (
+            approval.approval.anchor.revision,
+            approval.approval.anchor.commitment,
+            approval.verifying_key,
+        )
+    });
+    let next_checkpoint = external_floor_custodian_expected_rotated_quarantine_checkpoint(
+        previous_checkpoint,
+        continuity,
+        current_approval,
+        &canonical_approvals,
+    )?;
+    let mut receipt = ExternalFloorCustodianAnchorQuarantineRotationReceipt {
+        previous_checkpoint,
+        continuity,
+        current_approval,
+        quarantine_approvals: canonical_approvals,
+        next_checkpoint,
+        receipt_hash: [0; 32],
+    };
+    receipt.receipt_hash = quarantine_rotation_receipt_hash(&receipt)?;
+    Ok(receipt)
+}
+
+fn verify_rotated_quarantine_receipt_evidence(
+    receipt: &ExternalFloorCustodianAnchorQuarantineRotationReceipt,
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+    if receipt.quarantine_approvals.windows(2).any(|pair| {
+        let key = |approval: &ExternalFloorCustodianAnchorQuarantineApproval| {
+            (
+                approval.approval.anchor.revision,
+                approval.approval.anchor.commitment,
+                approval.verifying_key,
+            )
+        };
+        key(&pair[0]) >= key(&pair[1])
+    }) {
+        return Err(invalid(
+            "non-canonical BXRC anchor quarantine rotation receipt order",
+        ));
+    }
+    if receipt.receipt_hash == [0; 32]
+        || quarantine_rotation_receipt_hash(receipt)? != receipt.receipt_hash
+    {
+        return Err(invalid(
+            "invalid BXRC anchor quarantine rotation receipt hash",
+        ));
+    }
+    let expected = external_floor_custodian_expected_rotated_quarantine_checkpoint(
+        receipt.previous_checkpoint,
+        receipt.continuity,
+        receipt.current_approval,
+        &receipt.quarantine_approvals,
+    )?;
+    if expected != receipt.next_checkpoint {
+        return Err(denied(
+            "BXRC anchor quarantine rotation receipt successor does not match its evidence",
+        ));
+    }
+    Ok(expected)
+}
+
+/// Revalidates all cryptographic and checkpoint evidence in a portable
+/// rotation receipt against independently retained predecessor and receipt
+/// hashes, then returns its only accepted successor checkpoint.
+pub fn verify_external_floor_custodian_rotated_quarantine_receipt(
+    receipt: &ExternalFloorCustodianAnchorQuarantineRotationReceipt,
+    expected_previous_checkpoint_hash: [u8; 32],
+    expected_receipt_hash: [u8; 32],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+    if expected_previous_checkpoint_hash == [0; 32]
+        || receipt.previous_checkpoint.checkpoint_hash != expected_previous_checkpoint_hash
+        || expected_receipt_hash == [0; 32]
+        || receipt.receipt_hash != expected_receipt_hash
+    {
+        return Err(denied(
+            "BXRC anchor quarantine rotation receipt differs from external pins",
+        ));
+    }
+    verify_rotated_quarantine_receipt_evidence(receipt)
+}
+
+/// Encodes one fully verified rotation receipt into its canonical binary form.
+pub fn encode_external_floor_custodian_rotated_quarantine_receipt(
+    receipt: &ExternalFloorCustodianAnchorQuarantineRotationReceipt,
+) -> io::Result<Vec<u8>> {
+    verify_rotated_quarantine_receipt_evidence(receipt)?;
+    let mut encoded = encode_quarantine_rotation_receipt_body(receipt)?;
+    encoded.extend_from_slice(&receipt.receipt_hash);
+    Ok(encoded)
+}
+
+struct QuarantineReceiptReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> QuarantineReceiptReader<'a> {
+    fn take<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+        let end = self
+            .offset
+            .checked_add(N)
+            .ok_or_else(|| invalid("BXRC anchor quarantine rotation receipt length overflow"))?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| invalid("truncated BXRC anchor quarantine rotation receipt"))?;
+        self.offset = end;
+        Ok(value.try_into().expect("fixed receipt slice"))
+    }
+
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_be_bytes(self.take()?))
+    }
+
+    fn anchor(&mut self) -> io::Result<ExternalFloorCustodianClientAnchor> {
+        Ok(ExternalFloorCustodianClientAnchor {
+            revision: self.u64()?,
+            commitment: self.take()?,
+        })
+    }
+
+    fn checkpoint(&mut self) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+        Ok(ExternalFloorCustodianAnchorQuarantineCheckpoint {
+            inspection_index: self.u64()?,
+            deployment_id: self.take()?,
+            current_verifying_key: self.take()?,
+            current: self.anchor()?,
+            quarantine_count: self.u64()?,
+            quarantine_history_hash: self.take()?,
+            inventory_hash: self.take()?,
+            previous_checkpoint_hash: self.take()?,
+            checkpoint_hash: self.take()?,
+        })
+    }
+
+    fn approval(&mut self) -> io::Result<ExternalFloorCustodianAnchorApproval> {
+        Ok(ExternalFloorCustodianAnchorApproval {
+            deployment_id: self.take()?,
+            anchor: self.anchor()?,
+            signature: self.take()?,
+        })
+    }
+}
+
+/// Decodes and fully authenticates one bounded canonical rotation receipt.
+pub fn decode_external_floor_custodian_rotated_quarantine_receipt(
+    encoded: &[u8],
+    expected_previous_checkpoint_hash: [u8; 32],
+    expected_receipt_hash: [u8; 32],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineRotationReceipt> {
+    if encoded.len() < QUARANTINE_ROTATION_RECEIPT_FIXED_LEN
+        || encoded.len() > EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_LEN
+    {
+        return Err(invalid(
+            "invalid BXRC anchor quarantine rotation receipt length",
+        ));
+    }
+    let mut reader = QuarantineReceiptReader {
+        bytes: encoded,
+        offset: 0,
+    };
+    if reader.take::<4>()? != QUARANTINE_ROTATION_RECEIPT_MAGIC
+        || reader.take::<1>()?[0] != QUARANTINE_ROTATION_RECEIPT_VERSION
+        || reader.take::<3>()? != [0; 3]
+    {
+        return Err(invalid(
+            "invalid BXRC anchor quarantine rotation receipt header",
+        ));
+    }
+    let count = usize::try_from(reader.u64()?)
+        .map_err(|_| invalid("BXRC anchor quarantine rotation receipt count is invalid"))?;
+    if count > EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS {
+        return Err(invalid(
+            "BXRC anchor quarantine rotation receipt has too many records",
+        ));
+    }
+    let expected_len = QUARANTINE_ROTATION_RECEIPT_FIXED_LEN
+        .checked_add(
+            count
+                .checked_mul(QUARANTINE_KEYED_APPROVAL_LEN)
+                .ok_or_else(|| {
+                    invalid("BXRC anchor quarantine rotation receipt length overflow")
+                })?,
+        )
+        .ok_or_else(|| invalid("BXRC anchor quarantine rotation receipt length overflow"))?;
+    if encoded.len() != expected_len {
+        return Err(invalid(
+            "non-canonical BXRC anchor quarantine rotation receipt length",
+        ));
+    }
+    let previous_checkpoint = reader.checkpoint()?;
+    let continuity = ExternalFloorCustodianAnchorContinuityApproval {
+        deployment_id: reader.take()?,
+        previous_anchor: reader.anchor()?,
+        next_anchor: reader.anchor()?,
+        next_verifying_key: reader.take()?,
+        authorization_signature: reader.take()?,
+        acceptance_signature: reader.take()?,
+    };
+    let current_approval = reader.approval()?;
+    let mut quarantine_approvals = Vec::with_capacity(count);
+    for _ in 0..count {
+        quarantine_approvals.push(ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: reader.take()?,
+            approval: reader.approval()?,
+        });
+    }
+    let next_checkpoint = reader.checkpoint()?;
+    let receipt_hash = reader.take()?;
+    debug_assert_eq!(reader.offset, encoded.len());
+    let receipt = ExternalFloorCustodianAnchorQuarantineRotationReceipt {
+        previous_checkpoint,
+        continuity,
+        current_approval,
+        quarantine_approvals,
+        next_checkpoint,
+        receipt_hash,
+    };
+    verify_external_floor_custodian_rotated_quarantine_receipt(
+        &receipt,
+        expected_previous_checkpoint_hash,
+        expected_receipt_hash,
+    )?;
+    Ok(receipt)
 }
 
 fn continuity_message(
@@ -2611,12 +2974,142 @@ mod quarantine_checkpoint_tests {
             previous,
             transition,
             signed(&next_signer, deployment, next_current),
-            &[old_record, previous_record, intermediate_record],
+            &[intermediate_record, old_record, previous_record],
         )
         .unwrap();
         assert_eq!(rotated.current_verifying_key, next_key);
         assert_eq!(rotated.current, next_current);
         assert_eq!(rotated.previous_checkpoint_hash, previous.checkpoint_hash);
+
+        let receipt = external_floor_custodian_expected_rotated_quarantine_receipt(
+            previous,
+            transition,
+            signed(&next_signer, deployment, next_current),
+            &[intermediate_record, old_record, previous_record],
+        )
+        .unwrap();
+        assert_eq!(receipt.next_checkpoint, rotated);
+        assert_eq!(
+            verify_external_floor_custodian_rotated_quarantine_receipt(
+                &receipt,
+                previous.checkpoint_hash,
+                receipt.receipt_hash,
+            )
+            .unwrap(),
+            rotated
+        );
+        let encoded = encode_external_floor_custodian_rotated_quarantine_receipt(&receipt).unwrap();
+        assert_eq!(
+            decode_external_floor_custodian_rotated_quarantine_receipt(
+                &encoded,
+                previous.checkpoint_hash,
+                receipt.receipt_hash,
+            )
+            .unwrap(),
+            receipt
+        );
+        assert!(encoded.len() <= EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_LEN);
+
+        let mut changed_checkpoint = receipt.clone();
+        changed_checkpoint.next_checkpoint.inventory_hash[0] ^= 1;
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &changed_checkpoint,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut changed_signature = receipt.clone();
+        changed_signature.continuity.acceptance_signature[0] ^= 1;
+        changed_signature.receipt_hash =
+            quarantine_rotation_receipt_hash(&changed_signature).unwrap();
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &changed_signature,
+            previous.checkpoint_hash,
+            changed_signature.receipt_hash,
+        )
+        .is_err());
+        let mut changed_record_key = receipt.clone();
+        changed_record_key.quarantine_approvals[2].verifying_key = previous_key;
+        changed_record_key.receipt_hash =
+            quarantine_rotation_receipt_hash(&changed_record_key).unwrap();
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &changed_record_key,
+            previous.checkpoint_hash,
+            changed_record_key.receipt_hash,
+        )
+        .is_err());
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &receipt,
+            [0x55; 32],
+            receipt.receipt_hash,
+        )
+        .is_err());
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &receipt,
+            previous.checkpoint_hash,
+            [0x56; 32],
+        )
+        .is_err());
+        let mut reordered = receipt.clone();
+        reordered.quarantine_approvals.swap(0, 1);
+        reordered.receipt_hash = quarantine_rotation_receipt_hash(&reordered).unwrap();
+        assert!(verify_external_floor_custodian_rotated_quarantine_receipt(
+            &reordered,
+            previous.checkpoint_hash,
+            reordered.receipt_hash,
+        )
+        .is_err());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &trailing,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut unknown_version = encoded.clone();
+        unknown_version[4] = QUARANTINE_ROTATION_RECEIPT_VERSION + 1;
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &unknown_version,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut nonzero_reserved = encoded.clone();
+        nonzero_reserved[5] = 1;
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &nonzero_reserved,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut excessive_count = encoded.clone();
+        excessive_count[8..16].copy_from_slice(
+            &(EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS as u64 + 1)
+                .to_be_bytes(),
+        );
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &excessive_count,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut inconsistent_count = encoded.clone();
+        inconsistent_count[8..16].copy_from_slice(&4_u64.to_be_bytes());
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &inconsistent_count,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
+        let mut changed_bytes = encoded;
+        changed_bytes[QUARANTINE_ROTATION_RECEIPT_HEADER_LEN + 9] ^= 1;
+        assert!(decode_external_floor_custodian_rotated_quarantine_receipt(
+            &changed_bytes,
+            previous.checkpoint_hash,
+            receipt.receipt_hash,
+        )
+        .is_err());
 
         let wrong_previous_record = ExternalFloorCustodianAnchorQuarantineApproval {
             verifying_key: next_key,
@@ -2675,6 +3168,24 @@ mod quarantine_checkpoint_tests {
         assert_eq!(
             key_only.quarantine_history_hash,
             previous.quarantine_history_hash
+        );
+        let key_only_receipt = external_floor_custodian_expected_rotated_quarantine_receipt(
+            previous,
+            key_only_transition,
+            signed(&next_signer, deployment, previous_current),
+            &[old_record],
+        )
+        .unwrap();
+        assert_eq!(key_only_receipt.next_checkpoint, key_only);
+        assert_eq!(
+            decode_external_floor_custodian_rotated_quarantine_receipt(
+                &encode_external_floor_custodian_rotated_quarantine_receipt(&key_only_receipt)
+                    .unwrap(),
+                previous.checkpoint_hash,
+                key_only_receipt.receipt_hash,
+            )
+            .unwrap(),
+            key_only_receipt
         );
     }
 }

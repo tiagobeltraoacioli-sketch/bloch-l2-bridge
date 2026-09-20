@@ -417,6 +417,28 @@ Linux-only because the final namespace proof relies on `inotify`; receipt
 hashing does not weaken that platform boundary or make non-Linux inspection
 safe.
 
+For a transportable record of that ceremony,
+`external_floor_custodian_expected_rotated_quarantine_receipt` packages the
+previous and derived checkpoints, the dual-signed continuity statement, the
+new-current approval, and every keyed historical approval. Its bounded `BXQR`
+binary encoding is canonical and rejects trailing bytes, oversized inventories,
+unknown versions, nonzero reserved fields and noncanonical record order. The
+constructor sorts keyed approvals by their authenticated anchor identity, so
+caller iteration order cannot create multiple receipt encodings. Decoding is verification, not
+deserialization alone: it repeats every Ed25519 check, reconstructs the complete
+history boundary and requires the embedded successor to equal the only
+deterministically derived checkpoint. The domain-separated receipt hash covers
+the exact complete encoding body and is intended to be retained independently
+with the new checkpoint. Both decoding and public verification require the
+independently retained predecessor-checkpoint hash and exact receipt hash, so a
+valid older ceremony cannot silently become trust on first use. The receipt
+hash is an integrity and external-pinning identifier; authentication comes from
+the reverified embedded approvals. The format has no
+cleanup, adoption, retry or mutation field, and no receipt API touches the
+anchor store. A 4,096-record bound caps allocation and verification work; larger
+inventories must remain on the existing in-memory checkpoint path until a
+separately reviewed streaming receipt format exists.
+
 Linux
 provisioning creates a cryptographically random staging name through the
 retained parent fd. The parent `inotify` guard is armed before `mkdirat` and

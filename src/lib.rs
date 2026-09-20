@@ -99,22 +99,30 @@ pub use external_floor_custodian::{
 };
 #[cfg(unix)]
 pub use external_floor_custodian_anchor_file::{
+    decode_external_floor_custodian_rotated_quarantine_receipt,
+    encode_external_floor_custodian_rotated_quarantine_receipt,
     external_floor_custodian_anchor_approval_message,
     external_floor_custodian_anchor_continuity_acceptance_message,
     external_floor_custodian_anchor_continuity_authorization_message,
     external_floor_custodian_expected_initial_quarantine_checkpoint,
     external_floor_custodian_expected_next_quarantine_checkpoint,
     external_floor_custodian_expected_rotated_quarantine_checkpoint,
+    external_floor_custodian_expected_rotated_quarantine_receipt,
     verify_external_floor_custodian_anchor_approval,
     verify_external_floor_custodian_anchor_continuity,
-    verify_external_floor_custodian_quarantine_checkpoint, ExternalFloorCustodianAnchorApproval,
-    ExternalFloorCustodianAnchorContinuityApproval, ExternalFloorCustodianAnchorQuarantineApproval,
+    verify_external_floor_custodian_quarantine_checkpoint,
+    verify_external_floor_custodian_rotated_quarantine_receipt,
+    ExternalFloorCustodianAnchorApproval, ExternalFloorCustodianAnchorContinuityApproval,
+    ExternalFloorCustodianAnchorQuarantineApproval,
     ExternalFloorCustodianAnchorQuarantineCheckpoint,
     ExternalFloorCustodianAnchorQuarantineInspection,
-    ExternalFloorCustodianAnchorQuarantineReceipt, UnixExternalFloorCustodianAnchorStore,
+    ExternalFloorCustodianAnchorQuarantineReceipt,
+    ExternalFloorCustodianAnchorQuarantineRotationReceipt, UnixExternalFloorCustodianAnchorStore,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN,
     EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS,
 };
 #[cfg(unix)]
 pub use external_floor_custodian_authority_file::{
