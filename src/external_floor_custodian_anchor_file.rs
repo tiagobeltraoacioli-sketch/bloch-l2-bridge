@@ -44,6 +44,8 @@ const CONTINUITY_AUTHORIZATION_DOMAIN: &[u8; 48] =
     b"BLOCH-L2-BXRC-ANCHOR-CONTINUITY-AUTH-v1\0\0\0\0\0\0\0\0\0";
 const CONTINUITY_ACCEPTANCE_DOMAIN: &[u8; 48] =
     b"BLOCH-L2-BXRC-ANCHOR-CONTINUITY-ACCEPT-v1\0\0\0\0\0\0\0";
+const QUARANTINE_INVENTORY_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-ANCHOR-QUARANTINE-INVENTORY-v1\0";
+const QUARANTINE_CHECKPOINT_DOMAIN: &[u8] = b"BLOCH-L2-BXRC-ANCHOR-QUARANTINE-CHECKPOINT-v1\0";
 #[cfg(target_os = "linux")]
 static NEXT_PROVISION_STAGING: AtomicU64 = AtomicU64::new(0);
 static NEXT_QUARANTINE: AtomicU64 = AtomicU64::new(0);
@@ -95,6 +97,32 @@ pub struct ExternalFloorCustodianAnchorQuarantineInspection {
     pub quarantined: Vec<ExternalFloorCustodianClientAnchor>,
 }
 
+/// Independently retained position in the offline quarantine-inspection
+/// history.
+///
+/// The checkpoint is useful as an anti-rollback boundary only when the exact
+/// value is retained outside the anchor store's rollback domain. It never
+/// authorizes deletion, adoption, or mutation of any inspected pathname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorQuarantineCheckpoint {
+    pub inspection_index: u64,
+    pub deployment_id: [u8; 32],
+    pub current_verifying_key: [u8; 32],
+    pub current: ExternalFloorCustodianClientAnchor,
+    pub quarantine_count: u64,
+    pub quarantine_history_hash: [u8; 32],
+    pub inventory_hash: [u8; 32],
+    pub previous_checkpoint_hash: [u8; 32],
+    pub checkpoint_hash: [u8; 32],
+}
+
+/// Exact inspected inventory paired with its caller-pinned history position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFloorCustodianAnchorQuarantineReceipt {
+    pub checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    pub inspection: ExternalFloorCustodianAnchorQuarantineInspection,
+}
+
 /// Offline, two-party continuity evidence for anchor reapproval or authority
 /// rotation.
 ///
@@ -144,6 +172,269 @@ pub fn verify_external_floor_custodian_anchor_approval(
         .verify(&message, &approval.signature)
         .map_err(|_| denied("BXRC external anchor approval signature failed"))?;
     Ok(approval.anchor)
+}
+
+fn keccak_parts(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hash = Keccak::v256();
+    hash.update(domain);
+    for part in parts {
+        hash.update(part);
+    }
+    let mut output = [0_u8; 32];
+    hash.finalize(&mut output);
+    output
+}
+
+struct ApprovedQuarantineInventory {
+    current: ExternalFloorCustodianClientAnchor,
+    inventory_hash: [u8; 32],
+    history_hash: [u8; 32],
+    records: Vec<(ExternalFloorCustodianClientAnchor, [u8; 32])>,
+}
+
+fn approved_quarantine_inventory(
+    deployment_id: [u8; 32],
+    current_verifying_key: [u8; 32],
+    current_approval: ExternalFloorCustodianAnchorApproval,
+    quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+) -> io::Result<ApprovedQuarantineInventory> {
+    let current = verify_external_floor_custodian_anchor_approval(
+        deployment_id,
+        current_verifying_key,
+        current_approval,
+    )?;
+    let mut records = Vec::with_capacity(quarantine_approvals.len());
+    for expected in quarantine_approvals {
+        records.push((
+            verify_external_floor_custodian_anchor_approval(
+                deployment_id,
+                expected.verifying_key,
+                expected.approval,
+            )?,
+            expected.verifying_key,
+        ));
+    }
+    records.sort_by_key(|(anchor, key)| (anchor.revision, anchor.commitment, *key));
+    if records
+        .windows(2)
+        .any(|pair| pair[0].0.revision >= pair[1].0.revision)
+        || records
+            .iter()
+            .any(|(anchor, _)| anchor.revision >= current.revision)
+    {
+        return Err(invalid(
+            "non-monotonic BXRC anchor offline approval in quarantine inventory",
+        ));
+    }
+    let quarantine_history_hash = quarantine_history_hash(deployment_id, &records)?;
+    let current_revision = current.revision.to_be_bytes();
+    let inventory_hash = keccak_parts(
+        QUARANTINE_INVENTORY_DOMAIN,
+        &[
+            &deployment_id,
+            &current_verifying_key,
+            &current_revision,
+            &current.commitment,
+            &quarantine_history_hash,
+        ],
+    );
+    Ok(ApprovedQuarantineInventory {
+        current,
+        inventory_hash,
+        history_hash: quarantine_history_hash,
+        records,
+    })
+}
+
+fn quarantine_history_hash(
+    deployment_id: [u8; 32],
+    records: &[(ExternalFloorCustodianClientAnchor, [u8; 32])],
+) -> io::Result<[u8; 32]> {
+    let count = u64::try_from(records.len())
+        .map_err(|_| invalid("BXRC anchor quarantine approval count is invalid"))?
+        .to_be_bytes();
+    let mut hash = Keccak::v256();
+    hash.update(QUARANTINE_INVENTORY_DOMAIN);
+    hash.update(b"HISTORY\0");
+    hash.update(&deployment_id);
+    hash.update(&count);
+    for (anchor, key) in records {
+        hash.update(key);
+        hash.update(&anchor.revision.to_be_bytes());
+        hash.update(&anchor.commitment);
+    }
+    let mut output = [0; 32];
+    hash.finalize(&mut output);
+    Ok(output)
+}
+
+fn quarantine_checkpoint_hash(
+    checkpoint: &ExternalFloorCustodianAnchorQuarantineCheckpoint,
+) -> [u8; 32] {
+    let index = checkpoint.inspection_index.to_be_bytes();
+    let revision = checkpoint.current.revision.to_be_bytes();
+    keccak_parts(
+        QUARANTINE_CHECKPOINT_DOMAIN,
+        &[
+            &index,
+            &checkpoint.deployment_id,
+            &checkpoint.current_verifying_key,
+            &revision,
+            &checkpoint.current.commitment,
+            &checkpoint.quarantine_count.to_be_bytes(),
+            &checkpoint.quarantine_history_hash,
+            &checkpoint.inventory_hash,
+            &checkpoint.previous_checkpoint_hash,
+        ],
+    )
+}
+
+fn validate_quarantine_checkpoint(
+    checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+) -> io::Result<()> {
+    if checkpoint.deployment_id == [0; 32]
+        || checkpoint.current_verifying_key == [0; 32]
+        || checkpoint.current.commitment == [0; 32]
+        || checkpoint.quarantine_history_hash == [0; 32]
+        || checkpoint.inventory_hash == [0; 32]
+        || (checkpoint.inspection_index == 0) != (checkpoint.previous_checkpoint_hash == [0; 32])
+        || checkpoint.checkpoint_hash != quarantine_checkpoint_hash(&checkpoint)
+    {
+        return Err(invalid("invalid BXRC anchor quarantine checkpoint"));
+    }
+    Ok(())
+}
+
+/// Verifies the canonical hash and structural invariants of an independently
+/// retained quarantine checkpoint. Authenticity still comes from deriving the
+/// checkpoint from the separately pinned approvals, not from this unkeyed
+/// integrity check alone.
+pub fn verify_external_floor_custodian_quarantine_checkpoint(
+    checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+) -> io::Result<()> {
+    validate_quarantine_checkpoint(checkpoint)
+}
+
+/// Derives the genesis quarantine checkpoint exclusively from independently
+/// supplied, signature-verified approvals. Retain the returned value outside
+/// the anchor store before using it as an anti-rollback boundary.
+pub fn external_floor_custodian_expected_initial_quarantine_checkpoint(
+    deployment_id: [u8; 32],
+    current_verifying_key: [u8; 32],
+    current_approval: ExternalFloorCustodianAnchorApproval,
+    quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+    let inventory = approved_quarantine_inventory(
+        deployment_id,
+        current_verifying_key,
+        current_approval,
+        quarantine_approvals,
+    )?;
+    let mut checkpoint = ExternalFloorCustodianAnchorQuarantineCheckpoint {
+        inspection_index: 0,
+        deployment_id,
+        current_verifying_key,
+        current: inventory.current,
+        quarantine_count: inventory.records.len() as u64,
+        quarantine_history_hash: inventory.history_hash,
+        inventory_hash: inventory.inventory_hash,
+        previous_checkpoint_hash: [0; 32],
+        checkpoint_hash: [0; 32],
+    };
+    checkpoint.checkpoint_hash = quarantine_checkpoint_hash(&checkpoint);
+    Ok(checkpoint)
+}
+
+/// Derives the only next checkpoint accepted after an independently retained
+/// predecessor. Current-anchor revision cannot move backwards, and equal
+/// revisions cannot change commitment.
+pub fn external_floor_custodian_expected_next_quarantine_checkpoint(
+    previous: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    current_verifying_key: [u8; 32],
+    current_approval: ExternalFloorCustodianAnchorApproval,
+    quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+) -> io::Result<ExternalFloorCustodianAnchorQuarantineCheckpoint> {
+    validate_quarantine_checkpoint(previous)?;
+    if current_verifying_key != previous.current_verifying_key {
+        return Err(denied(
+            "BXRC anchor quarantine checkpoint cannot rotate authority without dual-signed continuity",
+        ));
+    }
+    let inventory = approved_quarantine_inventory(
+        previous.deployment_id,
+        current_verifying_key,
+        current_approval,
+        quarantine_approvals,
+    )?;
+    if inventory.current.revision < previous.current.revision
+        || (inventory.current.revision == previous.current.revision
+            && inventory.current != previous.current)
+    {
+        return Err(denied(
+            "BXRC anchor quarantine checkpoint would roll back current authority",
+        ));
+    }
+    let previous_count = usize::try_from(previous.quarantine_count)
+        .map_err(|_| invalid("BXRC anchor quarantine checkpoint count is invalid"))?;
+    if inventory.records.len() < previous_count
+        || quarantine_history_hash(previous.deployment_id, &inventory.records[..previous_count])?
+            != previous.quarantine_history_hash
+        || (inventory.current == previous.current && inventory.records.len() != previous_count)
+        || (inventory.current != previous.current
+            && (inventory.records.len() == previous_count
+                || inventory.records[previous_count]
+                    != (previous.current, previous.current_verifying_key)))
+    {
+        return Err(denied(
+            "BXRC anchor quarantine history does not extend retained checkpoint",
+        ));
+    }
+    if inventory
+        .records
+        .iter()
+        .skip(previous_count)
+        .any(|(_, key)| *key != previous.current_verifying_key)
+    {
+        return Err(denied(
+            "BXRC anchor quarantine history changes authority without dual-signed continuity",
+        ));
+    }
+    if inventory.current != previous.current {
+        let mut prior = previous.current;
+        for (anchor, _) in inventory.records.iter().skip(previous_count + 1) {
+            if !matches!(anchor.revision.checked_sub(prior.revision), Some(1 | 2)) {
+                return Err(denied(
+                    "BXRC anchor quarantine checkpoint has an invalid retained transition",
+                ));
+            }
+            prior = *anchor;
+        }
+        if !matches!(
+            inventory.current.revision.checked_sub(prior.revision),
+            Some(1 | 2)
+        ) {
+            return Err(denied(
+                "BXRC anchor quarantine checkpoint has an invalid current transition",
+            ));
+        }
+    }
+    let inspection_index = previous
+        .inspection_index
+        .checked_add(1)
+        .ok_or_else(|| invalid("BXRC anchor quarantine checkpoint index overflow"))?;
+    let mut checkpoint = ExternalFloorCustodianAnchorQuarantineCheckpoint {
+        inspection_index,
+        deployment_id: previous.deployment_id,
+        current_verifying_key,
+        current: inventory.current,
+        quarantine_count: inventory.records.len() as u64,
+        quarantine_history_hash: inventory.history_hash,
+        inventory_hash: inventory.inventory_hash,
+        previous_checkpoint_hash: previous.checkpoint_hash,
+        checkpoint_hash: [0; 32],
+    };
+    checkpoint.checkpoint_hash = quarantine_checkpoint_hash(&checkpoint);
+    Ok(checkpoint)
 }
 
 fn continuity_message(
@@ -1831,35 +2122,97 @@ impl UnixExternalFloorCustodianAnchorStore {
         current_approval: ExternalFloorCustodianAnchorApproval,
         quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
     ) -> io::Result<ExternalFloorCustodianAnchorQuarantineInspection> {
-        let current = verify_external_floor_custodian_anchor_approval(
+        let inventory = approved_quarantine_inventory(
             expected_deployment_id,
             verifying_key,
             current_approval,
+            quarantine_approvals,
         )?;
-        let mut quarantined = Vec::with_capacity(quarantine_approvals.len());
-        for expected in quarantine_approvals {
-            quarantined.push(verify_external_floor_custodian_anchor_approval(
-                expected_deployment_id,
-                expected.verifying_key,
-                expected.approval,
-            )?);
+
+        #[cfg(target_os = "linux")]
+        {
+            let quarantined = inventory
+                .records
+                .iter()
+                .map(|(anchor, _)| *anchor)
+                .collect::<Vec<_>>();
+            let directory = open_directory(path)?;
+            let lock = Lock::acquire_existing(&directory)?;
+            inspect_quarantines_inner(
+                path,
+                &directory,
+                &lock,
+                inventory.current,
+                &quarantined,
+                || {},
+            )
         }
-        quarantined.sort_by_key(|anchor| (anchor.revision, anchor.commitment));
-        if quarantined.windows(2).any(|pair| pair[0] == pair[1]) || quarantined.contains(&current) {
-            return Err(invalid(
-                "duplicate BXRC anchor offline approval in quarantine inventory",
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, inventory);
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "secure BXRC anchor quarantine inspection requires Linux inotify",
+            ))
+        }
+    }
+
+    /// Performs the same read-only Linux inspection while requiring an exact
+    /// externally retained quarantine-history checkpoint.
+    ///
+    /// The checkpoint must first be derived from the supplied approvals with
+    /// [`external_floor_custodian_expected_initial_quarantine_checkpoint`] or
+    /// [`external_floor_custodian_expected_next_quarantine_checkpoint`]. This
+    /// method never discovers a checkpoint from disk and never writes one into
+    /// the inspected rollback domain.
+    pub fn inspect_quarantines_checkpointed(
+        path: &Path,
+        expected_checkpoint: ExternalFloorCustodianAnchorQuarantineCheckpoint,
+        current_approval: ExternalFloorCustodianAnchorApproval,
+        quarantine_approvals: &[ExternalFloorCustodianAnchorQuarantineApproval],
+    ) -> io::Result<ExternalFloorCustodianAnchorQuarantineReceipt> {
+        validate_quarantine_checkpoint(expected_checkpoint)?;
+        let inventory = approved_quarantine_inventory(
+            expected_checkpoint.deployment_id,
+            expected_checkpoint.current_verifying_key,
+            current_approval,
+            quarantine_approvals,
+        )?;
+        if inventory.current != expected_checkpoint.current
+            || inventory.records.len() as u64 != expected_checkpoint.quarantine_count
+            || inventory.history_hash != expected_checkpoint.quarantine_history_hash
+            || inventory.inventory_hash != expected_checkpoint.inventory_hash
+        {
+            return Err(denied(
+                "BXRC anchor quarantine inventory does not match retained checkpoint",
             ));
         }
 
         #[cfg(target_os = "linux")]
         {
+            let quarantined = inventory
+                .records
+                .iter()
+                .map(|(anchor, _)| *anchor)
+                .collect::<Vec<_>>();
             let directory = open_directory(path)?;
             let lock = Lock::acquire_existing(&directory)?;
-            inspect_quarantines_inner(path, &directory, &lock, current, &quarantined, || {})
+            let inspection = inspect_quarantines_inner(
+                path,
+                &directory,
+                &lock,
+                inventory.current,
+                &quarantined,
+                || {},
+            )?;
+            Ok(ExternalFloorCustodianAnchorQuarantineReceipt {
+                checkpoint: expected_checkpoint,
+                inspection,
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (path, current, quarantined);
+            let _ = (path, inventory);
             Err(Error::new(
                 ErrorKind::Unsupported,
                 "secure BXRC anchor quarantine inspection requires Linux inotify",
@@ -1953,6 +2306,144 @@ impl ExternalFloorCustodianAnchorStore for UnixExternalFloorCustodianAnchorStore
             },
         )?;
         Ok(ExternalFloorCustodianAnchorCasOutcome::Committed)
+    }
+}
+
+#[cfg(test)]
+mod quarantine_checkpoint_tests {
+    use super::*;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    fn signed(
+        signer: &Ed25519KeyPair,
+        deployment_id: [u8; 32],
+        anchor: ExternalFloorCustodianClientAnchor,
+    ) -> ExternalFloorCustodianAnchorApproval {
+        let message = external_floor_custodian_anchor_approval_message(deployment_id, anchor);
+        let mut signature = [0; 64];
+        signature.copy_from_slice(signer.sign(&message).as_ref());
+        ExternalFloorCustodianAnchorApproval {
+            deployment_id,
+            anchor,
+            signature,
+        }
+    }
+
+    #[test]
+    fn checkpoint_chain_rejects_tampering_and_current_rollback() {
+        let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let signer = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+        let key = signer.public_key().as_ref().try_into().unwrap();
+        let deployment = [0x91; 32];
+        let old = ExternalFloorCustodianClientAnchor {
+            revision: 7,
+            commitment: [0x71; 32],
+        };
+        let current = ExternalFloorCustodianClientAnchor {
+            revision: 8,
+            commitment: [0x72; 32],
+        };
+        let quarantine = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: key,
+            approval: signed(&signer, deployment, old),
+        };
+        let initial = external_floor_custodian_expected_initial_quarantine_checkpoint(
+            deployment,
+            key,
+            signed(&signer, deployment, current),
+            &[quarantine],
+        )
+        .unwrap();
+        verify_external_floor_custodian_quarantine_checkpoint(initial).unwrap();
+        let next = external_floor_custodian_expected_next_quarantine_checkpoint(
+            initial,
+            key,
+            signed(&signer, deployment, current),
+            &[quarantine],
+        )
+        .unwrap();
+        assert_eq!(next.previous_checkpoint_hash, initial.checkpoint_hash);
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                initial,
+                key,
+                signed(&signer, deployment, current),
+                &[],
+            )
+            .is_err()
+        );
+        let advanced = ExternalFloorCustodianClientAnchor {
+            revision: 9,
+            commitment: [0x73; 32],
+        };
+        let other_document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let other_signer = Ed25519KeyPair::from_pkcs8(other_document.as_ref()).unwrap();
+        let other_key = other_signer.public_key().as_ref().try_into().unwrap();
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                initial,
+                other_key,
+                signed(&other_signer, deployment, current),
+                &[quarantine],
+            )
+            .is_err()
+        );
+        let current_only = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: key,
+            approval: signed(&signer, deployment, current),
+        };
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                initial,
+                key,
+                signed(&signer, deployment, advanced),
+                &[current_only],
+            )
+            .is_err()
+        );
+        let wrong_authority_current = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: other_key,
+            approval: signed(&other_signer, deployment, current),
+        };
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                initial,
+                key,
+                signed(&signer, deployment, advanced),
+                &[quarantine, wrong_authority_current],
+            )
+            .is_err()
+        );
+        let final_anchor = ExternalFloorCustodianClientAnchor {
+            revision: 10,
+            commitment: [0x74; 32],
+        };
+        let wrong_authority_intermediate = ExternalFloorCustodianAnchorQuarantineApproval {
+            verifying_key: other_key,
+            approval: signed(&other_signer, deployment, advanced),
+        };
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                initial,
+                key,
+                signed(&signer, deployment, final_anchor),
+                &[quarantine, current_only, wrong_authority_intermediate],
+            )
+            .is_err()
+        );
+        assert!(
+            external_floor_custodian_expected_next_quarantine_checkpoint(
+                next,
+                key,
+                signed(&signer, deployment, old),
+                &[],
+            )
+            .is_err()
+        );
+        let mut forged = next;
+        forged.inventory_hash[0] ^= 1;
+        assert!(verify_external_floor_custodian_quarantine_checkpoint(forged).is_err());
     }
 }
 

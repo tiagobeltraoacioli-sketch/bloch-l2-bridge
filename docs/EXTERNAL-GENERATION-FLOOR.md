@@ -380,7 +380,36 @@ quarantines fail closed. The method returns decoded approved anchors only and
 does not unlink, rename, create a lock, or expose discovered pathnames as
 cleanup authority. Operators may copy retained evidence only in a separate,
 audited ceremony after inspection; no local record or filename is trust on
-first use. Linux
+first use.
+
+For repeated ceremonies, `inspect_quarantines_checkpointed` binds that same
+Linux inspection to an exact quarantine-history checkpoint retained outside
+the anchor store. The initial and next checkpoint constructors verify every
+Ed25519 approval before hashing the deployment, current authority key, current
+anchor, sorted per-record authority keys and complete quarantine inventory.
+Each next checkpoint commits to the preceding checkpoint hash and a checked
+monotonic index. It also proves that the complete prior quarantine history is
+an unchanged prefix: an unchanged current anchor requires the identical
+history, while an advanced current anchor requires the former current anchor
+with its previously pinned verifying key to be the first newly retained
+predecessor. Every later predecessor added in the same extension must carry
+that same key. The ordinary next-checkpoint constructor also requires the
+current verifying key to remain unchanged: a caller-selected, self-signed
+replacement key is not authority continuity. Key rotation remains outside this
+receipt API until it is explicitly bound to the existing dual-signed anchor-continuity
+protocol. Lower revisions, equal revisions with different commitments, gaps
+created by removal, and rewritten historical approvals are rejected.
+Consequently an old, otherwise valid approved
+inventory cannot satisfy a caller that supplies the independently retained
+newer checkpoint. Deliberate cleanup requires a separate future authorization
+protocol; it cannot be smuggled through this receipt API. The checkpoint is a
+receipt, not cleanup or adoption authority, and keeping it beside the inspected
+directory provides no rollback resistance. Inspection remains read-only and
+Linux-only because the final namespace proof relies on `inotify`; receipt
+hashing does not weaken that platform boundary or make non-Linux inspection
+safe.
+
+Linux
 provisioning creates a cryptographically random staging name through the
 retained parent fd. The parent `inotify` guard is armed before `mkdirat` and
 accepts only the single expected named directory-create event before the new fd

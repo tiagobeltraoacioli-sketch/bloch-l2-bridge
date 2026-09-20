@@ -11,6 +11,8 @@ use bloch_l2_bridge::{
     external_floor_custodian_anchor_approval_message,
     external_floor_custodian_anchor_continuity_acceptance_message,
     external_floor_custodian_anchor_continuity_authorization_message,
+    external_floor_custodian_expected_initial_quarantine_checkpoint,
+    external_floor_custodian_expected_next_quarantine_checkpoint,
     verify_external_floor_custodian_anchor_approval,
     verify_external_floor_custodian_anchor_continuity, ExternalFloorCustodianAnchorApproval,
     ExternalFloorCustodianAnchorCasOutcome, ExternalFloorCustodianAnchorContinuityApproval,
@@ -320,6 +322,109 @@ fn offline_quarantine_inspection_never_creates_a_missing_lock() {
     assert!(
         !lock.exists(),
         "offline inspection must not create authority"
+    );
+}
+
+#[test]
+fn checkpointed_quarantine_receipts_are_exact_and_anti_rollback() {
+    let temp = Temp::new();
+    let deployment = [0x6a; 32];
+    let first = anchor(1, 0x51);
+    let second = anchor(2, 0x52);
+    let third = anchor(3, 0x53);
+    let signer = signer();
+    let key = verifying_key(&signer);
+    let store = UnixExternalFloorCustodianAnchorStore::provision_approved(
+        &temp.store,
+        deployment,
+        key,
+        approval(&signer, deployment, first),
+    )
+    .unwrap();
+    assert_eq!(
+        store.compare_and_swap(first, second).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    drop(store);
+
+    let first_quarantine = quarantine_approval(&signer, deployment, first);
+    let initial = external_floor_custodian_expected_initial_quarantine_checkpoint(
+        deployment,
+        key,
+        approval(&signer, deployment, second),
+        &[first_quarantine],
+    )
+    .unwrap();
+    let receipt = UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
+        &temp.store,
+        initial,
+        approval(&signer, deployment, second),
+        &[first_quarantine],
+    )
+    .unwrap();
+    assert_eq!(receipt.checkpoint, initial);
+    assert_eq!(receipt.inspection.current, second);
+    assert_eq!(receipt.inspection.quarantined, vec![first]);
+
+    let store = UnixExternalFloorCustodianAnchorStore::open_approved(
+        &temp.store,
+        deployment,
+        key,
+        approval(&signer, deployment, second),
+    )
+    .unwrap();
+    assert_eq!(
+        store.compare_and_swap(second, third).unwrap(),
+        ExternalFloorCustodianAnchorCasOutcome::Committed
+    );
+    drop(store);
+    let second_quarantine = quarantine_approval(&signer, deployment, second);
+    let next = external_floor_custodian_expected_next_quarantine_checkpoint(
+        initial,
+        key,
+        approval(&signer, deployment, third),
+        &[first_quarantine, second_quarantine],
+    )
+    .unwrap();
+    assert_eq!(next.inspection_index, 1);
+    assert_eq!(next.previous_checkpoint_hash, initial.checkpoint_hash);
+    UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
+        &temp.store,
+        next,
+        approval(&signer, deployment, third),
+        &[second_quarantine, first_quarantine],
+    )
+    .unwrap();
+
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
+            &temp.store,
+            initial,
+            approval(&signer, deployment, third),
+            &[first_quarantine, second_quarantine],
+        )
+        .is_err()
+    );
+    assert!(
+        external_floor_custodian_expected_next_quarantine_checkpoint(
+            next,
+            key,
+            approval(&signer, deployment, second),
+            &[first_quarantine],
+        )
+        .is_err()
+    );
+
+    let mut forged = next;
+    forged.previous_checkpoint_hash = [0x99; 32];
+    assert!(
+        UnixExternalFloorCustodianAnchorStore::inspect_quarantines_checkpointed(
+            &temp.store,
+            forged,
+            approval(&signer, deployment, third),
+            &[first_quarantine, second_quarantine],
+        )
+        .is_err()
     );
 }
 
