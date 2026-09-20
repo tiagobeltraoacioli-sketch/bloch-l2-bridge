@@ -81,7 +81,8 @@ The stablecoin Ethereum CLI also requires block-bound `eth_call` readback of
 `cap()`, `threshold()`, `transferMode()`, `routeId()` and `signerCount()`.
 It additionally captures `controlNonce()`, `depositsEnabled()` and
 `releasesEnabled()` so an observation retains the exact operational state at
-the same block.
+the same block. `depositCount()` is captured alongside them as a bounded
+counter, allowing deployment evidence to prove that no deposit has occurred.
 Each exact 32-byte ABI result must match the validated catalog, including zero
 address padding and integer widths. It then checks `signers(i)` in order and
 `isSigner(address)` for every configured member. `signerCount()` ensures the
@@ -90,12 +91,13 @@ configured list is complete; a matching prefix alone is not accepted.
 The `configuration` evidence object uses the ten immutable/configuration getter
 names without parentheses, with their raw 0x-prefixed 32-byte results, plus
 `signers` and `memberships` arrays and an exact `controls` object containing the
-three operational getter results. The nonce must fit `uint64`; both flags must
+three operational getter results, and an exact `counters` object containing
+`depositCount`. The nonce and deposit count must fit `uint64`; both flags must
 be canonical ABI booleans. Missing or unknown fields, extra committee members,
 malformed ABI words and noncanonical booleans are refused before the journal
 write. All calls use the deposit block hash and `requireCanonical: true`;
 the canonical block is rechecked after the entire read. Requests are bounded by
-the validated committee (2..16), at most 45 getter calls, each limited to 100,000
+the validated committee (2..16), at most 46 getter calls, each limited to 100,000
 gas and subject to the existing overall collection deadline. No response can
 increase the number of requested signer entries.
 
@@ -119,7 +121,7 @@ with exactly `total_locked` and `token_balance`, both raw 0x-prefixed 32-byte AB
 words. It reads `totalLocked()` from the configured vault and `balanceOf(vault)`
 from the configured token, using the same canonical deposit block hash as the
 other calls. Both reads have a 100,000 gas limit; the canonical block is checked
-again after all reads. The total maximum is now 47 getter calls, within the
+again after all reads. The total maximum is now 48 getter calls, within the
 existing collection deadline, without any fallback to `latest` or block height.
 
 The reported liability must fit uint64 and the route cap. The token balance is

@@ -16,6 +16,7 @@ CONTROL_SELECTORS = {
     'depositsEnabled': '5392fd1c',
     'releasesEnabled': '175b818c',
 }
+COUNTER_SELECTORS = {'depositCount': '2dfdf0b5'}
 SIGNERS = '2079fb9a'
 IS_SIGNER = '7df73e27'
 
@@ -44,7 +45,8 @@ def expected_words(route):
 def validate_configuration(route, configuration):
     expected = expected_words(route)
     require(type(configuration) is dict
-            and set(configuration) == set(expected) | {'signers', 'memberships', 'controls'},
+            and set(configuration) == set(expected) | {
+                'signers', 'memberships', 'controls', 'counters'},
             'exact vault configuration evidence required')
     for name, value in expected.items():
         require(word(configuration[name], 32) == value, 'vault configuration mismatch')
@@ -65,6 +67,11 @@ def validate_configuration(route, configuration):
     for name in ('depositsEnabled', 'releasesEnabled'):
         require(word(controls[name], 32) in (abi_uint(0), abi_uint(1)),
                 'invalid vault control flag')
+    counters = configuration['counters']
+    require(type(counters) is dict and set(counters) == set(COUNTER_SELECTORS),
+            'exact vault counters required')
+    require(int.from_bytes(word(counters['depositCount'], 32), 'big') <= (1 << 64) - 1,
+            'invalid vault deposit count')
 
 
 def collect_configuration(route, block_hash, source):
@@ -84,6 +91,9 @@ def collect_configuration(route, block_hash, source):
     result['controls'] = {}
     for name, selector in CONTROL_SELECTORS.items():
         result['controls'][name] = call(selector)
+    result['counters'] = {}
+    for name, selector in COUNTER_SELECTORS.items():
+        result['counters'][name] = call(selector)
     # Bound requests using the validated manifest, never an RPC-supplied count.
     result['signers'], result['memberships'] = [], []
     for index, signer in enumerate(route['committee_signers']):

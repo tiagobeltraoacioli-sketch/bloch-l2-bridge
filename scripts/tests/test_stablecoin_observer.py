@@ -54,6 +54,7 @@ def configuration_for(route):
         'routeId': route['route_id'], 'signerCount': uint(len(route['committee_signers'])),
         'controls': {'controlNonce': uint(1), 'depositsEnabled': uint(1),
                      'releasesEnabled': uint(1)},
+        'counters': {'depositCount': uint(1)},
         'signers': [address(s) for s in route['committee_signers']],
         'memberships': [uint(1) for _ in route['committee_signers']],
     }

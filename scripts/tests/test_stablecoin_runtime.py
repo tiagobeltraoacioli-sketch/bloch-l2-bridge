@@ -68,8 +68,9 @@ class StablecoinRuntimeTest(unittest.TestCase):
         source = Mock()
         config = self.runtime['configuration']
         reads = [v for k, v in config.items()
-                 if k not in ('signers', 'memberships', 'controls')]
+                 if k not in ('signers', 'memberships', 'controls', 'counters')]
         reads.extend(config['controls'].values())
+        reads.extend(config['counters'].values())
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
         reads.extend(self.runtime['reserves'].values())
@@ -95,8 +96,9 @@ class StablecoinRuntimeTest(unittest.TestCase):
         source = Mock()
         config = self.runtime['configuration']
         reads = [v for k, v in config.items()
-                 if k not in ('signers', 'memberships', 'controls')]
+                 if k not in ('signers', 'memberships', 'controls', 'counters')]
         reads.extend(config['controls'].values())
+        reads.extend(config['counters'].values())
         for signer, membership in zip(config['signers'], config['memberships']):
             reads.extend([signer, membership])
         reads.extend(self.runtime['reserves'].values())
