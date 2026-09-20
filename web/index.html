@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bloch Bridge — USDT routes in development</title>
-  <meta name="description" content="Follow development of Ethereum and TRON USDT routes to native Bloch L1. Source vaults and native gateway components are under development. Public transfers are not enabled.">
+  <title>Bloch Bridge — USDC route in qualification</title>
+  <meta name="description" content="Qualification status for the planned Ethereum USDC to Bloch L1 bUSDC route. Custody, deployment and activation remain disabled.">
   <meta name="theme-color" content="#10120f">
   <link rel="canonical" href="https://blochbridge.com/">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -18,46 +18,46 @@
 </header>
 <main id="main">
   <section class="hero">
-    <div class="eyebrow"><span class="dot"></span> IN DEVELOPMENT · USDT TRANSFERS NOT ENABLED</div>
-    <h1>Two source networks.<br>One native<br><em>Bloch destination.</em></h1>
-    <div class="hero-bottom"><p>Developing USDT routes from Ethereum and TRON to Bloch L1. Follow the source vaults, native asset accounting and verification work before asset transfers open.</p><a class="button" href="#status">View release status <span>↗</span></a></div>
-    <div class="network" aria-label="Planned USDT routes from Ethereum ERC-20 and TRON TRC-20 to native Bloch L1. Transfers are not enabled.">
-      <div><small>01 / SOURCE NETWORKS</small><strong>Ethereum + TRON</strong><span>USDT · ERC-20 / TRC-20</span></div>
+    <div class="eyebrow"><span class="dot"></span> QUALIFICATION IN PROGRESS · TRANSFERS NOT ENABLED</div>
+    <h1>Ethereum USDC.<br>One native<br><em>Bloch destination.</em></h1>
+    <div class="hero-bottom"><p>The initial route under qualification is canonical Ethereum mainnet USDC to a native Bloch L1 bUSDC representation. Custody, deployment evidence and activation approval must all complete before transfers open.</p><a class="button" href="#status">View release status <span>↗</span></a></div>
+    <div class="network" aria-label="Planned Ethereum mainnet USDC route to native Bloch L1 bUSDC. Transfers are not enabled.">
+      <div><small>01 / SOURCE NETWORK</small><strong>Ethereum mainnet</strong><span>Canonical USDC · ERC-20 · 6 decimals</span></div>
       <div class="connection"><span>TRANSFERS NOT ENABLED</span><i></i></div>
-      <div><small>02 / DESTINATION</small><strong>Bloch L1</strong><span>Native bridged USDT representation</span></div>
+      <div><small>02 / DESTINATION</small><strong>Bloch L1</strong><span>Native bridged bUSDC representation</span></div>
     </div>
   </section>
   <section id="architecture">
     <div class="section-label">01 / THE ARCHITECTURE</div>
-    <div class="section-heading"><h2>Separate networks.<br>Explicit responsibilities.</h2><p>The planned native asset is backed by source-vault USDT. It is a bridged representation, not USDT issued directly on Bloch by Tether.</p></div>
+    <div class="section-heading"><h2>Separate networks.<br>Explicit responsibilities.</h2><p>The planned bUSDC asset would be backed by USDC held in the reviewed Ethereum vault. It is a bridged representation, not USDC issued directly on Bloch by Circle.</p></div>
     <div class="cards">
-      <article><span class="number">01</span><h3>Lock source USDT</h3><p>Ethereum and TRON source-vault components cover deposits, committee-authorized releases and replay protection. Local EVM tests do not establish live deployment or TRON TVM compatibility.</p><span class="tag">REFERENCE COMPONENTS</span></article>
+      <article><span class="number">01</span><h3>Lock source USDC</h3><p>The Ethereum vault design covers deposits, threshold-authorized releases and replay protection. Local tests and build hashes do not establish a live deployment, real custody independence or backing.</p><span class="tag">REFERENCE COMPONENTS</span></article>
       <article><span class="number">02</span><h3>Account on native L1</h3><p>The native gateway implementation tracks imports, burns and backing separately for each source route. Native network activation and complete source-to-native integration remain pending.</p><span class="tag">INTEGRATION IN DEVELOPMENT</span></article>
       <article><span class="number">03</span><h3>Verify before release</h3><p>Contract identity, source finality, committee configuration and native authorization must be established before minting or releasing funds. Source committee attestations are not independent finality proofs.</p><span class="tag">PRODUCTION VERIFICATION PENDING</span></article>
     </div>
   </section>
   <section id="status" class="status">
-    <div><div class="section-label">02 / RELEASE STATUS</div><h2>Explore the work.<br>Wait to transfer.</h2><p>This is the bridge development portal. It provides no deposit address, token approval or wallet transaction flow. Public deposits and withdrawals remain disabled.</p><a class="text-link" href="https://blochdex.com/">Open the DEX · separate testnet ↗</a><p>The DEX's test tokens and testnet relaunch do not activate these USDT bridge routes.</p></div>
+    <div><div class="section-label">02 / RELEASE STATUS</div><h2>Explore the work.<br>Wait to transfer.</h2><p>This is the bridge qualification portal. It provides no deposit address, token approval or wallet transaction flow. Public deposits and withdrawals remain disabled.</p><a class="text-link" href="https://blochdex.com/">Open the DEX · separate testnet ↗</a><p>The DEX testnet and its test tokens do not activate the USDC/bUSDC route or establish Bloch L1 liquidity.</p></div>
     <div class="status-list">
-      <div><span>Ethereum / TRON source-vault components</span><b>Local implementation</b></div>
+      <div><span>Ethereum USDC custody preflight</span><b>Fail-closed implementation</b></div>
       <div><span>Native gateway accounting</span><b>Local implementation</b></div>
       <div><span>Verified source contracts and backing</span><b class="pending">Pending</b></div>
       <div><span>Bloch native network activation</span><b class="pending">Pending</b></div>
-      <div><span>Source finality and TRON TVM qualification</span><b class="pending">Pending</b></div>
-      <div><span>Public USDT deposits and withdrawals</span><b class="pending">Not enabled</b></div>
+      <div><span>Five-party custody and source finality qualification</span><b class="pending">Pending</b></div>
+      <div><span>Public USDC deposits and bUSDC withdrawals</span><b class="pending">Not enabled</b></div>
     </div>
   </section>
   <section id="developers">
     <div class="section-label">03 / BUILD WITH US</div>
     <div class="section-heading"><h2>Inspect the code.<br>Help test the routes.</h2><p>Review the implementations and reproduce the local tests. Source code and test results are development evidence, not proof that a public bridge is ready.</p></div>
     <div class="developer-links">
-      <a href="https://github.com/tiagobeltraoacioli-sketch/bloch-l2-bridge/tree/4cf97bec69ad07cb0a3133d274673a6c22ba0cdd"><span>01</span><div><h3>Bridge repository</h3><p>Source-vault contracts, route validation, accounting and replay-protection tests.</p></div><b>↗</b></a>
+      <a href="https://github.com/tiagobeltraoacioli-sketch/bloch-l2-bridge/tree/b94866988975357bf85ef9ac9ef5d44b045fd66e"><span>01</span><div><h3>Bridge repository</h3><p>Source-vault contracts, strict custody preflight, accounting and replay-protection tests.</p></div><b>↗</b></a>
       <a href="https://github.com/tiagobeltraoacioli-sketch/bloch-sis-pow"><span>02</span><div><h3>Native Bloch implementation</h3><p>Native asset authorization, gateway accounting and integration rehearsals.</p></div><b>↗</b></a>
       <a href="https://github.com/tiagobeltraoacioli-sketch/postern-dex"><span>03</span><div><h3>Postern DEX repository</h3><p>DEX code, wallet integration and explicit network identity checks.</p></div><b>↗</b></a>
       <a href="https://blochprotocol.dev/#evm"><span>04</span><div><h3>Developer portal</h3><p>Explore the separate EVM tools and broader Bloch development ecosystem.</p></div><b>↗</b></a>
     </div>
   </section>
-  <section class="closing"><span class="dot"></span><p>Follow the implementation.<br>Help verify the connection.</p><a class="button" href="https://github.com/tiagobeltraoacioli-sketch/bloch-l2-bridge/tree/4cf97bec69ad07cb0a3133d274673a6c22ba0cdd">Explore the code ↗</a></section>
+  <section class="closing"><span class="dot"></span><p>Follow the qualification.<br>Help verify the connection.</p><a class="button" href="https://github.com/tiagobeltraoacioli-sketch/bloch-l2-bridge/tree/b94866988975357bf85ef9ac9ef5d44b045fd66e">Explore the code ↗</a></section>
 </main>
 <footer><a class="brand" href="/">BLOCH <span>BRIDGE</span></a><p>A Postern Labs project · Development portal</p><div><a href="https://blochprotocol.io">Bloch</a><a href="https://blochl1.com">Explorer</a><a href="https://posternlabs.com">Postern Labs</a></div></footer>
 </body>

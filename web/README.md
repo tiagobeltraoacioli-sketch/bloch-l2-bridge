@@ -1,9 +1,9 @@
 # Bloch Bridge development portal
 
 Static publication source for `https://blochbridge.com/`. The visual styles and
-favicon preserve the previously published portal. Content now describes the
-planned Ethereum ERC-20 and TRON TRC-20 USDT routes to native Bloch L1, including
-outstanding source deployment, activation and finality work.
+favicon preserve the previously published portal. Content describes the initial
+Ethereum mainnet USDC to native Bloch L1 bUSDC route, including outstanding
+custody, source deployment, activation and finality work.
 
 There is no JavaScript, wallet connection, approval, deposit address, RPC call,
 analytics or transfer endpoint. The DEX link is explicitly a separate testnet.
@@ -18,7 +18,7 @@ from its custom-domain association before deployment.
 
 Before publication, preview desktop and narrow mobile widths; check all local
 assets and section links, preserve the CSP headers, and verify the published
-content still says USDT transfers are not enabled. External repository links
+content still says USDC/bUSDC transfers are not enabled. External repository links
 point to the actual project roots; no uncommitted file URLs or invented contract
 addresses are presented.
 
