@@ -13,6 +13,28 @@ python3 scripts/check-custody-deployment-evidence.py \
   /private/reviewed/deployment-evidence.json
 ```
 
+The repository can collect the exact evidence shape from one explicitly chosen
+HTTPS JSON-RPC endpoint:
+
+```sh
+python3 scripts/collect-custody-deployment-evidence.py \
+  /private/reviewed/manifest.json \
+  --endpoint https://operator-node.example \
+  --tx-hash 0xDEPLOYMENT_TRANSACTION
+```
+
+The collector accepts no endpoint credentials in its URL, follows no redirects,
+uses bounded uncompressed JSON responses and has a 40-second overall deadline.
+Receipt, finality, transaction, both USDC runtimes, implementation slot/getter,
+vault runtime, every getter and both reserve reads are checked before output.
+Runtime, storage and call reads use EIP-1898 `blockHash` with
+`requireCanonical: true`; the canonical block is fetched again after the last
+read. There is no fallback to `latest` or a block height.
+
+Collection from one endpoint is still not source authentication. Independent
+operators should run it against separately administered nodes and compare the
+entire normalized output before retaining the evidence reviewed below.
+
 The evidence object has exactly these top-level fields:
 
 - `schema`: `postern.custody-deployment-evidence.v1`;
