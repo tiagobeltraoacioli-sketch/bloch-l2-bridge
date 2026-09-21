@@ -60,6 +60,9 @@ Do not enable deposits or releases until all of the following exist:
 
 - finalized source deployment receipt and bytecode/state readback;
 - authenticated Bloch L1 asset and gateway registration;
+- explicit L2/native settlement evidence accepted by the independently reviewed,
+  checksum-pinned verifier; an L1 anchor, RPC `finalized` label, committee
+  attestation or agreeing node reports is not settlement of an L2 block;
 - qualified node release and readiness evidence for every active validator;
 - completed disposable-value deposit, mint, burn and release rehearsal;
 - reconciled zero-start reserves and native supply;
@@ -71,3 +74,12 @@ Do not enable deposits or releases until all of the following exist:
 The wallet/aggregator is the last component enabled. Its reviewed source
 registry must pin the exact bridge and DEX evidence; RPC responses, browser
 storage or a quote cannot promote readiness.
+
+`scripts/check-l2-settlement.py` implements the settlement prerequisite's
+bounded verifier transport. Its successful report sets only
+`settlementGateSatisfied`; `activationAuthorized`, `mintAuthorized`,
+`releaseAuthorized` and `bridgeReady` remain false until the other activation
+gates and external approval are composed by a separately reviewed procedure.
+The verifier must authenticate native checkpoint authority and ancestry, the
+consensus-enforced settlement record, the exact L2 chain/block/state/domain,
+execution proof and source cursor, plus durable monotonic cursor advancement.

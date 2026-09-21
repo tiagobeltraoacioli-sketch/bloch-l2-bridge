@@ -26,7 +26,10 @@ broadcast or activation.
 
 The [mainnet USDC activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md)
 lists the public operator decisions and independent evidence required before a
-paused deployment can be proposed. It explicitly excludes private key material.
+paused deployment can be proposed. It explicitly excludes private key material
+and includes a checksum-pinned, bounded L2/native settlement prerequisite. The
+prerequisite can recognize an external verifier's explicit settlement decision
+but never enables minting, release, activation or bridge readiness by itself.
 
 The [stablecoin release inspector](docs/STABLECOIN-RELEASE-OBSERVER.md) matches
 Ethereum payout events and token transfers to a supplied native release record.

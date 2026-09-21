@@ -62,3 +62,22 @@ verifier as a journal root merely because the byte lengths match.
 
 No production activation, validator change, pool launch or funds transfer is
 performed by this diagnostic.
+
+## Explicit L2 settlement prerequisite
+
+`scripts/check-l2-settlement.py` provides the fail-closed handoff to a future
+reviewed settlement verifier. The input binds route ID, selected L2 chain ID
+700771, exact L2 block/state/execution/proof/source cursor, canonical Bloch
+mainnet genesis, native checkpoint and settlement record, and hashes of all
+proof artifacts. The executable must be an absolute, regular, non-writable
+checksum-pinned file and must accept the bounded canonical request through the
+documented one-shot protocol. The adapter verifies the three supplied proof
+files against their declared hashes and gives the verifier private read-only
+copies through `--ancestry-proof`, `--execution-proof` and
+`--settlement-proof`; hashes without the corresponding bytes are rejected.
+
+The adapter cannot make an incomplete native implementation safe: the pinned
+verifier must actually validate consensus authority, ancestry, settlement
+inclusion, execution and monotonic persistence. Even a successful response is
+only one prerequisite. It never sets bridge readiness or mint/release/activation
+authorization, and current releases provide no accepted production evidence.
