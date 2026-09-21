@@ -17,6 +17,8 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS / "tests"))
 
 from bridge_activation_readiness import (  # noqa: E402
+    _approval_package,
+    _validate_authority_policy,
     _validated_request,
     verify_bridge_activation_readiness,
 )
@@ -62,28 +64,24 @@ def fixture():
         "releaseAuthorized": False,
         "bridgeReady": False,
     }
-    authority = {
-        "schema": "postern.bridge-authority-qualification.v1",
+    activation_authority = {
+        "operatorId": digest("activation-operator"),
+        "organizationId": digest("activation-organization"),
+        "algorithm": "ed25519",
+        "publicKey": digest("activation-public-key"),
+        "custodyAttestationSha256": digest("activation-custody-attestation"),
+    }
+    policy_digest = canonical_sha256({
+        "schema": "postern.bridge-authority-policy.v2",
+        "custody": manifest["custody"],
+        "roles": manifest["roles"],
+        "activationAuthority": activation_authority,
+    })
+    policy = {
+        "schema": "postern.bridge-authority-policy.v2",
         "manifestCanonicalSha256": manifest_digest,
-        "routeId": route,
-        "custodianCount": 5,
-        "custodyThreshold": 3,
-        "distinctAuthorityCount": 7,
-        "authorityPolicySha256": canonical_sha256({
-            "custody": manifest["custody"], "roles": manifest["roles"]
-        }),
-        "custodyCeremonySha256": digest("custody-ceremony"),
-        "nativeRolesCeremonySha256": digest("native-roles-ceremony"),
-        "settlementVerificationSha256": canonical_sha256(settlement),
-        "deploymentVerificationSha256": canonical_sha256(deployment),
-        "sourceDeploymentAuthenticated": True,
-        "nativeGatewayAuthenticated": True,
-        "settlementAuthenticated": True,
-        "activationApprovalSha256": digest("activation-approval"),
-        "approvalCheckpointHeight": "912",
-        "observedNativeHeight": "913",
-        "approvalValidUntilHeight": "1000",
-        "decision": "approve-activation-when-all-gates-satisfied",
+        "activationAuthority": activation_authority,
+        "authorityPolicySha256": policy_digest,
     }
     cycle = {
         "schema": "postern.bridge-disposable-cycle.v1",
@@ -110,11 +108,39 @@ def fixture():
         "nativeSupplyReconciled": True,
         "rollbackPauseExercised": True,
     }
+    authority = {
+        "schema": "postern.bridge-authority-qualification.v2",
+        "manifestCanonicalSha256": manifest_digest,
+        "routeId": route,
+        "custodianCount": 5,
+        "custodyThreshold": 3,
+        "distinctAuthorityCount": 8,
+        "authorityPolicySha256": policy_digest,
+        "custodyCeremonySha256": digest("custody-ceremony"),
+        "nativeRolesCeremonySha256": digest("native-roles-ceremony"),
+        "settlementVerificationSha256": canonical_sha256(settlement),
+        "deploymentVerificationSha256": canonical_sha256(deployment),
+        "sourceDeploymentAuthenticated": True,
+        "nativeGatewayAuthenticated": True,
+        "settlementAuthenticated": True,
+        "activationApprovalSha256": digest("activation-approval-certificate"),
+        "approvalCheckpointHeight": "912",
+        "observedNativeHeight": "913",
+        "approvalValidUntilHeight": "1000",
+        "approvalSequence": "1",
+        "previousApprovalSha256": "0x" + "00" * 32,
+        "approvalPackageSha256": digest("not-yet-computed"),
+        "decision": "approve-activation-when-all-gates-satisfied",
+    }
+    authority["approvalPackageSha256"] = canonical_sha256(_approval_package(
+        manifest_digest, route, policy_digest, settlement, deployment, cycle, authority
+    ))
     return {
-        "schema": "postern.bridge-activation-readiness.v1",
+        "schema": "postern.bridge-activation-readiness.v2",
         "manifest": manifest,
         "settlementVerification": settlement,
         "deploymentVerification": deployment,
+        "authorityPolicy": policy,
         "authorityQualification": authority,
         "disposableCycle": cycle,
     }
@@ -146,6 +172,10 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             executable, pin = verifier(directory)
             report = verify_bridge_activation_readiness(executable, pin, bundle)
         self.assertEqual(bundle, before)
+        self.assertEqual(
+            report["schema"],
+            "postern.bridge-activation-readiness-verification.v2",
+        )
         for field in (
             "settlementVerified", "custodyAuthoritiesVerified",
             "pausedDeploymentVerified", "disposableCycleVerified",
@@ -189,6 +219,12 @@ class BridgeActivationReadinessTest(unittest.TestCase):
 
     def test_cross_artifact_substitution_and_unknown_fields_refuse(self):
         mutations = [
+            lambda value: value.update(
+                schema="postern.bridge-activation-readiness.v1"),
+            lambda value: value["authorityPolicy"]["activationAuthority"].update(
+                publicKey=digest("substituted-activation-key")),
+            lambda value: value["authorityPolicy"]["activationAuthority"].update(
+                algorithm="secp256k1"),
             lambda value: value["authorityQualification"].update(
                 routeId=digest("other-route")),
             lambda value: value["disposableCycle"].update(
@@ -204,6 +240,8 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                 settlementVerificationSha256=digest("other-settlement-report")),
             lambda value: value["authorityQualification"].update(
                 deploymentVerificationSha256=digest("other-deployment-report")),
+            lambda value: value["authorityQualification"].update(
+                approvalPackageSha256=digest("other-approval-package")),
             lambda value: value["deploymentVerification"].update(
                 vaultAddress="0x" + "11" * 20),
             lambda value: value["deploymentVerification"].update(extra=True),
@@ -213,6 +251,88 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle = fixture()
             mutate(bundle)
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                _validated_request(bundle)
+
+    def test_activation_authority_is_eighth_independent_identity(self):
+        collisions = (
+            ("operatorId", "operator_id"),
+            ("organizationId", "organization_id"),
+            ("custodyAttestationSha256", "custody_attestation_sha256"),
+        )
+        for policy_field, manifest_field in collisions:
+            bundle = fixture()
+            authority = bundle["authorityPolicy"]["activationAuthority"]
+            authority[policy_field] = (
+                bundle["manifest"]["custody"]["custodians"][0][manifest_field]
+            )
+            policy_digest = canonical_sha256({
+                "schema": "postern.bridge-authority-policy.v2",
+                "custody": bundle["manifest"]["custody"],
+                "roles": bundle["manifest"]["roles"],
+                "activationAuthority": authority,
+            })
+            bundle["authorityPolicy"]["authorityPolicySha256"] = policy_digest
+            bundle["authorityQualification"]["authorityPolicySha256"] = policy_digest
+            with self.subTest(field=policy_field), self.assertRaises(ValueError):
+                _validated_request(bundle)
+
+        bundle = fixture()
+        manifest = copy.deepcopy(bundle["manifest"])
+        policy = copy.deepcopy(bundle["authorityPolicy"])
+        public_key = bytes.fromhex(
+            policy["activationAuthority"]["publicKey"][2:]
+        )
+        manifest["custody"]["custodians"][0]["bloch_public_key_sha256"] = (
+            "0x" + hashlib.sha256(public_key).hexdigest()
+        )
+        manifest_digest = canonical_sha256(manifest)
+        policy["manifestCanonicalSha256"] = manifest_digest
+        policy["authorityPolicySha256"] = canonical_sha256({
+            "schema": "postern.bridge-authority-policy.v2",
+            "custody": manifest["custody"],
+            "roles": manifest["roles"],
+            "activationAuthority": policy["activationAuthority"],
+        })
+        with self.assertRaises(ValueError):
+            _validate_authority_policy(policy, manifest, manifest_digest)
+
+    def test_prior_package_or_sequence_cannot_be_replayed(self):
+        original = fixture()
+        mutations = []
+
+        changed_cycle = copy.deepcopy(original)
+        changed_cycle["disposableCycle"]["depositTransactionHash"] = digest(
+            "replacement-cycle-deposit"
+        )
+        mutations.append(changed_cycle)
+
+        changed_sequence = copy.deepcopy(original)
+        changed_sequence["authorityQualification"]["approvalSequence"] = "2"
+        mutations.append(changed_sequence)
+
+        zero_predecessor = copy.deepcopy(original)
+        zero_predecessor["authorityQualification"]["approvalSequence"] = "2"
+        zero_predecessor["authorityQualification"]["approvalPackageSha256"] = (
+            canonical_sha256(_approval_package(
+                canonical_sha256(zero_predecessor["manifest"]),
+                zero_predecessor["settlementVerification"]["routeId"],
+                zero_predecessor["authorityPolicy"]["authorityPolicySha256"],
+                zero_predecessor["settlementVerification"],
+                zero_predecessor["deploymentVerification"],
+                zero_predecessor["disposableCycle"],
+                zero_predecessor["authorityQualification"],
+            ))
+        )
+        mutations.append(zero_predecessor)
+
+        nonzero_genesis = copy.deepcopy(original)
+        nonzero_genesis["authorityQualification"]["previousApprovalSha256"] = digest(
+            "unexpected-predecessor"
+        )
+        mutations.append(nonzero_genesis)
+
+        for bundle in mutations:
+            with self.subTest(bundle=bundle), self.assertRaises(ValueError):
                 _validated_request(bundle)
 
     def test_cycle_must_be_small_distinct_and_balance_neutral(self):

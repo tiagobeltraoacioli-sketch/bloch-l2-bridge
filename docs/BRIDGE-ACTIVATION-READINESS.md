@@ -6,16 +6,16 @@ deploy, sign, broadcast, unpause, mint or release anything. A successful result
 is permission for a separately reviewed activation procedure, not evidence
 that the procedure occurred.
 
-The command accepts one strict `postern.bridge-activation-readiness.v1` bundle.
+The command accepts one strict `postern.bridge-activation-readiness.v2` bundle.
 It combines the complete custody manifest with four artifacts:
 
 1. the exact non-authorizing report emitted by the L2/native settlement
    verifier;
 2. the exact non-authorizing report for the finalized, empty and paused source
    vault deployment;
-3. the three-of-five custody and separated native-role qualification, including
-   authenticated source deployment, native gateway and conditional activation
-   approval commitments;
+3. the three-of-five custody, separated native-role qualification and a distinct
+   external activation-authority policy, including authenticated source
+   deployment, native gateway and conditional activation approval commitments;
 4. a disposable-value deposit, mint, burn and release cycle whose source
    reserves and native supply return to their starting values and whose
    rollback/pause exercise is committed.
@@ -25,8 +25,22 @@ binds the exact deployment transaction and settlement evidence commitment.
 The authority qualification pins the canonical SHA-256 of both complete
 settlement and deployment verification reports, so approval for one pair of
 reports cannot be composed with another pair.
-The authority-policy commitment is derived directly from the manifest's five
-custodians, issuer and sponsor rather than accepted as an unrelated hash.
+The v2 authority-policy commitment is derived directly from the manifest's five
+custodians, issuer and sponsor plus the external activation authority's public
+operator identity, organization identity, Ed25519 public key and custody
+attestation. The external authority must be distinct from all seven operational
+authorities across every comparable identity. Its private key is never an input.
+
+The approval signs the canonical SHA-256 of a separate, non-circular
+`postern.bridge-activation-approval-package.v2` object. That object binds the
+manifest, route, complete authority policy, custody and native-role ceremonies,
+settlement report, deployment report, disposable-cycle report, checkpoint,
+observation height, expiry, decision, monotonic approval sequence and previous
+approval certificate. Sequence one requires the zero predecessor; every later
+sequence requires a non-placeholder predecessor. The production verifier must
+authenticate the Ed25519 certificate and compare the sequence/predecessor with
+independently retained monotonic state. Structural validation alone cannot prove
+key possession or prevent replay after verifier-state rollback.
 The four operation identities must be distinct, the test amount must be a
 positive canonical `uint64` no greater than either the route cap or 10 USDC,
 and both reserve domains must be balance-neutral after the round trip. The
@@ -40,14 +54,14 @@ refused before the verifier is started.
 
 Structural consistency alone never authorizes activation. The complete
 canonical bundle is sent to an independently reviewed local verifier executable
-under the domain `BLOCH-BRIDGE-ACTIVATION-READINESS-v1`. The executable is
+under the domain `BLOCH-BRIDGE-ACTIVATION-READINESS-v2`. The executable is
 copied from a regular, non-group/world-writable inode, checked against the
 operator-supplied SHA-256 pin, and executed only from that private copy. It must
 authenticate, rather than merely echo:
 
 - the finalized Ethereum deployment and its independently administered source
   RPC evidence;
-- native asset/gateway registration and all seven distinct authority records;
+- native asset/gateway registration and all eight distinct authority records;
 - the custody, issuer, sponsor and conditional activation signatures;
 - the consensus-enforced settlement proof and its durable source cursor;
 - every transaction/proof in the disposable cycle, final release, zero-start
@@ -61,7 +75,9 @@ transport tests and is not an activation verifier. Because the process receives
 the canonical bundle rather than arbitrary filesystem paths, a production
 verifier must embed the independently authenticated expected commitments and
 authority policy for this exact activation package (or verify self-contained
-cryptographic certificates carried by its reviewed package format). Merely
+cryptographic certificates carried by its reviewed package format). For v2 it
+must also verify the approval package's Ed25519 certificate and monotonic
+predecessor against independently retained state. Merely
 checking that hash-shaped fields and booleans are present is not authentication.
 
 Example, after all real reviewed artifacts exist:

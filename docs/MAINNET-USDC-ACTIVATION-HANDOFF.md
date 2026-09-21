@@ -36,6 +36,9 @@ Provide an independently reviewed `mainnet-custody/manifest.pending.json` with:
    implementation runtime hash at the selected finalized checkpoint.
 7. The future bUSDC asset ID, gateway runtime hash and gateway-manifest hash.
 8. The external security-review and deployment-runbook hashes.
+9. A separate external activation authority's public operator and organization
+   identities, Ed25519 public key and custody-attestation hash. All four must be
+   independent of the five custodians, native issuer and fee sponsor.
 
 All hashes and identities are public references. Key material remains with its
 custodian and must be used only through the separately reviewed signing
@@ -90,3 +93,10 @@ deployment reports to qualified authorities and a balance-neutral disposable
 cycle, then authenticates the complete bundle with a separately reviewed,
 checksum-pinned verifier. No individual report, stored boolean or unpinned
 executable can open activation, mint or release permission.
+
+The external authority is represented by the public-only
+`postern.bridge-authority-policy.v2` schema. Its approval is over the exact v2
+approval package, including the settlement checkpoint, disposable cycle,
+monotonic sequence and previous approval certificate. No private key or signing
+request belongs in the repository. The checked-in pending policy is intentionally
+incomplete and confers no approval or authorization.

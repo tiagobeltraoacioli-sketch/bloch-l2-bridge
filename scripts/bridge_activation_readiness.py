@@ -19,7 +19,7 @@ from usdt_observer.common import UINT64_MAX, require, word
 from usdt_observer.verifier_process import run_verifier
 
 
-DOMAIN = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v1\0"
+DOMAIN = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v2\0"
 MAX_VERIFIER_BYTES = 64 * 1024 * 1024
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_DISPOSABLE_BASE_UNITS = 10_000_000  # 10 USDC at six decimals.
@@ -49,7 +49,16 @@ AUTHORITY_FIELDS = {
     "sourceDeploymentAuthenticated", "nativeGatewayAuthenticated",
     "settlementAuthenticated", "activationApprovalSha256",
     "approvalCheckpointHeight", "observedNativeHeight", "approvalValidUntilHeight",
+    "approvalSequence", "previousApprovalSha256", "approvalPackageSha256",
     "decision",
+}
+AUTHORITY_POLICY_FIELDS = {
+    "schema", "manifestCanonicalSha256", "activationAuthority",
+    "authorityPolicySha256",
+}
+ACTIVATION_AUTHORITY_FIELDS = {
+    "operatorId", "organizationId", "algorithm", "publicKey",
+    "custodyAttestationSha256",
 }
 CYCLE_FIELDS = {
     "schema", "manifestCanonicalSha256", "routeId", "deploymentTransactionHash",
@@ -62,7 +71,7 @@ CYCLE_FIELDS = {
 }
 BUNDLE_FIELDS = {
     "schema", "manifest", "settlementVerification", "deploymentVerification",
-    "authorityQualification", "disposableCycle",
+    "authorityPolicy", "authorityQualification", "disposableCycle",
 }
 
 
@@ -136,20 +145,20 @@ def _validate_deployment(report):
 
 def _validate_authority(report):
     _fields(report, AUTHORITY_FIELDS, "authority qualification")
-    require(report["schema"] == "postern.bridge-authority-qualification.v1",
+    require(report["schema"] == "postern.bridge-authority-qualification.v2",
             "unsupported authority qualification")
     require(type(report["custodianCount"]) is int and report["custodianCount"] == 5,
             "five qualified custodians required")
     require(type(report["custodyThreshold"]) is int
             and report["custodyThreshold"] == 3, "three-of-five custody required")
     require(type(report["distinctAuthorityCount"]) is int
-            and report["distinctAuthorityCount"] == 7,
-            "custodians, issuer and sponsor must remain distinct")
+            and report["distinctAuthorityCount"] == 8,
+            "custodians, issuer, sponsor and activation authority must remain distinct")
     for field in (
         "manifestCanonicalSha256", "routeId", "authorityPolicySha256",
         "custodyCeremonySha256", "nativeRolesCeremonySha256",
         "settlementVerificationSha256", "deploymentVerificationSha256",
-        "activationApprovalSha256",
+        "activationApprovalSha256", "approvalPackageSha256",
     ):
         _pin(report[field], f"authority {field}")
     for field in ("sourceDeploymentAuthenticated", "nativeGatewayAuthenticated",
@@ -170,8 +179,90 @@ def _validate_authority(report):
             "activation approval checkpoint is stale")
     require(valid_until - checkpoint <= MAX_APPROVAL_LIFETIME,
             "activation approval lifetime exceeds policy")
+    sequence = _decimal(
+        report["approvalSequence"], "activation approval sequence", positive=True
+    )
+    previous = word(report["previousApprovalSha256"], 32)
+    if sequence == 1:
+        require(not any(previous),
+                "first activation approval must have the zero predecessor")
+    else:
+        require(any(previous) and len(set(previous)) > 1,
+                "successor activation approval requires a non-placeholder predecessor")
     require(report["decision"] == "approve-activation-when-all-gates-satisfied",
             "conditional activation approval required")
+
+
+def _validate_authority_policy(policy, manifest, manifest_digest):
+    """Bind one public activation authority to the seven operational roles."""
+    _fields(policy, AUTHORITY_POLICY_FIELDS, "activation authority policy")
+    require(policy["schema"] == "postern.bridge-authority-policy.v2",
+            "unsupported activation authority policy")
+    require(policy["manifestCanonicalSha256"].lower() == manifest_digest.lower(),
+            "activation authority policy binds another manifest")
+    authority = policy["activationAuthority"]
+    _fields(authority, ACTIVATION_AUTHORITY_FIELDS, "activation authority")
+    require(authority["algorithm"] == "ed25519",
+            "reviewed activation authority algorithm required")
+    operator = _pin(authority["operatorId"], "activation authority operator")
+    organization = _pin(
+        authority["organizationId"], "activation authority organization"
+    )
+    public_key = _pin(authority["publicKey"], "activation authority public key")
+    attestation = _pin(
+        authority["custodyAttestationSha256"],
+        "activation authority custody attestation",
+    )
+
+    operational = list(manifest["custody"]["custodians"]) + [
+        manifest["roles"]["issuer"], manifest["roles"]["sponsor"]
+    ]
+    require(operator not in {
+        word(value["operator_id"], 32) for value in operational
+    }, "activation authority operator must be independent")
+    require(organization not in {
+        word(value["organization_id"], 32) for value in operational
+    }, "activation authority organization must be independent")
+    public_key_digest = hashlib.sha256(public_key).digest()
+    require(public_key_digest not in {
+        word(value["bloch_public_key_sha256"], 32) for value in operational
+    }, "activation authority key must be independent")
+    require(attestation not in {
+        word(value["custody_attestation_sha256"], 32) for value in operational
+    }, "activation authority custody attestation must be independent")
+
+    expected = canonical_sha256({
+        "schema": "postern.bridge-authority-policy.v2",
+        "custody": manifest["custody"],
+        "roles": manifest["roles"],
+        "activationAuthority": authority,
+    })
+    require(policy["authorityPolicySha256"].lower() == expected.lower(),
+            "activation authority policy commitment mismatch")
+    return expected
+
+
+def _approval_package(
+    manifest_digest, route, policy_digest, settlement, deployment, cycle, authority
+):
+    """Return the exact non-circular object an external approval must sign."""
+    return {
+        "schema": "postern.bridge-activation-approval-package.v2",
+        "manifestCanonicalSha256": manifest_digest.lower(),
+        "routeId": route.lower(),
+        "authorityPolicySha256": policy_digest.lower(),
+        "custodyCeremonySha256": authority["custodyCeremonySha256"].lower(),
+        "nativeRolesCeremonySha256": authority["nativeRolesCeremonySha256"].lower(),
+        "settlementVerificationSha256": canonical_sha256(settlement).lower(),
+        "deploymentVerificationSha256": canonical_sha256(deployment).lower(),
+        "disposableCycleSha256": canonical_sha256(cycle).lower(),
+        "approvalCheckpointHeight": authority["approvalCheckpointHeight"],
+        "observedNativeHeight": authority["observedNativeHeight"],
+        "approvalValidUntilHeight": authority["approvalValidUntilHeight"],
+        "approvalSequence": authority["approvalSequence"],
+        "previousApprovalSha256": authority["previousApprovalSha256"].lower(),
+        "decision": authority["decision"],
+    }
 
 
 def _validate_cycle(report, cap):
@@ -218,7 +309,7 @@ def _validate_cycle(report, cap):
 
 def _validated_request(bundle):
     _fields(bundle, BUNDLE_FIELDS, "readiness bundle")
-    require(bundle["schema"] == "postern.bridge-activation-readiness.v1",
+    require(bundle["schema"] == "postern.bridge-activation-readiness.v2",
             "unsupported bridge readiness schema")
     manifest = bundle["manifest"]
     # Import lazily so this module cannot accidentally weaken manifest policy.
@@ -227,6 +318,7 @@ def _validated_request(bundle):
     digest = canonical_sha256(manifest)
     settlement = bundle["settlementVerification"]
     deployment = bundle["deploymentVerification"]
+    policy = bundle["authorityPolicy"]
     authority = bundle["authorityQualification"]
     cycle = bundle["disposableCycle"]
     _validate_settlement(settlement)
@@ -261,10 +353,7 @@ def _validated_request(bundle):
     require(authority["custodianCount"] == manifest["custody"]["threshold"] + 2
             and authority["custodyThreshold"] == manifest["custody"]["threshold"],
             "authority qualification conflicts with custody policy")
-    authority_policy = canonical_sha256({
-        "custody": manifest["custody"],
-        "roles": manifest["roles"],
-    })
+    authority_policy = _validate_authority_policy(policy, manifest, digest)
     require(authority["authorityPolicySha256"].lower()
             == authority_policy.lower(),
             "authority qualification binds another custody policy")
@@ -277,6 +366,15 @@ def _validated_request(bundle):
     require(authority["approvalCheckpointHeight"]
             == settlement["nativeCheckpointHeight"],
             "activation approval binds another native checkpoint")
+    approval_package = _approval_package(
+        digest, route, authority_policy, settlement, deployment, cycle, authority
+    )
+    require(authority["approvalPackageSha256"].lower()
+            == canonical_sha256(approval_package).lower(),
+            "activation approval binds another package")
+    require(authority["activationApprovalSha256"].lower()
+            != authority["approvalPackageSha256"].lower(),
+            "approval certificate and package commitments must differ")
 
     encoded = json.dumps(
         bundle, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
@@ -347,7 +445,7 @@ def verify_bridge_activation_readiness(executable, expected_sha256, bundle):
             and result.stdout == (commitment + "\n").encode("ascii"),
             "bridge readiness verifier refused")
     return {
-        "schema": "postern.bridge-activation-readiness-verification.v1",
+        "schema": "postern.bridge-activation-readiness-verification.v2",
         "manifestCanonicalSha256": manifest_digest,
         "routeId": route,
         "verifierSha256": "0x" + expected.hex(),
