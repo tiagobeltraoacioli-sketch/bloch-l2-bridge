@@ -185,3 +185,4 @@ pub use watcher::{
     WatcherState, WatcherSyncError, WatcherUpdate,
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};
+pub mod activation_approval;

@@ -14,10 +14,15 @@ def main(argv=None):
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--verifier", type=Path, required=True)
     parser.add_argument("--verifier-sha256", required=True)
+    parser.add_argument("--authority-policy-sha256", required=True)
+    parser.add_argument("--approval-checkpoint", type=Path, required=True)
+    parser.add_argument("--approval-checkpoint-sha256", required=True)
     args = parser.parse_args(argv)
     try:
         report = verify_bridge_activation_readiness(
-            args.verifier.absolute(), args.verifier_sha256, load_json(args.bundle)
+            args.verifier.absolute(), args.verifier_sha256,
+            args.authority_policy_sha256, args.approval_checkpoint.absolute(),
+            args.approval_checkpoint_sha256, load_json(args.bundle)
         )
     except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError):
         print(

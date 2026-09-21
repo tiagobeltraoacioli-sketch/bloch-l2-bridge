@@ -17,6 +17,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS / "tests"))
 
 from bridge_activation_readiness import (  # noqa: E402
+    _approval_certificate,
     _approval_package,
     _validate_authority_policy,
     _validated_request,
@@ -123,7 +124,10 @@ def fixture():
         "sourceDeploymentAuthenticated": True,
         "nativeGatewayAuthenticated": True,
         "settlementAuthenticated": True,
-        "activationApprovalSha256": digest("activation-approval-certificate"),
+        "activationApprovalSha256": digest("not-yet-computed-certificate"),
+        "activationApprovalSignature": "0x" + hashlib.sha512(
+            b"transport-only-signature-fixture"
+        ).hexdigest(),
         "approvalCheckpointHeight": "912",
         "observedNativeHeight": "913",
         "approvalValidUntilHeight": "1000",
@@ -134,6 +138,11 @@ def fixture():
     }
     authority["approvalPackageSha256"] = canonical_sha256(_approval_package(
         manifest_digest, route, policy_digest, settlement, deployment, cycle, authority
+    ))
+    authority["activationApprovalSha256"] = canonical_sha256(_approval_certificate(
+        policy_digest,
+        authority["approvalPackageSha256"],
+        authority["activationApprovalSignature"],
     ))
     return {
         "schema": "postern.bridge-activation-readiness.v2",
@@ -164,13 +173,36 @@ def verifier(directory, output="digest"):
     return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def checkpoint(directory, bundle):
+    path = Path(directory) / "approval-checkpoint.json"
+    if path.exists():
+        return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+    value = {
+        "schema": "postern.bridge-activation-approval-checkpoint.v2",
+        "authorityPolicySha256": bundle["authorityPolicy"]["authorityPolicySha256"],
+        "lastApprovalSequence": "0",
+        "lastApprovalSha256": "0x" + "00" * 32,
+    }
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    path.chmod(0o400)
+    return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify(executable, pin, bundle, directory):
+    state, state_pin = checkpoint(directory, bundle)
+    return verify_bridge_activation_readiness(
+        executable, pin, bundle["authorityPolicy"]["authorityPolicySha256"],
+        state, state_pin, bundle,
+    )
+
+
 class BridgeActivationReadinessTest(unittest.TestCase):
     def test_complete_authenticated_bundle_only_returns_permission(self):
         bundle = fixture()
         before = copy.deepcopy(bundle)
         with tempfile.TemporaryDirectory() as directory:
             executable, pin = verifier(directory)
-            report = verify_bridge_activation_readiness(executable, pin, bundle)
+            report = verify(executable, pin, bundle, directory)
         self.assertEqual(bundle, before)
         self.assertEqual(
             report["schema"],
@@ -214,7 +246,10 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                 bundle = fixture()
                 bundle[section][field] = value
                 with self.subTest(section=section, field=field), self.assertRaises(ValueError):
-                    verify_bridge_activation_readiness(Path(sys.executable), digest("x"), bundle)
+                    verify_bridge_activation_readiness(
+                        Path(sys.executable), digest("x"), digest("policy"),
+                        Path("checkpoint"), digest("checkpoint"), bundle,
+                    )
         run.assert_not_called()
 
     def test_cross_artifact_substitution_and_unknown_fields_refuse(self):
@@ -374,16 +409,16 @@ class BridgeActivationReadinessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable, pin = verifier(directory)
             with self.assertRaises(ValueError):
-                verify_bridge_activation_readiness(executable, digest("wrong-pin"), bundle)
+                verify(executable, digest("wrong-pin"), bundle, directory)
             executable, pin = verifier(directory, "wrong")
             with self.assertRaises(ValueError):
-                verify_bridge_activation_readiness(executable, pin, bundle)
+                verify(executable, pin, bundle, directory)
             executable, pin = verifier(directory, "failure")
             with self.assertRaises(ValueError):
-                verify_bridge_activation_readiness(executable, pin, bundle)
+                verify(executable, pin, bundle, directory)
             executable.chmod(0o522)
             with self.assertRaises(ValueError):
-                verify_bridge_activation_readiness(executable, pin, bundle)
+                verify(executable, pin, bundle, directory)
 
     def test_cli_refusal_is_machine_readable_and_never_writes_state(self):
         bundle = fixture()
@@ -393,10 +428,15 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle_path = root / "bundle.json"
             bundle_path.write_text(json.dumps(bundle))
             executable, pin = verifier(directory)
+            state, state_pin = checkpoint(directory, bundle)
             before = sorted(root.iterdir())
             result = subprocess.run(
                 [sys.executable, str(cli), "--bundle", str(bundle_path),
-                 "--verifier", str(executable), "--verifier-sha256", pin],
+                 "--verifier", str(executable), "--verifier-sha256", pin,
+                 "--authority-policy-sha256",
+                 bundle["authorityPolicy"]["authorityPolicySha256"],
+                 "--approval-checkpoint", str(state),
+                 "--approval-checkpoint-sha256", state_pin],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -404,7 +444,11 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             self.assertEqual(sorted(root.iterdir()), before)
             result = subprocess.run(
                 [sys.executable, str(cli), "--bundle", str(bundle_path),
-                 "--verifier", str(executable), "--verifier-sha256", digest("wrong")],
+                 "--verifier", str(executable), "--verifier-sha256", digest("wrong"),
+                 "--authority-policy-sha256",
+                 bundle["authorityPolicy"]["authorityPolicySha256"],
+                 "--approval-checkpoint", str(state),
+                 "--approval-checkpoint-sha256", state_pin],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             self.assertEqual(result.returncode, 1)

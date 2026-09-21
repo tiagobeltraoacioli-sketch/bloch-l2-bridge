@@ -37,10 +37,14 @@ manifest, route, complete authority policy, custody and native-role ceremonies,
 settlement report, deployment report, disposable-cycle report, checkpoint,
 observation height, expiry, decision, monotonic approval sequence and previous
 approval certificate. Sequence one requires the zero predecessor; every later
-sequence requires a non-placeholder predecessor. The production verifier must
-authenticate the Ed25519 certificate and compare the sequence/predecessor with
-independently retained monotonic state. Structural validation alone cannot prove
-key possession or prevent replay after verifier-state rollback.
+sequence requires a non-placeholder predecessor. The repository's
+`bridge_activation_approval_verifier` authenticates the Ed25519 certificate and
+compares the sequence/predecessor with an independently retained,
+checksum-pinned checkpoint. It requires an exact one-step sequence advance and
+exact predecessor-certificate match. The checkpoint is read-only: the approval
+ceremony remains the single writer, avoiding a second, divergent replay state.
+Its digest and the authority-policy digest must come from authenticated operator
+policy outside the bundle.
 The four operation identities must be distinct, the test amount must be a
 positive canonical `uint64` no greater than either the route cap or 10 USDC,
 and both reserve domains must be balance-neutral after the round trip. The
@@ -86,11 +90,15 @@ Example, after all real reviewed artifacts exist:
 python3 scripts/check-bridge-activation-readiness.py \
   --bundle /private/reviewed/bridge-readiness.json \
   --verifier /opt/bloch/bin/bridge-readiness-verifier \
-  --verifier-sha256 0xREVIEWED_SHA256
+  --verifier-sha256 0xREVIEWED_SHA256 \
+  --authority-policy-sha256 0xREVIEWED_POLICY_SHA256 \
+  --approval-checkpoint /private/reviewed/approval-checkpoint.json \
+  --approval-checkpoint-sha256 0xREVIEWED_CHECKPOINT_SHA256
 ```
 
 Any malformed input, wrong pin, verifier failure or incomplete evidence exits
 nonzero and emits machine-readable false values for `activationAuthorized`,
-`mintAuthorized`, `releaseAuthorized` and `bridgeReady`. The repository does
-not currently contain a production verifier, authority package or disposable
+`mintAuthorized`, `releaseAuthorized` and `bridgeReady`. The repository contains
+the production-grade approval sub-verifier, but not a complete production
+verifier for every external evidence source, authority package or disposable
 cycle, so none of those permissions is currently open.

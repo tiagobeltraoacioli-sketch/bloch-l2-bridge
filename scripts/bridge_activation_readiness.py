@@ -48,6 +48,7 @@ AUTHORITY_FIELDS = {
     "settlementVerificationSha256", "deploymentVerificationSha256",
     "sourceDeploymentAuthenticated", "nativeGatewayAuthenticated",
     "settlementAuthenticated", "activationApprovalSha256",
+    "activationApprovalSignature",
     "approvalCheckpointHeight", "observedNativeHeight", "approvalValidUntilHeight",
     "approvalSequence", "previousApprovalSha256", "approvalPackageSha256",
     "decision",
@@ -161,6 +162,9 @@ def _validate_authority(report):
         "activationApprovalSha256", "approvalPackageSha256",
     ):
         _pin(report[field], f"authority {field}")
+    signature = word(report["activationApprovalSignature"], 64)
+    require(any(signature) and len(set(signature)) > 1,
+            "authority activationApprovalSignature: non-placeholder signature required")
     for field in ("sourceDeploymentAuthenticated", "nativeGatewayAuthenticated",
                   "settlementAuthenticated"):
         _boolean(report[field], True, f"authority {field}")
@@ -262,6 +266,16 @@ def _approval_package(
         "approvalSequence": authority["approvalSequence"],
         "previousApprovalSha256": authority["previousApprovalSha256"].lower(),
         "decision": authority["decision"],
+    }
+
+
+def _approval_certificate(policy_digest, package_digest, signature):
+    """Return the exact certificate whose digest is retained as predecessor."""
+    return {
+        "schema": "postern.bridge-activation-approval-certificate.v2",
+        "authorityPolicySha256": policy_digest.lower(),
+        "approvalPackageSha256": package_digest.lower(),
+        "signature": signature.lower(),
     }
 
 
@@ -372,9 +386,14 @@ def _validated_request(bundle):
     require(authority["approvalPackageSha256"].lower()
             == canonical_sha256(approval_package).lower(),
             "activation approval binds another package")
+    certificate = _approval_certificate(
+        authority_policy,
+        authority["approvalPackageSha256"],
+        authority["activationApprovalSignature"],
+    )
     require(authority["activationApprovalSha256"].lower()
-            != authority["approvalPackageSha256"].lower(),
-            "approval certificate and package commitments must differ")
+            == canonical_sha256(certificate).lower(),
+            "activation approval certificate commitment mismatch")
 
     encoded = json.dumps(
         bundle, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
@@ -426,7 +445,10 @@ def _stage_verifier(path):
         raise
 
 
-def verify_bridge_activation_readiness(executable, expected_sha256, bundle):
+def verify_bridge_activation_readiness(
+    executable, expected_sha256, authority_policy_sha256,
+    approval_checkpoint, approval_checkpoint_sha256, bundle,
+):
     """Authenticate the complete package; return permission, never perform it."""
     request, manifest_digest, route = _validated_request(bundle)
     expected = word(expected_sha256, 32)
@@ -434,7 +456,10 @@ def verify_bridge_activation_readiness(executable, expected_sha256, bundle):
     try:
         temporary, staged, actual = _stage_verifier(executable)
         require(actual == expected, "readiness verifier checksum mismatch")
-        result = run_verifier([str(staged)], input=request, timeout=10)
+        result = run_verifier([
+            str(staged), authority_policy_sha256,
+            str(Path(approval_checkpoint).absolute()), approval_checkpoint_sha256,
+        ], input=request, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("readiness verifier unavailable") from exc
     finally:
