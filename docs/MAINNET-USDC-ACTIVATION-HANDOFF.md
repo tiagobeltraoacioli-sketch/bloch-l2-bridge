@@ -83,3 +83,10 @@ gates and external approval are composed by a separately reviewed procedure.
 The verifier must authenticate native checkpoint authority and ancestry, the
 consensus-enforced settlement record, the exact L2 chain/block/state/domain,
 execution proof and source cursor, plus durable monotonic cursor advancement.
+
+After every prerequisite exists, `BRIDGE-ACTIVATION-READINESS.md` defines the
+final fail-closed composition protocol. It binds the settlement and paused
+deployment reports to qualified authorities and a balance-neutral disposable
+cycle, then authenticates the complete bundle with a separately reviewed,
+checksum-pinned verifier. No individual report, stored boolean or unpinned
+executable can open activation, mint or release permission.
