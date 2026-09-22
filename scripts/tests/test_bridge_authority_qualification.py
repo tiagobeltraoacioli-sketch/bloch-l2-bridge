@@ -1,7 +1,9 @@
 """Adversarial tests for authenticated external authority qualification."""
 import copy
+import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -113,14 +115,32 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
         self.policy, self.private_keys = policy(self.key_directory.name)
         self.trusted_policy_digest = canonical_sha256(self.policy)
         self.value = qualification(self.ceremony, self.policy, self.private_keys)
+        ssh_keygen = shutil.which("ssh-keygen")
+        if ssh_keygen is None:
+            self.fail("ssh-keygen is required for qualification tests")
+        self.ssh_keygen = str(Path(ssh_keygen).resolve())
+        self.trusted_ssh_keygen_digest = (
+            "0x" + hashlib.sha256(Path(self.ssh_keygen).read_bytes()).hexdigest()
+        )
+
+    def verify(self, ceremony=None, value=None, review_policy=None, policy_digest=None,
+               **kwargs):
+        return verify_bridge_authority_qualification(
+            self.ceremony if ceremony is None else ceremony,
+            self.value if value is None else value,
+            self.policy if review_policy is None else review_policy,
+            self.trusted_policy_digest if policy_digest is None else policy_digest,
+            ssh_keygen=kwargs.get("ssh_keygen", self.ssh_keygen),
+            trusted_ssh_keygen_sha256=kwargs.get(
+                "trusted_ssh_keygen_sha256", self.trusted_ssh_keygen_digest
+            ),
+        )
 
     def tearDown(self):
         self.key_directory.cleanup()
 
     def test_authenticated_quorum_qualifies_without_authorizing(self):
-        report = verify_bridge_authority_qualification(
-            self.ceremony, self.value, self.policy, self.trusted_policy_digest
-        )
+        report = self.verify()
         self.assertEqual(report["reviewerCount"], 3)
         self.assertTrue(report["externalRecordsAuthenticated"])
         self.assertTrue(report["custodyQualified"])
@@ -153,9 +173,7 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             value = copy.deepcopy(self.value)
             mutate(value)
             with self.subTest(mutation=mutate), self.assertRaises((ValueError, TypeError)):
-                verify_bridge_authority_qualification(
-                    self.ceremony, value, self.policy, self.trusted_policy_digest
-                )
+                self.verify(value=value)
 
     def test_quorum_untrusted_duplicate_and_substitution_are_refused(self):
         values = []
@@ -175,8 +193,8 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             value, review_policy = item[:2]
             ceremony = item[2] if len(item) == 3 else self.ceremony
             with self.subTest(item=item), self.assertRaises((ValueError, TypeError)):
-                verify_bridge_authority_qualification(
-                    ceremony, value, review_policy, self.trusted_policy_digest
+                self.verify(
+                    ceremony=ceremony, value=value, review_policy=review_policy
                 )
 
     def test_reviewers_must_be_external_and_independent(self):
@@ -198,10 +216,7 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             review_policy = copy.deepcopy(self.policy)
             mutate(review_policy)
             with self.subTest(mutation=mutate), self.assertRaises((ValueError, TypeError)):
-                verify_bridge_authority_qualification(
-                    self.ceremony, self.value, review_policy,
-                    self.trusted_policy_digest,
-                )
+                self.verify(review_policy=review_policy)
 
     def test_self_selected_fully_signed_policy_is_not_a_trust_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -210,18 +225,43 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
                 self.ceremony, attacker_policy, attacker_keys
             )
             with self.assertRaisesRegex(ValueError, "trusted digest"):
-                verify_bridge_authority_qualification(
-                    self.ceremony, attacker_qualification, attacker_policy,
-                    self.trusted_policy_digest,
+                self.verify(
+                    value=attacker_qualification, review_policy=attacker_policy
                 )
         with self.assertRaisesRegex(ValueError, "canonical lowercase"):
-            verify_bridge_authority_qualification(
-                self.ceremony, self.value, self.policy,
-                "0x" + self.trusted_policy_digest[2:].upper(),
+            self.verify(
+                policy_digest="0x" + self.trusted_policy_digest[2:].upper()
             )
         with self.assertRaises(TypeError):
             verify_bridge_authority_qualification(
                 self.ceremony, self.value, self.policy
+            )
+
+    def test_signature_verifier_is_absolute_immutable_and_externally_pinned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "fake-ssh-keygen"
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+            fake.chmod(0o700)
+            fake_digest = "0x" + hashlib.sha256(fake.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                self.verify(
+                    trusted_ssh_keygen_sha256=pin("wrong-signature-verifier")
+                )
+            with self.assertRaisesRegex(ValueError, "absolute"):
+                self.verify(
+                    ssh_keygen="ssh-keygen",
+                    trusted_ssh_keygen_sha256=fake_digest,
+                )
+            with self.assertRaisesRegex(ValueError, "immutable regular"):
+                self.verify(
+                    ssh_keygen=str(fake),
+                    trusted_ssh_keygen_sha256=fake_digest,
+                )
+        with self.assertRaisesRegex(ValueError, "canonical lowercase"):
+            self.verify(
+                trusted_ssh_keygen_sha256=(
+                    "0x" + self.trusted_ssh_keygen_digest[2:].upper()
+                )
             )
 
     def test_checked_in_pending_state_and_cli_fail_closed(self):
@@ -231,7 +271,9 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
              "--ceremony", str(ROOT / "mainnet-custody/authority-ceremony.pending.json"),
              "--qualification", str(ROOT / "mainnet-custody/authority-qualification.pending.json"),
              "--review-policy", str(ROOT / "mainnet-custody/authority-review-policy.pending.json"),
-             "--trusted-review-policy-sha256", pin("pending-trusted-policy")],
+             "--trusted-review-policy-sha256", pin("pending-trusted-policy"),
+             "--ssh-keygen", self.ssh_keygen,
+             "--trusted-ssh-keygen-sha256", self.trusted_ssh_keygen_digest],
             capture_output=True, text=True, timeout=10, check=False,
         )
         self.assertEqual(completed.returncode, 1)

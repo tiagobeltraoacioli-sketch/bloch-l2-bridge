@@ -7,7 +7,9 @@ bridge operation.
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 
@@ -39,6 +41,7 @@ CONTROLS = {
     "broadcastAllowed": False,
     "activationAuthorized": False,
 }
+MAX_SIGNATURE_VERIFIER_BYTES = 32 * 1024 * 1024
 
 
 def _fields(value, expected, label):
@@ -141,9 +144,60 @@ def _verify_ed25519(reviewer_id, public_key, message, signature, ssh_keygen):
     require(completed.returncode == 0, "review signature authentication failed")
 
 
+def _open_signature_verifier(path, trusted_sha256):
+    """Authenticate one root-administered verifier and retain its open inode."""
+    path = Path(path)
+    require(path.is_absolute(), "absolute signature verifier required")
+    expected = _pin(trusted_sha256, 32, "trusted signature verifier")
+    canonical_expected = "0x" + expected.hex()
+    require(type(trusted_sha256) is str and trusted_sha256 == canonical_expected,
+            "trusted signature verifier digest must be canonical lowercase hex")
+    flags = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source = os.open(path, os.O_RDONLY | flags)
+    try:
+        before = os.fstat(source)
+        current = path.lstat()
+        require(stat.S_ISREG(before.st_mode)
+                and (before.st_dev, before.st_ino) == (current.st_dev, current.st_ino)
+                and 0 < before.st_size <= MAX_SIGNATURE_VERIFIER_BYTES
+                and before.st_uid == 0 and not before.st_mode & 0o022,
+                "immutable regular signature verifier required")
+        for parent in (path.parent, *path.parent.parents):
+            parent_stat = parent.stat()
+            require(parent_stat.st_uid == 0 and not parent_stat.st_mode & 0o022,
+                    "root-administered signature verifier path required")
+        digest = hashlib.sha256()
+        while chunk := os.read(source, 1024 * 1024):
+            digest.update(chunk)
+        os.lseek(source, 0, os.SEEK_SET)
+        after = os.fstat(source)
+        require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+                "signature verifier changed while hashing")
+        require(digest.digest() == expected, "signature verifier checksum mismatch")
+        return source, path, before
+    except BaseException:
+        os.close(source)
+        raise
+
+
+def _close_signature_verifier(source, path, before):
+    """Refuse replacement or mutation while the authenticated verifier ran."""
+    try:
+        after = os.fstat(source)
+        current = path.lstat()
+        require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                and (after.st_dev, after.st_ino)
+                == (current.st_dev, current.st_ino),
+                "signature verifier changed while in use")
+    finally:
+        os.close(source)
+
+
 def verify_bridge_authority_qualification(
     ceremony, qualification, policy, trusted_review_policy_sha256, *,
-    ssh_keygen="ssh-keygen",
+    ssh_keygen, trusted_ssh_keygen_sha256,
 ):
     """Authenticate the exact ceremony with an externally selected quorum."""
     preflight = verify_bridge_authority_ceremony(ceremony)
@@ -184,31 +238,43 @@ def verify_bridge_authority_qualification(
             and policy["threshold"] <= len(attestations) <= len(identities),
             "external reviewer quorum not satisfied")
     trusted = {identity[0]: identity for identity in identities}
-    seen, review_records = set(), set()
-    for attestation in attestations:
-        _fields(attestation, ATTESTATION_FIELDS, "review attestation")
-        reviewer_id = _pin(attestation["reviewerId"], 32, "attestation reviewer")
-        require(reviewer_id in trusted and reviewer_id not in seen,
-                "reviewer is untrusted or duplicated")
-        seen.add(reviewer_id)
-        identity = trusted[reviewer_id]
-        require(_pin(attestation["organizationId"], 32, "attestation organization")
-                == identity[1], "attestation organization mismatch")
-        for field, value in expected.items():
-            require(type(attestation[field]) is str
-                    and attestation[field] == value,
-                    f"attestation {field} mismatch")
-        record = _pin(attestation["reviewRecordSha256"], 32, "review record")
-        require(record not in review_records, "review records must be distinct")
-        review_records.add(record)
-        require(attestation["decision"] == "qualify-authorities-without-activation",
-                "non-authorizing qualification decision required")
-        signature = attestation["signature"]
-        signed = {key: value for key, value in attestation.items() if key != "signature"}
-        message = DOMAIN + json.dumps(
-            signed, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-        ).encode("ascii")
-        _verify_ed25519(reviewer_id, identity[2], message, signature, ssh_keygen)
+    verifier_source, staged_verifier, verifier_before = _open_signature_verifier(
+        ssh_keygen, trusted_ssh_keygen_sha256
+    )
+    try:
+        seen, review_records = set(), set()
+        for attestation in attestations:
+            _fields(attestation, ATTESTATION_FIELDS, "review attestation")
+            reviewer_id = _pin(attestation["reviewerId"], 32, "attestation reviewer")
+            require(reviewer_id in trusted and reviewer_id not in seen,
+                    "reviewer is untrusted or duplicated")
+            seen.add(reviewer_id)
+            identity = trusted[reviewer_id]
+            require(_pin(attestation["organizationId"], 32, "attestation organization")
+                    == identity[1], "attestation organization mismatch")
+            for field, value in expected.items():
+                require(type(attestation[field]) is str
+                        and attestation[field] == value,
+                        f"attestation {field} mismatch")
+            record = _pin(attestation["reviewRecordSha256"], 32, "review record")
+            require(record not in review_records, "review records must be distinct")
+            review_records.add(record)
+            require(attestation["decision"] == "qualify-authorities-without-activation",
+                    "non-authorizing qualification decision required")
+            signature = attestation["signature"]
+            signed = {
+                key: value for key, value in attestation.items() if key != "signature"
+            }
+            message = DOMAIN + json.dumps(
+                signed, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            ).encode("ascii")
+            _verify_ed25519(
+                reviewer_id, identity[2], message, signature, str(staged_verifier)
+            )
+    finally:
+        _close_signature_verifier(
+            verifier_source, staged_verifier, verifier_before
+        )
 
     return {
         "schema": "postern.bridge-authority-external-qualification.v1",
