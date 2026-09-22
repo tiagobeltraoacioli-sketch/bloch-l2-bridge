@@ -76,7 +76,7 @@ fn run() -> Result<(), String> {
     let bundle =
         serde_json::from_slice(&request[REQUEST_DOMAIN.len()..]).map_err(|e| e.to_string())?;
     verify_activation_approval(&bundle, &args[1], &state)?;
-    println!("{:x}", Sha256::digest(&request));
+    println!("{:X}", Sha256::digest(&request));
     Ok(())
 }
 

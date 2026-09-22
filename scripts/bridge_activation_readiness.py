@@ -2,9 +2,10 @@
 
 The custody and settlement checkers intentionally emit non-authorizing
 reports.  This module binds those reports to an authority qualification and a
-disposable-value round trip, then asks one immutable checksum-pinned verifier
-to authenticate the complete package.  It has no RPC, key, signing, broadcast,
-mint, release, pause or activation capability.
+disposable-value round trip, requires the checksum-pinned approval subverifier,
+then asks a separate immutable checksum-pinned verifier to authenticate the
+complete package. It has no RPC, key, signing, broadcast, mint, release, pause
+or activation capability.
 """
 import hashlib
 import json
@@ -446,26 +447,43 @@ def _stage_verifier(path):
 
 
 def verify_bridge_activation_readiness(
-    executable, expected_sha256, authority_policy_sha256,
-    approval_checkpoint, approval_checkpoint_sha256, bundle,
+    executable, expected_sha256, approval_executable, approval_expected_sha256,
+    authority_policy_sha256, approval_checkpoint, approval_checkpoint_sha256, bundle,
 ):
     """Authenticate the complete package; return permission, never perform it."""
     request, manifest_digest, route = _validated_request(bundle)
     expected = word(expected_sha256, 32)
+    approval_expected = word(approval_expected_sha256, 32)
+    approval_temporary = None
     temporary = None
     try:
-        temporary, staged, actual = _stage_verifier(executable)
-        require(actual == expected, "readiness verifier checksum mismatch")
-        result = run_verifier([
-            str(staged), authority_policy_sha256,
+        approval_temporary, approval_staged, approval_actual = _stage_verifier(
+            approval_executable
+        )
+        require(approval_actual == approval_expected,
+                "approval verifier checksum mismatch")
+        approval_result = run_verifier([
+            str(approval_staged), authority_policy_sha256,
             str(Path(approval_checkpoint).absolute()), approval_checkpoint_sha256,
         ], input=request, timeout=10)
+        commitment = hashlib.sha256(request).hexdigest()
+        require(
+            approval_result.returncode == 0
+            and approval_result.stdout
+            == (commitment.upper() + "\n").encode("ascii"),
+            "bridge approval verifier refused",
+        )
+
+        temporary, staged, actual = _stage_verifier(executable)
+        require(actual == expected, "readiness verifier checksum mismatch")
+        result = run_verifier([str(staged)], input=request, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("readiness verifier unavailable") from exc
     finally:
         if temporary is not None:
             temporary.cleanup()
-    commitment = hashlib.sha256(request).hexdigest()
+        if approval_temporary is not None:
+            approval_temporary.cleanup()
     require(result.returncode == 0
             and result.stdout == (commitment + "\n").encode("ascii"),
             "bridge readiness verifier refused")
@@ -474,6 +492,7 @@ def verify_bridge_activation_readiness(
         "manifestCanonicalSha256": manifest_digest,
         "routeId": route,
         "verifierSha256": "0x" + expected.hex(),
+        "approvalVerifierSha256": "0x" + approval_expected.hex(),
         "readinessCommitmentSha256": "0x" + commitment,
         "settlementVerified": True,
         "custodyAuthoritiesVerified": True,

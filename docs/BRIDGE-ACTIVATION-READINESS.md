@@ -57,10 +57,14 @@ refused before the verifier is started.
 ## Authentication boundary
 
 Structural consistency alone never authorizes activation. The complete
-canonical bundle is sent to an independently reviewed local verifier executable
-under the domain `BLOCH-BRIDGE-ACTIVATION-READINESS-v2`. The executable is
-copied from a regular, non-group/world-writable inode, checked against the
-operator-supplied SHA-256 pin, and executed only from that private copy. It must
+canonical bundle is first sent to the separately checksum-pinned
+`bridge_activation_approval_verifier`. It accepts only the independently pinned
+authority policy and predecessor checkpoint and writes the uppercase request
+SHA-256 on success. Only then is the same bundle
+sent to the independently reviewed complete verifier under the domain
+`BLOCH-BRIDGE-ACTIVATION-READINESS-v2`. Both executables are copied from regular,
+non-group/world-writable inodes, checked against distinct operator-supplied
+SHA-256 pins, and executed only from private copies. The complete verifier must
 authenticate, rather than merely echo:
 
 - the finalized Ethereum deployment and its independently administered source
@@ -71,9 +75,11 @@ authenticate, rather than merely echo:
 - every transaction/proof in the disposable cycle, final release, zero-start
   reconciliation and rollback/pause exercise.
 
-On acceptance the verifier writes exactly the lowercase SHA-256 of its complete
-request followed by one newline. The package checker accepts no extra output.
-The executable and its SHA-256 must come from authenticated operator policy,
+On acceptance the complete verifier writes exactly the lowercase SHA-256 of its
+complete request followed by one newline. The two success protocols are
+deliberately different, and neither executable is accepted in the other's role.
+The package checker accepts no extra output. Both executables and their SHA-256
+pins must come from authenticated operator policy,
 never from the bundle being checked. A digest-echo program is suitable only for
 transport tests and is not an activation verifier. Because the process receives
 the canonical bundle rather than arbitrary filesystem paths, a production
@@ -91,6 +97,8 @@ python3 scripts/check-bridge-activation-readiness.py \
   --bundle /private/reviewed/bridge-readiness.json \
   --verifier /opt/bloch/bin/bridge-readiness-verifier \
   --verifier-sha256 0xREVIEWED_SHA256 \
+  --approval-verifier /opt/bloch/bin/bridge_activation_approval_verifier \
+  --approval-verifier-sha256 0xREVIEWED_APPROVAL_VERIFIER_SHA256 \
   --authority-policy-sha256 0xREVIEWED_POLICY_SHA256 \
   --approval-checkpoint /private/reviewed/approval-checkpoint.json \
   --approval-checkpoint-sha256 0xREVIEWED_CHECKPOINT_SHA256

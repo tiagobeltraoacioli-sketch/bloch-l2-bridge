@@ -157,6 +157,8 @@ def fixture():
 
 def verifier(directory, output="digest"):
     path = Path(directory) / ("readiness-verifier-" + output)
+    if path.exists():
+        return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
     body = (
         "#!/usr/bin/env python3\n"
         "import hashlib, sys\n"
@@ -164,10 +166,37 @@ def verifier(directory, output="digest"):
     )
     if output == "digest":
         body += "print(hashlib.sha256(data).hexdigest())\n"
+    elif output == "upper":
+        body += "print(hashlib.sha256(data).hexdigest().upper())\n"
     elif output == "wrong":
         body += "print('00' * 32)\n"
     else:
         body += "sys.exit(1)\n"
+    path.write_text(body)
+    path.chmod(0o500)
+    return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def approval_verifier(directory, bundle, output="approval"):
+    path = Path(directory) / ("approval-verifier-" + output)
+    if path.exists():
+        return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+    policy = bundle["authorityPolicy"]["authorityPolicySha256"]
+    body = (
+        "#!/usr/bin/env python3\n"
+        "import hashlib, pathlib, sys\n"
+        f"expected_policy = {policy!r}\n"
+        "if len(sys.argv) != 4 or sys.argv[1].lower() != expected_policy.lower():\n"
+        "    sys.exit(1)\n"
+        "checkpoint = pathlib.Path(sys.argv[2]).read_bytes()\n"
+        "if ('0x' + hashlib.sha256(checkpoint).hexdigest()).lower() != sys.argv[3].lower():\n"
+        "    sys.exit(1)\n"
+        "data = sys.stdin.buffer.read()\n"
+    )
+    if output == "approval":
+        body += "print(hashlib.sha256(data).hexdigest().upper())\n"
+    else:
+        body += "print(hashlib.sha256(data).hexdigest())\n"
     path.write_text(body)
     path.chmod(0o500)
     return path, "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -190,9 +219,10 @@ def checkpoint(directory, bundle):
 
 def verify(executable, pin, bundle, directory):
     state, state_pin = checkpoint(directory, bundle)
+    approval, approval_pin = approval_verifier(directory, bundle)
     return verify_bridge_activation_readiness(
-        executable, pin, bundle["authorityPolicy"]["authorityPolicySha256"],
-        state, state_pin, bundle,
+        executable, pin, approval, approval_pin,
+        bundle["authorityPolicy"]["authorityPolicySha256"], state, state_pin, bundle,
     )
 
 
@@ -217,6 +247,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             self.assertTrue(report[field])
         self.assertFalse(report["broadcastPerformed"])
         self.assertEqual(report["routeId"], bundle["settlementVerification"]["routeId"])
+        self.assertTrue(report["approvalVerifierSha256"].startswith("0x"))
 
     def test_every_false_or_premature_prerequisite_refuses_before_spawn(self):
         mutations = []
@@ -247,7 +278,8 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                 bundle[section][field] = value
                 with self.subTest(section=section, field=field), self.assertRaises(ValueError):
                     verify_bridge_activation_readiness(
-                        Path(sys.executable), digest("x"), digest("policy"),
+                        Path(sys.executable), digest("x"),
+                        Path(sys.executable), digest("approval"), digest("policy"),
                         Path("checkpoint"), digest("checkpoint"), bundle,
                     )
         run.assert_not_called()
@@ -420,6 +452,52 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verify(executable, pin, bundle, directory)
 
+    def test_approval_verifier_is_mandatory_and_protocol_separated(self):
+        bundle = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            full, full_pin = verifier(directory)
+            state, state_pin = checkpoint(directory, bundle)
+            approval, approval_pin = approval_verifier(directory, bundle)
+            policy = bundle["authorityPolicy"]["authorityPolicySha256"]
+
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    full, full_pin, approval, digest("wrong-approval-pin"),
+                    policy, state, state_pin, bundle,
+                )
+
+            malicious_echo, malicious_pin = verifier(directory)
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    full, full_pin, malicious_echo, malicious_pin,
+                    policy, state, state_pin, bundle,
+                )
+
+            uppercase_echo, _ = verifier(directory, "upper")
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    full, full_pin, uppercase_echo, approval_pin,
+                    policy, state, state_pin, bundle,
+                )
+
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    full, full_pin, approval, approval_pin,
+                    digest("wrong-policy"), state, state_pin, bundle,
+                )
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    full, full_pin, approval, approval_pin,
+                    policy, Path(directory) / "missing-checkpoint",
+                    digest("wrong-checkpoint"), bundle,
+                )
+
+            with self.assertRaises(ValueError):
+                verify_bridge_activation_readiness(
+                    approval, approval_pin, approval, approval_pin,
+                    policy, state, state_pin, bundle,
+                )
+
     def test_cli_refusal_is_machine_readable_and_never_writes_state(self):
         bundle = fixture()
         cli = SCRIPTS / "check-bridge-activation-readiness.py"
@@ -429,10 +507,23 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle_path.write_text(json.dumps(bundle))
             executable, pin = verifier(directory)
             state, state_pin = checkpoint(directory, bundle)
+            approval, approval_pin = approval_verifier(directory, bundle)
             before = sorted(root.iterdir())
+            missing_approval = subprocess.run(
+                [sys.executable, str(cli), "--bundle", str(bundle_path),
+                 "--verifier", str(executable), "--verifier-sha256", pin,
+                 "--authority-policy-sha256",
+                 bundle["authorityPolicy"]["authorityPolicySha256"],
+                 "--approval-checkpoint", str(state),
+                 "--approval-checkpoint-sha256", state_pin],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertNotEqual(missing_approval.returncode, 0)
             result = subprocess.run(
                 [sys.executable, str(cli), "--bundle", str(bundle_path),
                  "--verifier", str(executable), "--verifier-sha256", pin,
+                 "--approval-verifier", str(approval),
+                 "--approval-verifier-sha256", approval_pin,
                  "--authority-policy-sha256",
                  bundle["authorityPolicy"]["authorityPolicySha256"],
                  "--approval-checkpoint", str(state),
@@ -445,6 +536,8 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(cli), "--bundle", str(bundle_path),
                  "--verifier", str(executable), "--verifier-sha256", digest("wrong"),
+                 "--approval-verifier", str(approval),
+                 "--approval-verifier-sha256", approval_pin,
                  "--authority-policy-sha256",
                  bundle["authorityPolicy"]["authorityPolicySha256"],
                  "--approval-checkpoint", str(state),
