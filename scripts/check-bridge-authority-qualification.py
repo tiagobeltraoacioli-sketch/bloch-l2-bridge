@@ -13,12 +13,14 @@ def main(argv=None):
     parser.add_argument("--ceremony", required=True)
     parser.add_argument("--qualification", required=True)
     parser.add_argument("--review-policy", required=True)
+    parser.add_argument("--trusted-review-policy-sha256", required=True)
     parser.add_argument("--ssh-keygen", default="ssh-keygen")
     args = parser.parse_args(argv)
     try:
         report = verify_bridge_authority_qualification(
             load_json(args.ceremony), load_json(args.qualification),
-            load_json(args.review_policy), ssh_keygen=args.ssh_keygen,
+            load_json(args.review_policy), args.trusted_review_policy_sha256,
+            ssh_keygen=args.ssh_keygen,
         )
     except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError):
         print(

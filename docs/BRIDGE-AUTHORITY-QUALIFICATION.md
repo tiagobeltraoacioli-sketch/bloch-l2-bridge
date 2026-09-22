@@ -1,10 +1,11 @@
 # External bridge authority qualification
 
 `scripts/check-bridge-authority-qualification.py` is the authentication gate
-after the public authority-ceremony preflight. It accepts three separate
-inputs: the exact ceremony package, a qualification package, and an externally
-administered reviewer policy. Nothing in the qualification package can select
-its own trust roots.
+after the public authority-ceremony preflight. It accepts four separate
+inputs: the exact ceremony package, a qualification package, an externally
+administered reviewer policy, and that policy's canonical SHA-256 obtained
+through a separate authenticated operator channel. Nothing in the
+qualification package or adjacent policy file can select its own trust roots.
 
 The reviewer policy requires exactly five Ed25519 reviewers and a three-reviewer
 quorum. Reviewer identities, organizations and public keys must be mutually
@@ -27,7 +28,8 @@ Run the read-only check only after authentic reviewers and evidence exist:
 python3 scripts/check-bridge-authority-qualification.py \
   --ceremony /private/reviewed/authority-ceremony.json \
   --qualification /private/reviewed/authority-qualification.json \
-  --review-policy /private/operator-policy/authority-review-policy.json
+  --review-policy /private/operator-policy/authority-review-policy.json \
+  --trusted-review-policy-sha256 0xAUTHENTICATED_CANONICAL_SHA256
 ```
 
 The checked-in `authority-qualification.pending.json` and

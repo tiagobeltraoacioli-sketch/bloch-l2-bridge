@@ -142,7 +142,8 @@ def _verify_ed25519(reviewer_id, public_key, message, signature, ssh_keygen):
 
 
 def verify_bridge_authority_qualification(
-    ceremony, qualification, policy, *, ssh_keygen="ssh-keygen"
+    ceremony, qualification, policy, trusted_review_policy_sha256, *,
+    ssh_keygen="ssh-keygen",
 ):
     """Authenticate the exact ceremony with an externally selected quorum."""
     preflight = verify_bridge_authority_ceremony(ceremony)
@@ -151,6 +152,14 @@ def verify_bridge_authority_qualification(
             "unsupported authority qualification")
     identities = _review_policy(policy, ceremony)
     policy_digest = canonical_sha256(policy).lower()
+    trusted_policy_digest = "0x" + _pin(
+        trusted_review_policy_sha256, 32, "trusted external review policy"
+    ).hex()
+    require(type(trusted_review_policy_sha256) is str
+            and trusted_review_policy_sha256 == trusted_policy_digest,
+            "trusted review policy digest must be canonical lowercase hex")
+    require(policy_digest == trusted_policy_digest,
+            "external review policy does not match trusted digest")
     expected = {
         "ceremonyPackageCanonicalSha256": preflight["packageCanonicalSha256"].lower(),
         "manifestCanonicalSha256": preflight["manifestCanonicalSha256"].lower(),

@@ -111,6 +111,7 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
         self.key_directory = tempfile.TemporaryDirectory()
         self.ceremony = ceremony_package()
         self.policy, self.private_keys = policy(self.key_directory.name)
+        self.trusted_policy_digest = canonical_sha256(self.policy)
         self.value = qualification(self.ceremony, self.policy, self.private_keys)
 
     def tearDown(self):
@@ -118,7 +119,7 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
 
     def test_authenticated_quorum_qualifies_without_authorizing(self):
         report = verify_bridge_authority_qualification(
-            self.ceremony, self.value, self.policy
+            self.ceremony, self.value, self.policy, self.trusted_policy_digest
         )
         self.assertEqual(report["reviewerCount"], 3)
         self.assertTrue(report["externalRecordsAuthenticated"])
@@ -153,7 +154,7 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             mutate(value)
             with self.subTest(mutation=mutate), self.assertRaises((ValueError, TypeError)):
                 verify_bridge_authority_qualification(
-                    self.ceremony, value, self.policy
+                    self.ceremony, value, self.policy, self.trusted_policy_digest
                 )
 
     def test_quorum_untrusted_duplicate_and_substitution_are_refused(self):
@@ -174,7 +175,9 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             value, review_policy = item[:2]
             ceremony = item[2] if len(item) == 3 else self.ceremony
             with self.subTest(item=item), self.assertRaises((ValueError, TypeError)):
-                verify_bridge_authority_qualification(ceremony, value, review_policy)
+                verify_bridge_authority_qualification(
+                    ceremony, value, review_policy, self.trusted_policy_digest
+                )
 
     def test_reviewers_must_be_external_and_independent(self):
         mutations = [
@@ -196,8 +199,30 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             mutate(review_policy)
             with self.subTest(mutation=mutate), self.assertRaises((ValueError, TypeError)):
                 verify_bridge_authority_qualification(
-                    self.ceremony, self.value, review_policy
+                    self.ceremony, self.value, review_policy,
+                    self.trusted_policy_digest,
                 )
+
+    def test_self_selected_fully_signed_policy_is_not_a_trust_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            attacker_policy, attacker_keys = policy(directory)
+            attacker_qualification = qualification(
+                self.ceremony, attacker_policy, attacker_keys
+            )
+            with self.assertRaisesRegex(ValueError, "trusted digest"):
+                verify_bridge_authority_qualification(
+                    self.ceremony, attacker_qualification, attacker_policy,
+                    self.trusted_policy_digest,
+                )
+        with self.assertRaisesRegex(ValueError, "canonical lowercase"):
+            verify_bridge_authority_qualification(
+                self.ceremony, self.value, self.policy,
+                "0x" + self.trusted_policy_digest[2:].upper(),
+            )
+        with self.assertRaises(TypeError):
+            verify_bridge_authority_qualification(
+                self.ceremony, self.value, self.policy
+            )
 
     def test_checked_in_pending_state_and_cli_fail_closed(self):
         cli = SCRIPTS / "check-bridge-authority-qualification.py"
@@ -205,7 +230,8 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             [sys.executable, str(cli),
              "--ceremony", str(ROOT / "mainnet-custody/authority-ceremony.pending.json"),
              "--qualification", str(ROOT / "mainnet-custody/authority-qualification.pending.json"),
-             "--review-policy", str(ROOT / "mainnet-custody/authority-review-policy.pending.json")],
+             "--review-policy", str(ROOT / "mainnet-custody/authority-review-policy.pending.json"),
+             "--trusted-review-policy-sha256", pin("pending-trusted-policy")],
             capture_output=True, text=True, timeout=10, check=False,
         )
         self.assertEqual(completed.returncode, 1)
