@@ -78,13 +78,44 @@ def qualification(ceremony, review_policy, private_keys, count=3):
         ],
         "reviewPolicySha256": canonical_sha256(review_policy),
     }
-    attestations = []
-    for index, reviewer in enumerate(review_policy["reviewers"][:count], 1):
+    appointment_evidence = [
+        item[field].lower()
+        for item in ceremony["appointments"]
+        for field in (
+            "appointmentRecordSha256", "keyCeremonyRecordSha256",
+            "recoveryProcedureSha256", "conflictCheckSha256",
+        )
+    ]
+    ceremony_evidence = [
+        ceremony[name][field].lower()
+        for name in (
+            "custodyCeremony", "nativeRolesCeremony",
+            "activationAuthorityCeremony",
+        )
+        for field in (
+            "transcriptSha256", "recoveryExerciseSha256",
+            "independentWitnessReportSha256",
+        )
+    ]
+    records, attestations = [], []
+    for reviewer in review_policy["reviewers"][:count]:
+        record = {
+            "schema": "postern.bridge-authority-review-record.v1",
+            "reviewerId": reviewer["reviewerId"],
+            "organizationId": reviewer["organizationId"],
+            "ceremonyPackageCanonicalSha256": bindings[
+                "ceremonyPackageCanonicalSha256"
+            ],
+            "appointmentEvidenceSha256": appointment_evidence,
+            "ceremonyEvidenceSha256": ceremony_evidence,
+            "decision": "authenticate-public-records-without-activation",
+        }
+        records.append(record)
         attestation = {
             "reviewerId": reviewer["reviewerId"],
             "organizationId": reviewer["organizationId"],
             **bindings,
-            "reviewRecordSha256": pin(f"external-review-record-{index}"),
+            "reviewRecordSha256": canonical_sha256(record),
             "decision": "qualify-authorities-without-activation",
         }
         message = DOMAIN + json.dumps(
@@ -95,8 +126,9 @@ def qualification(ceremony, review_policy, private_keys, count=3):
         )
         attestations.append(attestation)
     return {
-        "schema": "postern.bridge-authority-qualification-review.v1",
+        "schema": "postern.bridge-authority-qualification-review.v2",
         **bindings,
+        "reviewRecords": records,
         "attestations": attestations,
         "controls": {
             "keysLoaded": False,
@@ -196,6 +228,34 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
                 self.verify(
                     ceremony=ceremony, value=value, review_policy=review_policy
                 )
+
+    def test_opaque_incomplete_or_cross_reviewer_records_are_refused(self):
+        mutations = [
+            lambda value: value["reviewRecords"].pop(),
+            lambda value: value["reviewRecords"][0][
+                "appointmentEvidenceSha256"
+            ].pop(),
+            lambda value: value["reviewRecords"][0][
+                "ceremonyEvidenceSha256"
+            ].__setitem__(0, pin("substituted-ceremony-record")),
+            lambda value: value["reviewRecords"][0].update(
+                ceremonyPackageCanonicalSha256=pin("other-ceremony-package")
+            ),
+            lambda value: value["reviewRecords"][0].update(
+                reviewerId=value["reviewRecords"][1]["reviewerId"]
+            ),
+            lambda value: value["reviewRecords"][0].update(
+                decision="qualify-and-activate"
+            ),
+            lambda value: value["reviewRecords"][0].update(extra=True),
+        ]
+        for mutate in mutations:
+            value = copy.deepcopy(self.value)
+            mutate(value)
+            with self.subTest(mutation=mutate), self.assertRaises(
+                (ValueError, TypeError)
+            ):
+                self.verify(value=value)
 
     def test_reviewers_must_be_external_and_independent(self):
         mutations = [

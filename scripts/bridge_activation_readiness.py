@@ -213,7 +213,7 @@ def _validate_external_qualification(
 ):
     """Authenticate a non-authorizing qualification report with external pins."""
     _fields(report, EXTERNAL_QUALIFICATION_FIELDS, "external authority qualification")
-    require(report["schema"] == "postern.bridge-authority-external-qualification.v1",
+    require(report["schema"] == "postern.bridge-authority-external-qualification.v2",
             "unsupported external authority qualification")
     for field in (
         "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",

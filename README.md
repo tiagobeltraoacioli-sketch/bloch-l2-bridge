@@ -29,6 +29,8 @@ The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
 selected custody and native authorities to public evidence, then require an
 independent authenticated three-of-five reviewer quorum. The checked-in state
 is deliberately incomplete and all operational permissions remain disabled.
+Every reviewer signature must bind its supplied complete evidence inventory;
+an opaque self-asserted review-record hash is refused.
 The authority qualification gate requires an externally supplied SHA-256 pin
 for its immutable signature-verification executable. The final readiness composer also requires externally supplied trust pins for
 the review policy and canonical qualification report; qualification cannot

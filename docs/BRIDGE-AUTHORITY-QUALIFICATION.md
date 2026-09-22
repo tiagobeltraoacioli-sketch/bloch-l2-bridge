@@ -24,9 +24,16 @@ signature trust boundary.
 
 Every signed attestation binds the canonical ceremony package, manifest,
 authority policy, all three ceremony records, the complete reviewer policy and
-a distinct external review record. Substitution of any artifact, policy,
-reviewer, organization, decision or signature is refused. The only accepted
-decision is `qualify-authorities-without-activation`.
+a distinct, supplied external review record. Each review record must enumerate
+all 32 appointment/key/recovery/conflict artifacts and all nine
+transcript/recovery/witness artifacts in canonical ceremony order. The record
+is bound to exactly one trusted reviewer and organization, and its canonical
+SHA-256 must be the commitment signed by that same reviewer. An opaque digest
+without the corresponding complete record is refused. Review records use the
+non-authorizing `authenticate-public-records-without-activation` decision;
+attestations use `qualify-authorities-without-activation`. Substitution,
+omission, cross-reviewer reuse, extra records, policy changes or signature
+changes are refused.
 
 Run the read-only check only after authentic reviewers and evidence exist:
 

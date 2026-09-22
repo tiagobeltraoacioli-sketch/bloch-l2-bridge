@@ -25,8 +25,13 @@ REVIEWER_FIELDS = {"reviewerId", "organizationId", "algorithm", "publicKey"}
 PACKAGE_FIELDS = {
     "schema", "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
     "authorityPolicySha256", "custodyCeremonySha256", "nativeRolesCeremonySha256",
-    "activationAuthorityCeremonySha256", "reviewPolicySha256", "attestations",
-    "controls",
+    "activationAuthorityCeremonySha256", "reviewPolicySha256", "reviewRecords",
+    "attestations", "controls",
+}
+REVIEW_RECORD_FIELDS = {
+    "schema", "reviewerId", "organizationId",
+    "ceremonyPackageCanonicalSha256", "appointmentEvidenceSha256",
+    "ceremonyEvidenceSha256", "decision",
 }
 ATTESTATION_FIELDS = {
     "reviewerId", "organizationId", "ceremonyPackageCanonicalSha256",
@@ -202,7 +207,7 @@ def verify_bridge_authority_qualification(
     """Authenticate the exact ceremony with an externally selected quorum."""
     preflight = verify_bridge_authority_ceremony(ceremony)
     _fields(qualification, PACKAGE_FIELDS, "authority qualification")
-    require(qualification["schema"] == "postern.bridge-authority-qualification-review.v1",
+    require(qualification["schema"] == "postern.bridge-authority-qualification-review.v2",
             "unsupported authority qualification")
     identities = _review_policy(policy, ceremony)
     policy_digest = canonical_sha256(policy).lower()
@@ -233,16 +238,64 @@ def verify_bridge_authority_qualification(
             and all(type(value) is bool for value in qualification["controls"].values()),
             "qualification controls must remain disabled")
 
+    appointment_evidence = [
+        item[field].lower()
+        for item in ceremony["appointments"]
+        for field in (
+            "appointmentRecordSha256", "keyCeremonyRecordSha256",
+            "recoveryProcedureSha256", "conflictCheckSha256",
+        )
+    ]
+    ceremony_evidence = [
+        ceremony[name][field].lower()
+        for name in (
+            "custodyCeremony", "nativeRolesCeremony",
+            "activationAuthorityCeremony",
+        )
+        for field in (
+            "transcriptSha256", "recoveryExerciseSha256",
+            "independentWitnessReportSha256",
+        )
+    ]
+    review_records = qualification["reviewRecords"]
+    require(type(review_records) is list
+            and policy["threshold"] <= len(review_records) <= len(identities),
+            "external review record quorum not satisfied")
+    trusted = {identity[0]: identity for identity in identities}
+    authenticated_records = {}
+    for record in review_records:
+        _fields(record, REVIEW_RECORD_FIELDS, "external review record")
+        require(record["schema"] == "postern.bridge-authority-review-record.v1",
+                "unsupported external review record")
+        reviewer_id = _pin(record["reviewerId"], 32, "review record reviewer")
+        require(reviewer_id in trusted and reviewer_id not in authenticated_records,
+                "review record reviewer is untrusted or duplicated")
+        identity = trusted[reviewer_id]
+        require(_pin(record["organizationId"], 32, "review record organization")
+                == identity[1], "review record organization mismatch")
+        require(record["ceremonyPackageCanonicalSha256"]
+                == expected["ceremonyPackageCanonicalSha256"],
+                "review record binds another ceremony package")
+        require(record["appointmentEvidenceSha256"] == appointment_evidence,
+                "review record does not authenticate every appointment artifact")
+        require(record["ceremonyEvidenceSha256"] == ceremony_evidence,
+                "review record does not authenticate every ceremony artifact")
+        require(record["decision"]
+                == "authenticate-public-records-without-activation",
+                "non-authorizing review record decision required")
+        authenticated_records[reviewer_id] = canonical_sha256(record).lower()
+
     attestations = qualification["attestations"]
     require(type(attestations) is list
             and policy["threshold"] <= len(attestations) <= len(identities),
             "external reviewer quorum not satisfied")
-    trusted = {identity[0]: identity for identity in identities}
+    require(len(attestations) == len(authenticated_records),
+            "each attestation requires exactly one authenticated review record")
     verifier_source, staged_verifier, verifier_before = _open_signature_verifier(
         ssh_keygen, trusted_ssh_keygen_sha256
     )
     try:
-        seen, review_records = set(), set()
+        seen, record_digests = set(), set()
         for attestation in attestations:
             _fields(attestation, ATTESTATION_FIELDS, "review attestation")
             reviewer_id = _pin(attestation["reviewerId"], 32, "attestation reviewer")
@@ -257,8 +310,11 @@ def verify_bridge_authority_qualification(
                         and attestation[field] == value,
                         f"attestation {field} mismatch")
             record = _pin(attestation["reviewRecordSha256"], 32, "review record")
-            require(record not in review_records, "review records must be distinct")
-            review_records.add(record)
+            require(record not in record_digests, "review records must be distinct")
+            record_digests.add(record)
+            require(attestation["reviewRecordSha256"].lower()
+                    == authenticated_records.get(reviewer_id),
+                    "attestation does not bind its authenticated review record")
             require(attestation["decision"] == "qualify-authorities-without-activation",
                     "non-authorizing qualification decision required")
             signature = attestation["signature"]
@@ -275,9 +331,11 @@ def verify_bridge_authority_qualification(
         _close_signature_verifier(
             verifier_source, staged_verifier, verifier_before
         )
+    require(seen == set(authenticated_records),
+            "review records and attestations bind different reviewers")
 
     return {
-        "schema": "postern.bridge-authority-external-qualification.v1",
+        "schema": "postern.bridge-authority-external-qualification.v2",
         **expected,
         "reviewerCount": len(attestations),
         "reviewThreshold": policy["threshold"],

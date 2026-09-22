@@ -145,7 +145,7 @@ def fixture():
         authority["activationApprovalSignature"],
     ))
     external_authority = {
-        "schema": "postern.bridge-authority-external-qualification.v1",
+        "schema": "postern.bridge-authority-external-qualification.v2",
         "ceremonyPackageCanonicalSha256": digest("external-ceremony-package"),
         "manifestCanonicalSha256": manifest_digest,
         "authorityPolicySha256": policy_digest,
