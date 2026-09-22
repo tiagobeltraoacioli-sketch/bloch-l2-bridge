@@ -44,6 +44,14 @@ All hashes and identities are public references. Key material remains with its
 custodian and must be used only through the separately reviewed signing
 ceremony.
 
+Before treating these declarations as a ceremony candidate, bind all eight
+appointments and the custody, native-role and activation-authority ceremony
+records with the non-authorizing preflight described in
+`BRIDGE-AUTHORITY-CEREMONY.md`. Its checked-in pending package is intentionally
+empty. A passing structural report still leaves both custody and authorities
+unqualified until independent reviewers authenticate every referenced record
+and witnessed exercise.
+
 ## Deployment gate
 
 A paused deployment may be proposed only after the offline custody preflight

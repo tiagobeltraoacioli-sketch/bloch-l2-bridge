@@ -1,0 +1,37 @@
+{
+  "schema": "postern.bridge-authority-ceremony-package.v1",
+  "manifest": null,
+  "authorityPolicy": null,
+  "appointments": [],
+  "custodyCeremony": {
+    "schema": "postern.bridge-custody-ceremony.v1",
+    "participants": [],
+    "threshold": 3,
+    "transcriptSha256": null,
+    "recoveryExerciseSha256": null,
+    "independentWitnessReportSha256": null
+  },
+  "nativeRolesCeremony": {
+    "schema": "postern.bridge-native-roles-ceremony.v1",
+    "participants": [],
+    "threshold": 1,
+    "transcriptSha256": null,
+    "recoveryExerciseSha256": null,
+    "independentWitnessReportSha256": null
+  },
+  "activationAuthorityCeremony": {
+    "schema": "postern.bridge-activation-authority-ceremony.v1",
+    "participants": [],
+    "threshold": 1,
+    "transcriptSha256": null,
+    "recoveryExerciseSha256": null,
+    "independentWitnessReportSha256": null
+  },
+  "controls": {
+    "keysLoaded": false,
+    "signingAllowed": false,
+    "deploymentAllowed": false,
+    "broadcastAllowed": false,
+    "activationAuthorized": false
+  }
+}
