@@ -200,6 +200,23 @@ def _verify_ed25519(reviewer_id, public_key, message, signature, ssh_keygen):
     require(completed.returncode == 0, "review signature authentication failed")
 
 
+def _verify_refusal_protocol(ssh_keygen):
+    """Reject an always-success executable before considering any signature."""
+    with tempfile.TemporaryDirectory(prefix="bloch-review-negative-") as directory:
+        missing = Path(directory) / "missing"
+        try:
+            completed = subprocess.run(
+                [ssh_keygen, "-Y", "verify", "-f", str(missing), "-I",
+                 "negative-probe", "-n", SSH_NAMESPACE, "-s", str(missing)],
+                input=b"negative verifier probe", stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError("review signature verifier unavailable") from error
+    require(completed.returncode != 0,
+            "signature verifier accepts an invalid negative probe")
+
+
 def _open_signature_verifier(path, trusted_sha256):
     """Authenticate one root-administered verifier and retain its open inode."""
     path = Path(path)
@@ -368,6 +385,7 @@ def verify_bridge_authority_qualification(
         ssh_keygen, trusted_ssh_keygen_sha256
     )
     try:
+        _verify_refusal_protocol(str(staged_verifier))
         seen, record_digests = set(), set()
         for attestation in attestations:
             _fields(attestation, ATTESTATION_FIELDS, "review attestation")
@@ -408,15 +426,17 @@ def verify_bridge_authority_qualification(
             "review records and attestations bind different reviewers")
 
     return {
-        "schema": "postern.bridge-authority-external-qualification.v3",
+        "schema": "postern.bridge-authority-external-observation.v1",
         **expected,
         "qualificationPackageCanonicalSha256": canonical_sha256(
             qualification
         ).lower(),
         "reviewerCount": len(attestations),
         "reviewThreshold": policy["threshold"],
-        "externalRecordsAuthenticated": True,
-        "custodyQualified": True,
-        "authoritiesQualified": True,
+        # Caller-supplied policy, checkpoint and verifier pins prove internal
+        # consistency only. They are not independently authenticated roots.
+        "externalRecordsAuthenticated": False,
+        "custodyQualified": False,
+        "authoritiesQualified": False,
         **CONTROLS,
     }

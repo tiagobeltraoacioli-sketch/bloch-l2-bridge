@@ -212,12 +212,15 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
     def tearDown(self):
         self.key_directory.cleanup()
 
-    def test_authenticated_quorum_qualifies_without_authorizing(self):
+    def test_signed_quorum_remains_observation_only_without_external_roots(self):
         report = self.verify()
+        self.assertEqual(
+            report["schema"], "postern.bridge-authority-external-observation.v1"
+        )
         self.assertEqual(report["reviewerCount"], 3)
-        self.assertTrue(report["externalRecordsAuthenticated"])
-        self.assertTrue(report["custodyQualified"])
-        self.assertTrue(report["authoritiesQualified"])
+        self.assertFalse(report["externalRecordsAuthenticated"])
+        self.assertFalse(report["custodyQualified"])
+        self.assertFalse(report["authoritiesQualified"])
         for field in (
             "keysLoaded", "signingAllowed", "deploymentAllowed",
             "broadcastAllowed", "activationAuthorized",
@@ -403,6 +406,18 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
                 trusted_ssh_keygen_sha256=(
                     "0x" + self.trusted_ssh_keygen_digest[2:].upper()
                 )
+            )
+        true_path = shutil.which("true")
+        if true_path is None:
+            self.fail("true is required for signature-verifier attack test")
+        true_path = str(Path(true_path).resolve())
+        true_digest = "0x" + hashlib.sha256(Path(true_path).read_bytes()).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError, "negative probe|signature authentication"
+        ):
+            self.verify(
+                ssh_keygen=true_path,
+                trusted_ssh_keygen_sha256=true_digest,
             )
 
     def test_checked_in_pending_state_and_cli_fail_closed(self):

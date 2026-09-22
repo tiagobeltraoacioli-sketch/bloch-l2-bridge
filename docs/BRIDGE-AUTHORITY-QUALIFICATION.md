@@ -1,11 +1,14 @@
 # External bridge authority qualification
 
-`scripts/check-bridge-authority-qualification.py` is the authentication gate
+`scripts/check-bridge-authority-qualification.py` is a fail-closed observation
+checker
 after the public authority-ceremony preflight. It accepts four separate
 inputs: the exact ceremony package, a qualification package, an externally
-administered reviewer policy, and that policy's canonical SHA-256 obtained
-through a separate authenticated operator channel. Nothing in the
-qualification package or adjacent policy file can select its own trust roots.
+administered reviewer policy, and that policy's canonical SHA-256. The CLI
+cannot prove that its caller obtained any supplied digest through an
+independent authenticated channel. Its output therefore remains observation
+only and never claims that records or authorities are authenticated or
+qualified.
 
 The reviewer policy requires exactly five Ed25519 reviewers and a three-reviewer
 quorum. Reviewer identities, organizations and public keys must be mutually
@@ -19,8 +22,10 @@ be an absolute, root-owned, regular, non-group/world-writable executable under
 a root-administered path, and its SHA-256 must be supplied from a separate
 authenticated operator channel. The gate retains the authenticated inode open
 and verifies that neither it nor its pathname changed throughout use. A
-caller-selected program or mutable `PATH` lookup is never accepted as a
-signature trust boundary.
+mutable `PATH` lookup is never accepted as a signature trust boundary. A
+negative protocol probe also rejects always-success executables such as
+`/usr/bin/true`. These controls establish internal consistency only because the
+caller still supplies the executable digest.
 
 Qualification continuity is anchored in a separate, checksum-pinned
 `postern.bridge-authority-qualification-checkpoint.v1` file. The package,
@@ -29,8 +34,9 @@ review policy, ceremony package, exact successor sequence and predecessor
 qualification. Genesis requires sequence one and the zero predecessor; later
 qualifications require an exact one-step advance and the canonical SHA-256 of
 the preceding complete qualification package. The checkpoint and its digest
-are operator inputs outside the package, so a package cannot select its own
-replay state. A successful read-only verification returns the successor data;
+are caller inputs outside the package, so the signed package cannot directly
+select its own replay state. They are not authenticated trust roots. A
+successful read-only observation returns the successor data;
 an independently administered checkpoint writer must durably retain it before
 the result can be used. This checker never updates or consumes production
 state itself.
@@ -68,7 +74,10 @@ The checked-in `authority-qualification.pending.json`,
 reviewers or signatures and are refused. Do not replace them with invented
 people, generated production keys or placeholder approvals.
 
-A successful report authenticates and qualifies the authority ceremony only.
-It always returns `keysLoaded`, `signingAllowed`, `deploymentAllowed`,
-`broadcastAllowed` and `activationAuthorized` as false. It is not an activation
-approval and cannot be passed directly as the v2 activation qualification.
+A successful report uses the
+`postern.bridge-authority-external-observation.v1` schema and always returns
+`externalRecordsAuthenticated`, `custodyQualified`, `authoritiesQualified`,
+`keysLoaded`, `signingAllowed`, `deploymentAllowed`, `broadcastAllowed` and
+`activationAuthorized` as false. It is not accepted by the readiness composer's
+v3 external-qualification boundary. A future independently reviewed verifier
+with non-self-selected roots must produce that distinct qualification.

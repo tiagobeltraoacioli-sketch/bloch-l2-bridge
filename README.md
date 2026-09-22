@@ -25,16 +25,18 @@ runtime pins and paused/disabled controls. It never authorizes deployment,
 broadcast or activation.
 
 The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
-[external qualification gate](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind the
-selected custody and native authorities to public evidence, then require an
-independent authenticated three-of-five reviewer quorum. The checked-in state
-is deliberately incomplete and all operational permissions remain disabled.
+[external qualification checker](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind
+the selected custody and native authorities to public evidence and inspect a
+three-of-five reviewer quorum. Caller-supplied pins are not treated as
+authenticated roots: the checker remains observation-only. The checked-in
+state is deliberately incomplete and all operational permissions remain disabled.
 Every reviewer signature must bind its supplied complete evidence inventory;
 an opaque self-asserted review-record hash is refused.
 Qualification replay is refused against a separately checksum-pinned monotonic
 sequence and predecessor checkpoint that the package cannot select for itself.
-The authority qualification gate requires an externally supplied SHA-256 pin
-for its immutable signature-verification executable. The final readiness composer also requires externally supplied trust pins for
+The authority observation checker requires a caller-supplied SHA-256 pin for
+its immutable signature-verification executable but does not promote that pin
+to an authenticated root. The final readiness composer requires independently authenticated trust pins for
 the review policy and canonical qualification report; qualification cannot
 load keys, sign, deploy, broadcast or authorize activation.
 
