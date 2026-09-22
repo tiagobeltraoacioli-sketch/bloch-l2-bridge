@@ -80,7 +80,9 @@ EXTERNAL_QUALIFICATION_FIELDS = {
     "schema", "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
     "authorityPolicySha256", "custodyCeremonySha256",
     "nativeRolesCeremonySha256", "activationAuthorityCeremonySha256",
-    "reviewPolicySha256", "reviewerCount", "reviewThreshold",
+    "reviewPolicySha256", "qualificationCheckpointSha256",
+    "qualificationSequence", "previousQualificationSha256",
+    "qualificationPackageCanonicalSha256", "reviewerCount", "reviewThreshold",
     "externalRecordsAuthenticated", "custodyQualified", "authoritiesQualified",
     "keysLoaded", "signingAllowed", "deploymentAllowed", "broadcastAllowed",
     "activationAuthorized",
@@ -213,13 +215,14 @@ def _validate_external_qualification(
 ):
     """Authenticate a non-authorizing qualification report with external pins."""
     _fields(report, EXTERNAL_QUALIFICATION_FIELDS, "external authority qualification")
-    require(report["schema"] == "postern.bridge-authority-external-qualification.v2",
+    require(report["schema"] == "postern.bridge-authority-external-qualification.v3",
             "unsupported external authority qualification")
     for field in (
         "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
         "authorityPolicySha256", "custodyCeremonySha256",
         "nativeRolesCeremonySha256", "activationAuthorityCeremonySha256",
-        "reviewPolicySha256",
+        "reviewPolicySha256", "qualificationCheckpointSha256",
+        "qualificationPackageCanonicalSha256",
     ):
         _pin(report[field], f"external qualification {field}")
         require(report[field] == report[field].lower(),
@@ -231,6 +234,19 @@ def _validate_external_qualification(
             and not isinstance(report["reviewerCount"], bool)
             and 3 <= report["reviewerCount"] <= 5,
             "external qualification quorum required")
+    sequence = _decimal(
+        report["qualificationSequence"], "external qualification sequence",
+        positive=True,
+    )
+    predecessor = word(report["previousQualificationSha256"], 32)
+    require(report["previousQualificationSha256"] == "0x" + predecessor.hex(),
+            "external qualification predecessor must be canonical lowercase hex")
+    if sequence == 1:
+        require(not any(predecessor),
+                "first external qualification must have the zero predecessor")
+    else:
+        require(any(predecessor) and len(set(predecessor)) > 1,
+                "successor external qualification requires a predecessor")
     for field in (
         "externalRecordsAuthenticated", "custodyQualified", "authoritiesQualified",
     ):

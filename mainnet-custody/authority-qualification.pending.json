@@ -7,6 +7,9 @@
   "nativeRolesCeremonySha256": null,
   "activationAuthorityCeremonySha256": null,
   "reviewPolicySha256": null,
+  "qualificationCheckpointSha256": null,
+  "qualificationSequence": null,
+  "previousQualificationSha256": null,
   "reviewRecords": [],
   "attestations": [],
   "controls": {

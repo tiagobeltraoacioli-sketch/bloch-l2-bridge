@@ -145,7 +145,7 @@ def fixture():
         authority["activationApprovalSignature"],
     ))
     external_authority = {
-        "schema": "postern.bridge-authority-external-qualification.v2",
+        "schema": "postern.bridge-authority-external-qualification.v3",
         "ceremonyPackageCanonicalSha256": digest("external-ceremony-package"),
         "manifestCanonicalSha256": manifest_digest,
         "authorityPolicySha256": policy_digest,
@@ -155,6 +155,12 @@ def fixture():
             "activation-authority-ceremony"
         ),
         "reviewPolicySha256": digest("external-review-policy"),
+        "qualificationCheckpointSha256": digest("qualification-checkpoint"),
+        "qualificationSequence": "1",
+        "previousQualificationSha256": "0x" + "00" * 32,
+        "qualificationPackageCanonicalSha256": digest(
+            "qualification-package"
+        ),
         "reviewerCount": 3,
         "reviewThreshold": 3,
         "externalRecordsAuthenticated": True,

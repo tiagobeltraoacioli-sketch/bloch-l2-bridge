@@ -65,8 +65,24 @@ def sign(private_key, message):
         return (Path(str(message_path) + ".sig").read_text(encoding="ascii"))
 
 
-def qualification(ceremony, review_policy, private_keys, count=3):
+def qualification_checkpoint(ceremony, review_policy, sequence="0", last=None):
     preflight = verify_bridge_authority_ceremony(ceremony)
+    return {
+        "schema": "postern.bridge-authority-qualification-checkpoint.v1",
+        "reviewPolicySha256": canonical_sha256(review_policy),
+        "ceremonyPackageCanonicalSha256": preflight["packageCanonicalSha256"],
+        "lastQualificationSequence": sequence,
+        "lastQualificationSha256": last or "0x" + "00" * 32,
+    }
+
+
+def qualification(ceremony, review_policy, private_keys, count=3,
+                  checkpoint_value=None):
+    preflight = verify_bridge_authority_ceremony(ceremony)
+    checkpoint_value = checkpoint_value or qualification_checkpoint(
+        ceremony, review_policy
+    )
+    next_sequence = str(int(checkpoint_value["lastQualificationSequence"]) + 1)
     bindings = {
         "ceremonyPackageCanonicalSha256": preflight["packageCanonicalSha256"],
         "manifestCanonicalSha256": preflight["manifestCanonicalSha256"],
@@ -77,6 +93,11 @@ def qualification(ceremony, review_policy, private_keys, count=3):
             "activationAuthorityCeremonySha256"
         ],
         "reviewPolicySha256": canonical_sha256(review_policy),
+        "qualificationCheckpointSha256": canonical_sha256(checkpoint_value),
+        "qualificationSequence": next_sequence,
+        "previousQualificationSha256": checkpoint_value[
+            "lastQualificationSha256"
+        ],
     }
     appointment_evidence = [
         item[field].lower()
@@ -105,6 +126,14 @@ def qualification(ceremony, review_policy, private_keys, count=3):
             "organizationId": reviewer["organizationId"],
             "ceremonyPackageCanonicalSha256": bindings[
                 "ceremonyPackageCanonicalSha256"
+            ],
+            "reviewPolicySha256": bindings["reviewPolicySha256"],
+            "qualificationCheckpointSha256": bindings[
+                "qualificationCheckpointSha256"
+            ],
+            "qualificationSequence": bindings["qualificationSequence"],
+            "previousQualificationSha256": bindings[
+                "previousQualificationSha256"
             ],
             "appointmentEvidenceSha256": appointment_evidence,
             "ceremonyEvidenceSha256": ceremony_evidence,
@@ -146,7 +175,12 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
         self.ceremony = ceremony_package()
         self.policy, self.private_keys = policy(self.key_directory.name)
         self.trusted_policy_digest = canonical_sha256(self.policy)
-        self.value = qualification(self.ceremony, self.policy, self.private_keys)
+        self.checkpoint = qualification_checkpoint(self.ceremony, self.policy)
+        self.trusted_checkpoint_digest = canonical_sha256(self.checkpoint)
+        self.value = qualification(
+            self.ceremony, self.policy, self.private_keys,
+            checkpoint_value=self.checkpoint,
+        )
         ssh_keygen = shutil.which("ssh-keygen")
         if ssh_keygen is None:
             self.fail("ssh-keygen is required for qualification tests")
@@ -156,12 +190,19 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
         )
 
     def verify(self, ceremony=None, value=None, review_policy=None, policy_digest=None,
-               **kwargs):
+               checkpoint_value=None, checkpoint_digest=None, **kwargs):
         return verify_bridge_authority_qualification(
             self.ceremony if ceremony is None else ceremony,
             self.value if value is None else value,
             self.policy if review_policy is None else review_policy,
             self.trusted_policy_digest if policy_digest is None else policy_digest,
+            checkpoint=(
+                self.checkpoint if checkpoint_value is None else checkpoint_value
+            ),
+            trusted_checkpoint_sha256=(
+                self.trusted_checkpoint_digest
+                if checkpoint_digest is None else checkpoint_digest
+            ),
             ssh_keygen=kwargs.get("ssh_keygen", self.ssh_keygen),
             trusted_ssh_keygen_sha256=kwargs.get(
                 "trusted_ssh_keygen_sha256", self.trusted_ssh_keygen_digest
@@ -257,6 +298,46 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
             ):
                 self.verify(value=value)
 
+    def test_checkpoint_requires_exact_monotonic_successor_and_predecessor(self):
+        first_digest = canonical_sha256(self.value)
+        advanced = qualification_checkpoint(
+            self.ceremony, self.policy, sequence="1", last=first_digest
+        )
+        advanced_digest = canonical_sha256(advanced)
+        with self.assertRaisesRegex(ValueError, "exact checkpoint successor"):
+            self.verify(
+                checkpoint_value=advanced, checkpoint_digest=advanced_digest
+            )
+        successor = qualification(
+            self.ceremony, self.policy, self.private_keys,
+            checkpoint_value=advanced,
+        )
+        report = self.verify(
+            value=successor, checkpoint_value=advanced,
+            checkpoint_digest=advanced_digest,
+        )
+        self.assertEqual(report["qualificationSequence"], "2")
+        self.assertEqual(report["previousQualificationSha256"], first_digest)
+
+        attacks = []
+        wrong_policy = copy.deepcopy(advanced)
+        wrong_policy["reviewPolicySha256"] = pin("wrong-policy")
+        attacks.append((wrong_policy, canonical_sha256(wrong_policy)))
+        rollback = copy.deepcopy(advanced)
+        rollback["lastQualificationSequence"] = "0"
+        rollback["lastQualificationSha256"] = "0x" + "00" * 32
+        attacks.append((rollback, canonical_sha256(rollback)))
+        for checkpoint_value, checkpoint_digest in attacks:
+            with self.subTest(checkpoint=checkpoint_value), self.assertRaises(
+                (ValueError, TypeError)
+            ):
+                self.verify(
+                    value=successor, checkpoint_value=checkpoint_value,
+                    checkpoint_digest=checkpoint_digest,
+                )
+        with self.assertRaisesRegex(ValueError, "trusted digest"):
+            self.verify(checkpoint_digest=pin("self-selected-other-checkpoint"))
+
     def test_reviewers_must_be_external_and_independent(self):
         mutations = [
             lambda value: value["reviewers"][0].update(
@@ -326,12 +407,19 @@ class BridgeAuthorityQualificationTest(unittest.TestCase):
 
     def test_checked_in_pending_state_and_cli_fail_closed(self):
         cli = SCRIPTS / "check-bridge-authority-qualification.py"
+        checkpoint_path = Path(self.key_directory.name) / "checkpoint.json"
+        checkpoint_path.write_text(
+            json.dumps(self.checkpoint), encoding="ascii"
+        )
         completed = subprocess.run(
             [sys.executable, str(cli),
              "--ceremony", str(ROOT / "mainnet-custody/authority-ceremony.pending.json"),
              "--qualification", str(ROOT / "mainnet-custody/authority-qualification.pending.json"),
              "--review-policy", str(ROOT / "mainnet-custody/authority-review-policy.pending.json"),
              "--trusted-review-policy-sha256", pin("pending-trusted-policy"),
+             "--qualification-checkpoint", str(checkpoint_path),
+             "--trusted-qualification-checkpoint-sha256",
+             self.trusted_checkpoint_digest,
              "--ssh-keygen", self.ssh_keygen,
              "--trusted-ssh-keygen-sha256", self.trusted_ssh_keygen_digest],
             capture_output=True, text=True, timeout=10, check=False,

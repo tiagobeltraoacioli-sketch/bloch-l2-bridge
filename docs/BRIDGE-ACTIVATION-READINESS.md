@@ -16,7 +16,7 @@ It combines the complete custody manifest with five artifacts:
 3. the three-of-five custody, separated native-role qualification and a distinct
    external activation-authority policy, including authenticated source
    deployment, native gateway and conditional activation approval commitments;
-4. the non-authorizing `postern.bridge-authority-external-qualification.v2`
+4. the non-authorizing `postern.bridge-authority-external-qualification.v3`
    report produced by the independent three-of-five authority review quorum;
 5. a disposable-value deposit, mint, burn and release cycle whose source
    reserves and native supply return to their starting values and whose

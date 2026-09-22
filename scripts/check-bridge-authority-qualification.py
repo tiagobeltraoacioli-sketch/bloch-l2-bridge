@@ -14,6 +14,8 @@ def main(argv=None):
     parser.add_argument("--qualification", required=True)
     parser.add_argument("--review-policy", required=True)
     parser.add_argument("--trusted-review-policy-sha256", required=True)
+    parser.add_argument("--qualification-checkpoint", required=True)
+    parser.add_argument("--trusted-qualification-checkpoint-sha256", required=True)
     parser.add_argument("--ssh-keygen", required=True)
     parser.add_argument("--trusted-ssh-keygen-sha256", required=True)
     args = parser.parse_args(argv)
@@ -21,6 +23,10 @@ def main(argv=None):
         report = verify_bridge_authority_qualification(
             load_json(args.ceremony), load_json(args.qualification),
             load_json(args.review_policy), args.trusted_review_policy_sha256,
+            checkpoint=load_json(args.qualification_checkpoint),
+            trusted_checkpoint_sha256=(
+                args.trusted_qualification_checkpoint_sha256
+            ),
             ssh_keygen=args.ssh_keygen,
             trusted_ssh_keygen_sha256=args.trusted_ssh_keygen_sha256,
         )

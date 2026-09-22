@@ -1,0 +1,7 @@
+{
+  "schema": "postern.bridge-authority-qualification-checkpoint.v1",
+  "reviewPolicySha256": null,
+  "ceremonyPackageCanonicalSha256": null,
+  "lastQualificationSequence": "0",
+  "lastQualificationSha256": "0x0000000000000000000000000000000000000000000000000000000000000000"
+}

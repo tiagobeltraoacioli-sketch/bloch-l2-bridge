@@ -25,19 +25,28 @@ REVIEWER_FIELDS = {"reviewerId", "organizationId", "algorithm", "publicKey"}
 PACKAGE_FIELDS = {
     "schema", "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
     "authorityPolicySha256", "custodyCeremonySha256", "nativeRolesCeremonySha256",
-    "activationAuthorityCeremonySha256", "reviewPolicySha256", "reviewRecords",
-    "attestations", "controls",
+    "activationAuthorityCeremonySha256", "reviewPolicySha256",
+    "qualificationCheckpointSha256", "qualificationSequence",
+    "previousQualificationSha256", "reviewRecords", "attestations", "controls",
 }
 REVIEW_RECORD_FIELDS = {
     "schema", "reviewerId", "organizationId",
-    "ceremonyPackageCanonicalSha256", "appointmentEvidenceSha256",
+    "ceremonyPackageCanonicalSha256", "reviewPolicySha256",
+    "qualificationCheckpointSha256", "qualificationSequence",
+    "previousQualificationSha256", "appointmentEvidenceSha256",
     "ceremonyEvidenceSha256", "decision",
 }
 ATTESTATION_FIELDS = {
     "reviewerId", "organizationId", "ceremonyPackageCanonicalSha256",
     "manifestCanonicalSha256", "authorityPolicySha256", "custodyCeremonySha256",
     "nativeRolesCeremonySha256", "activationAuthorityCeremonySha256",
-    "reviewPolicySha256", "reviewRecordSha256", "decision", "signature",
+    "reviewPolicySha256", "qualificationCheckpointSha256",
+    "qualificationSequence", "previousQualificationSha256",
+    "reviewRecordSha256", "decision", "signature",
+}
+CHECKPOINT_FIELDS = {
+    "schema", "reviewPolicySha256", "ceremonyPackageCanonicalSha256",
+    "lastQualificationSequence", "lastQualificationSha256",
 }
 CONTROLS = {
     "keysLoaded": False,
@@ -59,6 +68,48 @@ def _pin(value, size, label):
     require(any(raw) and len(set(raw)) > 1,
             f"{label}: non-placeholder value required")
     return raw
+
+
+def _uint64(value, label):
+    require(type(value) is str and value.isascii() and value.isdecimal()
+            and (value == "0" or value[0] != "0") and len(value) <= 20,
+            f"{label}: canonical uint64 required")
+    number = int(value)
+    require(number <= 2**64 - 1, f"{label}: canonical uint64 required")
+    return number
+
+
+def _checkpoint(value, trusted_sha256, policy_digest, ceremony_digest):
+    _fields(value, CHECKPOINT_FIELDS, "qualification checkpoint")
+    require(value["schema"]
+            == "postern.bridge-authority-qualification-checkpoint.v1",
+            "unsupported qualification checkpoint")
+    checkpoint_digest = canonical_sha256(value).lower()
+    trusted_digest = "0x" + _pin(
+        trusted_sha256, 32, "trusted qualification checkpoint"
+    ).hex()
+    require(type(trusted_sha256) is str and trusted_sha256 == trusted_digest,
+            "trusted qualification checkpoint digest must be canonical lowercase hex")
+    require(checkpoint_digest == trusted_digest,
+            "qualification checkpoint does not match trusted digest")
+    require(value["reviewPolicySha256"] == policy_digest,
+            "qualification checkpoint binds another review policy")
+    require(value["ceremonyPackageCanonicalSha256"] == ceremony_digest,
+            "qualification checkpoint binds another ceremony package")
+    sequence = _uint64(
+        value["lastQualificationSequence"], "checkpoint qualification sequence"
+    )
+    previous = word(value["lastQualificationSha256"], 32)
+    canonical_previous = "0x" + previous.hex()
+    require(type(value["lastQualificationSha256"]) is str
+            and value["lastQualificationSha256"] == canonical_previous,
+            "checkpoint predecessor must be canonical lowercase hex")
+    if sequence == 0:
+        require(not any(previous), "genesis qualification checkpoint must be empty")
+    else:
+        require(any(previous) and len(set(previous)) > 1,
+                "qualification checkpoint requires a non-placeholder predecessor")
+    return sequence, canonical_previous, checkpoint_digest
 
 
 def _review_policy(policy, ceremony):
@@ -202,7 +253,7 @@ def _close_signature_verifier(source, path, before):
 
 def verify_bridge_authority_qualification(
     ceremony, qualification, policy, trusted_review_policy_sha256, *,
-    ssh_keygen, trusted_ssh_keygen_sha256,
+    checkpoint, trusted_checkpoint_sha256, ssh_keygen, trusted_ssh_keygen_sha256,
 ):
     """Authenticate the exact ceremony with an externally selected quorum."""
     preflight = verify_bridge_authority_ceremony(ceremony)
@@ -219,6 +270,19 @@ def verify_bridge_authority_qualification(
             "trusted review policy digest must be canonical lowercase hex")
     require(policy_digest == trusted_policy_digest,
             "external review policy does not match trusted digest")
+    checkpoint_sequence, checkpoint_predecessor, checkpoint_digest = _checkpoint(
+        checkpoint, trusted_checkpoint_sha256, policy_digest,
+        preflight["packageCanonicalSha256"].lower(),
+    )
+    sequence = _uint64(
+        qualification["qualificationSequence"], "qualification sequence"
+    )
+    require(checkpoint_sequence < 2**64 - 1
+            and sequence == checkpoint_sequence + 1,
+            "qualification sequence is not the exact checkpoint successor")
+    require(qualification["previousQualificationSha256"].lower()
+            == checkpoint_predecessor,
+            "qualification predecessor does not match checkpoint")
     expected = {
         "ceremonyPackageCanonicalSha256": preflight["packageCanonicalSha256"].lower(),
         "manifestCanonicalSha256": preflight["manifestCanonicalSha256"].lower(),
@@ -229,6 +293,9 @@ def verify_bridge_authority_qualification(
             "activationAuthorityCeremonySha256"
         ].lower(),
         "reviewPolicySha256": policy_digest,
+        "qualificationCheckpointSha256": checkpoint_digest,
+        "qualificationSequence": qualification["qualificationSequence"],
+        "previousQualificationSha256": checkpoint_predecessor,
     }
     for field, value in expected.items():
         require(type(qualification[field]) is str
@@ -276,6 +343,12 @@ def verify_bridge_authority_qualification(
         require(record["ceremonyPackageCanonicalSha256"]
                 == expected["ceremonyPackageCanonicalSha256"],
                 "review record binds another ceremony package")
+        for field in (
+            "reviewPolicySha256", "qualificationCheckpointSha256",
+            "qualificationSequence", "previousQualificationSha256",
+        ):
+            require(record[field] == expected[field],
+                    f"review record {field} mismatch")
         require(record["appointmentEvidenceSha256"] == appointment_evidence,
                 "review record does not authenticate every appointment artifact")
         require(record["ceremonyEvidenceSha256"] == ceremony_evidence,
@@ -335,8 +408,11 @@ def verify_bridge_authority_qualification(
             "review records and attestations bind different reviewers")
 
     return {
-        "schema": "postern.bridge-authority-external-qualification.v2",
+        "schema": "postern.bridge-authority-external-qualification.v3",
         **expected,
+        "qualificationPackageCanonicalSha256": canonical_sha256(
+            qualification
+        ).lower(),
         "reviewerCount": len(attestations),
         "reviewThreshold": policy["threshold"],
         "externalRecordsAuthenticated": True,

@@ -157,7 +157,7 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
     )?;
     require_schema(
         external_authority,
-        "postern.bridge-authority-external-qualification.v2",
+        "postern.bridge-authority-external-qualification.v3",
         "external authority qualification",
     )?;
     require_schema(
@@ -352,7 +352,7 @@ mod tests {
             "custodyCeremonySha256":custody_ceremony,
             "manifestCanonicalSha256":manifest_digest,
             "nativeRolesCeremonySha256":native_roles_ceremony,
-            "schema":"postern.bridge-authority-external-qualification.v2"
+            "schema":"postern.bridge-authority-external-qualification.v3"
         });
         let external_authority_digest = canonical_digest(&external_authority);
         let cycle = json!({"manifestCanonicalSha256":manifest_digest,"routeId":route,

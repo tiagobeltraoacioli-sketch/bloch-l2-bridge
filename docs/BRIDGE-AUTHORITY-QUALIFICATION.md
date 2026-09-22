@@ -22,6 +22,19 @@ and verifies that neither it nor its pathname changed throughout use. A
 caller-selected program or mutable `PATH` lookup is never accepted as a
 signature trust boundary.
 
+Qualification continuity is anchored in a separate, checksum-pinned
+`postern.bridge-authority-qualification-checkpoint.v1` file. The package,
+every review record and every signed attestation bind that checkpoint, its
+review policy, ceremony package, exact successor sequence and predecessor
+qualification. Genesis requires sequence one and the zero predecessor; later
+qualifications require an exact one-step advance and the canonical SHA-256 of
+the preceding complete qualification package. The checkpoint and its digest
+are operator inputs outside the package, so a package cannot select its own
+replay state. A successful read-only verification returns the successor data;
+an independently administered checkpoint writer must durably retain it before
+the result can be used. This checker never updates or consumes production
+state itself.
+
 Every signed attestation binds the canonical ceremony package, manifest,
 authority policy, all three ceremony records, the complete reviewer policy and
 a distinct, supplied external review record. Each review record must enumerate
@@ -43,11 +56,14 @@ python3 scripts/check-bridge-authority-qualification.py \
   --qualification /private/reviewed/authority-qualification.json \
   --review-policy /private/operator-policy/authority-review-policy.json \
   --trusted-review-policy-sha256 0xAUTHENTICATED_CANONICAL_SHA256 \
+  --qualification-checkpoint /private/operator-policy/qualification-checkpoint.json \
+  --trusted-qualification-checkpoint-sha256 0xAUTHENTICATED_CHECKPOINT_SHA256 \
   --ssh-keygen /usr/bin/ssh-keygen \
   --trusted-ssh-keygen-sha256 0xAUTHENTICATED_VERIFIER_SHA256
 ```
 
-The checked-in `authority-qualification.pending.json` and
+The checked-in `authority-qualification.pending.json`,
+`authority-qualification-checkpoint.pending.json` and
 `authority-review-policy.pending.json` intentionally contain no commitments,
 reviewers or signatures and are refused. Do not replace them with invented
 people, generated production keys or placeholder approvals.
