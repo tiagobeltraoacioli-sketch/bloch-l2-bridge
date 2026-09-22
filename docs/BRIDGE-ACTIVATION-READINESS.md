@@ -81,7 +81,21 @@ deliberately different, and neither executable is accepted in the other's role.
 The package checker accepts no extra output. Both executables and their SHA-256
 pins must come from authenticated operator policy,
 never from the bundle being checked. A digest-echo program is suitable only for
-transport tests and is not an activation verifier. Because the process receives
+transport tests and is not an activation verifier. The repository's
+`bridge_activation_readiness_verifier` instead accepts only one exact request
+commitment embedded at build time. A normal build has no embedded commitment
+and therefore refuses every request. The reviewed build must set
+`BLOCH_BRIDGE_READINESS_COMMITMENT_SHA256` to the lowercase, `0x`-prefixed
+SHA-256 of the complete domain-separated request; malformed and placeholder
+values fail closed. The commitment is not accepted through arguments, standard
+input, the bundle or another mutable runtime source.
+
+This exact-package verifier is useful only after an independent review has
+authenticated every evidence source in the one committed package. It does not
+turn report booleans into evidence, discover RPC state, validate signatures not
+already covered by the approval sub-verifier, open activation, or make a generic
+package safe. The reviewed executable's own SHA-256 must still be distributed
+through authenticated operator policy. Because the process receives
 the canonical bundle rather than arbitrary filesystem paths, a production
 verifier must embed the independently authenticated expected commitments and
 authority policy for this exact activation package (or verify self-contained
