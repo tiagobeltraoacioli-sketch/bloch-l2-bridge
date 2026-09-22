@@ -144,13 +144,36 @@ def fixture():
         authority["approvalPackageSha256"],
         authority["activationApprovalSignature"],
     ))
+    external_authority = {
+        "schema": "postern.bridge-authority-external-qualification.v1",
+        "ceremonyPackageCanonicalSha256": digest("external-ceremony-package"),
+        "manifestCanonicalSha256": manifest_digest,
+        "authorityPolicySha256": policy_digest,
+        "custodyCeremonySha256": authority["custodyCeremonySha256"],
+        "nativeRolesCeremonySha256": authority["nativeRolesCeremonySha256"],
+        "activationAuthorityCeremonySha256": digest(
+            "activation-authority-ceremony"
+        ),
+        "reviewPolicySha256": digest("external-review-policy"),
+        "reviewerCount": 3,
+        "reviewThreshold": 3,
+        "externalRecordsAuthenticated": True,
+        "custodyQualified": True,
+        "authoritiesQualified": True,
+        "keysLoaded": False,
+        "signingAllowed": False,
+        "deploymentAllowed": False,
+        "broadcastAllowed": False,
+        "activationAuthorized": False,
+    }
     return {
-        "schema": "postern.bridge-activation-readiness.v2",
+        "schema": "postern.bridge-activation-readiness.v3",
         "manifest": manifest,
         "settlementVerification": settlement,
         "deploymentVerification": deployment,
         "authorityPolicy": policy,
         "authorityQualification": authority,
+        "externalAuthorityQualification": external_authority,
         "disposableCycle": cycle,
     }
 
@@ -223,6 +246,23 @@ def verify(executable, pin, bundle, directory):
     return verify_bridge_activation_readiness(
         executable, pin, approval, approval_pin,
         bundle["authorityPolicy"]["authorityPolicySha256"], state, state_pin, bundle,
+        bundle["externalAuthorityQualification"]["reviewPolicySha256"],
+        canonical_sha256(bundle["externalAuthorityQualification"]),
+    )
+
+
+def validated(bundle):
+    return _validated_request(
+        bundle,
+        bundle["externalAuthorityQualification"]["reviewPolicySha256"],
+        canonical_sha256(bundle["externalAuthorityQualification"]),
+    )
+
+
+def trust_args(bundle):
+    return (
+        bundle["externalAuthorityQualification"]["reviewPolicySha256"],
+        canonical_sha256(bundle["externalAuthorityQualification"]),
     )
 
 
@@ -236,10 +276,11 @@ class BridgeActivationReadinessTest(unittest.TestCase):
         self.assertEqual(bundle, before)
         self.assertEqual(
             report["schema"],
-            "postern.bridge-activation-readiness-verification.v2",
+            "postern.bridge-activation-readiness-verification.v3",
         )
         for field in (
             "settlementVerified", "custodyAuthoritiesVerified",
+            "externalAuthorityReviewVerified",
             "pausedDeploymentVerified", "disposableCycleVerified",
             "activationAuthorized", "mintAuthorized", "releaseAuthorized",
             "bridgeReady",
@@ -281,13 +322,14 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                         Path(sys.executable), digest("x"),
                         Path(sys.executable), digest("approval"), digest("policy"),
                         Path("checkpoint"), digest("checkpoint"), bundle,
+                        *trust_args(bundle),
                     )
         run.assert_not_called()
 
     def test_cross_artifact_substitution_and_unknown_fields_refuse(self):
         mutations = [
             lambda value: value.update(
-                schema="postern.bridge-activation-readiness.v1"),
+                schema="postern.bridge-activation-readiness.v2"),
             lambda value: value["authorityPolicy"]["activationAuthority"].update(
                 publicKey=digest("substituted-activation-key")),
             lambda value: value["authorityPolicy"]["activationAuthority"].update(
@@ -318,7 +360,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle = fixture()
             mutate(bundle)
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
-                _validated_request(bundle)
+                validated(bundle)
 
     def test_activation_authority_is_eighth_independent_identity(self):
         collisions = (
@@ -341,7 +383,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle["authorityPolicy"]["authorityPolicySha256"] = policy_digest
             bundle["authorityQualification"]["authorityPolicySha256"] = policy_digest
             with self.subTest(field=policy_field), self.assertRaises(ValueError):
-                _validated_request(bundle)
+                validated(bundle)
 
         bundle = fixture()
         manifest = copy.deepcopy(bundle["manifest"])
@@ -362,6 +404,57 @@ class BridgeActivationReadinessTest(unittest.TestCase):
         })
         with self.assertRaises(ValueError):
             _validate_authority_policy(policy, manifest, manifest_digest)
+
+    def test_external_qualification_is_non_authorizing_and_externally_pinned(self):
+        for field in (
+            "keysLoaded", "signingAllowed", "deploymentAllowed",
+            "broadcastAllowed", "activationAuthorized",
+        ):
+            bundle = fixture()
+            bundle["externalAuthorityQualification"][field] = True
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validated(bundle)
+
+        bundle = fixture()
+        with self.assertRaisesRegex(ValueError, "untrusted review policy"):
+            _validated_request(
+                bundle, digest("attacker-review-policy"),
+                canonical_sha256(bundle["externalAuthorityQualification"]),
+            )
+        with self.assertRaisesRegex(ValueError, "trusted digest"):
+            _validated_request(
+                bundle,
+                bundle["externalAuthorityQualification"]["reviewPolicySha256"],
+                digest("attacker-qualification-report"),
+            )
+
+    def test_external_qualification_cross_bindings_and_pending_shapes_refuse(self):
+        mutations = [
+            lambda report: report.update(
+                manifestCanonicalSha256=digest("other-manifest")),
+            lambda report: report.update(
+                authorityPolicySha256=digest("other-authority-policy")),
+            lambda report: report.update(
+                custodyCeremonySha256=digest("other-custody-ceremony")),
+            lambda report: report.update(
+                nativeRolesCeremonySha256=digest("other-native-roles-ceremony")),
+            lambda report: report.update(reviewerCount=2),
+            lambda report: report.update(reviewThreshold=2),
+            lambda report: report.update(externalRecordsAuthenticated=False),
+            lambda report: report.update(extra=True),
+        ]
+        for mutate in mutations:
+            bundle = fixture()
+            mutate(bundle["externalAuthorityQualification"])
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                validated(bundle)
+
+        pending = json.loads((ROOT / "mainnet-custody/authority-qualification.pending.json")
+                             .read_text(encoding="utf-8"))
+        bundle = fixture()
+        bundle["externalAuthorityQualification"] = pending
+        with self.assertRaises((ValueError, TypeError)):
+            _validated_request(bundle, digest("pending-policy"), digest("pending-report"))
 
     def test_prior_package_or_sequence_cannot_be_replayed(self):
         original = fixture()
@@ -400,7 +493,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
 
         for bundle in mutations:
             with self.subTest(bundle=bundle), self.assertRaises(ValueError):
-                _validated_request(bundle)
+                validated(bundle)
 
     def test_cycle_must_be_small_distinct_and_balance_neutral(self):
         mutations = [
@@ -420,7 +513,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle = fixture()
             mutate(bundle["disposableCycle"], bundle["manifest"])
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
-                _validated_request(bundle)
+                validated(bundle)
 
     def test_activation_approval_must_be_current_and_bounded(self):
         mutations = [
@@ -434,7 +527,7 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             bundle = fixture()
             bundle["authorityQualification"].update(values)
             with self.subTest(values=values), self.assertRaises(ValueError):
-                _validated_request(bundle)
+                validated(bundle)
 
     def test_verifier_pin_permissions_and_exact_output_fail_closed(self):
         bundle = fixture()
@@ -463,39 +556,40 @@ class BridgeActivationReadinessTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     full, full_pin, approval, digest("wrong-approval-pin"),
-                    policy, state, state_pin, bundle,
+                    policy, state, state_pin, bundle, *trust_args(bundle),
                 )
 
             malicious_echo, malicious_pin = verifier(directory)
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     full, full_pin, malicious_echo, malicious_pin,
-                    policy, state, state_pin, bundle,
+                    policy, state, state_pin, bundle, *trust_args(bundle),
                 )
 
             uppercase_echo, _ = verifier(directory, "upper")
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     full, full_pin, uppercase_echo, approval_pin,
-                    policy, state, state_pin, bundle,
+                    policy, state, state_pin, bundle, *trust_args(bundle),
                 )
 
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     full, full_pin, approval, approval_pin,
                     digest("wrong-policy"), state, state_pin, bundle,
+                    *trust_args(bundle),
                 )
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     full, full_pin, approval, approval_pin,
                     policy, Path(directory) / "missing-checkpoint",
-                    digest("wrong-checkpoint"), bundle,
+                    digest("wrong-checkpoint"), bundle, *trust_args(bundle),
                 )
 
             with self.assertRaises(ValueError):
                 verify_bridge_activation_readiness(
                     approval, approval_pin, approval, approval_pin,
-                    policy, state, state_pin, bundle,
+                    policy, state, state_pin, bundle, *trust_args(bundle),
                 )
 
     def test_cli_refusal_is_machine_readable_and_never_writes_state(self):
@@ -515,7 +609,9 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                  "--authority-policy-sha256",
                  bundle["authorityPolicy"]["authorityPolicySha256"],
                  "--approval-checkpoint", str(state),
-                 "--approval-checkpoint-sha256", state_pin],
+                 "--approval-checkpoint-sha256", state_pin,
+                 "--trusted-review-policy-sha256", trust_args(bundle)[0],
+                 "--trusted-external-qualification-sha256", trust_args(bundle)[1]],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             self.assertNotEqual(missing_approval.returncode, 0)
@@ -527,7 +623,9 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                  "--authority-policy-sha256",
                  bundle["authorityPolicy"]["authorityPolicySha256"],
                  "--approval-checkpoint", str(state),
-                 "--approval-checkpoint-sha256", state_pin],
+                 "--approval-checkpoint-sha256", state_pin,
+                 "--trusted-review-policy-sha256", trust_args(bundle)[0],
+                 "--trusted-external-qualification-sha256", trust_args(bundle)[1]],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -541,7 +639,9 @@ class BridgeActivationReadinessTest(unittest.TestCase):
                  "--authority-policy-sha256",
                  bundle["authorityPolicy"]["authorityPolicySha256"],
                  "--approval-checkpoint", str(state),
-                 "--approval-checkpoint-sha256", state_pin],
+                 "--approval-checkpoint-sha256", state_pin,
+                 "--trusted-review-policy-sha256", trust_args(bundle)[0],
+                 "--trusted-external-qualification-sha256", trust_args(bundle)[1]],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             self.assertEqual(result.returncode, 1)

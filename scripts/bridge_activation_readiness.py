@@ -20,7 +20,7 @@ from usdt_observer.common import UINT64_MAX, require, word
 from usdt_observer.verifier_process import run_verifier
 
 
-DOMAIN = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v2\0"
+DOMAIN = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v3\0"
 MAX_VERIFIER_BYTES = 64 * 1024 * 1024
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_DISPOSABLE_BASE_UNITS = 10_000_000  # 10 USDC at six decimals.
@@ -73,7 +73,17 @@ CYCLE_FIELDS = {
 }
 BUNDLE_FIELDS = {
     "schema", "manifest", "settlementVerification", "deploymentVerification",
-    "authorityPolicy", "authorityQualification", "disposableCycle",
+    "authorityPolicy", "authorityQualification", "externalAuthorityQualification",
+    "disposableCycle",
+}
+EXTERNAL_QUALIFICATION_FIELDS = {
+    "schema", "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
+    "authorityPolicySha256", "custodyCeremonySha256",
+    "nativeRolesCeremonySha256", "activationAuthorityCeremonySha256",
+    "reviewPolicySha256", "reviewerCount", "reviewThreshold",
+    "externalRecordsAuthenticated", "custodyQualified", "authoritiesQualified",
+    "keysLoaded", "signingAllowed", "deploymentAllowed", "broadcastAllowed",
+    "activationAuthorized",
 }
 
 
@@ -196,6 +206,59 @@ def _validate_authority(report):
                 "successor activation approval requires a non-placeholder predecessor")
     require(report["decision"] == "approve-activation-when-all-gates-satisfied",
             "conditional activation approval required")
+
+
+def _validate_external_qualification(
+    report, trusted_review_policy_sha256, trusted_external_qualification_sha256,
+):
+    """Authenticate a non-authorizing qualification report with external pins."""
+    _fields(report, EXTERNAL_QUALIFICATION_FIELDS, "external authority qualification")
+    require(report["schema"] == "postern.bridge-authority-external-qualification.v1",
+            "unsupported external authority qualification")
+    for field in (
+        "ceremonyPackageCanonicalSha256", "manifestCanonicalSha256",
+        "authorityPolicySha256", "custodyCeremonySha256",
+        "nativeRolesCeremonySha256", "activationAuthorityCeremonySha256",
+        "reviewPolicySha256",
+    ):
+        _pin(report[field], f"external qualification {field}")
+        require(report[field] == report[field].lower(),
+                f"external qualification {field}: canonical lowercase hex required")
+    require(type(report["reviewThreshold"]) is int
+            and report["reviewThreshold"] == 3,
+            "external qualification three-reviewer threshold required")
+    require(type(report["reviewerCount"]) is int
+            and not isinstance(report["reviewerCount"], bool)
+            and 3 <= report["reviewerCount"] <= 5,
+            "external qualification quorum required")
+    for field in (
+        "externalRecordsAuthenticated", "custodyQualified", "authoritiesQualified",
+    ):
+        _boolean(report[field], True, f"external qualification {field}")
+    for field in (
+        "keysLoaded", "signingAllowed", "deploymentAllowed", "broadcastAllowed",
+        "activationAuthorized",
+    ):
+        _boolean(report[field], False, f"external qualification {field}")
+
+    review_policy = "0x" + _pin(
+        trusted_review_policy_sha256, "trusted external review policy"
+    ).hex()
+    qualification = "0x" + _pin(
+        trusted_external_qualification_sha256,
+        "trusted external qualification report",
+    ).hex()
+    require(type(trusted_review_policy_sha256) is str
+            and trusted_review_policy_sha256 == review_policy,
+            "trusted review policy digest must be canonical lowercase hex")
+    require(type(trusted_external_qualification_sha256) is str
+            and trusted_external_qualification_sha256 == qualification,
+            "trusted qualification digest must be canonical lowercase hex")
+    require(report["reviewPolicySha256"] == review_policy,
+            "external qualification binds an untrusted review policy")
+    require(canonical_sha256(report).lower() == qualification,
+            "external qualification report does not match trusted digest")
+    return qualification
 
 
 def _validate_authority_policy(policy, manifest, manifest_digest):
@@ -322,9 +385,11 @@ def _validate_cycle(report, cap):
         _boolean(report[field], True, f"cycle {field}")
 
 
-def _validated_request(bundle):
+def _validated_request(
+    bundle, trusted_review_policy_sha256, trusted_external_qualification_sha256,
+):
     _fields(bundle, BUNDLE_FIELDS, "readiness bundle")
-    require(bundle["schema"] == "postern.bridge-activation-readiness.v2",
+    require(bundle["schema"] == "postern.bridge-activation-readiness.v3",
             "unsupported bridge readiness schema")
     manifest = bundle["manifest"]
     # Import lazily so this module cannot accidentally weaken manifest policy.
@@ -335,10 +400,15 @@ def _validated_request(bundle):
     deployment = bundle["deploymentVerification"]
     policy = bundle["authorityPolicy"]
     authority = bundle["authorityQualification"]
+    external_authority = bundle["externalAuthorityQualification"]
     cycle = bundle["disposableCycle"]
     _validate_settlement(settlement)
     _validate_deployment(deployment)
     _validate_authority(authority)
+    external_qualification_digest = _validate_external_qualification(
+        external_authority, trusted_review_policy_sha256,
+        trusted_external_qualification_sha256,
+    )
     _validate_cycle(cycle, manifest["cap"]["base_units"])
 
     require(manifest_report["manifestCanonicalSha256"] == digest,
@@ -372,6 +442,16 @@ def _validated_request(bundle):
     require(authority["authorityPolicySha256"].lower()
             == authority_policy.lower(),
             "authority qualification binds another custody policy")
+    require(external_authority["manifestCanonicalSha256"] == digest.lower(),
+            "external qualification binds another manifest")
+    require(external_authority["authorityPolicySha256"] == authority_policy.lower(),
+            "external qualification binds another authority policy")
+    require(external_authority["custodyCeremonySha256"]
+            == authority["custodyCeremonySha256"].lower(),
+            "external qualification binds another custody ceremony")
+    require(external_authority["nativeRolesCeremonySha256"]
+            == authority["nativeRolesCeremonySha256"].lower(),
+            "external qualification binds another native roles ceremony")
     require(authority["settlementVerificationSha256"].lower()
             == canonical_sha256(settlement).lower(),
             "authority qualification binds another settlement verification")
@@ -402,7 +482,7 @@ def _validated_request(bundle):
     ).encode("ascii")
     request = DOMAIN + encoded
     require(len(request) <= MAX_REQUEST_BYTES, "readiness bundle exceeds verifier limit")
-    return request, digest, route
+    return request, digest, route, external_qualification_digest
 
 
 def _stage_verifier(path):
@@ -448,10 +528,14 @@ def _stage_verifier(path):
 
 def verify_bridge_activation_readiness(
     executable, expected_sha256, approval_executable, approval_expected_sha256,
-    authority_policy_sha256, approval_checkpoint, approval_checkpoint_sha256, bundle,
+    authority_policy_sha256, approval_checkpoint, approval_checkpoint_sha256,
+    bundle, trusted_review_policy_sha256, trusted_external_qualification_sha256,
 ):
     """Authenticate the complete package; return permission, never perform it."""
-    request, manifest_digest, route = _validated_request(bundle)
+    request, manifest_digest, route, external_qualification_digest = _validated_request(
+        bundle, trusted_review_policy_sha256,
+        trusted_external_qualification_sha256,
+    )
     expected = word(expected_sha256, 32)
     approval_expected = word(approval_expected_sha256, 32)
     approval_temporary = None
@@ -488,14 +572,16 @@ def verify_bridge_activation_readiness(
             and result.stdout == (commitment + "\n").encode("ascii"),
             "bridge readiness verifier refused")
     return {
-        "schema": "postern.bridge-activation-readiness-verification.v2",
+        "schema": "postern.bridge-activation-readiness-verification.v3",
         "manifestCanonicalSha256": manifest_digest,
         "routeId": route,
         "verifierSha256": "0x" + expected.hex(),
         "approvalVerifierSha256": "0x" + approval_expected.hex(),
         "readinessCommitmentSha256": "0x" + commitment,
+        "externalAuthorityQualificationSha256": external_qualification_digest,
         "settlementVerified": True,
         "custodyAuthoritiesVerified": True,
+        "externalAuthorityReviewVerified": True,
         "pausedDeploymentVerified": True,
         "disposableCycleVerified": True,
         "activationAuthorized": True,

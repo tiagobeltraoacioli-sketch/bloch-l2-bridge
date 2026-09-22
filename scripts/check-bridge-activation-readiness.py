@@ -19,13 +19,17 @@ def main(argv=None):
     parser.add_argument("--authority-policy-sha256", required=True)
     parser.add_argument("--approval-checkpoint", type=Path, required=True)
     parser.add_argument("--approval-checkpoint-sha256", required=True)
+    parser.add_argument("--trusted-review-policy-sha256", required=True)
+    parser.add_argument("--trusted-external-qualification-sha256", required=True)
     args = parser.parse_args(argv)
     try:
         report = verify_bridge_activation_readiness(
             args.verifier.absolute(), args.verifier_sha256,
             args.approval_verifier.absolute(), args.approval_verifier_sha256,
             args.authority_policy_sha256, args.approval_checkpoint.absolute(),
-            args.approval_checkpoint_sha256, load_json(args.bundle)
+            args.approval_checkpoint_sha256, load_json(args.bundle),
+            args.trusted_review_policy_sha256,
+            args.trusted_external_qualification_sha256,
         )
     except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError):
         print(

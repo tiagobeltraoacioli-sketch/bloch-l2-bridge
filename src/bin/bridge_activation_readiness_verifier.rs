@@ -12,7 +12,7 @@ use std::{
     io::{self, Read},
 };
 
-const REQUEST_DOMAIN: &[u8] = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v2\0";
+const REQUEST_DOMAIN: &[u8] = b"BLOCH-BRIDGE-ACTIVATION-READINESS-v3\0";
 const MAX_REQUEST_BYTES: u64 = 128 * 1024;
 
 #[derive(Clone, Copy)]
@@ -25,6 +25,7 @@ struct ReviewPins<'a> {
     settlement: Option<&'a str>,
     deployment: Option<&'a str>,
     cycle: Option<&'a str>,
+    external_qualification: Option<&'a str>,
 }
 
 const REVIEW_PINS: ReviewPins<'static> = ReviewPins {
@@ -36,6 +37,7 @@ const REVIEW_PINS: ReviewPins<'static> = ReviewPins {
     settlement: option_env!("BLOCH_BRIDGE_SETTLEMENT_VERIFICATION_SHA256"),
     deployment: option_env!("BLOCH_BRIDGE_DEPLOYMENT_VERIFICATION_SHA256"),
     cycle: option_env!("BLOCH_BRIDGE_DISPOSABLE_CYCLE_SHA256"),
+    external_qualification: option_env!("BLOCH_BRIDGE_EXTERNAL_AUTHORITY_QUALIFICATION_SHA256"),
 };
 
 fn pin(value: Option<&str>, label: &str) -> Result<[u8; 32], String> {
@@ -104,6 +106,7 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
         "deploymentVerification",
         "authorityPolicy",
         "authorityQualification",
+        "externalAuthorityQualification",
         "disposableCycle",
     ]);
     if actual != expected {
@@ -111,7 +114,7 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
     }
     require_schema(
         root,
-        "postern.bridge-activation-readiness.v2",
+        "postern.bridge-activation-readiness.v3",
         "readiness bundle",
     )?;
 
@@ -121,12 +124,14 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
     let deployment_value = get("deploymentVerification")?;
     let policy_value = get("authorityPolicy")?;
     let authority_value = get("authorityQualification")?;
+    let external_authority_value = get("externalAuthorityQualification")?;
     let cycle_value = get("disposableCycle")?;
     let manifest = object(manifest_value, "manifest")?;
     let settlement = object(settlement_value, "settlement verification")?;
     let deployment = object(deployment_value, "deployment verification")?;
     let policy = object(policy_value, "authority policy")?;
     let authority = object(authority_value, "authority qualification")?;
+    let external_authority = object(external_authority_value, "external authority qualification")?;
     let cycle = object(cycle_value, "disposable cycle")?;
 
     require_schema(manifest, "postern.custody-deployment-plan.v1", "manifest")?;
@@ -151,6 +156,11 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
         "authority qualification",
     )?;
     require_schema(
+        external_authority,
+        "postern.bridge-authority-external-qualification.v1",
+        "external authority qualification",
+    )?;
+    require_schema(
         cycle,
         "postern.bridge-disposable-cycle.v1",
         "disposable cycle",
@@ -163,12 +173,48 @@ fn verify_semantics(bundle: &Value, pins: ReviewPins<'_>) -> Result<(), String> 
     let settlement_pin = pin(pins.settlement, "settlement verification pin")?;
     let deployment_pin = pin(pins.deployment, "deployment verification pin")?;
     let cycle_pin = pin(pins.cycle, "disposable cycle pin")?;
+    let external_qualification_pin = pin(
+        pins.external_qualification,
+        "external authority qualification pin",
+    )?;
     if canonical_sha256(manifest_value)? != manifest_pin
         || canonical_sha256(settlement_value)? != settlement_pin
         || canonical_sha256(deployment_value)? != deployment_pin
         || canonical_sha256(cycle_value)? != cycle_pin
+        || canonical_sha256(external_authority_value)? != external_qualification_pin
     {
         return Err("reviewed artifact commitment mismatch".into());
+    }
+    if field_pin(
+        external_authority,
+        "authorityPolicySha256",
+        "external qualification authority policy pin",
+    )? != policy_pin
+        || field_pin(
+            external_authority,
+            "manifestCanonicalSha256",
+            "external qualification manifest pin",
+        )? != manifest_pin
+        || field_pin(
+            external_authority,
+            "custodyCeremonySha256",
+            "external qualification custody ceremony pin",
+        )? != field_pin(
+            authority,
+            "custodyCeremonySha256",
+            "authority custody ceremony",
+        )?
+        || field_pin(
+            external_authority,
+            "nativeRolesCeremonySha256",
+            "external qualification native roles ceremony pin",
+        )? != field_pin(
+            authority,
+            "nativeRolesCeremonySha256",
+            "authority native roles ceremony",
+        )?
+    {
+        return Err("external authority qualification binding mismatch".into());
     }
     if field_pin(
         policy,
@@ -279,7 +325,7 @@ mod tests {
         digest(&serde_json::to_vec(value).unwrap())
     }
 
-    fn fixture() -> (Vec<u8>, [String; 8]) {
+    fn fixture() -> (Vec<u8>, [String; 9]) {
         let route = digest(b"route");
         let manifest = json!({"schema":"postern.custody-deployment-plan.v1"});
         let manifest_digest = canonical_digest(&manifest);
@@ -293,16 +339,29 @@ mod tests {
         let settlement_digest = canonical_digest(&settlement);
         let deployment_digest = canonical_digest(&deployment);
         let approval_digest = digest(b"approval");
+        let custody_ceremony = digest(b"custody-ceremony");
+        let native_roles_ceremony = digest(b"native-roles-ceremony");
         let authority = json!({"approvalPackageSha256":approval_digest,"authorityPolicySha256":policy_digest,
+            "custodyCeremonySha256":custody_ceremony,
             "deploymentVerificationSha256":deployment_digest,"manifestCanonicalSha256":manifest_digest,
+            "nativeRolesCeremonySha256":native_roles_ceremony,
             "routeId":route,"schema":"postern.bridge-authority-qualification.v2",
             "settlementVerificationSha256":settlement_digest});
+        let external_authority = json!({
+            "authorityPolicySha256":policy_digest,
+            "custodyCeremonySha256":custody_ceremony,
+            "manifestCanonicalSha256":manifest_digest,
+            "nativeRolesCeremonySha256":native_roles_ceremony,
+            "schema":"postern.bridge-authority-external-qualification.v1"
+        });
+        let external_authority_digest = canonical_digest(&external_authority);
         let cycle = json!({"manifestCanonicalSha256":manifest_digest,"routeId":route,
             "schema":"postern.bridge-disposable-cycle.v1"});
         let cycle_digest = canonical_digest(&cycle);
         let bundle = json!({"authorityPolicy":policy,"authorityQualification":authority,
-            "deploymentVerification":deployment,"disposableCycle":cycle,"manifest":manifest,
-            "schema":"postern.bridge-activation-readiness.v2","settlementVerification":settlement});
+            "deploymentVerification":deployment,"disposableCycle":cycle,
+            "externalAuthorityQualification":external_authority,"manifest":manifest,
+            "schema":"postern.bridge-activation-readiness.v3","settlementVerification":settlement});
         let request = [REQUEST_DOMAIN, &serde_json::to_vec(&bundle).unwrap()].concat();
         let pins = [
             digest(&request),
@@ -313,11 +372,12 @@ mod tests {
             settlement_digest,
             deployment_digest,
             cycle_digest,
+            external_authority_digest,
         ];
         (request, pins)
     }
 
-    fn pins(v: &[String; 8]) -> ReviewPins<'_> {
+    fn pins(v: &[String; 9]) -> ReviewPins<'_> {
         ReviewPins {
             request: Some(&v[0]),
             manifest: Some(&v[1]),
@@ -327,6 +387,7 @@ mod tests {
             settlement: Some(&v[5]),
             deployment: Some(&v[6]),
             cycle: Some(&v[7]),
+            external_qualification: Some(&v[8]),
         }
     }
 
@@ -358,6 +419,7 @@ mod tests {
                 5 => absent.settlement = None,
                 6 => absent.deployment = None,
                 7 => absent.cycle = None,
+                8 => absent.external_qualification = None,
                 _ => unreachable!(),
             }
             assert!(

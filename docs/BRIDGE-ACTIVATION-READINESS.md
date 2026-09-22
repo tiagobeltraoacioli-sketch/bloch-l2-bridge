@@ -6,8 +6,8 @@ deploy, sign, broadcast, unpause, mint or release anything. A successful result
 is permission for a separately reviewed activation procedure, not evidence
 that the procedure occurred.
 
-The command accepts one strict `postern.bridge-activation-readiness.v2` bundle.
-It combines the complete custody manifest with four artifacts:
+The command accepts one strict `postern.bridge-activation-readiness.v3` bundle.
+It combines the complete custody manifest with five artifacts:
 
 1. the exact non-authorizing report emitted by the L2/native settlement
    verifier;
@@ -16,7 +16,9 @@ It combines the complete custody manifest with four artifacts:
 3. the three-of-five custody, separated native-role qualification and a distinct
    external activation-authority policy, including authenticated source
    deployment, native gateway and conditional activation approval commitments;
-4. a disposable-value deposit, mint, burn and release cycle whose source
+4. the non-authorizing `postern.bridge-authority-external-qualification.v1`
+   report produced by the independent three-of-five authority review quorum;
+5. a disposable-value deposit, mint, burn and release cycle whose source
    reserves and native supply return to their starting values and whose
    rollback/pause exercise is committed.
 
@@ -30,6 +32,13 @@ custodians, issuer and sponsor plus the external activation authority's public
 operator identity, organization identity, Ed25519 public key and custody
 attestation. The external authority must be distinct from all seven operational
 authorities across every comparable identity. Its private key is never an input.
+The external qualification must bind the same manifest, authority policy,
+custody ceremony and native-role ceremony as the operational qualification.
+Its canonical report SHA-256 and reviewer-policy SHA-256 are mandatory operator
+inputs outside the bundle. The report must retain `keysLoaded`, `signingAllowed`,
+`deploymentAllowed`, `broadcastAllowed` and `activationAuthorized` as false.
+Qualification therefore authenticates public authority evidence but cannot load
+keys or grant any operational permission.
 
 The approval signs the canonical SHA-256 of a separate, non-circular
 `postern.bridge-activation-approval-package.v2` object. That object binds the
@@ -62,7 +71,7 @@ canonical bundle is first sent to the separately checksum-pinned
 authority policy and predecessor checkpoint and writes the uppercase request
 SHA-256 on success. Only then is the same bundle
 sent to the independently reviewed complete verifier under the domain
-`BLOCH-BRIDGE-ACTIVATION-READINESS-v2`. Both executables are copied from regular,
+`BLOCH-BRIDGE-ACTIVATION-READINESS-v3`. Both executables are copied from regular,
 non-group/world-writable inodes, checked against distinct operator-supplied
 SHA-256 pins, and executed only from private copies. The complete verifier must
 authenticate, rather than merely echo:
@@ -87,7 +96,7 @@ commitment embedded at build time. A normal build has no embedded commitment
 and therefore refuses every request. The reviewed build must set
 `BLOCH_BRIDGE_READINESS_COMMITMENT_SHA256` to the lowercase, `0x`-prefixed
 SHA-256 of the complete domain-separated request. It must additionally embed
-seven independently reviewed semantic pins:
+eight independently reviewed semantic pins:
 
 - `BLOCH_BRIDGE_MANIFEST_SHA256`;
 - `BLOCH_BRIDGE_ROUTE_ID`;
@@ -95,11 +104,12 @@ seven independently reviewed semantic pins:
 - `BLOCH_BRIDGE_APPROVAL_PACKAGE_SHA256`;
 - `BLOCH_BRIDGE_SETTLEMENT_VERIFICATION_SHA256`;
 - `BLOCH_BRIDGE_DEPLOYMENT_VERIFICATION_SHA256`;
-- `BLOCH_BRIDGE_DISPOSABLE_CYCLE_SHA256`.
+- `BLOCH_BRIDGE_DISPOSABLE_CYCLE_SHA256`;
+- `BLOCH_BRIDGE_EXTERNAL_AUTHORITY_QUALIFICATION_SHA256`.
 
 Every pin is a lowercase, `0x`-prefixed, non-placeholder 32-byte value. The
-verifier requires exact v2 top-level fields and component schema versions,
-recomputes the canonical SHA-256 of the manifest and three evidence reports,
+verifier requires exact v3 top-level fields and component schema versions,
+recomputes the canonical SHA-256 of the manifest and four evidence reports,
 checks their cross-references, and rejects JSON that is not the composer's
 compact, sorted ASCII serialization. This makes the reviewed build inputs
 individually inspectable rather than hiding the selected route and evidence
@@ -115,7 +125,7 @@ through authenticated operator policy. Because the process receives
 the canonical bundle rather than arbitrary filesystem paths, a production
 verifier must embed the independently authenticated expected commitments and
 authority policy for this exact activation package (or verify self-contained
-cryptographic certificates carried by its reviewed package format). For v2 it
+cryptographic certificates carried by its reviewed package format). For v3 it
 must also verify the approval package's Ed25519 certificate and monotonic
 predecessor against independently retained state. Merely
 checking that hash-shaped fields and booleans are present is not authentication.
@@ -131,8 +141,14 @@ python3 scripts/check-bridge-activation-readiness.py \
   --approval-verifier-sha256 0xREVIEWED_APPROVAL_VERIFIER_SHA256 \
   --authority-policy-sha256 0xREVIEWED_POLICY_SHA256 \
   --approval-checkpoint /private/reviewed/approval-checkpoint.json \
-  --approval-checkpoint-sha256 0xREVIEWED_CHECKPOINT_SHA256
+  --approval-checkpoint-sha256 0xREVIEWED_CHECKPOINT_SHA256 \
+  --trusted-review-policy-sha256 0xEXTERNALLY_SELECTED_REVIEW_POLICY_SHA256 \
+  --trusted-external-qualification-sha256 0xREVIEWED_QUALIFICATION_REPORT_SHA256
 ```
+
+The checked-in `authority-review-policy.pending.json` and
+`authority-qualification.pending.json` files are incomplete templates. They
+are not trust roots or readiness evidence and are refused by this composer.
 
 Any malformed input, wrong pin, verifier failure or incomplete evidence exits
 nonzero and emits machine-readable false values for `activationAuthorized`,
