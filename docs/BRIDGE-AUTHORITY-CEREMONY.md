@@ -40,3 +40,6 @@ the actual custody and recovery exercises, and explicitly qualify the result
 through a separately reviewed gate. This preflight output cannot be used as an
 activation approval or as the authority qualification consumed by the bridge
 readiness composer.
+
+The next boundary is the separately authenticated external-review gate in
+[`BRIDGE-AUTHORITY-QUALIFICATION.md`](BRIDGE-AUTHORITY-QUALIFICATION.md).

@@ -24,6 +24,12 @@ three-of-five custody, separate issuer and sponsor authorities, explicit caps,
 runtime pins and paused/disabled controls. It never authorizes deployment,
 broadcast or activation.
 
+The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
+[external qualification gate](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind the
+selected custody and native authorities to public evidence, then require an
+independent authenticated three-of-five reviewer quorum. The checked-in state
+is deliberately incomplete and all operational permissions remain disabled.
+
 The [mainnet USDC activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md)
 lists the public operator decisions and independent evidence required before a
 paused deployment can be proposed. It explicitly excludes private key material

@@ -1,0 +1,18 @@
+{
+  "schema": "postern.bridge-authority-qualification-review.v1",
+  "ceremonyPackageCanonicalSha256": null,
+  "manifestCanonicalSha256": null,
+  "authorityPolicySha256": null,
+  "custodyCeremonySha256": null,
+  "nativeRolesCeremonySha256": null,
+  "activationAuthorityCeremonySha256": null,
+  "reviewPolicySha256": null,
+  "attestations": [],
+  "controls": {
+    "keysLoaded": false,
+    "signingAllowed": false,
+    "deploymentAllowed": false,
+    "broadcastAllowed": false,
+    "activationAuthorized": false
+  }
+}
