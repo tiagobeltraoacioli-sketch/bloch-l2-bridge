@@ -86,9 +86,25 @@ transport tests and is not an activation verifier. The repository's
 commitment embedded at build time. A normal build has no embedded commitment
 and therefore refuses every request. The reviewed build must set
 `BLOCH_BRIDGE_READINESS_COMMITMENT_SHA256` to the lowercase, `0x`-prefixed
-SHA-256 of the complete domain-separated request; malformed and placeholder
-values fail closed. The commitment is not accepted through arguments, standard
-input, the bundle or another mutable runtime source.
+SHA-256 of the complete domain-separated request. It must additionally embed
+seven independently reviewed semantic pins:
+
+- `BLOCH_BRIDGE_MANIFEST_SHA256`;
+- `BLOCH_BRIDGE_ROUTE_ID`;
+- `BLOCH_BRIDGE_AUTHORITY_POLICY_SHA256`;
+- `BLOCH_BRIDGE_APPROVAL_PACKAGE_SHA256`;
+- `BLOCH_BRIDGE_SETTLEMENT_VERIFICATION_SHA256`;
+- `BLOCH_BRIDGE_DEPLOYMENT_VERIFICATION_SHA256`;
+- `BLOCH_BRIDGE_DISPOSABLE_CYCLE_SHA256`.
+
+Every pin is a lowercase, `0x`-prefixed, non-placeholder 32-byte value. The
+verifier requires exact v2 top-level fields and component schema versions,
+recomputes the canonical SHA-256 of the manifest and three evidence reports,
+checks their cross-references, and rejects JSON that is not the composer's
+compact, sorted ASCII serialization. This makes the reviewed build inputs
+individually inspectable rather than hiding the selected route and evidence
+behind one opaque request hash. These pins are not accepted through arguments,
+standard input, the bundle or another mutable runtime source.
 
 This exact-package verifier is useful only after an independent review has
 authenticated every evidence source in the one committed package. It does not
