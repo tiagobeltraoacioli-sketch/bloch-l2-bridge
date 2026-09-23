@@ -43,20 +43,6 @@ activation permission as false.
 - The checked-in pending template is not a production identity package and
   must continue to fail verification.
 
-Build and pin the minimal public-signature verifier before the ceremony. It
-accepts only a bounded message, raw public key and detached signature; it
-cannot sign or access a private key:
-
-```sh
-cargo build --release --locked --bin bridge_ed25519_public_verifier
-openssl dgst -sha256 target/release/bridge_ed25519_public_verifier
-PUBLIC_VERIFIER_SHA256=0xREVIEWED_PUBLIC_VERIFIER_SHA256
-```
-
-The coordinator opens this executable without following symlinks, refuses
-multiple hard links and group/world-writable files, hashes the opened bytes,
-and executes a private copy to prevent pathname substitution.
-
 ## 1. Create the public intake template
 
 On the coordinator computer:
@@ -67,6 +53,7 @@ CEREMONY_DIR=bridge-authority-ceremony-YYYYMMDD
 mkdir "$CEREMONY_DIR"
 python3 scripts/prepare-bridge-authority-trust-ceremony.py template \
   > "$CEREMONY_DIR/intake.json"
+CURRENT_INTAKE="$CEREMONY_DIR/intake.json"
 ```
 
 Populate only public values in `intake.json`. Use package sequence `"1"` and a
@@ -92,13 +79,31 @@ openssl dgst -sha256 recovery-declaration.pdf
 
 Enter the result as lowercase `0x` followed by 64 hexadecimal characters.
 
+Build and pin the minimal public-signature verifier before generating or
+importing any signatures. It accepts only a bounded message, raw public key
+and detached signature; it cannot sign or access a private key:
+
+```sh
+cargo build --release --locked --bin bridge_ed25519_public_verifier
+PUBLIC_VERIFIER=target/release/bridge_ed25519_public_verifier
+PUBLIC_VERIFIER_SHA256=0xREVIEWED_PUBLIC_VERIFIER_SHA256
+test "0x$(shasum -a 256 "$PUBLIC_VERIFIER" | awk '{print $1}')" \
+  = "$PUBLIC_VERIFIER_SHA256"
+```
+
+Replace the placeholder with the digest received through the independent
+review channel; do not trust a digest supplied with the signature. The
+coordinator opens this executable without following symlinks, refuses multiple
+hard links and group/world-writable files, hashes the opened bytes, and
+executes a private copy to prevent pathname substitution.
+
 ## 2. Root proof-of-possession round
 
 Generate three byte-exact requests. The destination directory must not exist:
 
 ```sh
 python3 scripts/prepare-bridge-authority-trust-ceremony.py root-requests \
-  "$CEREMONY_DIR/intake.json" "$CEREMONY_DIR/root-pop-requests"
+  "$CURRENT_INTAKE" "$CEREMONY_DIR/root-pop-requests"
 ```
 
 Transfer each root only its own `.message.bin` and `.request.json`. After
@@ -119,25 +124,31 @@ The root returns only the 64-byte signature. Import and apply it without
 editing JSON:
 
 ```sh
+ROOT_SLOT=1
+ROOT_SIGNATURE=trust-root-1-pop.signature.bin
+ROOT_RESPONSE="$CEREMONY_DIR/trust-root-1-pop.response.json"
+NEXT_INTAKE="$CEREMONY_DIR/intake.root-1.json"
+
 python3 scripts/prepare-bridge-authority-trust-ceremony.py import-signature \
-  "$CEREMONY_DIR/root-pop-requests/trust-root-1-pop.request.json" \
-  "$CEREMONY_DIR/root-pop-requests/trust-root-1-pop.message.bin" \
-  trust-root-1-pop.signature.bin \
-  "$CEREMONY_DIR/trust-root-1-pop.response.json" \
-  --public-signature-verifier target/release/bridge_ed25519_public_verifier \
+  "$CEREMONY_DIR/root-pop-requests/trust-root-$ROOT_SLOT-pop.request.json" \
+  "$CEREMONY_DIR/root-pop-requests/trust-root-$ROOT_SLOT-pop.message.bin" \
+  "$ROOT_SIGNATURE" "$ROOT_RESPONSE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
   --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
 
 python3 scripts/prepare-bridge-authority-trust-ceremony.py apply-signature \
-  "$CEREMONY_DIR/intake.json" \
-  "$CEREMONY_DIR/trust-root-1-pop.response.json" \
-  "$CEREMONY_DIR/intake.root-1.json" \
-  --public-signature-verifier target/release/bridge_ed25519_public_verifier \
+  "$CURRENT_INTAKE" "$ROOT_RESPONSE" "$NEXT_INTAKE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
   --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+CURRENT_INTAKE="$NEXT_INTAKE"
 ```
 
-Repeat for roots 2 and 3, always using the previous new intake as input and a
-new pathname as output. No private key file is returned. A root-1 response
-cannot be moved to root 2, even if filenames are changed.
+Repeat with `ROOT_SLOT=2` and `ROOT_SLOT=3`, distinct signature/response paths,
+and `NEXT_INTAKE` set to `intake.root-2.json` then `intake.root-3.json`. Assign
+`CURRENT_INTAKE="$NEXT_INTAKE"` after every successful application. Never reset
+it to the initial `intake.json`. No private key file is returned. A root-1
+response cannot be moved to root 2, even if filenames are changed.
 
 ## 3. Operational proof-of-possession round
 
@@ -146,7 +157,7 @@ requests:
 
 ```sh
 python3 scripts/prepare-bridge-authority-trust-ceremony.py authority-requests \
-  "$CEREMONY_DIR/intake.json" "$CEREMONY_DIR/authority-pop-requests"
+  "$CURRENT_INTAKE" "$CEREMONY_DIR/authority-pop-requests"
 ```
 
 Each operational authority independently verifies and signs only its assigned
@@ -160,6 +171,32 @@ required order is:
 3. `fee-sponsor`;
 4. `activation-authority`.
 
+For example, apply the first custodian and advance the current intake:
+
+```sh
+ROLE=custodian-1
+ROLE_SIGNATURE=custodian-1-pop.signature.bin
+ROLE_RESPONSE="$CEREMONY_DIR/custodian-1-pop.response.json"
+NEXT_INTAKE="$CEREMONY_DIR/intake.custodian-1.json"
+
+python3 scripts/prepare-bridge-authority-trust-ceremony.py import-signature \
+  "$CEREMONY_DIR/authority-pop-requests/$ROLE-pop.request.json" \
+  "$CEREMONY_DIR/authority-pop-requests/$ROLE-pop.message.bin" \
+  "$ROLE_SIGNATURE" "$ROLE_RESPONSE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+python3 scripts/prepare-bridge-authority-trust-ceremony.py apply-signature \
+  "$CURRENT_INTAKE" "$ROLE_RESPONSE" "$NEXT_INTAKE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+CURRENT_INTAKE="$NEXT_INTAKE"
+```
+
+Repeat for all eight ordered roles, with a unique `NEXT_INTAKE`, and advance
+`CURRENT_INTAKE` only after each command succeeds.
+
 ## 4. Trust-root approval round
 
 After all eight operational PoPs have been inserted and `rootApprovals` is
@@ -167,7 +204,7 @@ still empty, generate the common approval request:
 
 ```sh
 python3 scripts/prepare-bridge-authority-trust-ceremony.py approval-requests \
-  "$CEREMONY_DIR/intake.json" "$CEREMONY_DIR/root-approval-requests" \
+  "$CURRENT_INTAKE" "$CEREMONY_DIR/root-approval-requests" \
   > "$CEREMONY_DIR/approval-request-report.json"
 ```
 
@@ -176,6 +213,30 @@ the common message SHA-256 independently and signs it. Import and apply each
 detached signature with the same two commands, using the corresponding
 `trust-root-N-approval.request.json` and message. Apply at least two distinct
 root responses, chaining a new intake pathname after each application.
+
+```sh
+ROOT_SLOT=1
+ROOT_SIGNATURE=trust-root-1-approval.signature.bin
+ROOT_RESPONSE="$CEREMONY_DIR/trust-root-1-approval.response.json"
+NEXT_INTAKE="$CEREMONY_DIR/intake.approval-root-1.json"
+
+python3 scripts/prepare-bridge-authority-trust-ceremony.py import-signature \
+  "$CEREMONY_DIR/root-approval-requests/trust-root-$ROOT_SLOT-approval.request.json" \
+  "$CEREMONY_DIR/root-approval-requests/trust-root-$ROOT_SLOT-approval.message.bin" \
+  "$ROOT_SIGNATURE" "$ROOT_RESPONSE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+python3 scripts/prepare-bridge-authority-trust-ceremony.py apply-signature \
+  "$CURRENT_INTAKE" "$ROOT_RESPONSE" "$NEXT_INTAKE" \
+  --public-signature-verifier "$PUBLIC_VERIFIER" \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+CURRENT_INTAKE="$NEXT_INTAKE"
+```
+
+Repeat for a second distinct root, choose a distinct `NEXT_INTAKE`, and advance
+`CURRENT_INTAKE` again. A third approval is optional.
 
 An approval from an identity outside the three-root anchor, a duplicate root,
 or a signature copied from another message is refused.
@@ -211,7 +272,7 @@ Use the independently reviewed executable and its separately received digest:
 
 ```sh
 python3 scripts/prepare-bridge-authority-trust-ceremony.py verify \
-  "$CEREMONY_DIR/intake.json" \
+  "$CURRENT_INTAKE" \
   --verifier target/release/bridge_authority_trust_verifier \
   --verifier-sha256 0xREVIEWED_VERIFIER_SHA256 \
   > "$CEREMONY_DIR/verification-observation.json"

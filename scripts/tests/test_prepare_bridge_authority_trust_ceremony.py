@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -185,6 +186,28 @@ class OfflineAuthorityCeremonyTest(unittest.TestCase):
         self.assertNotIn("privatekey", encoded)
         for root in value["trustAnchorPackage"]["roots"]:
             self.assertTrue(all(item is None for item in root.values()))
+
+    def test_documented_shell_commands_chain_the_latest_intake(self):
+        document = (ROOT / "docs/OFFLINE-AUTHORITY-TRUST-CEREMONY.md").read_text()
+        self.assertIn('CURRENT_INTAKE="$CEREMONY_DIR/intake.json"', document)
+        self.assertGreaterEqual(
+            document.count('CURRENT_INTAKE="$NEXT_INTAKE"'), 3)
+        for command in ("root-requests", "authority-requests", "approval-requests"):
+            location = document.index(
+                f"prepare-bridge-authority-trust-ceremony.py {command}")
+            self.assertIn('"$CURRENT_INTAKE"', document[location:location + 220])
+        verify = document.index("prepare-bridge-authority-trust-ceremony.py verify")
+        self.assertIn('"$CURRENT_INTAKE"', document[verify:verify + 160])
+        build = document.index(
+            "cargo build --release --locked --bin bridge_ed25519_public_verifier")
+        imported = document.index(
+            "prepare-bridge-authority-trust-ceremony.py import-signature")
+        self.assertLess(build, imported)
+        self.assertLess(document.index("PUBLIC_VERIFIER_SHA256="), imported)
+        shell = "\n".join(re.findall(r"```sh\n(.*?)```", document, re.DOTALL))
+        syntax = subprocess.run(["sh", "-n"], input=shell, text=True,
+                                capture_output=True, timeout=10, check=False)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
     def test_root_requests_are_exact_domain_separated_public_messages(self):
         with tempfile.TemporaryDirectory() as directory:
