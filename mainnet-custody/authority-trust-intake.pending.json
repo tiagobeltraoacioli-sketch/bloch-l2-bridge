@@ -1,0 +1,18 @@
+{
+  "schema": "postern.bridge-authority-trust-intake.v1",
+  "trustAnchorPackage": {
+    "schema": "postern.bridge-authority-trust-anchor.v1",
+    "domain": "bloch-bridge-authority-trust-v1",
+    "packageSequence": null,
+    "previousPackageSha256": null,
+    "roots": []
+  },
+  "operationalAuthorityPackage": {
+    "schema": "postern.bridge-operational-authority-package.v1",
+    "manifestCanonicalSha256": null,
+    "ceremonyPackageCanonicalSha256": null,
+    "custodyThreshold": 3,
+    "authorities": [],
+    "rootApprovals": []
+  }
+}

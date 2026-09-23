@@ -27,6 +27,7 @@
 //!   POSTERNDEX-BRIDGE-DESIGN §0 gates clear.
 
 pub mod atoms;
+pub mod authority_trust_intake;
 pub mod envelope;
 #[cfg(unix)]
 pub mod external_floor;

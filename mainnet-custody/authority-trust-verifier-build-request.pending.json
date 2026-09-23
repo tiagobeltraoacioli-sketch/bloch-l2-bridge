@@ -1,0 +1,15 @@
+{
+  "schema": "postern.bridge-authority-trust-verifier-build-request.v1",
+  "trustAnchorPackageCanonicalSha256": null,
+  "sourceRevision": null,
+  "cargoLockSha256": null,
+  "builderAttestations": [],
+  "verifierBinarySha256": null,
+  "controls": {
+    "keysLoaded": false,
+    "signingAllowed": false,
+    "deploymentAllowed": false,
+    "broadcastAllowed": false,
+    "activationAuthorized": false
+  }
+}

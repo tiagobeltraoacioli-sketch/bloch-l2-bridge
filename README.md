@@ -37,6 +37,10 @@ sequence and predecessor checkpoint that the package cannot select for itself.
 The [observation-only checkpoint journal](docs/AUTHORITY-QUALIFICATION-CHECKPOINT.md)
 can durably retain that sequence with locking, CAS, atomic rename, fsync and
 crash recovery, without promoting caller-supplied pins to authenticated roots.
+The [independent authority trust intake](docs/AUTHORITY-TRUST-INTAKE.md) defines
+the real organizational identities, possession proofs, recovery/conflict
+declarations and two-of-three root approvals needed to replace caller-selected
+pins. Its normal build has no anchor and refuses every request.
 The authority observation checker requires a caller-supplied SHA-256 pin for
 its immutable signature-verification executable but does not promote that pin
 to an authenticated root. The final readiness composer requires independently authenticated trust pins for
