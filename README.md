@@ -45,6 +45,9 @@ The [offline authority trust ceremony](docs/OFFLINE-AUTHORITY-TRUST-CEREMONY.md)
 provides identity-free templates and byte-exact public signing requests without
 generating, loading or storing private keys; final checking requires the
 independently reviewed, anchor-pinned verifier and remains non-authorizing.
+Detached public signatures are cryptographically checked and applied to exact
+empty slots through create-only canonical outputs, avoiding manual signature
+edits and refusing role, identity, key or message substitution.
 The authority observation checker requires a caller-supplied SHA-256 pin for
 its immutable signature-verification executable but does not promote that pin
 to an authenticated root. The final readiness composer requires independently authenticated trust pins for

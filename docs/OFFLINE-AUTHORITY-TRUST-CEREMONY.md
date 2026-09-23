@@ -15,6 +15,13 @@ messages expected by the Rust verifier:
 4. an independently built verifier, with the reviewed trust-anchor digest
    compiled into it, validates all proofs and approvals.
 
+Detached signatures are never pasted into an intake. `import-signature`
+validates the request, message digest, identity, role, public key, algorithm,
+length and Ed25519 signature before creating a response file.
+`apply-signature` reconstructs the expected message from the intake, repeats
+the checks and fills exactly one empty slot in a new canonical intake file.
+Both commands are create-only and refuse to overwrite or alias an input.
+
 Coordinator success does not authenticate an organization, appointment,
 declaration, witness or ceremony record. Verifier success proves signatures
 and package bindings only. It still reports every deployment, broadcast and
@@ -35,6 +42,20 @@ activation permission as false.
   verifier SHA-256, request inventories and external witness records.
 - The checked-in pending template is not a production identity package and
   must continue to fail verification.
+
+Build and pin the minimal public-signature verifier before the ceremony. It
+accepts only a bounded message, raw public key and detached signature; it
+cannot sign or access a private key:
+
+```sh
+cargo build --release --locked --bin bridge_ed25519_public_verifier
+openssl dgst -sha256 target/release/bridge_ed25519_public_verifier
+PUBLIC_VERIFIER_SHA256=0xREVIEWED_PUBLIC_VERIFIER_SHA256
+```
+
+The coordinator opens this executable without following symlinks, refuses
+multiple hard links and group/world-writable files, hashes the opened bytes,
+and executes a private copy to prevent pathname substitution.
 
 ## 1. Create the public intake template
 
@@ -82,8 +103,9 @@ python3 scripts/prepare-bridge-authority-trust-ceremony.py root-requests \
 
 Transfer each root only its own `.message.bin` and `.request.json`. After
 confirming the message SHA-256 through an independent channel, the root signs
-on its own isolated system. This OpenSSL example assumes that the root already
-has its independently generated Ed25519 private key:
+on its own isolated system. This example requires modern OpenSSL with Ed25519
+support (Apple LibreSSL 3.3.6 does not support this operation) and assumes that
+the root already has its independently generated Ed25519 private key:
 
 ```sh
 openssl dgst -sha256 trust-root-1-pop.message.bin
@@ -93,9 +115,29 @@ test "$(wc -c < trust-root-1-pop.signature.bin | tr -d ' ')" = 64
 xxd -p -c 256 trust-root-1-pop.signature.bin
 ```
 
-The root returns only the 64-byte signature. The coordinator inserts it as
-lowercase `0x` plus 128 hexadecimal characters in that root's
-`proofOfPossessionSignature`. No private key file is returned.
+The root returns only the 64-byte signature. Import and apply it without
+editing JSON:
+
+```sh
+python3 scripts/prepare-bridge-authority-trust-ceremony.py import-signature \
+  "$CEREMONY_DIR/root-pop-requests/trust-root-1-pop.request.json" \
+  "$CEREMONY_DIR/root-pop-requests/trust-root-1-pop.message.bin" \
+  trust-root-1-pop.signature.bin \
+  "$CEREMONY_DIR/trust-root-1-pop.response.json" \
+  --public-signature-verifier target/release/bridge_ed25519_public_verifier \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+
+python3 scripts/prepare-bridge-authority-trust-ceremony.py apply-signature \
+  "$CEREMONY_DIR/intake.json" \
+  "$CEREMONY_DIR/trust-root-1-pop.response.json" \
+  "$CEREMONY_DIR/intake.root-1.json" \
+  --public-signature-verifier target/release/bridge_ed25519_public_verifier \
+  --public-signature-verifier-sha256 "$PUBLIC_VERIFIER_SHA256"
+```
+
+Repeat for roots 2 and 3, always using the previous new intake as input and a
+new pathname as output. No private key file is returned. A root-1 response
+cannot be moved to root 2, even if filenames are changed.
 
 ## 3. Operational proof-of-possession round
 
@@ -108,8 +150,10 @@ python3 scripts/prepare-bridge-authority-trust-ceremony.py authority-requests \
 ```
 
 Each operational authority independently verifies and signs only its assigned
-message with the same `openssl pkeyutl -sign -rawin` procedure. Insert the
-returned signature into the matching ordered role. The required order is:
+message with its approved Ed25519 device. For each detached signature, run
+`import-signature` against that role's request and message, then
+`apply-signature` against the latest intake and a new output pathname. The
+required order is:
 
 1. `custodian-1` through `custodian-5`;
 2. `native-issuer`;
@@ -128,18 +172,18 @@ python3 scripts/prepare-bridge-authority-trust-ceremony.py approval-requests \
 ```
 
 All three message files must be byte-identical. Each approving root verifies
-the common message SHA-256 independently and signs it. Insert at least two
-distinct approvals:
-
-```json
-"rootApprovals": [
-  {"authorityId": "0x...", "signature": "0x..."},
-  {"authorityId": "0x...", "signature": "0x..."}
-]
-```
+the common message SHA-256 independently and signs it. Import and apply each
+detached signature with the same two commands, using the corresponding
+`trust-root-N-approval.request.json` and message. Apply at least two distinct
+root responses, chaining a new intake pathname after each application.
 
 An approval from an identity outside the three-root anchor, a duplicate root,
 or a signature copied from another message is refused.
+
+Every imported response and applied intake is created with mode `0600`, then
+flushed with `fsync`. Existing output paths, partial prerequisite packages,
+already populated slots, malformed responses, foreign signatures and
+input/output aliases are refused without changing the input.
 
 ## 5. Build the anchor-pinned verifier independently
 

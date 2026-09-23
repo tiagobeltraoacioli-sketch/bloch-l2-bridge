@@ -6,6 +6,7 @@ is untrusted ceremony material until the independently built, anchor-pinned
 Rust verifier accepts the completed intake.
 """
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -22,6 +23,15 @@ APPROVAL_DOMAIN = b"BLOCH-BRIDGE-OPERATIONAL-AUTHORITY-APPROVAL-v1\0"
 ROLES = [
     "custodian-1", "custodian-2", "custodian-3", "custodian-4",
     "custodian-5", "native-issuer", "fee-sponsor", "activation-authority",
+]
+REQUEST_FIELDS = [
+    "schema", "kind", "authorityId", "role", "publicKey", "messageFile",
+    "messageSha256", "messageBytes", "signatureAlgorithm",
+    "privateKeyIncluded", "authorizing",
+]
+RESPONSE_FIELDS = [
+    "schema", "kind", "authorityId", "role", "publicKey", "messageSha256",
+    "messageBytes", "signatureAlgorithm", "signature",
 ]
 ROOT_FIELDS = [
     "authorityId", "organizationId", "publicKey",
@@ -64,13 +74,50 @@ def sha256(value):
     return "0x" + hashlib.sha256(value).hexdigest()
 
 
+def read_public(path, limit, label):
+    path_metadata = os.lstat(path)
+    if stat.S_ISLNK(path_metadata.st_mode):
+        refuse(f"{label}: symlink refused")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if (path_metadata.st_dev, path_metadata.st_ino) != (metadata.st_dev, metadata.st_ino):
+            refuse(f"{label}: file changed while opening")
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < 1 or metadata.st_size > limit:
+            refuse(f"{label}: invalid file type or size")
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        value = b"".join(chunks)
+        if len(value) != metadata.st_size:
+            refuse(f"{label}: unstable or oversized input")
+        return value
+    finally:
+        os.close(descriptor)
+
+
 def load(path):
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    value = json.loads(read_public(path, 1024 * 1024, "intake").decode("utf-8"))
     exact(value, ["schema", "trustAnchorPackage", "operationalAuthorityPackage"],
           "intake")
     if value["schema"] != "postern.bridge-authority-trust-intake.v1":
         refuse("unsupported intake schema")
     return value
+
+
+def signature_field(value, size, label, mode):
+    if value is None:
+        if mode == "all":
+            refuse(f"{label}: signature required")
+        return
+    if mode == "none":
+        refuse(f"{label}: signature must be null before signing")
+    word(value, size, label)
 
 
 def anchor(intake, *, signatures):
@@ -106,11 +153,8 @@ def anchor(intake, *, signatures):
             refuse("trust root declarations must be globally distinct")
         identities.add(identity); organizations.add(organization); keys.add(key)
         records.update((recovery, conflict))
-        signature = item["proofOfPossessionSignature"]
-        if signatures:
-            word(signature, 64, f"root {index} proof of possession")
-        elif signature is not None:
-            refuse(f"root {index}: proof signature must be null before signing")
+        signature_field(item["proofOfPossessionSignature"], 64,
+                        f"root {index} proof of possession", signatures)
     return value
 
 
@@ -146,21 +190,22 @@ def operational(intake, *, signatures, approvals):
             refuse("operational evidence records must be globally distinct")
         identities.add(identity); organizations.add(organization); keys.add(key)
         records.update(evidence)
-        signature = item["proofOfPossessionSignature"]
-        if signatures:
-            word(signature, 64, f"{role} proof of possession")
-        elif signature is not None:
-            refuse(f"{role}: proof signature must be null before signing")
+        signature_field(item["proofOfPossessionSignature"], 64,
+                        f"{role} proof of possession", signatures)
     root_approvals = value["rootApprovals"]
-    if approvals:
-        if type(root_approvals) is not list or len(root_approvals) not in (2, 3):
+    if type(root_approvals) is not list:
+        refuse("root approvals must be a list")
+    if approvals == "all":
+        if len(root_approvals) not in (2, 3):
             refuse("two or three root approvals required")
-        for index, item in enumerate(root_approvals, 1):
-            exact(item, ["authorityId", "signature"], f"root approval {index}")
-            word(item["authorityId"], 32, f"approval {index} authority")
-            word(item["signature"], 64, f"approval {index} signature")
-    elif root_approvals != []:
+    elif approvals == "none" and root_approvals:
         refuse("root approvals must be empty before approval signing")
+    elif approvals == "partial" and len(root_approvals) > 3:
+        refuse("at most three root approvals allowed")
+    for index, item in enumerate(root_approvals, 1):
+        exact(item, ["authorityId", "signature"], f"root approval {index}")
+        word(item["authorityId"], 32, f"approval {index} authority")
+        word(item["signature"], 64, f"approval {index} signature")
     return value
 
 
@@ -225,7 +270,7 @@ def write_requests(directory, kind, requests):
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     output.chmod(0o700)
     inventory = []
-    for name, identity, message in requests:
+    for name, identity, role, public_key, message in requests:
         message_path = output / f"{name}.message.bin"
         request_path = output / f"{name}.request.json"
         write_private(message_path, message)
@@ -233,6 +278,8 @@ def write_requests(directory, kind, requests):
             "schema": "postern.bridge-offline-signing-request.v1",
             "kind": kind,
             "authorityId": identity,
+            "role": role,
+            "publicKey": public_key,
             "messageFile": message_path.name,
             "messageSha256": sha256(message),
             "messageBytes": len(message),
@@ -242,6 +289,19 @@ def write_requests(directory, kind, requests):
         }
         write_private(request_path, (json.dumps(metadata, indent=2) + "\n").encode())
         inventory.append(metadata)
+        response = {
+            "schema": "postern.bridge-offline-signature-response.v1",
+            "kind": kind,
+            "authorityId": identity,
+            "role": role,
+            "publicKey": public_key,
+            "messageSha256": metadata["messageSha256"],
+            "messageBytes": metadata["messageBytes"],
+            "signatureAlgorithm": "ed25519",
+            "signature": None,
+        }
+        write_private(output / f"{name}.response.pending.json",
+                      (json.dumps(response, indent=2) + "\n").encode())
     write_private(output / "inventory.json", (json.dumps({
         "schema": "postern.bridge-offline-signing-inventory.v1",
         "kind": kind,
@@ -297,30 +357,32 @@ def template():
 
 def command_root_requests(args):
     intake = load(args.intake)
-    package = anchor(intake, signatures=False)
+    package = anchor(intake, signatures="none")
     requests = []
     for index, item in enumerate(package["roots"], 1):
         requests.append((f"trust-root-{index}-pop", item["authorityId"],
+                         f"trust-root-{index}", item["publicKey"],
                          ROOT_POP_DOMAIN + compact(root_pop(item, package))))
     write_requests(args.output, "trust-root-proof-of-possession", requests)
 
 
 def command_authority_requests(args):
     intake = load(args.intake)
-    anchor_package = anchor(intake, signatures=True)
-    package = operational(intake, signatures=False, approvals=False)
+    anchor_package = anchor(intake, signatures="all")
+    package = operational(intake, signatures="none", approvals="none")
     require_independence(anchor_package, package)
     requests = []
     for item in package["authorities"]:
         requests.append((f"{item['role']}-pop", item["authorityId"],
+                         item["role"], item["publicKey"],
                          AUTHORITY_POP_DOMAIN + compact(authority_pop(item, package))))
     write_requests(args.output, "operational-proof-of-possession", requests)
 
 
 def command_approval_requests(args):
     intake = load(args.intake)
-    anchor_package = anchor(intake, signatures=True)
-    package = operational(intake, signatures=True, approvals=False)
+    anchor_package = anchor(intake, signatures="all")
+    package = operational(intake, signatures="all", approvals="none")
     require_independence(anchor_package, package)
     anchor_digest = hashlib.sha256(compact(anchor_package)).digest()
     unsigned = {
@@ -332,7 +394,8 @@ def command_approval_requests(args):
     }
     message = APPROVAL_DOMAIN + anchor_digest + compact(unsigned)
     requests = [
-        (f"trust-root-{index}-approval", item["authorityId"], message)
+        (f"trust-root-{index}-approval", item["authorityId"],
+         f"trust-root-{index}", item["publicKey"], message)
         for index, item in enumerate(anchor_package["roots"], 1)
     ]
     write_requests(args.output, "operational-package-approval", requests)
@@ -341,6 +404,198 @@ def command_approval_requests(args):
         "approvalMessageSha256": sha256(message),
         "approvalMessageBytes": len(message),
     }, indent=2))
+
+
+def approval_message(anchor_package, package):
+    anchor_digest = hashlib.sha256(compact(anchor_package)).digest()
+    unsigned = {
+        "schema": package["schema"],
+        "manifestCanonicalSha256": package["manifestCanonicalSha256"],
+        "ceremonyPackageCanonicalSha256": package["ceremonyPackageCanonicalSha256"],
+        "custodyThreshold": package["custodyThreshold"],
+        "authorities": package["authorities"],
+    }
+    return APPROVAL_DOMAIN + anchor_digest + compact(unsigned)
+
+
+def run_private_executable(executable, arguments, input_value, prefix):
+    with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+        os.chmod(directory, 0o700)
+        binary = Path(directory) / "reviewed-verifier"
+        write_private(binary, executable, mode=0o700)
+        return subprocess.run([str(binary), *arguments], input=input_value,
+                              capture_output=True, timeout=30, check=False)
+
+
+def pinned_public_verifier(args):
+    expected = word(args.public_signature_verifier_sha256, 32,
+                    "public signature verifier SHA-256")
+    executable = reviewed_executable_bytes(args.public_signature_verifier)
+    if hashlib.sha256(executable).digest() != expected:
+        refuse("public signature verifier does not match its reviewed SHA-256")
+    return executable
+
+
+def verify_ed25519(public_key, message, signature, executable):
+    result = run_private_executable(
+        executable,
+        ["0x" + public_key.hex(), "0x" + signature.hex()],
+        message,
+        "bridge-public-signature-",
+    )
+    if result.returncode != 0 or result.stdout or result.stderr:
+        refuse("Ed25519 signature verification failed")
+
+
+def validate_detached(value, message, label, verifier):
+    exact(value, RESPONSE_FIELDS, label)
+    if value["schema"] != "postern.bridge-offline-signature-response.v1":
+        refuse(f"{label}: unsupported response schema")
+    if value["signatureAlgorithm"] != "ed25519":
+        refuse(f"{label}: Ed25519 required")
+    identity = word(value["authorityId"], 32, f"{label} authority")
+    public_key = word(value["publicKey"], 32, f"{label} public key")
+    signature = word(value["signature"], 64, f"{label} signature")
+    if (type(value["messageBytes"]) is not int
+            or isinstance(value["messageBytes"], bool)
+            or value["messageBytes"] != len(message)):
+        refuse(f"{label}: message length mismatch")
+    if value["messageSha256"] != sha256(message):
+        refuse(f"{label}: message SHA-256 mismatch")
+    verify_ed25519(public_key, message, signature, verifier)
+    return identity, public_key, signature
+
+
+def write_canonical_new(path, value):
+    output = Path(path)
+    write_private(output, compact(value) + b"\n")
+    directory_fd = os.open(output.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def command_import_signature(args):
+    verifier = pinned_public_verifier(args)
+    request = json.loads(read_public(
+        args.request, 64 * 1024, "signing request").decode("utf-8"))
+    exact(request, REQUEST_FIELDS, "signing request")
+    if request["schema"] != "postern.bridge-offline-signing-request.v1":
+        refuse("unsupported signing request schema")
+    if request["signatureAlgorithm"] != "ed25519":
+        refuse("Ed25519 request required")
+    if request["privateKeyIncluded"] is not False or request["authorizing"] is not False:
+        refuse("request must remain public and non-authorizing")
+    message = read_public(args.message, 128 * 1024, "signing message")
+    if Path(args.message).name != request["messageFile"]:
+        refuse("message filename does not match request")
+    signature = read_public(args.signature, 64, "detached signature")
+    response = {
+        "schema": "postern.bridge-offline-signature-response.v1",
+        "kind": request["kind"],
+        "authorityId": request["authorityId"],
+        "role": request["role"],
+        "publicKey": request["publicKey"],
+        "messageSha256": request["messageSha256"],
+        "messageBytes": request["messageBytes"],
+        "signatureAlgorithm": request["signatureAlgorithm"],
+        "signature": "0x" + signature.hex(),
+    }
+    validate_detached(response, message, "detached signature", verifier)
+    write_canonical_new(args.output, response)
+
+
+def load_response(path):
+    return json.loads(read_public(
+        path, 64 * 1024, "signature response").decode("utf-8"))
+
+
+def command_apply_signature(args):
+    verifier = pinned_public_verifier(args)
+    intake = load(args.intake)
+    response = load_response(args.response)
+    if type(response) is not dict or response.get("kind") not in {
+        "trust-root-proof-of-possession", "operational-proof-of-possession",
+        "operational-package-approval",
+    }:
+        refuse("unsupported detached signature kind")
+    result = copy.deepcopy(intake)
+
+    if response["kind"] == "trust-root-proof-of-possession":
+        anchor_package = anchor(intake, signatures="partial")
+        operational_package = operational(
+            intake, signatures="partial", approvals="partial")
+        require_independence(anchor_package, operational_package)
+        matches = [
+            (index, item) for index, item in enumerate(anchor_package["roots"])
+            if item["authorityId"] == response.get("authorityId")
+        ]
+        if len(matches) != 1:
+            refuse("root response authority does not identify one exact slot")
+        index, item = matches[0]
+        message = ROOT_POP_DOMAIN + compact(root_pop(item, anchor_package))
+        expected_role = f"trust-root-{index + 1}"
+        if (response.get("role") != expected_role
+                or response.get("publicKey") != item["publicKey"]):
+            refuse("root response role or public key substitution")
+        if item["proofOfPossessionSignature"] is not None:
+            refuse("root proof slot is already populated")
+        validate_detached(response, message, "root proof response", verifier)
+        result["trustAnchorPackage"]["roots"][index][
+            "proofOfPossessionSignature"] = response["signature"]
+
+    elif response["kind"] == "operational-proof-of-possession":
+        anchor_package = anchor(intake, signatures="all")
+        package = operational(intake, signatures="partial", approvals="none")
+        require_independence(anchor_package, package)
+        matches = [
+            (index, item) for index, item in enumerate(package["authorities"])
+            if item["authorityId"] == response.get("authorityId")
+        ]
+        if len(matches) != 1:
+            refuse("authority response does not identify one exact slot")
+        index, item = matches[0]
+        message = AUTHORITY_POP_DOMAIN + compact(authority_pop(item, package))
+        if (response.get("role") != item["role"]
+                or response.get("publicKey") != item["publicKey"]):
+            refuse("operational response role or public key substitution")
+        if item["proofOfPossessionSignature"] is not None:
+            refuse("operational proof slot is already populated")
+        validate_detached(response, message, "operational proof response", verifier)
+        result["operationalAuthorityPackage"]["authorities"][index][
+            "proofOfPossessionSignature"] = response["signature"]
+
+    else:
+        anchor_package = anchor(intake, signatures="all")
+        package = operational(intake, signatures="all", approvals="partial")
+        require_independence(anchor_package, package)
+        require_approval_roots(anchor_package, package)
+        matches = [
+            (index, item) for index, item in enumerate(anchor_package["roots"])
+            if item["authorityId"] == response.get("authorityId")
+        ]
+        if len(matches) != 1:
+            refuse("approval response does not identify one selected root")
+        index, item = matches[0]
+        if (response.get("role") != f"trust-root-{index + 1}"
+                or response.get("publicKey") != item["publicKey"]):
+            refuse("approval response role or public key substitution")
+        if any(approval["authorityId"] == item["authorityId"]
+               for approval in package["rootApprovals"]):
+            refuse("duplicate root approval refused")
+        validate_detached(response, approval_message(anchor_package, package),
+                          "root approval response", verifier)
+        approvals = result["operationalAuthorityPackage"]["rootApprovals"]
+        approvals.append({
+            "authorityId": item["authorityId"],
+            "signature": response["signature"],
+        })
+        order = {root["authorityId"]: position
+                 for position, root in enumerate(anchor_package["roots"])}
+        approvals.sort(key=lambda approval: order[approval["authorityId"]])
+
+    write_canonical_new(args.output, result)
 
 
 def reviewed_executable_bytes(path):
@@ -381,8 +636,8 @@ def command_verify(args):
     if hashlib.sha256(executable).digest() != expected:
         refuse("verifier executable does not match the independently reviewed SHA-256")
     intake = load(args.intake)
-    anchor_package = anchor(intake, signatures=True)
-    operational_package = operational(intake, signatures=True, approvals=True)
+    anchor_package = anchor(intake, signatures="all")
+    operational_package = operational(intake, signatures="all", approvals="all")
     require_independence(anchor_package, operational_package)
     require_approval_roots(anchor_package, operational_package)
     encoded = compact(intake)
@@ -422,6 +677,23 @@ def main(argv=None):
         command.add_argument("intake")
         command.add_argument("output")
         command.set_defaults(function=function)
+    imported = commands.add_parser(
+        "import-signature", help="validate a detached signature and create a response")
+    imported.add_argument("request")
+    imported.add_argument("message")
+    imported.add_argument("signature")
+    imported.add_argument("output")
+    imported.add_argument("--public-signature-verifier", required=True)
+    imported.add_argument("--public-signature-verifier-sha256", required=True)
+    imported.set_defaults(function=command_import_signature)
+    apply = commands.add_parser(
+        "apply-signature", help="verify and apply one response to a new intake")
+    apply.add_argument("intake")
+    apply.add_argument("response")
+    apply.add_argument("output")
+    apply.add_argument("--public-signature-verifier", required=True)
+    apply.add_argument("--public-signature-verifier-sha256", required=True)
+    apply.set_defaults(function=command_apply_signature)
     verify = commands.add_parser("verify")
     verify.add_argument("intake")
     verify.add_argument("--verifier", required=True)
