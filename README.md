@@ -34,6 +34,9 @@ Every reviewer signature must bind its supplied complete evidence inventory;
 an opaque self-asserted review-record hash is refused.
 Qualification replay is refused against a separately checksum-pinned monotonic
 sequence and predecessor checkpoint that the package cannot select for itself.
+The [observation-only checkpoint journal](docs/AUTHORITY-QUALIFICATION-CHECKPOINT.md)
+can durably retain that sequence with locking, CAS, atomic rename, fsync and
+crash recovery, without promoting caller-supplied pins to authenticated roots.
 The authority observation checker requires a caller-supplied SHA-256 pin for
 its immutable signature-verification executable but does not promote that pin
 to an authenticated root. The final readiness composer requires independently authenticated trust pins for
