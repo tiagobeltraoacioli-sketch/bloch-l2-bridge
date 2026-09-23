@@ -41,6 +41,10 @@ The [independent authority trust intake](docs/AUTHORITY-TRUST-INTAKE.md) defines
 the real organizational identities, possession proofs, recovery/conflict
 declarations and two-of-three root approvals needed to replace caller-selected
 pins. Its normal build has no anchor and refuses every request.
+The [offline authority trust ceremony](docs/OFFLINE-AUTHORITY-TRUST-CEREMONY.md)
+provides identity-free templates and byte-exact public signing requests without
+generating, loading or storing private keys; final checking requires the
+independently reviewed, anchor-pinned verifier and remains non-authorizing.
 The authority observation checker requires a caller-supplied SHA-256 pin for
 its immutable signature-verification executable but does not promote that pin
 to an authenticated root. The final readiness composer requires independently authenticated trust pins for

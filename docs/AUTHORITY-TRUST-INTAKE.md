@@ -75,3 +75,8 @@ Only after the binary and anchor have an externally authenticated distribution
 path may its result be considered for a future qualification gate. Until then,
 all existing authority outputs remain observation-only and every readiness
 permission remains false.
+
+The byte-exact, keyless coordinator workflow and participant commands are in
+[`OFFLINE-AUTHORITY-TRUST-CEREMONY.md`](OFFLINE-AUTHORITY-TRUST-CEREMONY.md).
+It produces public signing requests but cannot authenticate an organization or
+authorize bridge operation.
