@@ -6,6 +6,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from usdt_observer.networks import BASE_USDC
 
 ETH_USDT = "dac17f958d2ee523a2206206994597c13d831ec7"
 TRON_USDT = "a614f803b6fd780986a42c78ec9c7f77e6ded13c"
@@ -81,8 +82,11 @@ def validate(config, allow_synthetic=False, *, source_asset="USDT"):
     networks = NETWORKS if source_asset == "USDT" else {
         "ethereum-mainnet": ("eip155:1", "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 0)}
     require(isinstance(config, dict), "configuration: expected object")
-    require(type(config.get("version")) is int and config["version"] == 2,
-            "unsupported version: version 2 with native_supply_cap is required")
+    require(type(config.get("version")) is int and
+            (config["version"] == 2 or (config["version"] == 3 and source_asset == "USDC")),
+            "unsupported version: version 2 with native_supply_cap is required; v3 permits explicit USDC EVM routes")
+    if config["version"] == 3:
+        networks["base-mainnet"] = ("eip155:8453", BASE_USDC[2:], 0)
     fields(config, "version synthetic native_domain native_asset native_supply_cap routes", "configuration")
     require(type(config["synthetic"]) is bool, "synthetic must be boolean")
     require(not config["synthetic"] or allow_synthetic, "synthetic fixture requires --allow-synthetic")
@@ -90,8 +94,10 @@ def validate(config, allow_synthetic=False, *, source_asset="USDT"):
     asset = word(config["native_asset"], 32, "native_asset")
     require(native != asset, "native asset and domain must differ")
     native_supply_cap = uint(config["native_supply_cap"], "native_supply_cap")
-    require(isinstance(config["routes"], list) and len(config["routes"]) == len(networks),
-            "exact source route set is required")
+    require(isinstance(config["routes"], list) and
+            (len(config["routes"]) == len(networks) if config["version"] == 2
+             else 1 <= len(config["routes"]) <= len(networks)),
+            "explicit source route set is required")
     seen, domains, output = set(), set(), []
     total_source_capacity = 0
     for route in config["routes"]:

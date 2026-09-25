@@ -1,4 +1,4 @@
-"""Strict offline qualification for an inert Ethereum USDC/Bloch bUSDC plan.
+"""Strict offline qualification for an inert EVM USDC/Bloch bUSDC plan.
 
 This module validates public configuration only. It has no network, key,
 signing, deployment, funding, broadcast, or activation capability.
@@ -7,6 +7,7 @@ import hashlib
 import json
 
 from usdt_observer.common import require, word
+from usdt_observer.networks import BASE_GENESIS, BASE_USDC, BASE_SOURCE_DOMAIN
 
 
 ETHEREUM_GENESIS = (
@@ -74,7 +75,7 @@ def canonical_sha256(value):
 def validate_custody_deployment_manifest(manifest):
     """Validate one public, paused deployment candidate without authorizing it."""
     _fields(manifest, "schema source native cap custody roles controls approvals", "manifest")
-    require(manifest["schema"] == "postern.custody-deployment-plan.v1",
+    require(manifest["schema"] in ("postern.custody-deployment-plan.v1", "postern.custody-deployment-plan.v2"),
             "unsupported custody deployment schema")
 
     source = manifest["source"]
@@ -82,19 +83,23 @@ def validate_custody_deployment_manifest(manifest):
                     "transfer_mode "
                     "token_proxy_runtime_sha256 token_implementation_address "
                     "token_implementation_runtime_sha256 vault_address vault_runtime_sha256 "
-                    "vault_build_sha256 vault_creation_input_sha256", "Ethereum source")
-    require(source["network"] == "ethereum-mainnet" and source["chain_id"] == "eip155:1",
-            "Ethereum mainnet source required")
-    require(source["genesis_hash"].lower() == ETHEREUM_GENESIS,
-            "canonical Ethereum genesis required")
-    require(source["source_domain"].lower() == ETHEREUM_SOURCE_DOMAIN,
-            "canonical Ethereum source domain required")
+                    "vault_build_sha256 vault_creation_input_sha256", "EVM source")
+    profile = ("eip155:1", ETHEREUM_GENESIS, ETHEREUM_SOURCE_DOMAIN, ETHEREUM_USDC)
+    if source["network"] == "base-mainnet":
+        require(manifest["schema"] == "postern.custody-deployment-plan.v2",
+                "Base requires explicit v2 custody plan")
+        profile = ("eip155:8453", BASE_GENESIS, BASE_SOURCE_DOMAIN, BASE_USDC)
+    else:
+        require(source["network"] == "ethereum-mainnet", "unsupported EVM source")
+    require(source["chain_id"] == profile[0], "canonical source chain ID required")
+    require(source["genesis_hash"].lower() == profile[1], "canonical source genesis required")
+    require(source["source_domain"].lower() == profile[2], "canonical source domain required")
     require(source["token_symbol"] == "USDC" and source["token_decimals"] == 6,
             "six-decimal USDC source required")
     require(type(source["transfer_mode"]) is int and source["transfer_mode"] == 0,
-            "Ethereum ERC-20 transfer mode required")
+            "EVM ERC-20 transfer mode required")
     token = _pin(source["token_address"], 20, "USDC token")
-    require("0x" + token.hex() == ETHEREUM_USDC, "canonical Ethereum USDC required")
+    require("0x" + token.hex() == profile[3], "canonical source USDC required")
     _pin(source["token_proxy_runtime_sha256"], 32, "USDC proxy runtime")
     implementation = _pin(
         source["token_implementation_address"], 20, "USDC implementation"
@@ -179,10 +184,10 @@ def validate_custody_deployment_manifest(manifest):
         "schema": "postern.custody-deployment-preflight.v1",
         "manifestCanonicalSha256": canonical_sha256(manifest),
         "configurationConsistent": True,
-        "target": "Ethereum USDC to Bloch mainnet bUSDC",
+        "target": ("Base" if source["network"] == "base-mainnet" else "Ethereum") + " USDC to Bloch mainnet bUSDC",
         "custodianCount": 5,
         "custodyThreshold": 3,
-        "sourceDomain": ETHEREUM_SOURCE_DOMAIN,
+        "sourceDomain": profile[2],
         "transferMode": 0,
         "issuerSponsorSeparated": True,
         "paused": True,

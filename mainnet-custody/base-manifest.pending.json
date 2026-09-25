@@ -1,0 +1,54 @@
+{
+  "schema": "postern.custody-deployment-plan.v2",
+  "source": {
+    "network": "base-mainnet",
+    "chain_id": "eip155:8453",
+    "genesis_hash": "0xf712aa9241cc24369b143cf6dce85f0902a9731e70d66818a3a5845b296c73dd",
+    "source_domain": "0xc9de7185c0e895a9fcc685eb34ba4d8651d9df4e846ecfa9e18f0589cb8bb661",
+    "token_symbol": "USDC",
+    "token_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "token_decimals": 6,
+    "transfer_mode": 0,
+    "token_proxy_runtime_sha256": null,
+    "token_implementation_address": null,
+    "token_implementation_runtime_sha256": null,
+    "vault_address": null,
+    "vault_runtime_sha256": null,
+    "vault_build_sha256": null,
+    "vault_creation_input_sha256": null
+  },
+  "native": {
+    "network": "bloch-mainnet",
+    "format": "BPOSMAN1",
+    "genesis_hash": "0x9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415",
+    "domain": "0xf47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966",
+    "asset_symbol": "bUSDC",
+    "asset_id": null,
+    "gateway_runtime_sha256": null,
+    "gateway_manifest_sha256": null
+  },
+  "cap": {
+    "decimals": 6,
+    "base_units": null
+  },
+  "custody": {
+    "threshold": 3,
+    "custodians": [],
+    "independence_review_sha256": null
+  },
+  "roles": {
+    "issuer": null,
+    "sponsor": null
+  },
+  "controls": {
+    "paused": true,
+    "deposits_enabled": false,
+    "releases_enabled": false,
+    "activation_authorized": false,
+    "broadcast_allowed": false
+  },
+  "approvals": {
+    "security_review_sha256": null,
+    "deployment_runbook_sha256": null
+  }
+}

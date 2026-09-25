@@ -1,0 +1,106 @@
+{
+  "schema": "bloch.component-artifacts.v1",
+  "component": "bridge",
+  "files": [
+    {
+      "path": "README.md",
+      "sha3": "e1770951184b3eb0e4e9fa052fcf527886b17a4b6a475e6692e3f667335b6eec"
+    },
+    {
+      "path": "checkpoints/README.md",
+      "sha3": "9ec5c9edf31a869cc10b8fcaab9aef62085b5cdb805bf4eb11b42aa79e24a949"
+    },
+    {
+      "path": "checkpoints/registry.pending.json",
+      "sha3": "0c30bc2bb83fdb4ea3971aa75f3aaf30eb87ab95c244e24018d698ec3714af8f"
+    },
+    {
+      "path": "contracts/usdt/USDTSourceVault.sol",
+      "sha3": "12a79e5b9a741bd13a9d5d2cabc2f842a45ca3d6057b26944148e00d77ff3d5c"
+    },
+    {
+      "path": "docs/BASE-USDC-BRIDGE.md",
+      "sha3": "af87115210154d0dea04b0e1cac37aea7f4a9ad19aa7d28e99c60ee27a12370a"
+    },
+    {
+      "path": "docs/STABLECOIN-OBSERVER.md",
+      "sha3": "759a01a724a46c3dccd697eee923e021d5e4d42993f8e1f14e4ecb43f2e14399"
+    },
+    {
+      "path": "foundry.toml",
+      "sha3": "1cb18cbf8130713f83df6375d225daebc22183aaf864c7561e42b360b0adcfd9"
+    },
+    {
+      "path": "mainnet-custody/base-manifest.pending.json",
+      "sha3": "03c6882ece8cfa32623afdb1100ea65768ba0213cc3f9bf56eda5beb9ee91ac0"
+    },
+    {
+      "path": "scripts/component-checkpoint.py",
+      "sha3": "c65f06c61d353612fc6cf656f21575ddd9adcc3bf56e52641516b51bb91d3a51"
+    },
+    {
+      "path": "scripts/custody_deployment_collect.py",
+      "sha3": "ac0794291c3dc73071a1cd1996d6700a124500c0a7f92277c9e84c3640a8fa91"
+    },
+    {
+      "path": "scripts/custody_deployment_evidence.py",
+      "sha3": "448223702056721d4a97daa4049a4075ad67d5c08096acfecb7afc92793c1767"
+    },
+    {
+      "path": "scripts/custody_deployment_manifest.py",
+      "sha3": "11631d57a47eee58cb368b3d6f19636b8c5d1fe24a1650b3cd7cf40493703269"
+    },
+    {
+      "path": "scripts/inspect-stablecoin-release.py",
+      "sha3": "6ac56d1055d956f19c0413237ffff3b2bc6bac3b966e21e7048fc420b57be537"
+    },
+    {
+      "path": "scripts/observe-usdt-deposit.py",
+      "sha3": "367b9ac2f281c787aa126a71ea798833340714adb69bd5b7b833a571d0089cca"
+    },
+    {
+      "path": "scripts/read-stablecoin-review.py",
+      "sha3": "cba1330331f889f0deaa107bcc1113a0c790197d32310d293deea7f78160039c"
+    },
+    {
+      "path": "scripts/tests/test_base_stablecoin.py",
+      "sha3": "4c8328d82a4c9f1bb8259e7db460cb75b0902a6eb6911ca54458757e7dcc0a3f"
+    },
+    {
+      "path": "scripts/usdt_observer/collect.py",
+      "sha3": "b86b741e1244ed843a6e63ac8568c85b604b2228dac265e860adeef669f5e47d"
+    },
+    {
+      "path": "scripts/usdt_observer/common.py",
+      "sha3": "c69b8d7ce8a8c6b50bc570cf45ee6145b817a638740727314062870b238bdad9"
+    },
+    {
+      "path": "scripts/usdt_observer/ethereum.py",
+      "sha3": "0607e3bb022d3ea92cacdb0a5f00762e0a6593a5f433527260d73018b4a530ed"
+    },
+    {
+      "path": "scripts/usdt_observer/networks.py",
+      "sha3": "ae02356007bc57e0e2897008dba86eedeccd8d3f5c900a63d730d7e6a53c9fa5"
+    },
+    {
+      "path": "scripts/usdt_observer/releases.py",
+      "sha3": "ea35eb054b16d25244d774849bce377f4e2783af7f5579083aef553276e3bb63"
+    },
+    {
+      "path": "scripts/usdt_observer/runtime.py",
+      "sha3": "df93826359e982ef4cef90d3498391819a80e2502f67be9e6804c7f3b1d86fc3"
+    },
+    {
+      "path": "scripts/usdt_observer/stablecoins.py",
+      "sha3": "2ac9a9b111af165f4424b5b77027ca21ca446fa4e22e8b3749c45273936e504b"
+    },
+    {
+      "path": "scripts/validate-usdt-routes.py",
+      "sha3": "178c02ebbff56a9430bf0c6bc5ecf31de855c1481ac516003570e2a19348152b"
+    },
+    {
+      "path": "solidity-tests/USDTSourceVault.t.sol",
+      "sha3": "f4fbf2cf1f6b4d884ccab8142e40fc7372337805a46600ce78a182c5a1da68f2"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect one Ethereum stablecoin payout; never mark a native redemption paid."""
+"""Inspect one configured EVM stablecoin payout; never mark a native redemption paid."""
 import argparse
 import hashlib
 import json
@@ -18,6 +18,7 @@ def main(argv=None):
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--asset', required=True, choices=['bUSDT', 'bUSDC'])
     parser.add_argument('--release', required=True, type=Path)
+    parser.add_argument('--network', choices=['ethereum-mainnet', 'base-mainnet'], default='ethereum-mainnet')
     parser.add_argument('--allow-synthetic', action='store_true')
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--evidence', type=Path)
@@ -36,7 +37,7 @@ def main(argv=None):
     parser.add_argument('--native-audit-journal', type=Path)
     args = parser.parse_args(argv)
     try:
-        route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
+        route = select_route(load_json(args.config), args.asset, args.network, args.allow_synthetic)
         expected = load_json(args.release)
         review = None
         native_verification = None

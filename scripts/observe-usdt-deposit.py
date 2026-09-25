@@ -7,13 +7,14 @@ from pathlib import Path
 import sys
 
 from usdt_observer import ethereum, tron
+from usdt_observer.networks import EVM_CHAIN_IDS
 from usdt_observer.collect import HttpSource, collect, collection_deadline
 from usdt_observer.common import Invalid, load_json, normalized_route, require, word
 from usdt_observer.journal import record
 
 
 def observe(route, network, evidence):
-    validator = ethereum.validate if network == 'ethereum-mainnet' else tron.validate
+    validator = ethereum.validate if network in EVM_CHAIN_IDS else tron.validate
     observations = validator(route, evidence)
     return {'version': 1, 'validation': 'source-rpc-consistency-only', 'network': network,
             'source_policy_satisfied': True, 'observations': observations,
@@ -24,7 +25,7 @@ def observe(route, network, evidence):
 def main(argv=None, *, stablecoins=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, type=Path)
-    parser.add_argument('--network', required=True, choices=['ethereum-mainnet', 'tron-mainnet'])
+    parser.add_argument('--network', required=True, choices=['ethereum-mainnet', 'base-mainnet', 'tron-mainnet'])
     parser.add_argument('--allow-synthetic', action='store_true')
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--evidence', type=Path, help='Captured RPC results; does not authenticate their source')
@@ -52,12 +53,12 @@ def main(argv=None, *, stablecoins=False):
                     'synthetic manifests may collect only from a loopback fixture')
             with collection_deadline():
                 evidence = collect(route, args.tx_hash, transport)
-                if stablecoins and args.network == 'ethereum-mainnet':
+                if stablecoins and args.network in EVM_CHAIN_IDS:
                     from usdt_observer.runtime import collect_runtime
                     evidence['vault_runtime'] = collect_runtime(route, evidence, transport)
         source_evidence = evidence
         runtime_check = None
-        if stablecoins and args.network == 'ethereum-mainnet':
+        if stablecoins and args.network in EVM_CHAIN_IDS:
             from usdt_observer.runtime import validate_runtime
             require(type(evidence) is dict and 'vault_runtime' in evidence,
                     'vault runtime evidence required')
@@ -65,8 +66,8 @@ def main(argv=None, *, stablecoins=False):
             runtime_check = validate_runtime(route, source_evidence, evidence['vault_runtime'])
         if args.tx_hash:
             expected = word(args.tx_hash, 32)
-            actual = evidence['receipt']['transactionHash'] if args.network == 'ethereum-mainnet' else evidence['transaction_info']['id']
-            require(word(actual, 32, prefix=args.network == 'ethereum-mainnet') == expected,
+            actual = evidence['receipt']['transactionHash'] if args.network in EVM_CHAIN_IDS else evidence['transaction_info']['id']
+            require(word(actual, 32, prefix=args.network in EVM_CHAIN_IDS) == expected,
                     'evidence is for another requested transaction')
         output = observe(route, args.network, source_evidence)
         if runtime_check is not None:

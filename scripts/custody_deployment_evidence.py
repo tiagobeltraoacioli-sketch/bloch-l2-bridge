@@ -67,7 +67,7 @@ def _route(manifest, deployment_height):
     custody = manifest["custody"]
     cap = manifest["cap"]["base_units"]
     return {
-        "network": "ethereum-mainnet",
+        "network": source["network"],
         "genesis_hash": source["genesis_hash"].lower(),
         "source_domain": source["source_domain"].lower(),
         "native_domain": native["domain"].lower(),

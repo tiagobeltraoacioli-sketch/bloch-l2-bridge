@@ -11,6 +11,7 @@ interface UsdtVm {
     function expectRevert() external;
     function expectRevert(bytes4 selector) external;
     function warp(uint256) external;
+    function chainId(uint256) external;
 }
 
 contract MockSourceUSDT {
@@ -140,6 +141,29 @@ contract USDTSourceVaultTest {
 
     function deposit() private {
         vault.deposit(100, bytes32(uint256(8)));
+    }
+
+    function testBaseUsdcDepositAndReleaseRejectsEthereumRoute() public {
+        vm.chainId(8453);
+        bytes32 baseGenesis = 0xf712aa9241cc24369b143cf6dce85f0902a9731e70d66818a3a5845b296c73dd;
+        bytes32 baseDomain =
+            sha256(abi.encodePacked("BLOCH-USDT-SOURCE-CONFIG-v1", bytes1(0), "base-mainnet", bytes1(0), baseGenesis));
+        USDTSourceVault ethereumVault = vault;
+        vault = deploy(0, baseDomain);
+        require(vault.sourceDomain() == baseDomain && vault.routeId() != ethereumVault.routeId());
+        deposit();
+        USDTSourceVault.Release memory r = item();
+        r.route = ethereumVault.routeId();
+        bytes[] memory wrongRouteSignatures = cert(r, 100);
+        vm.expectRevert(USDTSourceVault.InvalidRelease.selector);
+        vault.release(r, 100, wrongRouteSignatures);
+        r.route = vault.routeId();
+        vault.release(r, 100, cert(r, 100));
+        require(vault.totalLocked() == 60 && token.balanceOf(address(vault)) == 60);
+        require(token.balanceOf(address(123)) == 40);
+        bytes[] memory replay = cert(r, 100);
+        vm.expectRevert(USDTSourceVault.InvalidRelease.selector);
+        vault.release(r, 100, replay);
     }
 
     function testDeploymentStartsPausedAndThresholdControlsAreReplayProtected() public {

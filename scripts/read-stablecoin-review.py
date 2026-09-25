@@ -17,6 +17,7 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--asset', choices=['bUSDT', 'bUSDC'])
     parser.add_argument('--release', type=Path)
+    parser.add_argument('--network', choices=['ethereum-mainnet', 'base-mainnet'], default='ethereum-mainnet')
     parser.add_argument('--allow-synthetic', action='store_true')
     args = parser.parse_args(argv)
     try:
@@ -25,7 +26,7 @@ def main(argv=None):
         if all(options):
             from usdt_observer.stablecoins import select_route
             from usdt_observer.review_revalidation import revalidate_review
-            route = select_route(load_json(args.config), args.asset, 'ethereum-mainnet', args.allow_synthetic)
+            route = select_route(load_json(args.config), args.asset, args.network, args.allow_synthetic)
             result = revalidate_review(args.journal, args.audit_id, args.native_verifier, route,
                                        load_json(args.release), load_json(args.native_trust))
         else:

@@ -3,6 +3,7 @@
 Inputs are JSON-RPC result objects collected from authenticated source nodes.
 This module performs no I/O, consensus verification, signing or minting.
 """
+from .networks import EVM_CHAIN_IDS
 from .common import decode_deposits, quantity, require, word
 
 MAX_LOGS = 4096
@@ -38,8 +39,9 @@ def validate_events(route, evidence, decoder):
     _object(route, 'route')
     _object(evidence, 'evidence')
     require(set(evidence) == EVIDENCE_KEYS, 'explicit finalized evidence fields required')
-    require(route.get('network') == 'ethereum-mainnet', 'Ethereum mainnet route required')
-    require(quantity(evidence.get('chain_id')) == 1, 'Ethereum mainnet chain ID required')
+    require(route.get('network') in EVM_CHAIN_IDS, 'configured EVM mainnet route required')
+    require(quantity(evidence.get('chain_id')) == EVM_CHAIN_IDS[route['network']],
+            'EVM source chain ID mismatch')
     genesis = _object(evidence.get('genesis'), 'genesis')
     require(quantity(genesis.get('number')) == 0, 'genesis must be block zero')
     require(_hash(genesis.get('hash')) == _hash(route.get('genesis_hash')), 'genesis identity mismatch')

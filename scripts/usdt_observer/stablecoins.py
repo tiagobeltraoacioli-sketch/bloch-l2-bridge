@@ -4,6 +4,7 @@ This is configuration consistency only, not an on-chain asset registration.
 The existing six-decimal wire protocol retains its legacy USDT domain tags.
 """
 from .common import normalized_route, require, word
+from .networks import EVM_CHAIN_IDS
 
 
 def select_route(catalog, symbol, network, allow_synthetic=False):
@@ -26,7 +27,10 @@ def select_route(catalog, symbol, network, allow_synthetic=False):
         seen.add(source)
         manifest = entry['manifest']
         # Validates every route, including unselected assets, before any RPC I/O.
-        first = normalized_route(manifest, 'ethereum-mainnet', allow_synthetic,
+        require(type(manifest) is dict and type(manifest.get('routes')) is list
+                and len(manifest['routes']) > 0 and type(manifest['routes'][0]) is dict,
+                'explicit stablecoin routes required')
+        first = normalized_route(manifest, manifest['routes'][0].get('network'), allow_synthetic,
                                  source_asset=source)
         domain, asset = word(first['native_domain'], 32), word(first['native_asset'], 32)
         require(asset not in native_ids, 'stablecoins must have distinct native asset IDs')
@@ -51,7 +55,7 @@ def select_route(catalog, symbol, network, allow_synthetic=False):
                                 synthetic=synthetic,
                                 transfer_mode=configured['transfer_mode'],
                                 committee_threshold=configured['committee']['threshold'],
-                                committee_signers=tuple(s.lower() if network == 'ethereum-mainnet' else s
+                                committee_signers=tuple(s.lower() if network in EVM_CHAIN_IDS else s
                                                         for s in configured['committee']['signers']),
                                 vault_runtime_sha256=configured['deployment']['runtime_sha256'].lower(),
                                 vault_deployment_height=configured['deployment']['block_number'])

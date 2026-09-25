@@ -15,7 +15,8 @@ prove finality or make the bridge ready for deposits.
 
 The [bUSDT/bUSDC observer](docs/STABLECOIN-OBSERVER.md) adds an explicit shared
 catalog with distinct token, native asset and custody-route identities. It
-supports USDC source evidence on Ethereum while preserving the legacy USDT
+supports USDC source evidence on Ethereum and explicitly configured Base routes
+while preserving the legacy USDT
 routes and refusing cross-asset observation reassignment. It remains read-only.
 
 The [custody deployment preflight](docs/CUSTODY-DEPLOYMENT-PREFLIGHT.md) validates
@@ -185,3 +186,15 @@ Bitcoin bridge.
 The same inspector has a [real Bitcoin Core regtest acceptance harness](docs/BTC-OBSERVER.md#real-bitcoin-core-regtest-acceptance) for confirmation thresholds, restart, cookie rotation, orphan refusal and re-mined outpoint deduplication.
 
 Optional BTC tracking persists revision-guarded refresh results and orphan status. Historical reads always require a fresh assessment and never authorize minting.
+
+## Three-holder component checkpoints
+
+See [the component checkpoint ceremony](checkpoints/README.md). The native hybrid
+PQ verifier, immutable input pins and offline holder signing flow are implemented;
+production holder keys and signatures remain pending.
+
+## Base native USDC
+
+See [Base configuration, deposit/payout inspection and activation boundaries](docs/BASE-USDC-BRIDGE.md).
+The observer and custody preflight support chain 8453; the pending Base deployment
+plan deliberately contains no invented custodian keys or vault addresses.

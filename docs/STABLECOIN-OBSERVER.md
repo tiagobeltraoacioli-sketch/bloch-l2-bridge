@@ -160,3 +160,10 @@ authenticated source deployment checks, operational reserve reconciliation,
 deposit finality/reorg handling, burn-to-payout replay protection and redemption
 tests. Source token controls still apply; bUSDC is a Bloch bridge representation,
 not Circle-issued native USDC on Bloch.
+
+## Base USDC route extension
+
+Version 3 USDC manifests may explicitly configure Base mainnet, Ethereum mainnet
+or both, subject to their combined native supply cap. See [the Base runbook](BASE-USDC-BRIDGE.md)
+for the canonical token, network identity, CLI options and source-finality boundary.
+Version 2 and legacy USDT behavior remain unchanged.

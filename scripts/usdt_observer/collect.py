@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .networks import EVM_CHAIN_IDS
 from .common import MAX_JSON, Invalid, integer, parse_json, quantity, require, word
 
 
@@ -105,9 +106,9 @@ def collect(route, tx_hash, source):
     txid = word(tx_hash, 32)
     require(any(txid), 'zero transaction ID')
     tx_hash = '0x' + txid.hex()
-    if route['network'] == 'ethereum-mainnet':
+    if route['network'] in EVM_CHAIN_IDS:
         chain_id = source.eth('eth_chainId', [])
-        require(quantity(chain_id) == 1, 'wrong Ethereum chain')
+        require(quantity(chain_id) == EVM_CHAIN_IDS[route['network']], 'wrong EVM source chain')
         genesis = source.eth('eth_getBlockByNumber', ['0x0', False])
         require(type(genesis) is dict and quantity(genesis.get('number')) == 0
                 and word(genesis.get('hash'), 32) == word(route['genesis_hash'], 32), 'source genesis mismatch')

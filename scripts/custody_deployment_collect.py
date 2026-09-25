@@ -23,7 +23,7 @@ def collect_custody_deployment_evidence(manifest, tx_hash, source):
     validate_custody_deployment_manifest(manifest)
     requested = "0x" + word(tx_hash, 32).hex()
     source_evidence = collect({
-        "network": "ethereum-mainnet",
+        "network": manifest["source"]["network"],
         "genesis_hash": manifest["source"]["genesis_hash"],
     }, requested, source)
     receipt = source_evidence["receipt"]
