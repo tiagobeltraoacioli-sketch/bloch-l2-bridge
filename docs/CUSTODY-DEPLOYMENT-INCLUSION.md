@@ -1,5 +1,8 @@
 # Exact deployment transaction and receipt inclusion
 
+For additional account/code and proxy implementation-slot proofs against the
+same deployment state root, use the [state proof workflow](CUSTODY-DEPLOYMENT-STATE.md).
+
 The optional offline verifier closes the gap between captured deployment JSON
 and the transaction/receipt roots of the retained raw Ethereum headers. It
 rechecks the complete ancestry v2, then verifies both Merkle Patricia proofs at

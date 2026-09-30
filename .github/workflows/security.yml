@@ -100,8 +100,8 @@ jobs:
         # Rust toolchain; the default bridge/MSRV checks above remain unchanged.
         run: |
           rustup toolchain install 1.94.1 --profile minimal --component clippy --no-self-update
-          cargo +1.94.1 test --locked --features ethereum-inclusion --test ethereum_deployment_inclusion
-          cargo +1.94.1 clippy --locked --features ethereum-inclusion --lib --bin ethereum_deployment_inclusion_verifier -- -D warnings
+          cargo +1.94.1 test --locked --features ethereum-inclusion --test ethereum_deployment_inclusion --test ethereum_deployment_state
+          cargo +1.94.1 clippy --locked --features ethereum-inclusion --lib --bin ethereum_deployment_inclusion_verifier --bin ethereum_deployment_state_verifier -- -D warnings
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Install checksum-pinned Foundry
         run: |

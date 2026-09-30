@@ -95,7 +95,9 @@ The [deployment inclusion workflow](CUSTODY-DEPLOYMENT-INCLUSION.md) additionall
 opens exact transaction and receipt trie proofs under those raw-header roots.
 It recovers the creation sender, derives the CREATE address, matches the reviewed
 init-code hash and proves a successful empty-log receipt at the same index.
-State readback and finality still need independent authentication.
+The [deployment state workflow](CUSTODY-DEPLOYMENT-STATE.md) additionally proves
+the three runtime codes and the proxy implementation slot under that header's
+state root. Vault controls, reserves and finality still need independent proof.
 
 ## Captured evidence contract
 

@@ -180,6 +180,10 @@ Alloy trie/RLP and k256 dependencies. It is not part of the default MSRV build.
 Its [offline deployment proof workflow](docs/CUSTODY-DEPLOYMENT-INCLUSION.md)
 binds signed creation transactions and receipts to retained header roots without
 authenticating consensus, replaying runtime execution or enabling the bridge.
+The [deployment state workflow](docs/CUSTODY-DEPLOYMENT-STATE.md) additionally
+proves vault/USDC runtime code and the proxy implementation slot against the
+same header state root. Vault controls and reserve balances remain separate
+proof obligations.
 
 Standalone crate with its own empty `[workspace]` (the `crates/bloch-tokens`
 pattern) — deliberately excluded from the product root workspace.

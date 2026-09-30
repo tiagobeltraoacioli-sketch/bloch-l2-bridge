@@ -270,9 +270,27 @@ fn receipt(raw: &[u8], kind: u8, expected: &Evidence) -> Check<()> {
 }
 
 fn prove(root: [u8; 32], index: u64, value: Vec<u8>, nodes: &[String]) -> Check<()> {
+    let mut key = Vec::new();
+    index.encode(&mut key);
+    prove_key(root, &key, value, nodes, MAX_PROOF_NODES)
+}
+
+/// Presence only: the complete exact leaf value must be reached. This helper
+/// does not accept absence/zero-storage assertions or an incomplete path.
+pub(crate) fn prove_key(
+    root: [u8; 32],
+    key: &[u8],
+    value: Vec<u8>,
+    nodes: &[String],
+    maximum_nodes: usize,
+) -> Check<()> {
     require(
-        !nodes.is_empty() && nodes.len() <= MAX_PROOF_NODES,
+        !nodes.is_empty() && nodes.len() <= maximum_nodes,
         "proof node count",
+    )?;
+    require(
+        !key.is_empty() && key.len() <= 32 && !value.is_empty(),
+        "proof key/value bound",
     )?;
     let mut total = 0usize;
     let mut decoded = Vec::with_capacity(nodes.len());
@@ -291,11 +309,9 @@ fn prove(root: [u8; 32], index: u64, value: Vec<u8>, nodes: &[String]) -> Check<
         )?;
         decoded.push(Bytes::from(bytes));
     }
-    let mut key = Vec::new();
-    index.encode(&mut key);
     verify_proof(
         B256::from(root),
-        Nibbles::unpack(&key),
+        Nibbles::unpack(key),
         Some(value),
         &decoded,
     )
