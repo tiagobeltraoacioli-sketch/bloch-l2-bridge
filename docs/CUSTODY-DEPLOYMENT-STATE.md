@@ -1,5 +1,10 @@
 # Deployment account, code and USDC implementation proofs
 
+The separate [fixed-build vault workflow](CUSTODY-DEPLOYMENT-VAULT.md) extends
+this verifier with constructor/immutable matching and initial vault storage
+proofs, including explicit zero/absence proofs. State v1 keeps its original
+limited coverage.
+
 This offline workflow binds three retained runtime bytecodes to the exact
 deployment header's `stateRoot`: the vault, mainnet USDC proxy and reviewed USDC
 implementation. It also proves the proxy's implementation address under that

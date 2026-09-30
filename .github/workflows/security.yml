@@ -79,6 +79,8 @@ jobs:
           echo 'fb03a29a517452b9f12bcf459ef37d0a543765bb3bbc911e70a87d6a37c30d5f  /tmp/bloch-audit-tools/solc' | sha256sum --check
           chmod +x "$SOLC"
           "$SOLC" --version
+      - name: Reproduce fixed vault runtime and storage layout
+        run: python3 scripts/check-vault-storage-build.py --solc "$SOLC"
       - name: Rust tests and exact deployed-bytecode pins
         run: cargo test --locked --all-targets
       - name: Optimized Rust tests
@@ -100,8 +102,8 @@ jobs:
         # Rust toolchain; the default bridge/MSRV checks above remain unchanged.
         run: |
           rustup toolchain install 1.94.1 --profile minimal --component clippy --no-self-update
-          cargo +1.94.1 test --locked --features ethereum-inclusion --test ethereum_deployment_inclusion --test ethereum_deployment_state
-          cargo +1.94.1 clippy --locked --features ethereum-inclusion --lib --bin ethereum_deployment_inclusion_verifier --bin ethereum_deployment_state_verifier -- -D warnings
+          cargo +1.94.1 test --locked --features ethereum-inclusion --test ethereum_deployment_inclusion --test ethereum_deployment_state --test ethereum_deployment_vault
+          cargo +1.94.1 clippy --locked --features ethereum-inclusion --lib --bin ethereum_deployment_inclusion_verifier --bin ethereum_deployment_state_verifier --bin ethereum_deployment_vault_verifier -- -D warnings
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Install checksum-pinned Foundry
         run: |

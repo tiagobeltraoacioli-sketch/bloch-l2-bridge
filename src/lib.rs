@@ -192,3 +192,7 @@ pub mod activation_approval;
 pub mod ethereum_deployment_inclusion;
 #[cfg(feature = "ethereum-inclusion")]
 pub mod ethereum_deployment_state;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_deployment_vault;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_storage_proof;
