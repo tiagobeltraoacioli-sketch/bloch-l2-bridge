@@ -6,8 +6,9 @@ import subprocess
 import time
 
 
-def run_verifier(command, *, input, timeout=10):
-    if (type(input) is not bytes or len(input) > 65536
+def run_verifier(command, *, input, timeout=10, max_input_bytes=65536):
+    if (type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 1024 * 1024
+            or type(input) is not bytes or len(input) > max_input_bytes
             or type(timeout) not in (int, float) or isinstance(timeout, bool)
             or not 0 < timeout <= 60):
         raise ValueError('invalid verifier request bounds')

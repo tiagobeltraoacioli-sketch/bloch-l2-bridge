@@ -24,6 +24,16 @@ three-of-five custody, separate issuer and sponsor authorities, explicit caps,
 runtime pins and paused/disabled controls. It never authorizes deployment,
 broadcast or activation.
 
+The [deployment evidence tools](docs/CUSTODY-DEPLOYMENT-EVIDENCE.md) collect and
+validate a finalized, empty and paused vault snapshot. The offline comparison
+command checks two to eight retained captures, preserving per-capture commitments
+and refusing conflicting deployment or checkpoint evidence. Agreement does not
+authenticate sources, establish operator independence or authorize bridge funds.
+The [raw-header ancestry workflow](docs/CUSTODY-DEPLOYMENT-ANCESTRY.md) links the
+deployment block and all captured checkpoints with bounded, hash-checked Ethereum
+RLP headers. Collection and offline verification remain separate from consensus
+finality and activation approval.
+
 The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
 [external qualification checker](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind
 the selected custody and native authorities to public evidence and inspect a

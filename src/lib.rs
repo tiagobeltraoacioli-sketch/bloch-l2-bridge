@@ -29,6 +29,7 @@
 pub mod atoms;
 pub mod authority_trust_intake;
 pub mod envelope;
+pub mod ethereum_header_ancestry;
 #[cfg(unix)]
 pub mod external_floor;
 #[cfg(unix)]

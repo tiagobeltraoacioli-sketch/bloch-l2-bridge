@@ -33,7 +33,65 @@ read. There is no fallback to `latest` or a block height.
 
 Collection from one endpoint is still not source authentication. Independent
 operators should run it against separately administered nodes and compare the
-entire normalized output before retaining the evidence reviewed below.
+captured deployment snapshots before retaining the evidence reviewed below.
+
+## Comparing retained captures
+
+The offline comparator checks two to eight captures against the same completed
+manifest, re-running the complete deployment validator for every capture:
+
+```sh
+python3 scripts/compare-custody-deployment-evidence.py \
+  /private/reviewed/manifest.json \
+  --capture operator-a=/private/reviewed/operator-a-deployment.json \
+  --capture operator-b=/private/reviewed/operator-b-deployment.json
+```
+
+Each JSON input is limited to 1 MiB. Source labels are distinct lowercase ASCII
+identifiers of at most 64 characters; they are local labels, not authenticated
+operator identities. The tool performs no RPC calls or writes and accepts no
+signing, deployment or activation options. Missing, malformed, duplicate-key,
+oversized, invalid or conflicting captures exit nonzero with a generic JSON
+refusal and false operational permissions. Raw input and filesystem paths are
+not echoed in validation errors.
+
+The comparison requires equality of **every captured field except
+`source_evidence.finalized_block`**, using canonical sorted JSON. This includes
+the full canonical transaction-hash list, receipt, creation transaction, token
+runtime, proxy implementation evidence and complete vault state. It deliberately
+compares more than the deployment verification summary. Differences in provider
+fields or hex casing are also refused; inputs are not silently rewritten to hide
+a difference. JSON key ordering and formatting do not affect equality.
+
+Finalized tips can advance between captures. Each complete capture and finalized
+block object retains its own canonical SHA-256 in the comparison report. A
+different hash at the same height, or a single hash assigned to different
+heights, is refused, including conflicts with the deployment block. Different
+captured block objects for the same identity are also refused in their entirety,
+including differing or missing provider fields, parent hashes or timestamps.
+When a finalized tip is the deployment block, its complete block object must
+match the captured canonical block. Different
+reported tips at different heights only mean that no direct identity conflict
+was detected. This comparison has no retained ancestry proof, so their mutual ancestry or
+global chain consistency is **not** established. The report records whether all
+reported finalized checkpoint identities match and keeps `finalityVerified` and
+`finalityAncestryVerified` false in either case.
+
+`captureCount` counts supplied captures; `distinctEvidenceCount` counts their
+complete canonical JSON digests. Neither counts independent operators. Supplying
+the same capture under two labels yields a distinct-evidence count of one, never
+independence credit. Agreement also cannot establish freshness, source RPC
+authentication or a real deployment. All authentication, freshness, independence,
+activation, broadcast, mint, release and bridge-readiness flags remain false.
+The comparison is review support; it neither replaces the individual deployment
+verification report nor enters the activation readiness composer as an approval.
+
+The separate [raw-header ancestry workflow](CUSTODY-DEPLOYMENT-ANCESTRY.md)
+can retain and verify a bounded Keccak/RLP parent chain against every original
+capture anchor. It revalidates the captures and report commitments and still
+does not authenticate consensus finality or authorize activation.
+
+## Captured evidence contract
 
 The evidence object has exactly these top-level fields:
 

@@ -23,6 +23,18 @@ class VerifierProcessTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(result.stdout), 65)
 
+    def test_explicit_larger_input_budget_is_bounded_and_default_is_unchanged(self):
+        payload = b'x' * (1024 * 1024)
+        result = run_verifier([sys.executable, '-c',
+                              "import sys; assert len(sys.stdin.buffer.read())==1048576; print('a'*64)"],
+                              input=payload, max_input_bytes=len(payload))
+        self.assertEqual(result.returncode, 0)
+        for bound in (True, 0, -1, 1024 * 1024 + 1, 1.5):
+            with self.assertRaises(ValueError):
+                run_verifier(['/nonexistent'], input=b'x', max_input_bytes=bound)
+        with self.assertRaises(ValueError):
+            run_verifier(['/nonexistent'], input=payload)
+
     def test_output_flood_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'excessive'):
             self.run_child("import os; os.write(1,b'a'*1000000)")
