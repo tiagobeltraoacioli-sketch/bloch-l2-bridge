@@ -71,8 +71,10 @@ comparison-report SHA-256 must match exactly. The anchor set must also match
 exactly; a caller cannot omit an inconvenient checkpoint or add a trusted label.
 If a captured block includes `parentHash` or `timestamp`, its value must match
 the decoded raw header too. Missing metadata is represented by null and is not
-invented. Other RPC block fields are retained by the comparison commitment, but
-are not independently recomputed from the raw header in this version.
+invented. Every anchor must include `stateRoot`, `transactionsRoot` and `receiptsRoot`.
+All three are checked against the corresponding fields of the exact hash-checked
+raw RLP header. Missing, zero or malformed roots are refused before collection.
+Other RPC fields remain committed by the comparison but are not recomputed.
 
 The executable is read from a regular, non-group/world-writable inode, checked
 against the supplied pin and executed from a private byte-for-byte copy. The
@@ -84,18 +86,19 @@ bytes does not authenticate the verifier's author or distribution channel.
 
 ## Evidence and parser contract
 
-The strict `postern.custody-deployment-ancestry.v1` object contains only:
+The strict `postern.custody-deployment-ancestry.v2` object contains only:
 
 - `schema`, `manifestCanonicalSha256` and `comparisonCanonicalSha256`;
 - `anchors`, sorted by distinct ascending height, each containing
-  `blockNumber`, `blockHash`, `parentHash` and `timestamp`;
+  `blockNumber`, `blockHash`, `parentHash`, `timestamp`, `stateRoot`,
+  `transactionsRoot` and `receiptsRoot`;
 - `headers`, the complete ascending sequence of lowercase, `0x`-prefixed raw
   RLP bytes, including the deployment and highest checkpoint headers.
 
 There can be at most nine anchors: one deployment and up to eight distinct
 checkpoints. Heights and timestamps are canonical decimal strings; hashes are
 32-byte lowercase hexadecimal values. The JSON artifact is bounded to 1 MiB.
-The local verifier request prepends `BLOCH-ETHEREUM-HEADER-ANCESTRY-v1\0` to
+The local verifier request prepends `BLOCH-ETHEREUM-HEADER-ANCESTRY-v2\0` to
 canonical sorted ASCII JSON, with a 1 MiB total request bound.
 
 The Rust parser implements nonrecursive, canonical
@@ -138,3 +141,18 @@ Tests include independently generated synthetic Keccak/RLP fixtures, the real
 Rust subprocess, hostile RLP/JSON, anchor substitution, metadata mismatch,
 broken paths, source reorgs and a local HTTP collector round trip. Synthetic
 fixtures are not deployment evidence.
+
+## Version 2 root binding
+
+Version 2 also reports `capturedHeaderRootsVerified: true` after the real Rust
+verifier matches all three roots at every deployment/finalized anchor. Version 1
+artifacts are refused; recollect the root-bearing evidence using the original
+captures and retain a newly reviewed verifier hash. Do not merely rename a v1
+schema or reuse the old executable pin. The source captures must themselves
+contain these roots; the collector never fills them from a claimed proof.
+
+A root binding is not a transaction/receipt-trie proof or an account/storage
+proof. Those proofs must still be checked against these exact roots, and the
+anchors must still be authenticated independently. All existing authorization
+flags remain false. Root tampering is tested even after recomputing the capture
+comparison and ancestry envelope, with rejection by the actual Rust subprocess.

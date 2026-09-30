@@ -18,8 +18,8 @@ from usdt_observer.verifier_process import run_verifier
 
 MAX_HEADERS = 256
 MAX_HEADER_BYTES = 1024
-DOMAIN = b"BLOCH-ETHEREUM-HEADER-ANCESTRY-v1\0"
-SCHEMA = "postern.custody-deployment-ancestry.v1"
+DOMAIN = b"BLOCH-ETHEREUM-HEADER-ANCESTRY-v2\0"
+SCHEMA = "postern.custody-deployment-ancestry.v2"
 
 
 def load_captures(arguments):
@@ -47,6 +47,7 @@ def _context(manifest, captures):
         "blockNumber": str(number), "blockHash": _hash(blocks[number]["hash"]),
         "parentHash": _hash(blocks[number]["parentHash"]) if "parentHash" in blocks[number] else None,
         "timestamp": str(quantity(blocks[number]["timestamp"])) if "timestamp" in blocks[number] else None,
+        **{key: _hash(blocks[number].get(key)) for key in ("stateRoot", "transactionsRoot", "receiptsRoot")},
     } for number in ordered]
     return comparison, blocks, anchors
 
@@ -158,7 +159,7 @@ def verify_custody_deployment_ancestry(manifest, captures, evidence, *,
         if temporary is not None:
             temporary.cleanup()
     return {
-        "schema": "postern.custody-deployment-ancestry-verification.v1",
+        "schema": "postern.custody-deployment-ancestry-verification.v2",
         "manifestCanonicalSha256": comparison["manifestCanonicalSha256"],
         "comparisonCanonicalSha256": evidence["comparisonCanonicalSha256"],
         "ancestryEvidenceCanonicalSha256": canonical_sha256(evidence),
@@ -168,6 +169,7 @@ def verify_custody_deployment_ancestry(manifest, captures, evidence, *,
         "headerCount": len(evidence["headers"]),
         "captureComparisonRevalidated": True,
         "rawHeaderAncestryVerified": True,
+        "capturedHeaderRootsVerified": True,
         "anchorAuthenticationVerified": False,
         "verifierIdentityAuthenticated": False,
         "consensusRulesVerified": False,

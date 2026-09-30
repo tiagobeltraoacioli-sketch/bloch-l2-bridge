@@ -19,7 +19,7 @@ fn historical_mainnet_genesis_matches_its_independent_hash() {
     assert_eq!(header.parent_hash, [0; 32]);
 
     let evidence = Evidence {
-        schema: "postern.custody-deployment-ancestry.v1".into(),
+        schema: "postern.custody-deployment-ancestry.v2".into(),
         // Synthetic envelope bindings: this vector authenticates no deployment.
         manifest_canonical_sha256: hex::encode_prefixed(&[1; 32]),
         comparison_canonical_sha256: hex::encode_prefixed(&[2; 32]),
@@ -28,6 +28,9 @@ fn historical_mainnet_genesis_matches_its_independent_hash() {
             block_hash: MAINNET_GENESIS.into(),
             parent_hash: Some(hex::encode_prefixed(&[0; 32])),
             timestamp: Some("0".into()),
+            state_root: hex::encode_prefixed(&header.state_root),
+            transactions_root: hex::encode_prefixed(&header.transactions_root),
+            receipts_root: hex::encode_prefixed(&header.receipts_root),
         }],
         headers: vec![RAW.trim().into()],
     };

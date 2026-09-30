@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 pub const MAX_HEADERS: usize = 256;
 pub const MAX_HEADER_BYTES: usize = 1024;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub const REQUEST_DOMAIN: &[u8] = b"BLOCH-ETHEREUM-HEADER-ANCESTRY-v1\0";
+pub const REQUEST_DOMAIN: &[u8] = b"BLOCH-ETHEREUM-HEADER-ANCESTRY-v2\0";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -20,6 +20,9 @@ pub struct Anchor {
     pub block_hash: String,
     pub parent_hash: Option<String>,
     pub timestamp: Option<String>,
+    pub state_root: String,
+    pub transactions_root: String,
+    pub receipts_root: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -38,6 +41,9 @@ pub struct Header {
     pub hash: [u8; 32],
     pub parent_hash: [u8; 32],
     pub timestamp: u64,
+    pub state_root: [u8; 32],
+    pub transactions_root: [u8; 32],
+    pub receipts_root: [u8; 32],
 }
 
 type Check<T> = Result<T, &'static str>;
@@ -209,6 +215,9 @@ pub fn decode_header(raw: &[u8]) -> Check<Header> {
         hash: keccak256(raw),
         parent_hash: fields[0].try_into().unwrap(),
         timestamp,
+        state_root: fields[3].try_into().unwrap(),
+        transactions_root: fields[4].try_into().unwrap(),
+        receipts_root: fields[5].try_into().unwrap(),
     })
 }
 
@@ -216,7 +225,7 @@ pub fn decode_header(raw: &[u8]) -> Check<Header> {
 /// This only proves ancestry conditional on the supplied hashes being genuine.
 pub fn verify(evidence: &Evidence) -> Check<Vec<Header>> {
     require(
-        evidence.schema == "postern.custody-deployment-ancestry.v1",
+        evidence.schema == "postern.custody-deployment-ancestry.v2",
         "unsupported ancestry schema",
     )?;
     hash(&evidence.manifest_canonical_sha256)?;
@@ -243,7 +252,15 @@ pub fn verify(evidence: &Evidence) -> Check<Vec<Header>> {
             "zero captured parent hash above genesis",
         )?;
         let timestamp = anchor.timestamp.as_deref().map(decimal).transpose()?;
-        anchors.push((number, hash(&anchor.block_hash)?, parent_hash, timestamp));
+        anchors.push((
+            number,
+            hash(&anchor.block_hash)?,
+            parent_hash,
+            timestamp,
+            hash(&anchor.state_root)?,
+            hash(&anchor.transactions_root)?,
+            hash(&anchor.receipts_root)?,
+        ));
         last = Some(number);
     }
     let expected_count = anchors
@@ -277,7 +294,16 @@ pub fn verify(evidence: &Evidence) -> Check<Vec<Header>> {
         }
         headers.push(header);
     }
-    for (number, expected_hash, parent_hash, timestamp) in anchors {
+    for (
+        number,
+        expected_hash,
+        parent_hash,
+        timestamp,
+        state_root,
+        transactions_root,
+        receipts_root,
+    ) in anchors
+    {
         let index =
             usize::try_from(number - headers[0].number).map_err(|_| "anchor index overflow")?;
         require(
@@ -287,6 +313,12 @@ pub fn verify(evidence: &Evidence) -> Check<Vec<Header>> {
             "header anchor mismatch",
         )?;
         let header = &headers[index];
+        require(
+            header.state_root == state_root
+                && header.transactions_root == transactions_root
+                && header.receipts_root == receipts_root,
+            "captured header roots mismatch",
+        )?;
         require(
             parent_hash.is_none_or(|parent| parent == header.parent_hash)
                 && timestamp.is_none_or(|time| time == header.timestamp),
@@ -388,6 +420,9 @@ mod tests {
             block_hash: hex::encode_prefixed(&keccak256(&hex::decode(&headers[index]).unwrap())),
             parent_hash: None,
             timestamp: None,
+            state_root: hex::encode_prefixed(&[3; 32]),
+            transactions_root: hex::encode_prefixed(&[4; 32]),
+            receipts_root: hex::encode_prefixed(&[5; 32]),
         };
         let anchors = if count == 1 {
             vec![anchor(0)]
@@ -395,12 +430,35 @@ mod tests {
             vec![anchor(0), anchor(count - 1)]
         };
         Evidence {
-            schema: "postern.custody-deployment-ancestry.v1".into(),
+            schema: "postern.custody-deployment-ancestry.v2".into(),
             manifest_canonical_sha256: hex::encode_prefixed(&[12; 32]),
             comparison_canonical_sha256: hex::encode_prefixed(&[13; 32]),
             anchors,
             headers,
         }
+    }
+
+    #[test]
+    fn every_captured_root_is_bound_and_v1_cannot_be_promoted() {
+        let original = proof(3);
+        for anchor in 0..original.anchors.len() {
+            for field in 0..3 {
+                let mut evidence = original.clone();
+                let value = hex::encode_prefixed(&[99; 32]);
+                match field {
+                    0 => evidence.anchors[anchor].state_root = value,
+                    1 => evidence.anchors[anchor].transactions_root = value,
+                    _ => evidence.anchors[anchor].receipts_root = value,
+                }
+                assert_eq!(
+                    verify(&evidence).unwrap_err(),
+                    "captured header roots mismatch"
+                );
+            }
+        }
+        let mut legacy = original;
+        legacy.schema = "postern.custody-deployment-ancestry.v1".into();
+        assert_eq!(verify(&legacy).unwrap_err(), "unsupported ancestry schema");
     }
 
     #[test]
@@ -414,6 +472,9 @@ mod tests {
                 block_hash: hex::encode_prefixed(&middle.hash),
                 parent_hash: Some(hex::encode_prefixed(&middle.parent_hash)),
                 timestamp: Some(middle.timestamp.to_string()),
+                state_root: hex::encode_prefixed(&[3; 32]),
+                transactions_root: hex::encode_prefixed(&[4; 32]),
+                receipts_root: hex::encode_prefixed(&[5; 32]),
             },
         );
         assert_eq!(verify(&evidence).unwrap().len(), 4);
@@ -548,6 +609,9 @@ mod tests {
             block_hash: hex::encode_prefixed(&[99; 32]),
             parent_hash: None,
             timestamp: None,
+            state_root: hex::encode_prefixed(&[3; 32]),
+            transactions_root: hex::encode_prefixed(&[4; 32]),
+            receipts_root: hex::encode_prefixed(&[5; 32]),
         });
         assert!(verify(&evidence).is_err());
     }

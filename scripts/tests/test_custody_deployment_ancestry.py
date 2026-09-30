@@ -40,6 +40,7 @@ def ancestry_fixture():
             "number": hex(int(row["number"])), "hash": row["hash"],
             "parentHash": row["parentHash"], "timestamp": hex(int(row["timestamp"])),
             "transactions": [tx_hash] if index == 0 else [],
+            "stateRoot": "0x"+"03"*32, "transactionsRoot": "0x"+"04"*32, "receiptsRoot": "0x"+"05"*32,
         } for index, row in enumerate(VECTORS)
     }
     block_hash = blocks[100]["hash"]
@@ -91,6 +92,16 @@ class AncestryCollectionTest(unittest.TestCase):
         self.assertEqual((manifest, captures, blocks), before)
         self.assertFalse(any("latest" in params for _, params in source.calls))
         self.assertNotIn("rawHeaderAncestryVerified", evidence)
+
+    def test_all_roots_are_required_before_any_rpc(self):
+        for field in ("stateRoot", "transactionsRoot", "receiptsRoot"):
+            manifest, captures, blocks = ancestry_fixture()
+            source = SyntheticRpc(manifest, blocks)
+            for capture in captures:
+                del capture["evidence"]["source_evidence"]["canonical_block"][field]
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                collect_custody_deployment_ancestry(manifest, captures, source)
+            self.assertEqual(source.calls, [])
 
     def test_missing_raw_method_has_no_reconstruction_or_fallback(self):
         manifest, captures, blocks = ancestry_fixture()
@@ -184,6 +195,7 @@ class AncestryVerifierTest(unittest.TestCase):
     def test_real_rust_binary_verifies_independently_generated_keccak_vectors(self):
         report = self.verify()
         self.assertTrue(report["rawHeaderAncestryVerified"])
+        self.assertTrue(report["capturedHeaderRootsVerified"])
         self.assertTrue(report["captureComparisonRevalidated"])
         self.assertEqual(report["headerCount"], 3)
         self.assertEqual(report["ancestryEvidenceCanonicalSha256"], canonical_sha256(self.evidence))
@@ -222,7 +234,9 @@ class AncestryVerifierTest(unittest.TestCase):
                 self.verify(evidence=candidate)
 
     def test_capture_parent_and_timestamp_are_bound_to_raw_header_fields(self):
-        for field, value in (("timestamp", "0x99"), ("parentHash", "0x" + "94" * 32)):
+        for field, value in (("timestamp", "0x99"), ("parentHash", "0x" + "94" * 32),
+                             ("stateRoot", "0x"+"95"*32), ("transactionsRoot", "0x"+"96"*32),
+                             ("receiptsRoot", "0x"+"97"*32)):
             captures = copy.deepcopy(self.captures)
             for capture in captures:
                 capture["evidence"]["source_evidence"]["canonical_block"][field] = value
@@ -276,6 +290,7 @@ class AncestryVerifierTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
             self.assertTrue(report["rawHeaderAncestryVerified"])
+            self.assertTrue(report["capturedHeaderRootsVerified"])
             self.assert_inert(report)
             self.assertEqual(before, {path.name: path.read_bytes() for path in root.iterdir()})
             paths["ancestry"].write_text('{"private-details":"DO-NOT-ECHO","private-details":1}')
