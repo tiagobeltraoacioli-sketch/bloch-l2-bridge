@@ -91,6 +91,12 @@ can retain and verify a bounded Keccak/RLP parent chain against every original
 capture anchor. It revalidates the captures and report commitments and still
 does not authenticate consensus finality or authorize activation.
 
+The [deployment inclusion workflow](CUSTODY-DEPLOYMENT-INCLUSION.md) additionally
+opens exact transaction and receipt trie proofs under those raw-header roots.
+It recovers the creation sender, derives the CREATE address, matches the reviewed
+init-code hash and proves a successful empty-log receipt at the same index.
+State readback and finality still need independent authentication.
+
 ## Captured evidence contract
 
 The evidence object has exactly these top-level fields:

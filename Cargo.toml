@@ -33,6 +33,21 @@ description = "DESIGN SCAFFOLD — unaudited, not a working L2, nothing here mov
 # excluded from the product root workspace).
 [workspace]
 
+[features]
+# The optional offline Ethereum inclusion verifier is qualified with Rust 1.94.1.
+# Keep the existing default bridge build and its 1.87 MSRV independent.
+ethereum-inclusion = ["dep:alloy-primitives", "dep:alloy-rlp", "dep:alloy-trie", "dep:k256"]
+
+[[bin]]
+name = "ethereum_deployment_inclusion_verifier"
+path = "src/bin/ethereum_deployment_inclusion_verifier.rs"
+required-features = ["ethereum-inclusion"]
+
+[[test]]
+name = "ethereum_deployment_inclusion"
+path = "tests/ethereum_deployment_inclusion.rs"
+required-features = ["ethereum-inclusion"]
+
 [dependencies]
 tiny-keccak = { version = "2.0", features = ["keccak", "kmac"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -42,6 +57,10 @@ libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 ring = "0.17"
 sha2 = "0.10"
+alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std"], optional = true }
+alloy-rlp = { version = "=0.3.16", default-features = false, features = ["std"], optional = true }
+alloy-trie = { version = "=0.9.5", default-features = false, features = ["std"], optional = true }
+k256 = { version = "=0.13.4", default-features = false, features = ["std", "ecdsa"], optional = true }
 
 [dev-dependencies]
 rcgen = "0.13"

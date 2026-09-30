@@ -188,3 +188,5 @@ pub use watcher::{
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};
 pub mod activation_approval;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_deployment_inclusion;

@@ -41,6 +41,7 @@ pub struct Header {
     pub hash: [u8; 32],
     pub parent_hash: [u8; 32],
     pub timestamp: u64,
+    pub gas_used: u64,
     pub state_root: [u8; 32],
     pub transactions_root: [u8; 32],
     pub receipts_root: [u8; 32],
@@ -56,7 +57,7 @@ fn require(condition: bool, message: &'static str) -> Check<()> {
     }
 }
 
-fn hex_bytes(value: &str, maximum: usize) -> Check<Vec<u8>> {
+pub(crate) fn hex_bytes(value: &str, maximum: usize) -> Check<Vec<u8>> {
     require(
         value.starts_with("0x")
             && value.len() >= 4
@@ -77,13 +78,13 @@ fn hash_bytes(value: &str) -> Check<[u8; 32]> {
     Ok(bytes)
 }
 
-fn hash(value: &str) -> Check<[u8; 32]> {
+pub(crate) fn hash(value: &str) -> Check<[u8; 32]> {
     let bytes = hash_bytes(value)?;
     require(bytes.iter().any(|b| *b != 0), "zero hash")?;
     Ok(bytes)
 }
 
-fn decimal(value: &str) -> Check<u64> {
+pub(crate) fn decimal(value: &str) -> Check<u64> {
     require(
         !value.is_empty()
             && value.len() <= 20
@@ -109,7 +110,7 @@ fn length(bytes: &[u8]) -> Check<usize> {
 
 // One nonrecursive item. Header fields must be scalars, so nested lists are
 // rejected by the caller rather than traversed or allocated.
-fn item(bytes: &[u8]) -> Check<(bool, &[u8], usize)> {
+pub(crate) fn item(bytes: &[u8]) -> Check<(bool, &[u8], usize)> {
     let tag = *bytes.first().ok_or("truncated RLP")?;
     if tag < 0x80 {
         return Ok((false, &bytes[..1], 1));
@@ -215,6 +216,7 @@ pub fn decode_header(raw: &[u8]) -> Check<Header> {
         hash: keccak256(raw),
         parent_hash: fields[0].try_into().unwrap(),
         timestamp,
+        gas_used,
         state_root: fields[3].try_into().unwrap(),
         transactions_root: fields[4].try_into().unwrap(),
         receipts_root: fields[5].try_into().unwrap(),

@@ -175,6 +175,11 @@ before re-driving idempotent mints from `creditable()`. Repeat bounded syncs
 to catch up; cancel pending mint/review work on `ConfirmationsLost`.
 
 Minimum supported Rust is declared in `Cargo.toml` (`rust-version`).
+The optional `ethereum-inclusion` feature is tested with Rust 1.94.1 and pins
+Alloy trie/RLP and k256 dependencies. It is not part of the default MSRV build.
+Its [offline deployment proof workflow](docs/CUSTODY-DEPLOYMENT-INCLUSION.md)
+binds signed creation transactions and receipts to retained header roots without
+authenticating consensus, replaying runtime execution or enabling the bridge.
 
 Standalone crate with its own empty `[workspace]` (the `crates/bloch-tokens`
 pattern) — deliberately excluded from the product root workspace.
