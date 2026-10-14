@@ -40,31 +40,31 @@
     "set": [
       {
         "operator": null,
-        "address": null
+        "address": "0xa981e9A6fbb32626c6dd56b167860BCc7496E441"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x181d1331163F9486C8153B38d7C4A43F18CEfDe9"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x5bDB78421B38494040fcb504F79c99CD411Ea3a0"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x91EC58A2aCf42Ac2FF1B592D8fD37033C2Bdc82D"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x494856914ACC0f370A17227A51B830ADbF3A7E60"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x811f46cc76c71f045c0291bA4aCf46080322AaE9"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0x3D800a0023b8CA3284b0D13513661F36A96B0A63"
       }
     ]
   },
@@ -74,15 +74,15 @@
     "set": [
       {
         "operator": null,
-        "address": null
+        "address": "0xDb5Ef90964ED561bF592D88a065e5f61248cc375"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0xC8578A95df5c948a5F09844Bf3A75F7Aa4fCd6e7"
       },
       {
         "operator": null,
-        "address": null
+        "address": "0xB473Fa954CAB70a2132263f8b78FAbF236103c90"
       }
     ]
   },
