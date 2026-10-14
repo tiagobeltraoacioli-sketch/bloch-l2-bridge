@@ -12,6 +12,7 @@ finality -> one signer opens a release round, another joins it with --context ->
 vault.release once -> paid on Ethereum; an expired round is replaced by a new one.
 """
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -134,6 +135,14 @@ def main():
             ks = str(work / f's{i}')
             half = [sys.executable, str(HERE / 'eth_half_fake.py'), '--rpc', eth, '--vault', vault, '--keystore', ks,
                     '--password-file', str(work / 'pw'), '--cast', CAST]
+            if os.environ.get('ETH_HALF') == 'real':  # the production Ethereum half
+                ecfg = work / f'eth{i}.json'
+                ecfg.write_text(json.dumps({
+                    'eth_rpc': eth, 'eth_chain_id': ETH_CHAIN, 'vault': vault,
+                    'vault_code_keccak': out(CAST, 'keccak', out(CAST, 'code', vault, '--rpc-url', eth)),
+                    'vault_from_block': 0, 'keystore': ks, 'password_file': str(work / 'pw'), 'cast': CAST,
+                    'db': str(work / f'ethdb{i}.json')}))
+                half = [sys.executable, str(HERE / 'eth_half.py'), '--config', str(ecfg)]
             cfg = {'signer': i, 'l2_rpc': l2, 'l2_chain_id': L2_CHAIN, 'token': stable,
                    'token_code_keccak': code_keccak, 'source_chain_id': ETH_CHAIN, 'source_vault': vault,
                    'source_route': route, 'threshold': 2, 'vault_threshold': 2, 'keystore': ks,

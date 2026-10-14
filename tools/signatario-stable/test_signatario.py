@@ -34,6 +34,7 @@ ETH_CHAIN, L2_CHAIN = 11155111, 700771
 VAULT_CAP, WINDOW_LIMIT, WINDOW = 1_000_000 * 10**6, 100_000 * 10**6, 86400
 PERIOD_CAP, SUPPLY_CAP, MIN_BURN = 100_000 * 10**6, 1_000_000 * 10**6, 10**6
 MAX = str(2**256 - 1)
+REAL_HALF = os.environ.get('ETH_HALF') == 'real'  # ETH_HALF=real: production eth_half.py
 
 results = []
 
@@ -144,7 +145,17 @@ def main():
         (work / 'pw').write_text('test-password\n')
         os.chmod(work / 'pw', 0o600)
 
-        def half(v, ks, *extra):
+        def half(v, ks, *extra, fake=False):
+            if REAL_HALF and not fake:
+                # the production Ethereum half (eth_half.py), one config per signer key
+                ecfg = work / f'eth-{Path(ks).name}-{v[2:10]}.json'
+                ecfg.write_text(json.dumps({
+                    'eth_rpc': eth, 'eth_chain_id': ETH_CHAIN, 'vault': v,
+                    'vault_code_keccak': out(CAST, 'keccak', out(CAST, 'code', v, '--rpc-url', eth)),
+                    'vault_from_block': 0, 'keystore': ks, 'password_file': str(work / 'pw'), 'cast': CAST,
+                    'db': str(work / f'ethdb-{Path(ks).name}.json'), **dict(zip(extra[::2], extra[1::2]))}))
+                base = [sys.executable, str(HERE / 'eth_half.py'), '--config', str(ecfg)]
+                return (base + ['deposit', '--deposit-id', '{deposit_id}'], base + ['release', '--intent', '{intent}'])
             base = [sys.executable, str(HERE / 'eth_half_fake.py'), '--rpc', eth, '--vault', v, '--keystore', ks,
                     '--password-file', str(work / 'pw'), '--cast', CAST, *extra]
             return (base + ['deposit', '--deposit-id', '{deposit_id}'], base + ['release', '--intent', '{intent}'])
@@ -207,7 +218,7 @@ def main():
                        '--out', work / 'x.json')
         check('mint: refuses a contract whose code differs from the pin', rc == 1 and 'pinned' in
               r.get('reason', ''), r)
-        dep_argv, _ = half(vault, str(work / 's2'), '--tamper-amount')
+        dep_argv, _ = half(vault, str(work / 's2'), '--tamper-amount', fake=True)
         rc, r = signer(variant('tamper', 1, eth_half_deposit=dep_argv), 'mint', '--deposit-id', dep_more,
                        '--out', work / 'x.json')
         check('mint: refuses fields that do not hash to the depositId', rc == 1 and 'depositId recomputed' in
@@ -251,6 +262,61 @@ def main():
               json.dumps(r.get('eth', {})), r)
         rc, r = signer(cfgs[0], 'release', '--burn-tx', '0x' + 'ee' * 32, '--out', work / 'x.json')
         check('release: refuses an unknown transaction', rc == 1 and 'not in this L2' in r.get('reason', ''), r)
+
+        if REAL_HALF:
+            # ── checks of the production Ethereum half itself ──
+            def direct(argv):
+                done = sh(*argv, ok=False)
+                try:
+                    return done.returncode, json.loads(done.stdout)
+                except ValueError:
+                    return done.returncode, {'raw': done.stdout, 'stderr': done.stderr}
+
+            def intent(recipient, nonce=2, burn='0x' + 'c1' * 32):
+                p = work / f'intent-{recipient[2:6]}-{nonce}.json'
+                p.write_text(json.dumps({
+                    'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': ETH_CHAIN, 'vault': vault,
+                    'release': {'route': route, 'nonce': nonce, 'recipient': recipient, 'amount': 10**6,
+                                'nativeBurn': burn},
+                    'native': {'nativeFinalizedNumber': 7, 'nativeFinalizedHash': '0x' + 'aa' * 32},
+                    'proposed_context': None}))
+                return str(p)
+
+            _, rel_argv = half(vault, str(work / 's1'))
+            rc, a = direct([x.format(intent=intent(BOB)) for x in rel_argv])
+            check('eth_half: signs a fresh release (nonce 2)', rc == 0 and a.get('signed'), a)
+            rc, r = direct([x.format(intent=intent(alice)) for x in rel_argv])
+            check('eth_half: refuses a different release for the same nonce (equivocation)', rc == 1
+                  and 'different release' in r.get('reason', ''), r)
+            rc, r = direct([x.format(intent=intent(alice, nonce=3)) for x in rel_argv])
+            check('eth_half: refuses a different release for the same burn (equivocation)', rc == 1
+                  and 'different release' in r.get('reason', ''), r)
+            rc, again2 = direct([x.format(intent=intent(BOB)) for x in rel_argv])
+            check('eth_half: re-signs the same release (idempotent)', rc == 0 and again2.get('signed'), again2)
+            _, rel_argv = half(vault, str(work / 's1'), 'vault_code_keccak', '0x' + '00' * 32)
+            rc, r = direct([x.format(intent=intent(BOB)) for x in rel_argv])
+            check('eth_half: refuses a vault whose code differs from the pin', rc == 1 and 'pinned' in
+                  r.get('reason', ''), r)
+            _, rel_argv = half(vault, str(work / 's1'), 'eth_chain_id', 1)
+            rc, r = direct([x.format(intent=intent(BOB)) for x in rel_argv])
+            check('eth_half: refuses a node of another chain', rc == 1 and 'another chain' in r.get('reason', ''), r)
+            sh(CAST, 'rpc', 'anvil_mine', '0x100', '--rpc-url', eth)
+            p = Path(intent(BOB))
+            j = json.loads(p.read_text())
+            j['proposed_context'] = {'validUntil': int(time.time()) + 600, 'sourceAnchorNumber': 1,
+                                     'sourceAnchorHash': out(CAST, 'block', '1', '-f', 'hash', '--rpc-url', eth)}
+            p.write_text(json.dumps(j))
+            _, rel_argv = half(vault, str(work / 's1'))
+            rc, r = direct([x.format(intent=str(p)) for x in rel_argv])
+            check('eth_half: refuses a proposed anchor too old for the blockhash window', rc == 1
+                  and 'recent finalized' in r.get('reason', ''), r)
+            amt = j['release']['amount'] = 10**12
+            j['proposed_context'] = None
+            p.write_text(json.dumps(j))
+            rc, r = direct([x.format(intent=str(p)) for x in rel_argv])
+            check('eth_half: refuses more than totalLocked', rc == 1 and 'totalLocked' in r.get('reason', ''), r)
+            rc, r = direct([x.format(deposit_id='0x' + '77' * 32) for x in half(vault, str(work / 's1'))[0]])
+            check('eth_half: refuses an unknown deposit id', rc == 1 and 'no Deposited log' in r.get('reason', ''), r)
     finally:
         for p in procs:
             p.kill()
