@@ -68,3 +68,11 @@ when one key serves both chains), `max_valid_seconds` (default 3600), `db`, `eth
 
 Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 11155111 with the vault fixture and a
 6-decimal mock token, 700771 with `BridgedStablecoin`; Ethereum half test double).
+
+## Automation
+
+`vigia.py --config CFG sign|relay [--once]` runs the signer and a relayer without anyone in the loop (same
+shape as `tools/signatario-gnb/vigia.py`; config adds `shared_dir`, `eth_rpc`, `vault_from_block`,
+`token_from_block`, `eth_chain_id`, `l2_relayer_key`, `eth_relayer_key`, `round_margin`). Release
+certificates are grouped in rounds sharing one Ethereum anchor (`--context`). Test:
+`python3 test_vigia.py <foundry project>` (two anvils, `BridgedStablecoinV2`, 26 checks).
