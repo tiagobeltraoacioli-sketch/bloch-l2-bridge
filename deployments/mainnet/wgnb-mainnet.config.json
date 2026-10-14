@@ -16,7 +16,7 @@
     "revision": null
   },
   "deployer": {
-    "address": null,
+    "address": "0xa64b47b03d5F1a7a961fE98597c01E471D4b504A",
     "startNonce": 0,
     "fundedBy": {
       "entity": "Bloch Inc (Safe v1.4.1, 3-of-5)",
