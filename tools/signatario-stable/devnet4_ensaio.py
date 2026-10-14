@@ -6,6 +6,8 @@
   sudo python3 tools/signatario-stable/devnet4_ensaio.py burn 7      # bUSDC, L2 -> Ethereum
   sudo python3 tools/signatario-stable/devnet4_ensaio.py tick        # vigia sign --once x3 + relay --once
   sudo python3 tools/signatario-stable/devnet4_ensaio.py status
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-propose   # one-way light-client switch (mock SP1)
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-activate  # skips the 7 days on anvil
 
 "Ethereum" is a persistent anvil (chain id 11155111, 2 s blocks, port 18950) holding a six-decimal mock
 USDC and ContextBoundSourceVault (2-of-3 Ethereum keys). The L2 is the real devnet4 (700771) with
@@ -264,6 +266,53 @@ def tick():
     print('[relay] ' + (out.stdout + out.stderr).strip()[-3000:], flush=True)
 
 
+def switch_propose():
+    """One-way switch, step 1 (3-of-3 Ethereum keys): propose an SP1ReleaseVerifier. Its SP1 verifier here is
+    the MOCK from the bridge repo tests (no Bloch light-client program exists yet): this shows the vault
+    mechanics only, not a real proof."""
+    st = state()
+    br = Path(os.environ.get('BRIDGE_OUT', '/home/ubuntu/bridge-context-20261014/out'))
+    art = lambda f, n: json.loads((br / f / f'{n}.json').read_text())['bytecode']['object']
+    _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('ContextBoundSourceVaultSwitch.t.sol', 'MockSP1'))
+    mock = r['contractAddress'].lower()
+    args = sh(CAST, 'abi-encode', 'c(address,bytes32,bytes32,uint256,address)', mock,
+              sh(CAST, 'keccak', 'devnet4-mock-program-vkey'), sh(CAST, 'keccak', 'devnet4-trust-anchor'), L2_CHAIN,
+              st['l2_token'])
+    _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('SP1ReleaseVerifier.sol', 'SP1ReleaseVerifier')
+                          + args[2:])
+    lc = r['contractAddress'].lower()
+    code_hash = sh(CAST, 'keccak', sh(CAST, 'code', lc, '--rpc-url', ETH_RPC))
+    nonce = call(ETH_RPC, st['vault'], 'switchNonce()(uint64)')
+    vu = str(int(time.time()) + 3600)
+    d = call(ETH_RPC, st['vault'], 'switchDigest(bool,address,bytes32,uint64,uint256)(bytes32)', 'false', lc,
+             code_hash, nonce, vu)
+    keys = sorted(((DIR / 'keys' / f'eth{i}.addr').read_text().strip(), i) for i in (1, 2, 3))
+    sigs = [sh(CAST, 'wallet', 'sign', '--no-hash', '--keystore', DIR / 'keys' / f'eth{i}', '--password-file',
+               DIR / 'password', d) for _, i in keys]
+    tx, r, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'proposeVerifier(address,uint64,uint256,bytes[])', lc, nonce, vu,
+                           '[' + ','.join(sigs) + ']')
+    st.update(mock_sp1=mock, verifier=lc, propose_tx=tx)
+    save(st)
+    print(json.dumps({'mock_sp1': mock, 'sp1_release_verifier': lc, 'codehash': code_hash, 'propose_tx': tx,
+                      'block': int(r['blockNumber'], 16),
+                      'activates_at': int(call(ETH_RPC, st['vault'], 'verifierActivatesAt()(uint64)'))}, indent=1))
+
+
+def switch_activate():
+    """Step 2: anyone, after the delay. On this anvil "Ethereum" the 7 days are skipped with evm_increaseTime."""
+    st = state()
+    early = subprocess.run([CAST, 'send', st['vault'], 'activateVerifier()', '--rpc-url', ETH_RPC, '--private-key',
+                            ANVIL_KEYS[0]], capture_output=True, text=True)
+    sel = sh(CAST, 'sig', 'InvalidSwitch()')
+    print(json.dumps({'activate_before_delay': 'refused InvalidSwitch' if sel in early.stderr + early.stdout
+                      else early.stderr[-300:]}))
+    sh(CAST, 'rpc', 'evm_increaseTime', str(7 * 86400), '--rpc-url', ETH_RPC)
+    sh(CAST, 'rpc', 'anvil_mine', '0x1', '--rpc-url', ETH_RPC)
+    tx, r, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'activateVerifier()')
+    print(json.dumps({'activate_tx': tx, 'block': int(r['blockNumber'], 16),
+                      'verifier': '0x' + call(ETH_RPC, st['vault'], 'verifier()(address)')[2:].lower()}, indent=1))
+
+
 def status():
     st = state()
     alice = sh(CAST, 'wallet', 'address', '--private-key', ANVIL_KEYS[1]).lower()
@@ -283,5 +332,7 @@ def status():
 
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else ''
-{'setup': setup, 'tick': tick, 'status': status}.get(cmd, lambda: None)() if cmd in ('setup', 'tick', 'status') \
+SIMPLE = {'setup': setup, 'tick': tick, 'status': status, 'switch-propose': switch_propose,
+          'switch-activate': switch_activate}
+SIMPLE[cmd]() if cmd in SIMPLE \
     else deposit(sys.argv[2]) if cmd == 'deposit' else burn(sys.argv[2]) if cmd == 'burn' else print(__doc__)
