@@ -110,8 +110,8 @@ class Vigia:
 
     def logs(self, url, address, topics, from_block):
         final = self.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
-        if final is None:
-            return []
+        if final is None or int(from_block) > int(final['number'], 16):
+            return []  # contract newer than the finalized head: nothing final yet (and an inverted range errors)
         return self.rpc(url, 'eth_getLogs', [{'address': address, 'topics': topics, 'fromBlock': hex(int(from_block)),
                                               'toBlock': final['number']}])
 
