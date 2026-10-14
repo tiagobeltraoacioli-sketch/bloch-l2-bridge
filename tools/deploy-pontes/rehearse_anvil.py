@@ -113,7 +113,7 @@ def source_vault(eth, work):
     signers = sorted(new_key()[1] for _ in range(3))
     vault = create('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                    k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
-                   '[' + ','.join(signers) + ']', '2', str(100_000 * 10**6), '86400')
+                   '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800)')
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
     return {'chainId': int(out(CAST, 'chain-id', '--rpc-url', eth)), 'vault': vault,
             'route': out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth).lower(),

@@ -162,9 +162,9 @@ def setup():
                                bytecode('solidity-tests/BridgedStablecoin.t.sol:MockStable'))
         st['eth_token'] = r['contractAddress'].lower()
         k = lambda t: sh(CAST, 'keccak', t)
-        args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,uint64,uint64)',
+        args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,(uint64,uint64,uint8,uint64))',
                   k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
-                  '[' + ','.join(eth_signers) + ']', 2, WINDOW_LIMIT, WINDOW)
+                  '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})')
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
                                bytecode('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault')
                                + args[2:])

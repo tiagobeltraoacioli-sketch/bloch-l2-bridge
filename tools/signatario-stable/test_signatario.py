@@ -111,7 +111,7 @@ def main():
         for native in ('bloch-l2-700771', 'another-native-domain'):
             v = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k(native), k('USDC'), token, str(VAULT_CAP), '0', addrs, '2',
-                       str(WINDOW_LIMIT), str(WINDOW))
+                       f'({WINDOW_LIMIT},{WINDOW},2,604800)')
             vu = str(int(time.time()) + 3600)
             d = out(CAST, 'call', v, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu,
                     '--rpc-url', eth)
@@ -317,6 +317,26 @@ def main():
             check('eth_half: refuses more than totalLocked', rc == 1 and 'totalLocked' in r.get('reason', ''), r)
             rc, r = direct([x.format(deposit_id='0x' + '77' * 32) for x in half(vault, str(work / 's1'))[0]])
             check('eth_half: refuses an unknown deposit id', rc == 1 and 'no Deposited log' in r.get('reason', ''), r)
+
+            # one-way light-client switch: a pending proposal is reported, an active verifier retires the half
+            verifier = create(project, eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')  # any contract
+            vu = str(int(time.time()) + 3600)
+            code_hash = out(CAST, 'keccak', out(CAST, 'code', verifier, '--rpc-url', eth))
+            d = out(CAST, 'call', vault, 'switchDigest(bool,address,bytes32,uint64,uint256)(bytes32)', 'false',
+                    verifier, code_hash, '0', vu, '--rpc-url', eth)
+            sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in signers[:2]]
+            send(eth, DEPLOYER, vault, 'proposeVerifier(address,uint64,uint256,bytes[])', verifier, '0', vu,
+                 '[' + ','.join(sigs) + ']')
+            _, rel_argv = half(vault, str(work / 's1'))
+            rc, r = direct([x.format(intent=intent(BOB, nonce=4, burn='0x' + 'c4' * 32)) for x in rel_argv])
+            check('eth_half: reports a pending light-client switch', rc == 0 and r.get('pending_verifier') == verifier,
+                  r)
+            sh(CAST, 'rpc', 'evm_increaseTime', str(7 * 86400), '--rpc-url', eth)
+            sh(CAST, 'rpc', 'anvil_mine', '0x1', '--rpc-url', eth)
+            send(eth, DEPLOYER, vault, 'activateVerifier()')
+            rc, r = direct([x.format(intent=intent(BOB, nonce=5, burn='0x' + 'c5' * 32)) for x in rel_argv])
+            check('eth_half: refuses once the vault switched to its verifier', rc == 1 and 'committee is retired' in
+                  r.get('reason', ''), r)
     finally:
         for p in procs:
             p.kill()

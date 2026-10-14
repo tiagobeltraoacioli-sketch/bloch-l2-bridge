@@ -13,7 +13,8 @@ deposit  the configured chain id; the vault code at `finalized` equals the pin; 
          (hash by number) and its transaction succeeded with that same log in the receipt; the vault's own
          `depositId(...)` at `finalized` recomputes the id. Signs nothing (the Bloch half signs the mint).
 release  chain id and code pin at `latest`; `route == routeId()`; releases enabled; nonce and burn not
-         released; amount <= totalLocked and within what the deployment-fixed window still allows;
+         released; the vault still in committee mode (no light-client verifier active; a pending
+         proposal is reported as `pending_verifier`); amount <= totalLocked and within what the deployment-fixed window still allows;
          recipient not zero nor the vault; `nativeFinalizedHash` non-zero. Anchor: its own `finalized`
          block (refused if the node's finality lags the head by more than `anchor_max_age`), or the
          proposed one when it is a canonical block of this node, <= finalized and at most `anchor_max_age`
@@ -233,8 +234,13 @@ def cmd_release(eth, args):
     eth.check_code('latest')
     if eth.call('routeId()').lower() != rel['route']:
         refuse('release route is not this vault route')
+    if eth.word(eth.call('verifier()')):
+        refuse('the vault switched to its light-client verifier; the committee is retired (releaseWithProof)')
     if not eth.word(eth.call('releasesEnabled()')):
         refuse('vault releases are disabled')
+    pending = '0x' + eth.call('proposedVerifier()')[-40:]
+    switch = {} if int(pending, 16) == 0 else {
+        'pending_verifier': pending, 'verifier_activates_at': eth.word(eth.call('verifierActivatesAt()'))}
     if eth.word(eth.call('releasedBurn(bytes32)', rel['nativeBurn'])) or \
             eth.word(eth.call('releasedNonce(uint64)', rel['nonce'])):
         refuse('this burn or nonce is already released on Ethereum')
@@ -303,7 +309,7 @@ def cmd_release(eth, args):
     if len(sig) != 132 or int(sig[66:130], 16) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0:
         refuse('signer produced a malformed or high-s signature')
     answer(True, signer=signer, release=rel, context=context, digest=digest, signature=sig,
-           eth_finalized_number=finalized, eth_head_number=head)
+           eth_finalized_number=finalized, eth_head_number=head, **switch)
 
 
 def main():
