@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity 0.8.24;
 
+/// @notice Proof verifier the vault may switch to, once, instead of its committee.
+/// @dev Must be immutable (no owner, no upgrade). It must accept `proof` only if it
+///      proves that the Bloch L2 burn behind `releaseId` (route, nonce = burn nonce,
+///      recipient, amount, nativeBurn = burn id) is final under Bloch L1 FFG, for
+///      this `vault` on this chain. On success it returns its selector; anything
+///      else (revert, other value) is a refusal.
+interface IReleaseVerifier {
+    function verifyRelease(address vault, bytes32 releaseId, bytes calldata proof) external view returns (bytes4);
+}
+
 /// @notice Federated source custody for a domain-specific six-decimal token route,
 ///         with context-bound release certificates (successor of USDTSourceVault,
 ///         whose pinned build and deployment evidence stay unchanged).
@@ -13,6 +23,12 @@ pragma solidity 0.8.24;
 ///      native FFG, holding the burn. Releases are also capped per time window
 ///      by limits fixed at deployment: even a colluding quorum drains at most
 ///      `windowLimit` per `windowSeconds`.
+///      Light-client switch (one way, set once): `switchThreshold` of the
+///      committee may propose a verifier (bound to its code hash); anyone
+///      activates it after `switchDelay` (at least 7 days, so holders who
+///      disagree can exit first) unless the same quorum cancelled it. Once
+///      active, committee releases stop for good, releases need a proof and
+///      the committee can no longer disable them; per-window limits still apply.
 contract ContextBoundSourceVault {
     bytes32 public immutable sourceDomain;
     bytes32 public immutable nativeDomain;
@@ -25,6 +41,11 @@ contract ContextBoundSourceVault {
     uint64 public immutable windowLimit;
     uint64 public immutable windowSeconds;
     uint8 public immutable threshold;
+    /// Signatures needed to propose or cancel the light-client switch (>= threshold).
+    uint8 public immutable switchThreshold;
+    /// Seconds between a switch proposal and its earliest activation.
+    uint64 public immutable switchDelay;
+    uint64 public constant MIN_SWITCH_DELAY = 7 days;
     /// 0: optional boolean; 1: configured TRON token, exact deltas authoritative.
     uint8 public immutable transferMode;
     address[] public signers;
@@ -39,6 +60,13 @@ contract ContextBoundSourceVault {
     bool private entered;
     uint64 public windowStart;
     uint64 public windowReleased;
+    /// Light-client switch state: proposal (verifier, its code hash, earliest
+    /// activation), replay nonce, and the active verifier (zero = committee mode).
+    address public proposedVerifier;
+    bytes32 public proposedVerifierCodehash;
+    uint64 public verifierActivatesAt;
+    uint64 public switchNonce;
+    address public verifier;
     uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     struct Release {
@@ -47,6 +75,15 @@ contract ContextBoundSourceVault {
         address recipient;
         uint64 amount;
         bytes32 nativeBurn;
+    }
+
+    /// Release policy fixed at deployment: the per-window throughput ceiling and
+    /// the one-time light-client switch (quorum and delay).
+    struct Policy {
+        uint64 windowLimit;
+        uint64 windowSeconds;
+        uint8 switchThreshold;
+        uint64 switchDelay;
     }
 
     /// What a release certificate binds beyond the release itself.
@@ -67,6 +104,9 @@ contract ContextBoundSourceVault {
         bytes32 indexed id, bytes32 indexed route, uint64 nonce, address recipient, uint64 amount, bytes32 nativeBurn
     );
     event ControlsUpdated(bytes32 indexed route, uint64 indexed nonce, bool depositsEnabled, bool releasesEnabled);
+    event VerifierProposed(address indexed verifier, bytes32 codehash, uint64 activatesAt, uint64 indexed nonce);
+    event VerifierCancelled(address indexed verifier, uint64 indexed nonce);
+    event VerifierActivated(address indexed verifier, bytes32 codehash);
 
     error InvalidConfiguration();
     error InvalidTransfer();
@@ -77,6 +117,9 @@ contract ContextBoundSourceVault {
     error InvalidContext();
     error RateLimited();
     error Reentrancy();
+    error InvalidSwitch();
+    error CommitteeRetired();
+    error InvalidProof();
 
     constructor(
         bytes32 source_,
@@ -87,13 +130,14 @@ contract ContextBoundSourceVault {
         uint8 transferMode_,
         address[] memory signers_,
         uint8 threshold_,
-        uint64 windowLimit_,
-        uint64 windowSeconds_
+        Policy memory policy
     ) {
         if (
             source_ == 0 || native_ == 0 || source_ == native_ || asset_ == 0 || token_.code.length == 0 || cap_ == 0
                 || transferMode_ > 1 || threshold_ < 2 || threshold_ > signers_.length || signers_.length > 16
-                || windowLimit_ == 0 || windowLimit_ > cap_ || windowSeconds_ == 0
+                || policy.windowLimit == 0 || policy.windowLimit > cap_ || policy.windowSeconds == 0
+                || policy.switchThreshold < threshold_ || policy.switchThreshold > signers_.length
+                || policy.switchDelay < MIN_SWITCH_DELAY
         ) revert InvalidConfiguration();
         (bool ok, bytes memory data) = token_.staticcall(abi.encodeWithSignature("decimals()"));
         if (!ok || data.length != 32 || abi.decode(data, (uint256)) != 6) revert InvalidConfiguration();
@@ -111,8 +155,10 @@ contract ContextBoundSourceVault {
         cap = cap_;
         threshold = threshold_;
         transferMode = transferMode_;
-        windowLimit = windowLimit_;
-        windowSeconds = windowSeconds_;
+        windowLimit = policy.windowLimit;
+        windowSeconds = policy.windowSeconds;
+        switchThreshold = policy.switchThreshold;
+        switchDelay = policy.switchDelay;
     }
 
     modifier nonReentrant() {
@@ -212,7 +258,8 @@ contract ContextBoundSourceVault {
             block.timestamp > validUntil || nonce != controlNonce || nonce == type(uint64).max
                 || (deposits_ == depositsEnabled && releases_ == releasesEnabled)
         ) revert InvalidControls();
-        _checkCertificate(controlDigest(deposits_, releases_, nonce, validUntil), signatures);
+        if (verifier != address(0) && !releases_) revert CommitteeRetired();
+        _checkCertificate(controlDigest(deposits_, releases_, nonce, validUntil), signatures, threshold);
         controlNonce = nonce + 1;
         depositsEnabled = deposits_;
         releasesEnabled = releases_;
@@ -243,18 +290,111 @@ contract ContextBoundSourceVault {
         external
         nonReentrant
     {
-        if (
-            !releasesEnabled || item.route != routeId() || item.amount == 0 || item.recipient == address(0)
-                || item.recipient == address(this) || item.nativeBurn == 0 || item.amount > totalLocked
-                || block.timestamp > context.validUntil || releasedNonce[item.nonce] || releasedBurn[item.nativeBurn]
-        ) revert InvalidRelease();
+        if (verifier != address(0)) revert CommitteeRetired();
+        if (!releasesEnabled || block.timestamp > context.validUntil) revert InvalidRelease();
+        _checkRelease(item);
         // The anchor must be a past block of THIS chain, still within the
         // 256-block blockhash window; a fork or a stale certificate fails here.
         if (
             context.sourceAnchorNumber >= block.number || context.sourceAnchorHash == 0
                 || blockhash(context.sourceAnchorNumber) != context.sourceAnchorHash || context.nativeFinalizedHash == 0
         ) revert InvalidContext();
-        _checkCertificate(releaseDigest(item, context), signatures);
+        _checkCertificate(releaseDigest(item, context), signatures, threshold);
+        _pay(item);
+    }
+
+    /// @notice Release proven by the active light-client verifier (after the switch).
+    ///         Anyone may submit; the committee has no say and cannot disable it.
+    function releaseWithProof(Release calldata item, bytes calldata proof) external nonReentrant {
+        address active = verifier;
+        if (active == address(0)) revert InvalidProof();
+        _checkRelease(item);
+        bytes32 id = releaseId(item);
+        (bool ok, bytes memory data) =
+            active.staticcall(abi.encodeCall(IReleaseVerifier.verifyRelease, (address(this), id, proof)));
+        if (!ok || data.length != 32 || abi.decode(data, (bytes4)) != IReleaseVerifier.verifyRelease.selector) {
+            revert InvalidProof();
+        }
+        _pay(item);
+    }
+
+    function switchDigest(bool cancel, address verifier_, bytes32 codehash, uint64 nonce, uint256 validUntil)
+        public
+        view
+        returns (bytes32)
+    {
+        bytes32 authorization = keccak256(
+            abi.encode(
+                bytes32(cancel ? bytes32("BLOCH-USDT-VERIFIER-CANCEL-v1") : bytes32("BLOCH-USDT-VERIFIER-PROPOSE-v1")),
+                block.chainid,
+                address(this),
+                routeId(),
+                verifier_,
+                codehash,
+                nonce,
+                validUntil
+            )
+        );
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", authorization));
+    }
+
+    /// @notice One-time switch, step 1: `switchThreshold` signers propose a verifier,
+    ///         pinned to its current code hash. Only one proposal may be pending.
+    function proposeVerifier(address verifier_, uint64 nonce, uint256 validUntil, bytes[] calldata signatures)
+        external
+        nonReentrant
+    {
+        bytes32 codehash = verifier_.codehash;
+        if (
+            verifier != address(0) || proposedVerifier != address(0) || verifier_ == address(0)
+                || verifier_ == address(this) || verifier_.code.length == 0 || nonce != switchNonce
+                || block.timestamp > validUntil
+        ) revert InvalidSwitch();
+        _checkCertificate(switchDigest(false, verifier_, codehash, nonce, validUntil), signatures, switchThreshold);
+        switchNonce = nonce + 1;
+        proposedVerifier = verifier_;
+        proposedVerifierCodehash = codehash;
+        verifierActivatesAt = uint64(block.timestamp) + switchDelay;
+        emit VerifierProposed(verifier_, codehash, verifierActivatesAt, nonce);
+    }
+
+    /// @notice The same quorum may cancel a pending proposal before it activates.
+    function cancelVerifier(uint64 nonce, uint256 validUntil, bytes[] calldata signatures) external nonReentrant {
+        address pending = proposedVerifier;
+        if (pending == address(0) || nonce != switchNonce || block.timestamp > validUntil) revert InvalidSwitch();
+        _checkCertificate(
+            switchDigest(true, pending, proposedVerifierCodehash, nonce, validUntil), signatures, switchThreshold
+        );
+        switchNonce = nonce + 1;
+        delete proposedVerifier;
+        delete proposedVerifierCodehash;
+        delete verifierActivatesAt;
+        emit VerifierCancelled(pending, nonce);
+    }
+
+    /// @notice One-time switch, step 2: anyone activates after the delay, if the
+    ///         verifier code is unchanged. Irreversible.
+    function activateVerifier() external nonReentrant {
+        address pending = proposedVerifier;
+        if (
+            pending == address(0) || block.timestamp < verifierActivatesAt
+                || pending.codehash != proposedVerifierCodehash
+        ) revert InvalidSwitch();
+        verifier = pending;
+        delete proposedVerifier;
+        releasesEnabled = true;
+        emit VerifierActivated(pending, proposedVerifierCodehash);
+    }
+
+    function _checkRelease(Release calldata item) private view {
+        if (
+            item.route != routeId() || item.amount == 0 || item.recipient == address(0)
+                || item.recipient == address(this) || item.nativeBurn == 0 || item.amount > totalLocked
+                || releasedNonce[item.nonce] || releasedBurn[item.nativeBurn]
+        ) revert InvalidRelease();
+    }
+
+    function _pay(Release calldata item) private {
         if (block.timestamp >= uint256(windowStart) + windowSeconds) {
             windowStart = uint64(block.timestamp);
             windowReleased = 0;
@@ -275,8 +415,8 @@ contract ContextBoundSourceVault {
         emit Released(releaseId(item), item.route, item.nonce, item.recipient, item.amount, item.nativeBurn);
     }
 
-    function _checkCertificate(bytes32 digest, bytes[] calldata signatures) private view {
-        if (signatures.length < threshold || signatures.length > signers.length) revert InvalidCertificate();
+    function _checkCertificate(bytes32 digest, bytes[] calldata signatures, uint8 required) private view {
+        if (signatures.length < required || signatures.length > signers.length) revert InvalidCertificate();
         address previous;
         for (uint256 i; i < signatures.length; ++i) {
             bytes calldata signature = signatures[i];

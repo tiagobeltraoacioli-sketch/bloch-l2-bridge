@@ -81,7 +81,7 @@ contract ContextBoundSourceVaultTest {
 
     function deployPaused(uint8 mode, bytes32 domain) private returns (ContextBoundSourceVault) {
         return new ContextBoundSourceVault(
-            domain, bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, mode, committee(), 2, 1_000_000, 1 days
+            domain, bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, mode, committee(), 2, ContextBoundSourceVault.Policy(1_000_000, 1 days, 2, 7 days)
         );
     }
 
@@ -382,12 +382,12 @@ contract ContextBoundSourceVaultTest {
     function testInvalidCommitteeAndTransferPolicy() public {
         address[] memory s = committee();
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 1, 100, 1 days);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 1, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 2, s, 2, 100, 1 days);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 2, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
         s[1] = s[0];
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, 100, 1 days);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
     }
 
     function testIndependentPythonAndRustWireVectors() public {
@@ -422,8 +422,7 @@ contract ContextBoundSourceVaultTest {
                 uint8(i),
                 committee(),
                 2,
-                10_000_000_000,
-                1 days
+                ContextBoundSourceVault.Policy(10_000_000_000, 1 days, 2, 7 days)
             );
             vm.etch(fixedVault, address(configured).code);
             ContextBoundSourceVault subject = ContextBoundSourceVault(fixedVault);
@@ -561,7 +560,7 @@ contract ContextBoundSourceVaultTest {
 
     function testReleasesAreCappedPerWindowAtDeploymentLimits() public {
         ContextBoundSourceVault small = new ContextBoundSourceVault(
-            bytes32(uint256(9)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, committee(), 2, 50, 1 hours
+            bytes32(uint256(9)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, committee(), 2, ContextBoundSourceVault.Policy(50, 1 hours, 2, 7 days)
         );
         controls(small, true, true, 0);
         small.deposit(200, bytes32(uint256(8)));
@@ -582,10 +581,10 @@ contract ContextBoundSourceVaultTest {
     function testWindowLimitsAreValidatedOnce() public {
         address[] memory s = committee();
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, 0, 1 days);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(0, 1 days, 2, 7 days));
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, 101, 1 days);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(101, 1 days, 2, 7 days));
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, 100, 0);
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 0, 2, 7 days));
     }
 }
