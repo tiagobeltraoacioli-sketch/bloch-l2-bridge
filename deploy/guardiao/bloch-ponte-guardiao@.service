@@ -1,0 +1,39 @@
+# One bridge guardian (instance = bridge name, e.g. wgnb or busdc). Pause-only: its key can call pause()
+# on the L2 token and nothing else. Runs under its own user, on a machine of the guardian operator (never
+# a signer machine), against that operator's own L2 RPC and GnB/Ethereum node. No network listener.
+[Unit]
+Description=Bloch bridge guardian (%i): independent check, may only pause mints
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bloch-guardiao
+Group=bloch-guardiao
+ExecStart=/usr/bin/python3 /opt/bloch-guardiao/tools/guardiao/guardiao.py --config /etc/bloch-guardiao/%i.json watch --interval 60
+Restart=always
+RestartSec=30
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/bloch-guardiao
+ReadOnlyPaths=/etc/bloch-guardiao /opt/bloch-guardiao
+
+[Install]
+WantedBy=multi-user.target
