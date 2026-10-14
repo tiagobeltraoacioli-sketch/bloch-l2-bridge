@@ -1,0 +1,21 @@
+# Keyless relayer (instance = bridge name). Holds only an L2 gas key; any number may run.
+[Unit]
+Description=Bloch bridge relayer (%i): submit what k signers already signed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bloch-ponte
+Group=bloch-ponte
+ExecStart=/usr/bin/python3 /opt/bloch-ponte/tools/signatario-gnb/vigia.py --config /etc/bloch-ponte/%i-relay.json relay --interval 60
+Restart=always
+RestartSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bloch-ponte
+ReadOnlyPaths=/etc/bloch-ponte
+
+[Install]
+WantedBy=multi-user.target

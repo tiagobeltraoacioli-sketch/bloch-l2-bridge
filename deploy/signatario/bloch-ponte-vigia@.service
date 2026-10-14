@@ -1,0 +1,22 @@
+# One automatic bridge signer (instance = bridge name, e.g. wgnb). Runs as an unprivileged user that can
+# read its own keystore, the native follower state and the L2 rebuild tools; no network listener.
+[Unit]
+Description=Bloch bridge signer (%i): sign only what this machine verified
+After=network-online.target bloch-l2-follower.service gnb-node.service
+Wants=network-online.target
+
+[Service]
+User=bloch-ponte
+Group=bloch-ponte
+ExecStart=/usr/bin/python3 /opt/bloch-ponte/tools/signatario-gnb/vigia.py --config /etc/bloch-ponte/%i.json sign --interval 60
+Restart=always
+RestartSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bloch-ponte
+ReadOnlyPaths=/etc/bloch-ponte /var/lib/bloch-l2-follower
+
+[Install]
+WantedBy=multi-user.target
