@@ -11,7 +11,8 @@ its own nodes. Formats: `INTERFACE-PONTE-BLOCH-GNB.md`, section "Bloch" (B2–B7
 
 Config (one JSON per signer, written once at deploy): `l2_rpc`, `l2_chain_id`, `wgnb`, `wgnb_code_keccak`,
 `gnb_chain_id`, `threshold`, `keystore`, `password_file`, `db`, `gnb_half_lock` / `gnb_half_release` (argv templates with `{txid}`, `{burn}`, `{spend}` for gnb-smh `tools/ponte/signatario_gnb.py`), and for release
-`follower`, `genesis`, `produce`, `settled_rpc`, `work_dir`. `l2_source: "rpc"` trusts `l2_rpc` for
+`follower`, `genesis`, `produce`, `settled_rpc`, `work_dir`, `timestamp_rule_file` (default `timestamp-rule.txt` next to
+the genesis, as `atestador.py`). `l2_source: "rpc"` trusts `l2_rpc` for
 finality and exists only for tests.
 
 Tests: `python3 test_signatario.py <foundry project>` (anvil, chain id 700771, GnB half test double).

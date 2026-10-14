@@ -275,9 +275,12 @@ def own_l2(ctx, work):
     if age > MAX_STATUS_AGE:
         refuse(f'the follower status is {int(age)} s old (stalled follower)')
     target = work / 'l2'
+    # the L2 timestamp rule switch (as atestador.py): devnet4 /etc/bloch-l2-devnet4/public/timestamp-rule.txt
+    rule_file = Path(c.get('timestamp_rule_file', Path(c['genesis']).parent / 'timestamp-rule.txt'))
+    rule = ['--timestamp-rule', rule_file.read_text().strip()] if rule_file.exists() else []
     for _ in range(3):  # the follower may be rewriting its index
         done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),
-                               '--l1-follower', str(follower / 'native')], capture_output=True, text=True)
+                               '--l1-follower', str(follower / 'native'), *rule], capture_output=True, text=True)
         if done.returncode == 0:
             break
         shutil.rmtree(target, ignore_errors=True)
