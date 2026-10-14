@@ -28,6 +28,7 @@ SIGNER_KEYS = ['0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b7869
 USER_KEY = '0x' + '0b' * 32
 TXID = 'ab' * 32
 results = []
+V2 = '--v2' in sys.argv
 
 
 def sh(*argv, ok=True):
@@ -49,7 +50,7 @@ def vigia(cfg, mode):
 
 
 def main():
-    project = Path(sys.argv[1]).resolve()
+    project = Path(next(a for a in sys.argv[1:] if a != '--v2')).resolve()
     work = Path(tempfile.mkdtemp(prefix='vigia-test-'))
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
@@ -64,7 +65,15 @@ def main():
         user = sh(CAST, 'wallet', 'address', '--private-key', USER_KEY).stdout.strip().lower()
         sh(CAST, 'rpc', 'anvil_setBalance', user, hex(10**21), '--rpc-url', url)
         signers = sorted((sh(CAST, 'wallet', 'address', '--private-key', k).stdout.strip().lower(), k) for k in SIGNER_KEYS)
-        dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
+        if V2:  # v1.1: token bucket (capacity = the v1 period cap, refill in 24 h), large-mint delay off, 1 guardian
+            pc, sc, mb = 10**11, 10**12, 100000
+            limits = f'({sc},{pc},{pc // 86400},{2**256 - 1},0,{mb})'
+            guard = '([0x000000000000000000000000000000000000Ba5E],259200,259200)'
+            dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
+                     'contracts/wgnb/WrappedGnBV2.sol:WrappedGnBV2', '--constructor-args',
+                     '0x474E0002', '[' + ','.join(a for a, _ in signers) + ']', '2', limits, guard).stdout
+        else:
+            dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
                  'contracts/wgnb/WrappedGnB.sol:WrappedGnB', '--constructor-args', '0x474E0002',
                  '[' + ','.join(a for a, _ in signers) + ']', '2', '86400', str(10**11), str(10**12), '100000').stdout
         wgnb = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()

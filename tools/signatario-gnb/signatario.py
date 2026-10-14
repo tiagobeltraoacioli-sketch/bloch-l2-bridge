@@ -115,6 +115,41 @@ class Ctx:
                          *[str(a) for a in args]], 'cast calldata')
         return self.rpc(url, 'eth_call', [{'to': self.wgnb, 'data': data}, block])
 
+    def contract_version(self, url):
+        """'2' for the v1.1 tokens (SignerMintedToken: availableToMint), '1' for the v1 tokens."""
+        if getattr(self, '_version', None) is None:
+            data = self.run([self.cast, 'calldata', 'availableToMint()'], 'cast calldata')
+            body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call',
+                               'params': [{'to': self.wgnb, 'data': data}, 'latest']}).encode()
+            req = urllib.request.Request(url, body, {'content-type': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    out = json.loads(r.read())
+            except OSError as e:
+                refuse('L2 RPC eth_call unreachable', url=url, error=str(e))
+            self._version = '2' if 'result' in out and len(out['result']) == 66 else '1'
+        return self._version
+
+    def cap_check(self, url, amount):
+        """Refuse what the contract would refuse now (v1: period window; v2: token bucket, pause)."""
+        supply = self.word(self.call(url, 'totalSupply()(uint256)'))
+        supply_cap = self.word(self.call(url, 'supplyCap()(uint256)'))
+        if self.contract_version(url) == '2':
+            if self.word(self.call(url, 'paused()(bool)')):
+                refuse('mints are paused by a guardian; retry after the pause')
+            available = self.word(self.call(url, 'availableToMint()(uint256)'))
+            if amount > available:
+                refuse('the mint does not fit the token bucket now; retry later', available=available)
+            supply += self.word(self.call(url, 'pendingSupply()(uint256)'))
+        else:
+            period = self.word(self.call(url, 'currentPeriod()(uint256)'))
+            in_period = self.word(self.call(url, 'mintedInPeriod(uint256)(uint256)', period))
+            cap = self.word(self.call(url, 'periodMintCap()(uint256)'))
+            if in_period + amount > cap:
+                refuse('the mint does not fit the period cap now; retry next period', in_period=in_period, cap=cap)
+        if supply + amount > supply_cap:
+            refuse('the mint does not fit the supply cap now', supply=supply, cap=supply_cap)
+
     def word(self, hexdata, i=0):
         h = hexdata[2:] if hexdata.startswith('0x') else hexdata
         return int(h[64 * i:64 * (i + 1)], 16)
@@ -136,7 +171,7 @@ class Ctx:
     def mint_digest(self, txid, vout, amount, recipient):
         domain = self.keccak(self.abi_encode('f(bytes32,bytes32,bytes32,uint256,address)',
                                              self.keccak_text(DOMAIN_TYPEHASH_STR), self.keccak_text('Bloch wGnB'),
-                                             self.keccak_text('1'), str(self.l2_chain_id), self.wgnb))
+                                             self.keccak_text(self.contract_version(self.cfg['l2_rpc'])), str(self.l2_chain_id), self.wgnb))
         struct = self.keccak(self.abi_encode('f(bytes32,uint32,bytes32,uint32,uint64,address)',
                                              self.keccak_text(MINT_TYPEHASH_STR), str(self.gnb_chain_id),
                                              txid, str(vout), str(amount), recipient))
@@ -197,15 +232,7 @@ def cmd_mint(ctx, args):
     lock_id = ctx.keccak(ctx.abi_encode('f(bytes32,uint32)', txid, str(vout)))
     if ctx.word(ctx.call(url, 'minted(bytes32)(bool)', lock_id)):
         refuse('this lock is already minted', lock_id=lock_id)
-    period = ctx.word(ctx.call(url, 'currentPeriod()(uint256)'))
-    in_period = ctx.word(ctx.call(url, 'mintedInPeriod(uint256)(uint256)', period))
-    cap = ctx.word(ctx.call(url, 'periodMintCap()(uint256)'))
-    supply = ctx.word(ctx.call(url, 'totalSupply()(uint256)'))
-    supply_cap = ctx.word(ctx.call(url, 'supplyCap()(uint256)'))
-    if in_period + amount > cap:
-        refuse('the mint does not fit the period cap now; retry next period', in_period=in_period, cap=cap)
-    if supply + amount > supply_cap:
-        refuse('the mint does not fit the supply cap now', supply=supply, cap=supply_cap)
+    ctx.cap_check(url, amount)
 
     digest = ctx.mint_digest(txid, vout, amount, recipient)
     onchain = '0x' + ctx.call(url, 'mintDigest(bytes32,uint32,uint64,address)(bytes32)',

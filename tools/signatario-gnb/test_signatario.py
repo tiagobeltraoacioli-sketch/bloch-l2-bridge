@@ -34,6 +34,7 @@ TXID_REFUSED = 'bb' * 32
 TXID_BIG = 'cc' * 32
 
 results = []
+V2 = '--v2' in sys.argv
 
 
 def sh(*argv, ok=True):
@@ -58,7 +59,7 @@ def signer(cfg, *args):
 
 
 def main():
-    project = Path(sys.argv[1]).resolve()
+    project = Path(next(a for a in sys.argv[1:] if a != '--v2')).resolve()
     work = Path(tempfile.mkdtemp(prefix='signatario-test-'))
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
@@ -76,7 +77,15 @@ def main():
         signers = sorted((sh(CAST, 'wallet', 'address', '--private-key', k).stdout.strip().lower(), k)
                          for k in SIGNER_KEYS)
         addrs = '[' + ','.join(a for a, _ in signers) + ']'
-        dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
+        if V2:  # v1.1: token bucket (capacity = the v1 period cap, refill in 24 h), large-mint delay off, 1 guardian
+            pc, sc, mb = PERIOD_CAP, SUPPLY_CAP, MIN_BURN
+            limits = f'({sc},{pc},{pc // 86400},{2**256 - 1},0,{mb})'
+            guard = '([0x000000000000000000000000000000000000Ba5E],259200,259200)'
+            dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
+                     'contracts/wgnb/WrappedGnBV2.sol:WrappedGnBV2', '--constructor-args',
+                     GNB_TESTNET, addrs, '2', limits, guard).stdout
+        else:
+            dep = sh(FORGE, 'create', '--root', project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER,
                  'contracts/wgnb/WrappedGnB.sol:WrappedGnB', '--constructor-args', GNB_TESTNET, addrs, '2',
                  '86400', str(PERIOD_CAP), str(SUPPLY_CAP), str(MIN_BURN)).stdout
         wgnb = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
@@ -130,7 +139,7 @@ def main():
         rc, r = signer(cfgs[1], 'mint', '--txid', TXID_REFUSED, '--vout', '0', '--out', work / 'x.json')
         check('mint: refuses when the GnB half refuses', rc == 1 and 'GnB half refused' in r.get('reason', ''), r)
         rc, r = signer(cfgs[1], 'mint', '--txid', TXID_BIG, '--vout', '0', '--out', work / 'x.json')
-        check('mint: refuses above the period cap', rc == 1 and 'period cap' in r.get('reason', ''), r)
+        check('mint: refuses above the period cap / token bucket', rc == 1 and ('period cap' in r.get('reason', '') or 'token bucket' in r.get('reason', '')), r)
         bad = json.loads(cfgs[1].read_text())
         bad['wgnb_code_keccak'] = '0x' + '00' * 32
         (work / 'bad-pin.json').write_text(json.dumps(bad))
