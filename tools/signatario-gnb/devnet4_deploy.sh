@@ -4,12 +4,13 @@
 # Development only: all three signers live on this host (a real signer runs on its own machine with its own
 # GnB node and native follower). Writes only under $DIR; the deploy is one L2 transaction from the dev account.
 set -euo pipefail
-DIR=/var/lib/bloch-l2-devnet4-pontes
+DIR=${DIR:-/var/lib/bloch-l2-devnet4-pontes}
 BIN=/home/ubuntu/.foundry/bin
 RPC=${RPC:-http://127.0.0.1:18946}          # forge-compatible proxy over the settled RPC (18945)
 DEV_KEY=/var/lib/bloch-l2-devnet4-settler/ensaio/l2.key
-GNB_CHAIN_ID=0x474E0002                      # GnB testnet
-PERIOD=86400 PERIOD_CAP=100000000000 SUPPLY_CAP=1000000000000 MIN_BURN=100000   # 1,000 / 10,000 GNB; 0.001 GNB
+GNB_CHAIN_ID=${GNB_CHAIN_ID:-0x474E0002}     # GnB testnet; 0x474E0001 = mainnet pilot
+PERIOD=${PERIOD:-86400} PERIOD_CAP=${PERIOD_CAP:-100000000000} SUPPLY_CAP=${SUPPLY_CAP:-1000000000000}  # 1,000 / 10,000 GNB
+MIN_BURN=${MIN_BURN:-100000}                 # 0.001 GNB
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
 install -d -m 700 "$DIR" "$DIR/keys" "$DIR/work"
@@ -69,11 +70,13 @@ for s in json.load(open(f'{d}/signers.json')):
            'genesis': '/etc/bloch-l2-devnet4/public/genesis.blg',
            'produce': '/opt/bloch/l2-devnet4-settler/bloch-l2-produce-dev',
            'settled_rpc': '/opt/bloch/l2-devnet4-finality/bloch-l2-settled-rpc',
-           'gnb_half': ['false']}  # set to the GnB half command (terminal GnB) before the rehearsal
+           # argv templates for gnb-smh tools/ponte/signatario_gnb.py; set per network before the rehearsal
+           'gnb_half_lock': ['false'], 'gnb_half_release': ['false']}
     p = f'{d}/signer{i}.json'
     try:
-        cfg['gnb_half'] = json.load(open(p))['gnb_half']
-    except (OSError, ValueError, KeyError):
+        old = json.load(open(p))
+        cfg.update({k: old[k] for k in ('gnb_half_lock', 'gnb_half_release') if k in old})
+    except (OSError, ValueError):
         pass
     json.dump(cfg, open(p, 'w'), indent=1)
 print(json.dumps({'wgnb': wgnb, 'code_keccak': code, 'signers': json.load(open(f'{d}/signers.json'))}, indent=1))

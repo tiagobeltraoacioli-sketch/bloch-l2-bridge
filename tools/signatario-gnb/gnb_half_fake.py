@@ -37,6 +37,31 @@ elif 'release' in args:
         answer(False, reason='malformed burn')
     if burn['burn_id'] in fx.get('markers', []):
         answer(False, reason='a release with this burn marker already exists on GnB')
+    spend_path = Path(args[args.index('--spend') + 1])
+    if '--signer' in args:  # sign in place, like gnb-cli policysign
+        spend = json.loads(spend_path.read_text())
+        if spend.get('burn_id') not in (None, burn['burn_id']) or str(spend.get('amount')) not in ('None', burn['amount_sats']):
+            answer(False, reason='the release does not match the burn')
+        for m in spend['signatures']:
+            m[args[args.index('--signer') + 1]] = 'fake-signature'
+        spend_path.write_text(json.dumps(spend))
     answer(True, burn_id=burn['burn_id'], gnb_recipient=burn['gnb_recipient'], amount_sats=burn['amount_sats'])
+elif 'vault-utxos' in args:  # stands in for gnb-cli vaultutxos
+    print(json.dumps({'utxos': fx.get('vault_utxos', [])}))
+elif 'vault-release' in args:  # stands in for gnb-cli vaultrelease <burn_id> <gnb1…> <sats> --out F --utxo …
+    i = args.index('vault-release')
+    burn_id, recipient, amount = args[i + 1], args[i + 2], args[i + 3]
+    out = Path(args[args.index('--out') + 1])
+    utxos = [args[j + 1] for j, a in enumerate(args) if a == '--utxo']
+    out.write_text(json.dumps({'tx': 'fake-tx', 'burn_id': burn_id, 'recipient': recipient, 'amount': amount,
+                               'inputs': utxos, 'signatures': [{} for _ in utxos]}))
+elif 'policysend' in args:  # stands in for gnb-cli policysend: needs 2 signatures per input
+    spend = json.loads(Path(args[args.index('policysend') + 1]).read_text())
+    if min(len(m) for m in spend['signatures']) < 2:
+        print('Error: not enough signatures', file=sys.stderr)
+        raise SystemExit(1)
+    fx.setdefault('markers', []).append(spend['burn_id'])
+    Path(args[args.index('--fixture') + 1]).write_text(json.dumps(fx))
+    print('Broadcast OK')
 else:
     answer(False, reason='unknown command')
