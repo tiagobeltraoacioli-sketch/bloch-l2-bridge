@@ -3,11 +3,11 @@
 
   python3 signatario.py --config CFG.json mint    --txid HEX --vout 0 --out SIG.json
   python3 signatario.py --config CFG.json combine --sig A.json --sig B.json [...] --out MINT.json
-  python3 signatario.py --config CFG.json release --burn-tx 0xHASH --out PARTIAL.json
+  python3 signatario.py --config CFG.json release --burn-tx 0xHASH --spend RELEASE.json --out PARTIAL.json
 
 Message formats: INTERFACE-PONTE-BLOCH-GNB.md, section "Bloch" (B2-B7).
 
-mint: the GnB half (`gnb_half` in the config, run on this signer's own GnB node) checks the lock
+mint: the GnB half (`gnb_half_lock` argv template in the config, run on this signer's own GnB node) checks the lock
 format and depth/finality and returns the lock fields. This half then requires, on the L2:
   1. the chain id and the wGnB runtime code hash pinned in the config (set once at deploy);
   2. the contract's gnbChainId and threshold equal the config;
@@ -22,8 +22,9 @@ release: the burn must be finalized, read from an L2 this signer rebuilt itself:
   3. the burn receipt is read from that private RPC, in a block <= finalized whose hash equals the
      rebuilt one; the wGnB code at finalized equals the pin; the Burned log is decoded and its burnId
      recomputed;
-  4. the release intent goes to the GnB half, which refuses if the burn marker already exists on GnB
-     and otherwise co-signs the policyspend.
+  4. the burn goes to the GnB half (`gnb_half_release`) as its BURN.json together with the release tx
+     (`--spend`, built by anyone with gnb-cli vaultrelease); the GnB half checks the tx on its own node
+     (exact shape, burn marker absent on chain) and co-signs it.
 `l2_source: "rpc"` (config) skips the rebuild and trusts `l2_rpc` for finalized: tests only.
 
 Any mismatch refuses with the reason and exit code 1. Keys are never on the command line.
@@ -141,16 +142,27 @@ class Ctx:
                                              txid, str(vout), str(amount), recipient))
         return self.keccak('0x1901' + domain[2:] + struct[2:])
 
-    def gnb_half(self, *args):
-        argv = [*self.cfg['gnb_half'], *args]
+    def gnb_half(self, kind, **subs):
+        """Run the GnB half (gnb-smh tools/ponte/signatario_gnb.py) from the config's argv template."""
+        argv = [a.format(**subs) for a in self.cfg[f'gnb_half_{kind}']]
         done = subprocess.run(argv, capture_output=True, text=True)
         try:
             out = json.loads(done.stdout)
         except ValueError:
             refuse('the GnB half returned no JSON', exit=done.returncode, stderr=done.stderr.strip()[-1500:])
-        if done.returncode or not out.get('ok'):
+        if done.returncode or not (out.get('ok') or out.get('signed')):
             refuse('the GnB half refused', gnb=out)
         return out
+
+
+def gnb_address(spk_hex, gnb_chain_id):
+    """20-byte key hash -> gnb1q…/gnb1t… (hash ‖ SHA3-256(SHA3-256(hash))[:4], hex), as gnb-crypto."""
+    prefix = {0x474E0001: 'gnb1q', 0x474E0002: 'gnb1t'}.get(gnb_chain_id)
+    if prefix is None:
+        refuse('unknown GnB network for the release address', gnb_chain_id=hex(gnb_chain_id))
+    h = bytes.fromhex(spk_hex)
+    check = hashlib.sha3_256(hashlib.sha3_256(h).digest()).digest()[:4]
+    return prefix + (h + check).hex()
 
 
 def hex32(value, what):
@@ -168,7 +180,7 @@ def cmd_mint(ctx, args):
     url = ctx.cfg['l2_rpc']
 
     # GnB half: lock format, vault, depth N or PoWit finality, on this signer's own GnB node
-    lock = ctx.gnb_half('verify-lock', '--txid', txid[2:], '--vout', str(vout))
+    lock = ctx.gnb_half('lock', txid=txid[2:])
     if hex32(lock['lock_txid'], 'lock_txid') != txid or int(lock['lock_vout']) != vout:
         refuse('the GnB half answered for another lock', gnb=lock)
     if as_int(lock['gnb_chain_id']) != ctx.gnb_chain_id:
@@ -296,6 +308,7 @@ def own_l2(ctx, work):
 
 def cmd_release(ctx, args):
     burn_tx = hex32(option(args, '--burn-tx'), 'burn tx hash')
+    spend = Path(option(args, '--spend'))  # the release tx (gnb-cli vaultrelease); anyone may build it
     out = Path(option(args, '--out'))
     source = ctx.cfg.get('l2_source', 'rebuild')
     work = Path(tempfile.mkdtemp(prefix='signatario-', dir=ctx.cfg.get('work_dir')))
@@ -347,6 +360,8 @@ def cmd_release(ctx, args):
             refuse('the burnId differs from keccak(chainid, wgnb, nonce)', log=burn_id, expected=expect)
         if not (spk_len == 20 or (spk_len == 33 and spk.startswith('02'))):
             refuse('bad GnB script_pubkey in the burn', spk=spk)
+        if spk_len != 20:
+            refuse('policy (33-byte) destinations are not released by the GnB half yet', spk=spk)
 
         intent = {'l2ChainId': ctx.l2_chain_id, 'wgnb': ctx.wgnb, 'burnId': burn_id, 'burnNonce': nonce,
                   'from': sender, 'l2TxHash': burn_tx, 'l2Block': number, 'l2BlockHash': block['hash'].lower(),
@@ -359,20 +374,25 @@ def cmd_release(ctx, args):
         core = {k: intent[k] for k in ('burnNonce', 'amount', 'gnbScriptPubKey')}
         if prior is not None and prior != core:
             refuse('this burnId was already handled with different fields', prior=prior, now=core)
-        intent_file = work / 'intent.json'
-        intent_file.write_text(json.dumps(intent) + '\n')
+        intent['gnbRecipient'] = gnb_address(spk, ctx.gnb_chain_id)
+        burn_file = work / 'burn.json'  # the GnB half's BURN.json (tools/ponte/signatario_gnb.py)
+        burn_file.write_text(json.dumps({'burn_id': burn_id.removeprefix('0x'), 'gnb_recipient': intent['gnbRecipient'],
+                                         'amount_sats': str(amount), 'finalized': True, 'l2_block': number,
+                                         'l2_tx': burn_tx}) + '\n')
     finally:
         if proc is not None:
             proc.kill()
             proc.wait()
 
     try:
-        partial = ctx.gnb_half('release', '--intent', str(intent_file), '--out', str(out))
+        partial = ctx.gnb_half('release', burn=str(burn_file), spend=str(spend))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     ctx.db['releases'][burn_id] = core
     ctx.save_db()
-    print(json.dumps({'signed': True, 'kind': 'wgnb-release', 'intent': intent, 'gnb': partial}, indent=2))
+    record = {'signed': True, 'kind': 'wgnb-release', 'intent': intent, 'spend': str(spend), 'gnb': partial}
+    out.write_text(json.dumps(record, indent=2) + '\n')
+    print(json.dumps(record, indent=2))
 
 
 def main():

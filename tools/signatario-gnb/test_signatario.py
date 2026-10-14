@@ -85,10 +85,10 @@ def main():
         (work / 'pw').write_text('test-password\n')
         os.chmod(work / 'pw', 0o600)
         fixture = {'gnb_chain_id': GNB_TESTNET, 'markers': [], 'locks': {
-            f'{TXID_OK}:0': {'amount': 5 * 10**8, 'l2_recipient': ALICE, 'gnb_block_hash': '11' * 32,
+            f'{TXID_OK}': {'amount': 5 * 10**8, 'l2_recipient': ALICE, 'gnb_block_hash': '11' * 32,
                              'gnb_block_height': 4242, 'confirmations': 1000},
-            f'{TXID_REFUSED}:0': {'refuse': 'depth 12 < N 1000'},
-            f'{TXID_BIG}:0': {'amount': PERIOD_CAP + 1, 'l2_recipient': ALICE, 'confirmations': 1000}}}
+            f'{TXID_REFUSED}': {'refuse': 'depth 12 < N 1000'},
+            f'{TXID_BIG}': {'amount': PERIOD_CAP + 1, 'l2_recipient': ALICE, 'confirmations': 1000}}}
         (work / 'fixture.json').write_text(json.dumps(fixture))
         cfgs = []
         for i, (_, key) in enumerate(signers, 1):
@@ -98,8 +98,11 @@ def main():
                    'gnb_chain_id': GNB_TESTNET, 'threshold': 2, 'keystore': str(work / f's{i}'),
                    'password_file': str(work / 'pw'), 'cast': CAST, 'db': str(work / f'db{i}.json'),
                    'l2_source': 'rpc', 'work_dir': str(work),
-                   'gnb_half': [sys.executable, str(HERE / 'gnb_half_fake.py'), '--fixture',
-                                str(work / 'fixture.json')]}
+                   'gnb_half_lock': [sys.executable, str(HERE / 'gnb_half_fake.py'), '--fixture',
+                                     str(work / 'fixture.json'), 'lock', '--txid', '{txid}'],
+                   'gnb_half_release': [sys.executable, str(HERE / 'gnb_half_fake.py'), '--fixture',
+                                        str(work / 'fixture.json'), 'release', '--burn', '{burn}',
+                                        '--spend', '{spend}']}
             path = work / f'cfg{i}.json'
             path.write_text(json.dumps(cfg))
             cfgs.append(path)
@@ -133,14 +136,14 @@ def main():
         (work / 'bad-pin.json').write_text(json.dumps(bad))
         rc, r = signer(work / 'bad-pin.json', 'mint', '--txid', 'dd' * 32, '--vout', '0', '--out', work / 'x.json')
         rc_lock = rc  # lock not in fixture: GnB half refuses first; use a real lock to reach the pin check
-        fixture['locks'][f'{"dd" * 32}:0'] = {'amount': 10**8, 'l2_recipient': ALICE, 'confirmations': 1000}
+        fixture['locks']['dd' * 32] = {'amount': 10**8, 'l2_recipient': ALICE, 'confirmations': 1000}
         (work / 'fixture.json').write_text(json.dumps(fixture))
         (work / 'fixture-mainnet.json').write_text(json.dumps({**fixture, 'gnb_chain_id': '0x474E0001'}))
         rc, r = signer(work / 'bad-pin.json', 'mint', '--txid', 'dd' * 32, '--vout', '0', '--out', work / 'x.json')
         check('mint: refuses a contract whose code differs from the pin', rc == 1 and rc_lock == 1 and
               'pinned' in r.get('reason', ''), r)
         other = json.loads(cfgs[1].read_text())
-        other['gnb_half'][-1] = str(work / 'fixture-mainnet.json')
+        other['gnb_half_lock'][3] = str(work / 'fixture-mainnet.json')
         (work / 'other-net.json').write_text(json.dumps(other))
         rc, r = signer(work / 'other-net.json', 'mint', '--txid', 'dd' * 32, '--vout', '0', '--out', work / 'x.json')
         check('mint: refuses a lock on another GnB network', rc == 1 and 'another GnB network' in r.get('reason', ''), r)
@@ -150,22 +153,26 @@ def main():
         burn = sh(CAST, 'send', wgnb, 'burn(uint64,bytes)', str(2 * 10**8), spk, '--rpc-url', url,
                   '--private-key', ALICE_KEY, '--json')
         burn_tx = json.loads(burn.stdout)['transactionHash']
-        rc, r = signer(cfgs[0], 'release', '--burn-tx', burn_tx, '--out', work / 'p1.json')
+        rc, r = signer(cfgs[0], 'release', '--burn-tx', burn_tx, '--spend', work / 'pw', '--out', work / 'p1.json')
         check('release: refuses a burn that is not finalized', rc == 1 and 'not finalized' in r.get('reason', ''), r)
         sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', url)
-        rc, r = signer(cfgs[0], 'release', '--burn-tx', burn_tx, '--out', work / 'p1.json')
+        rc, r = signer(cfgs[0], 'release', '--burn-tx', burn_tx, '--spend', work / 'pw', '--out', work / 'p1.json')
         intent = r.get('intent', {})
         expect_id = sh(CAST, 'keccak', sh(CAST, 'abi-encode', 'f(uint256,address,uint64)', '700771', wgnb, '1')
                        .stdout.strip()).stdout.strip()
+        import hashlib
+        h = bytes.fromhex('42' * 20)
+        expect_addr = 'gnb1t' + (h + hashlib.sha3_256(hashlib.sha3_256(h).digest()).digest()[:4]).hex()
         check('release: finalized burn -> intent for the GnB half', rc == 0 and intent.get('burnId') == expect_id
               and intent.get('amount') == 2 * 10**8 and intent.get('gnbScriptPubKey') == '42' * 20
-              and intent.get('burnNonce') == 1, r)
-        fixture['markers'] = [expect_id]
+              and intent.get('burnNonce') == 1 and intent.get('gnbRecipient') == expect_addr
+              and r.get('gnb', {}).get('gnb_recipient') == expect_addr, r)
+        fixture['markers'] = [expect_id.removeprefix('0x')]
         (work / 'fixture.json').write_text(json.dumps(fixture))
-        rc, r = signer(cfgs[1], 'release', '--burn-tx', burn_tx, '--out', work / 'p2.json')
+        rc, r = signer(cfgs[1], 'release', '--burn-tx', burn_tx, '--spend', work / 'pw', '--out', work / 'p2.json')
         check('release: refuses when the GnB marker already exists', rc == 1 and 'GnB half refused' in
               r.get('reason', ''), r)
-        rc, r = signer(cfgs[0], 'release', '--burn-tx', '0x' + 'ee' * 32, '--out', work / 'p3.json')
+        rc, r = signer(cfgs[0], 'release', '--burn-tx', '0x' + 'ee' * 32, '--spend', work / 'pw', '--out', work / 'p3.json')
         check('release: refuses an unknown transaction', rc == 1 and 'not in this L2' in r.get('reason', ''), r)
     finally:
         anvil.kill()
