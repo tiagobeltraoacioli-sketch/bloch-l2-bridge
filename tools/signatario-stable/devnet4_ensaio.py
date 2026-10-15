@@ -7,7 +7,12 @@
   sudo python3 tools/signatario-stable/devnet4_ensaio.py tick        # vigia sign --once x3 + relay --once
   sudo python3 tools/signatario-stable/devnet4_ensaio.py status
   sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-propose   # one-way light-client switch (mock SP1)
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-propose TRUST.json  # ... to the REAL Bloch light
+                                                                     # client: SP1 v6.1.0 Groth16 verifier, release
+                                                                     # vkey + trustAnchor from `lc_prover.py trust`
   sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-activate  # skips the 7 days on anvil
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py release-proof PROVER_STATE.json  # releaseWithProof for
+                                                                     # every burn the light-client prover proved
 
 "Ethereum" is a persistent anvil (chain id 11155111, 2 s blocks, port 18950) holding a six-decimal mock
 USDC and ContextBoundSourceVault (2-of-3 Ethereum keys). The L2 is the real devnet4 (700771) with
@@ -106,6 +111,11 @@ def save(st):
     (DIR / 'state.json').write_text(json.dumps(st, indent=1) + '\n')
 
 
+def eth_now():
+    """The anvil's clock: switch-activate moves it 7 days ahead of the wall clock."""
+    return int(rpc(ETH_RPC, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
+
+
 def anvil_up():
     try:
         return int(rpc(ETH_RPC, 'eth_chainId', []), 16) == ETH_CHAIN
@@ -171,7 +181,7 @@ def setup():
                                bytecode('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault')
                                + args[2:])
         st.update(vault=r['contractAddress'].lower(), vault_tx=tx, vault_block=int(r['blockNumber'], 16))
-        vu = str(int(time.time()) + 3600)
+        vu = str(eth_now() + 3600)
         d = call(ETH_RPC, st['vault'], 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [sh(CAST, 'wallet', 'sign', '--no-hash', '--keystore', DIR / 'keys' / f'eth{i}', '--password-file',
                    pw, d) for i in (1, 2)]
@@ -266,24 +276,32 @@ def tick():
     print('[relay] ' + (out.stdout + out.stderr).strip()[-3000:], flush=True)
 
 
-def switch_propose():
-    """One-way switch, step 1 (3-of-3 Ethereum keys): propose an SP1ReleaseVerifier. Its SP1 verifier here is
-    the MOCK from the bridge repo tests (no Bloch light-client program exists yet): this shows the vault
-    mechanics only, not a real proof."""
+def switch_propose(trust_file=None):
+    """One-way switch, step 1 (3-of-3 Ethereum keys): propose an SP1ReleaseVerifier. Without TRUST.json its
+    SP1 verifier is the MOCK from the bridge repo tests (vault mechanics only). With it, the real SP1 v6.1.0
+    Groth16 verifier, the Bloch light-client release program key and the trustAnchor (anchor + step key)."""
     st = state()
     br = Path(os.environ.get('BRIDGE_OUT', '/home/ubuntu/bridge-context-20261014/out'))
     art = lambda f, n: json.loads((br / f / f'{n}.json').read_text())['bytecode']['object']
-    _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('ContextBoundSourceVaultSwitch.t.sol', 'MockSP1'))
-    mock = r['contractAddress'].lower()
-    args = sh(CAST, 'abi-encode', 'c(address,bytes32,bytes32,uint256,address)', mock,
-              sh(CAST, 'keccak', 'devnet4-mock-program-vkey'), sh(CAST, 'keccak', 'devnet4-trust-anchor'), L2_CHAIN,
+    if trust_file:
+        trust = json.loads(Path(trust_file).read_text())
+        if 'sp1_groth16' not in st or not rpc(ETH_RPC, 'eth_getCode', [st['sp1_groth16'], 'latest'])[2:]:
+            _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('SP1VerifierGroth16.sol', 'SP1Verifier'))
+            st['sp1_groth16'] = r['contractAddress'].lower()
+        mock, vkey, anchor = st['sp1_groth16'], trust['release_vkey'], trust['trust_anchor']
+        st.update(lc_trust=trust)
+    else:
+        _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('ContextBoundSourceVaultSwitch.t.sol', 'MockSP1'))
+        mock = r['contractAddress'].lower()
+        vkey, anchor = sh(CAST, 'keccak', 'devnet4-mock-program-vkey'), sh(CAST, 'keccak', 'devnet4-trust-anchor')
+    args = sh(CAST, 'abi-encode', 'c(address,bytes32,bytes32,uint256,address)', mock, vkey, anchor, L2_CHAIN,
               st['l2_token'])
     _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('SP1ReleaseVerifier.sol', 'SP1ReleaseVerifier')
                           + args[2:])
     lc = r['contractAddress'].lower()
     code_hash = sh(CAST, 'keccak', sh(CAST, 'code', lc, '--rpc-url', ETH_RPC))
     nonce = call(ETH_RPC, st['vault'], 'switchNonce()(uint64)')
-    vu = str(int(time.time()) + 3600)
+    vu = str(eth_now() + 3600)
     d = call(ETH_RPC, st['vault'], 'switchDigest(bool,address,bytes32,uint64,uint256)(bytes32)', 'false', lc,
              code_hash, nonce, vu)
     keys = sorted(((DIR / 'keys' / f'eth{i}.addr').read_text().strip(), i) for i in (1, 2, 3))
@@ -293,7 +311,8 @@ def switch_propose():
                            '[' + ','.join(sigs) + ']')
     st.update(mock_sp1=mock, verifier=lc, propose_tx=tx)
     save(st)
-    print(json.dumps({'mock_sp1': mock, 'sp1_release_verifier': lc, 'codehash': code_hash, 'propose_tx': tx,
+    print(json.dumps({'sp1_verifier': mock, 'real': bool(trust_file), 'program_vkey': vkey, 'trust_anchor': anchor,
+                      'sp1_release_verifier': lc, 'codehash': code_hash, 'propose_tx': tx,
                       'block': int(r['blockNumber'], 16),
                       'activates_at': int(call(ETH_RPC, st['vault'], 'verifierActivatesAt()(uint64)'))}, indent=1))
 
@@ -311,6 +330,39 @@ def switch_activate():
     tx, r, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'activateVerifier()')
     print(json.dumps({'activate_tx': tx, 'block': int(r['blockNumber'], 16),
                       'verifier': '0x' + call(ETH_RPC, st['vault'], 'verifier()(address)')[2:].lower()}, indent=1))
+
+
+def release_proof(prover_state):
+    """releaseWithProof for every burn of this token that the light-client prover proved. The item comes from
+    the L2 Burned log itself; the vault recomputes the releaseId and the verifier checks the Groth16 proof."""
+    st = state()
+    burns = json.loads(Path(prover_state).read_text()).get('burns', {})
+    topic = sh(CAST, 'keccak', 'Burned(bytes32,uint64,address,uint64,address)').lower()
+    out = []
+    for burn_id, b in burns.items():
+        if b.get('status') != 'proven' or b.get('mode') != 'groth16':
+            continue
+        if call(ETH_RPC, st['vault'], 'releasedBurn(bytes32)(bool)', burn_id) == 'true':
+            out.append({'burn_id': burn_id, 'already_released': True})
+            continue
+        r = rpc(L2_RPC, 'eth_getTransactionReceipt', [b['tx']])
+        log = next(l for l in r['logs'] if l['address'].lower() == st['l2_token'] and l['topics'][0].lower() == topic
+                   and l['topics'][1].lower() == burn_id.lower())
+        nonce, data = int(log['topics'][2], 16), log['data'][2:]
+        amount, recipient = int(data[:64], 16), '0x' + data[64 + 24:128]
+        item = f"({st['route']},{nonce},{recipient},{amount},{burn_id})"
+        rid = call(ETH_RPC, st['vault'], 'releaseId((bytes32,uint64,address,uint64,bytes32))(bytes32)', item).lower()
+        if rid != b['release_id'].lower():
+            raise SystemExit(f'vault releaseId {rid} differs from the proof\'s {b["release_id"]}')
+        proof = sh(CAST, 'abi-encode', 'f(bytes,bytes)', b['public_values'], b['proof_bytes'])
+        before = int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', recipient))
+        tx, rr, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'releaseWithProof((bytes32,uint64,address,uint64,bytes32),bytes)',
+                                item, proof)
+        after = int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', recipient))
+        out.append({'burn_id': burn_id, 'release_id': rid, 'tx': tx, 'block': int(rr['blockNumber'], 16),
+                    'gas_used': int(rr['gasUsed'], 16), 'recipient': recipient, 'amount': amount,
+                    'recipient_before': before, 'recipient_after': after})
+    print(json.dumps(out, indent=1))
 
 
 def status():
@@ -334,5 +386,10 @@ def status():
 cmd = sys.argv[1] if len(sys.argv) > 1 else ''
 SIMPLE = {'setup': setup, 'tick': tick, 'status': status, 'switch-propose': switch_propose,
           'switch-activate': switch_activate}
-SIMPLE[cmd]() if cmd in SIMPLE \
-    else deposit(sys.argv[2]) if cmd == 'deposit' else burn(sys.argv[2]) if cmd == 'burn' else print(__doc__)
+if cmd == 'switch-propose' and len(sys.argv) > 2:
+    switch_propose(sys.argv[2])
+elif cmd == 'release-proof':
+    release_proof(sys.argv[2])
+else:
+    SIMPLE[cmd]() if cmd in SIMPLE \
+        else deposit(sys.argv[2]) if cmd == 'deposit' else burn(sys.argv[2]) if cmd == 'burn' else print(__doc__)
