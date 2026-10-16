@@ -88,7 +88,10 @@ What the tool enforces:
 1. Fill the config: `network.genesisHash`, `source.revision`, `deployer.address` (fresh key),
    `deployer.fundedBy.safe` (Bloch Inc Safe), 7 signer `{operator, address}`, guardian
    `{operator, address}`, `tx.maxGasPriceWei`; bUSDC: `ethereum.vault/route/vaultCodeHash/vaultCap`
-   (vault deployed first; its signers sorted ascending). Review as a pull request.
+   (vault deployed first; its signers sorted ascending) and `ethereum.vaultGuard` = the vault's `Guard`
+   constructor argument (`guardians` sorted ascending, at least one on mainnet, never an L2 signer;
+   `pauseDuration`, `pauseCooldown`), which `verify --source-rpc` compares with the deployed vault.
+   Review as a pull request.
 2. `python3 tools/deploy-pontes/deploy_pontes.py validate --config <c>` → note `configSha256`.
 3. `plan --config <c> --write deployments/mainnet/<bridge>.plan.json`; a second reviewer regenerates it.
 4. `python3 tools/deploy-pontes/rehearse_anvil.py` must end with `REHEARSAL OK`.

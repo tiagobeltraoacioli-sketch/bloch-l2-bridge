@@ -5,7 +5,7 @@
 
 "L2" = anvil 700771 with WrappedGnBV2 / BridgedStablecoinV2 (2-of-3 signers, one guardian, pause 2 h,
 cooldown 2 h, large mints > 10 units delayed 1 h). "GnB" = gnb_node_fake.py over a fixture of transactions.
-"Ethereum" = anvil 11155111 with a six-decimal MockStable and the ContextBoundSourceVault fixture.
+"Ethereum" = anvil 11155111 with a six-decimal MockStable and ContextBoundSourceVault (contracts/usdt).
 Scenarios: healthy flows (no pause, release accounted, soft liveness alert only), forged mint (k signer
 keys, no lock) -> pause, repeated rounds and cooldown -> no second pause tx, re-pause after the cooldown,
 large queued mint without provenance -> pause before readyAt and executeMint reverts, reserves shortfall
@@ -294,7 +294,7 @@ def main():
         # ════════════════════════════ stablecoin ════════════════════════════
         mock = create(project, eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
         k = lambda t: out(CAST, 'keccak', t)
-        vault = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+        vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), mock, str(10**12), '0', signer_list,
                        '2', f'({10**11},86400,2,604800)',
                        f'([{",".join(sorted([vault_guardian, SOMBRA_GUARDIAN]))}],{PAUSE},{COOLDOWN})')

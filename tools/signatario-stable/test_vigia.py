@@ -3,7 +3,7 @@
 
   python3 test_vigia.py FOUNDRY_PROJECT_DIR
 
-"Ethereum" = anvil 11155111 with a six-decimal MockStable and the ContextBoundSourceVault fixture (2-of-3);
+"Ethereum" = anvil 11155111 with a six-decimal MockStable and ContextBoundSourceVault (contracts/usdt) (2-of-3);
 "L2" = anvil 700771 with BridgedStablecoinV2 (2-of-3, same keys, token bucket, large-mint delay, one
 guardian); the Ethereum half is the test double eth_half_fake.py.
 deposit -> nothing before Ethereum finality -> three `vigia sign` -> `vigia relay` mints -> nothing twice;
@@ -104,7 +104,7 @@ def main():
 
         token = create(project, eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
         k = lambda t: out(CAST, 'keccak', t)
-        vault = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+        vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), token, str(1_000_000 * U), '0', addrs,
                        '2', f'({100_000 * U},86400,2,604800)', '([],0,0)')
         vu = str(int(time.time()) + 3600)

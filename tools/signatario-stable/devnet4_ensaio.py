@@ -203,7 +203,7 @@ def setup():
                   '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})',
                   f"([{vault_guardians}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
-                               bytecode('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault')
+                               bytecode('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault')
                                + args[2:])
         st.update(vault=r['contractAddress'].lower(), vault_tx=tx, vault_block=int(r['blockNumber'], 16),
                   guardian=keys['guardian'], guardiao_eth=keys['guardiao-eth'])
@@ -319,7 +319,7 @@ def switch_propose(trust_file=None):
     SP1 verifier is the MOCK from the bridge repo tests (vault mechanics only). With it, the real SP1 v6.1.0
     Groth16 verifier, the Bloch light-client release program key and the trustAnchor (anchor + step key)."""
     st = state()
-    br = Path(os.environ.get('BRIDGE_OUT', '/home/ubuntu/bridge-context-20261014/out'))
+    br = Path(os.environ.get('BRIDGE_OUT', str(PROJECT / 'out')))
     art = lambda f, n: json.loads((br / f / f'{n}.json').read_text())['bytecode']['object']
     if trust_file:
         trust = json.loads(Path(trust_file).read_text())
@@ -431,7 +431,7 @@ def shadow_verifier():
     shadow proof against it with eth_call, i.e. exactly what the vault would accept after the switch."""
     st = state()
     trust = json.loads((DIR / 'prover' / 'state.json').read_text())['trust']
-    br = Path(os.environ.get('BRIDGE_OUT', '/home/ubuntu/bridge-context-20261014/out'))
+    br = Path(os.environ.get('BRIDGE_OUT', str(PROJECT / 'out')))
     art = lambda f, n: json.loads((br / f / f'{n}.json').read_text())['bytecode']['object']
     if 'sp1_groth16' not in st or not rpc(ETH_RPC, 'eth_getCode', [st['sp1_groth16'], 'latest'])[2:]:
         _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('SP1VerifierGroth16.sol', 'SP1Verifier'))

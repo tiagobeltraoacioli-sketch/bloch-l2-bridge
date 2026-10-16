@@ -111,14 +111,17 @@ def source_vault(eth, work):
     k = lambda t: out(CAST, 'keccak', t)
     token = create('solidity-tests/BridgedStablecoin.t.sol:MockStable')
     signers = sorted(new_key()[1] for _ in range(3))
-    vault = create('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+    guardians = sorted((new_key()[1] for _ in range(2)), key=lambda a: int(a, 16))
+    vault = create('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                    k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
-                   '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800)', '([],0,0)')
+                   '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800)',
+                   f'([{",".join(guardians)}],259200,259200)')
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
     return {'chainId': int(out(CAST, 'chain-id', '--rpc-url', eth)), 'vault': vault,
             'route': out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth).lower(),
             'vaultCodeHash': out(CAST, 'keccak', out(CAST, 'code', vault, '--rpc-url', eth)).lower(),
-            'vaultCap': 1_000_000 * 10**6}
+            'vaultCap': 1_000_000 * 10**6,
+            'vaultGuard': {'guardians': guardians, 'pauseDuration': 259200, 'pauseCooldown': 259200}}
 
 
 def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=None):
@@ -227,6 +230,12 @@ def main():
                 lambda c: c['deployer'].update(address=c['signers']['set'][0]['address']), needle='no role')
         refused('[policy] mainnet with a used deployer (nonce > 0) refused',
                 lambda c: c['deployer'].update(startNonce=3), needle='fresh')
+        refused('[policy] mainnet vault without guardians refused',
+                lambda c: c['ethereum'].update(vaultGuard={'guardians': [], 'pauseDuration': 0, 'pauseCooldown': 0}),
+                needle='at least one guardian')
+        refused('[policy] unsorted vault guardians refused',
+                lambda c: c['ethereum']['vaultGuard'].update(guardians=c['ethereum']['vaultGuard']['guardians'][::-1]),
+                needle='ascending')
         refused('[policy] supply cap above the vault cap refused',
                 lambda c: c['ethereum'].update(vaultCap=10**10), needle='vault cap')
         refused('[policy] rehearsal flag on 700770 refused', lambda c: c['network'].update(rehearsal=True),

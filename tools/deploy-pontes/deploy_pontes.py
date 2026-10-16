@@ -278,7 +278,7 @@ def validate(cfg, rehearsal):
         params['gnbChainId'] = g
     else:
         eth = cfg['ethereum']
-        exact_keys(eth, ['chainId', 'vault', 'route', 'vaultCodeHash', 'vaultCap'], 'ethereum')
+        exact_keys(eth, ['chainId', 'vault', 'route', 'vaultCodeHash', 'vaultCap', 'vaultGuard'], 'ethereum')
         refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId is undecided')
         refuse(rehearsal or eth['chainId'] == ETH_MAINNET, 'mainnet policy: ethereum.chainId must be 1')
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
@@ -287,8 +287,25 @@ def validate(cfg, rehearsal):
         refuse(is_uint(eth['vaultCap'], UINT64_MAX, 1), 'ethereum.vaultCap is undecided (vault.cap())')
         refuse(lim['supplyCap'] <= eth['vaultCap'], 'supplyCap exceeds the vault cap')
         refuse(eth['vault'].lower() not in signers + guardians, 'the vault address is listed as a role')
+        # the vault's own guardians (ContextBoundSourceVault Guard constructor argument), checked on-chain by verify
+        vg = eth['vaultGuard']
+        refuse(isinstance(vg, dict), 'ethereum.vaultGuard must be an object')
+        exact_keys(vg, ['guardians', 'pauseDuration', 'pauseCooldown'], 'ethereum.vaultGuard')
+        refuse(isinstance(vg['guardians'], list) and len(vg['guardians']) <= MAX_GUARDIANS,
+               'ethereum.vaultGuard.guardians is undecided or lists more than 7')
+        refuse(all(is_addr(a) for a in vg['guardians']), 'ethereum.vaultGuard.guardians: undecided or invalid address')
+        vgs = [a.lower() for a in vg['guardians']]
+        refuse(vgs == sorted(set(vgs), key=lambda a: int(a, 16)), 'ethereum.vaultGuard.guardians must be strictly ascending')
+        refuse(is_uint(vg['pauseDuration'], UINT64_MAX) and is_uint(vg['pauseCooldown'], UINT64_MAX),
+               'ethereum.vaultGuard pauseDuration/pauseCooldown are undecided')
+        refuse(bool(vgs) == (vg['pauseDuration'] > 0) and (vgs or vg['pauseCooldown'] == 0),
+               'ethereum.vaultGuard: guardians need pauseDuration > 0; no guardians need zero durations')
+        refuse(rehearsal or vgs, 'mainnet policy: the vault needs at least one guardian')
+        refuse(not set(vgs) & set(signers), 'an L2 signer key is also a vault guardian')
         params.update(sourceChainId=eth['chainId'], sourceVault=eth['vault'].lower(), sourceRoute=eth['route'].lower(),
-                      vaultCodeHash=eth['vaultCodeHash'].lower(), vaultCap=eth['vaultCap'])
+                      vaultCodeHash=eth['vaultCodeHash'].lower(), vaultCap=eth['vaultCap'],
+                      vaultGuard={'guardians': vgs, 'pauseDuration': vg['pauseDuration'],
+                                  'pauseCooldown': vg['pauseCooldown']})
 
     tx = cfg['tx']
     exact_keys(tx, ['gasLimit', 'maxGasPriceWei'], 'tx')
@@ -402,7 +419,8 @@ def make_plan(cfg, rehearsal, build=True):
             'tx': {'gasLimit': cfg['tx']['gasLimit'], 'maxGasPriceWei': cfg['tx']['maxGasPriceWei']}}
     if p['bridge'] == 'stable':
         plan['sourceVault'] = {'chainId': p['sourceChainId'], 'address': p['sourceVault'],
-                               'codeHash': p['vaultCodeHash'], 'route': p['sourceRoute'], 'cap': p['vaultCap']}
+                               'codeHash': p['vaultCodeHash'], 'route': p['sourceRoute'], 'cap': p['vaultCap'],
+                               'guard': p['vaultGuard']}
     return plan, init_code
 
 
@@ -606,7 +624,15 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
         refuse(route == sv['route'], f'vault routeId is {route}, the config says {sv["route"]}')
         cap = int(str(json.loads(eth.call(sv['address'], 'cap()', block='finalized', returns='(uint64)'))[0]).split()[0])
         refuse(cap == sv['cap'] and cap >= exp['supplyCap'], f'vault cap is {cap}, the config says {sv["cap"]}')
-        result['sourceVault'] = {'address': sv['address'], 'codeHash': sv['codeHash'], 'routeId': route, 'cap': cap}
+        uint = lambda sig, *a: int(str(json.loads(eth.call(sv['address'], sig, *a, block='finalized',
+                                                            returns='(uint256)'))[0]).split()[0])
+        n = uint('guardianCount()')
+        got = [json.loads(eth.call(sv['address'], 'guardians(uint256)', i, block='finalized',
+                                   returns='(address)'))[0].lower() for i in range(n)]
+        guard = {'guardians': got, 'pauseDuration': uint('pauseDuration()'), 'pauseCooldown': uint('pauseCooldown()')}
+        refuse(guard == sv['guard'], f'vault guardians/pause policy {guard} differ from the config {sv["guard"]}')
+        result['sourceVault'] = {'address': sv['address'], 'codeHash': sv['codeHash'], 'routeId': route, 'cap': cap,
+                                 'guard': guard}
     return result
 
 

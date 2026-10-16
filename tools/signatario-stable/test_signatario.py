@@ -109,7 +109,7 @@ def main():
         k = lambda t: out(CAST, 'keccak', t)
         vaults = []
         for native in ('bloch-l2-700771', 'another-native-domain'):
-            v = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+            v = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k(native), k('USDC'), token, str(VAULT_CAP), '0', addrs, '2',
                        f'({WINDOW_LIMIT},{WINDOW},2,604800)', '([],0,0)')
             vu = str(int(time.time()) + 3600)

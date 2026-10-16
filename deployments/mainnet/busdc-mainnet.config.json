@@ -33,7 +33,12 @@
     "vault": null,
     "route": null,
     "vaultCodeHash": null,
-    "vaultCap": null
+    "vaultCap": null,
+    "vaultGuard": {
+      "guardians": null,
+      "pauseDuration": 259200,
+      "pauseCooldown": 259200
+    }
   },
   "signers": {
     "threshold": 5,

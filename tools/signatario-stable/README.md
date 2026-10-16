@@ -76,7 +76,7 @@ when one key serves both chains), `max_valid_seconds` (default 3600), `db`, `eth
 `timestamp_rule_file` (default `timestamp-rule.txt` next to the genesis, as `atestador.py`).
 `l2_source: "rpc"` trusts `l2_rpc` for finality and exists only for tests.
 
-Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 11155111 with the vault fixture and a
+Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 11155111 with the vault (contracts/usdt) and a
 6-decimal mock token, 700771 with `BridgedStablecoin`; Ethereum half test double).
 
 ## Automation

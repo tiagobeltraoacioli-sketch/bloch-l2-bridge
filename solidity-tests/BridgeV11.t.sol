@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {WrappedGnBV2} from "../contracts/wgnb/WrappedGnBV2.sol";
 import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
-import {ContextBoundSourceVault} from "./fixtures/ContextBoundSourceVault.sol";
+import {ContextBoundSourceVault} from "../contracts/usdt/ContextBoundSourceVault.sol";
 
 interface Vm {
     function addr(uint256 privateKey) external pure returns (address);

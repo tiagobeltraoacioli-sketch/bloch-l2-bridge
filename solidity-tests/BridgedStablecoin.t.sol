@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {BridgedStablecoin} from "../contracts/stable/BridgedStablecoin.sol";
-import {ContextBoundSourceVault} from "./fixtures/ContextBoundSourceVault.sol";
+import {ContextBoundSourceVault} from "../contracts/usdt/ContextBoundSourceVault.sol";
 
 interface Vm {
     struct Log {

@@ -3,7 +3,7 @@
 
   python3 test_reservas.py FOUNDRY_PROJECT_DIR
 
-Stable: the ContextBoundSourceVault fixture over MockStable (deposits, a committee release) against a
+Stable: ContextBoundSourceVault (contracts/usdt) over MockStable (deposits, a committee release) against a
 MockSupplyV2 token. wGnB: a fake `getutxos` against a MockSupplyV1 / V2 token. Scenarios: equal -> ok;
 deposit not yet minted -> surplus (soft) and a tolerance absorbs it; release without a burn -> deficit
 (hard); pendingSupply counts as a liability; GnB equal / deficit; truncated GnB answer, foreign script and
@@ -104,7 +104,7 @@ def main():
         signers = sorted((out(CAST, 'wallet', 'address', '--private-key', k).lower(), k) for k in SIGNER_KEYS)
         k = lambda t: out(CAST, 'keccak', t)
         usdc = create('solidity-tests/BridgedStablecoin.t.sol:MockStable')
-        vault = create('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+        vault = create('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), usdc, str(10**12), '0',
                        '[' + ','.join(a for a, _ in signers) + ']', '2', f'({10**11},86400,2,604800)', '([],0,0)')
         sigs = lambda d: '[' + ','.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d)

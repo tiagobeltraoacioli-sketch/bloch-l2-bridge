@@ -29,5 +29,5 @@ Config: `{"bridges": [...], "cast": optional}`, each bridge `kind`, `name`, `l2_
 (base units, 0) and `eth_rpc` + `vault` (stable) or `gnb_rpc` + `gnb_vault_address` + optional
 `gnb_vault_script` (wgnb).
 
-Tests: `python3 test_reservas.py <foundry project>` (anvil, vault fixture, `MockSupply` tokens, fake GnB
+Tests: `python3 test_reservas.py <foundry project>` (anvil, vault (contracts/usdt), `MockSupply` tokens, fake GnB
 RPC): 14 checks.

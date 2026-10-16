@@ -4,7 +4,7 @@ temp dir, cleanup).
 
   python3 test_sombra.py FOUNDRY_PROJECT_DIR
 
-Ethereum = anvil 11155111 with a six-decimal MockStable, the ContextBoundSourceVault fixture (2-of-3
+Ethereum = anvil 11155111 with a six-decimal MockStable, ContextBoundSourceVault (contracts/usdt) (2-of-3
 releases, 3-of-3 switch/unpause, one guardian, pause 2 h, cooldown 1 h) and a shadow SP1ReleaseVerifier
 over MockSP1. The light-client prover is simulated by writing its state.json/status.json; a fake Bloch L1
 RPC serves `getchaininfo` for the epoch grace.
@@ -138,13 +138,13 @@ def main():
 
         k = lambda t: out(CAST, 'keccak', t)
         usdc = create(project, eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
-        sp1 = create(project, eth, 'solidity-tests/fixtures/MockSP1.sol:MockSP1')
-        shadow = create(project, eth, 'solidity-tests/fixtures/SP1ReleaseVerifier.sol:SP1ReleaseVerifier',
+        sp1 = create(project, eth, 'solidity-tests/ContextBoundSourceVaultSwitch.t.sol:MockSP1')
+        shadow = create(project, eth, 'contracts/usdt/SP1ReleaseVerifier.sol:SP1ReleaseVerifier',
                         sp1, VKEY, ANCHOR, str(L2_CHAIN), L2_TOKEN)
         send(eth, DEPLOYER, usdc, 'mintTo(address,uint256)', user, str(10**12))
 
         def deploy_vault(native):
-            v = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+            v = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k(native), k('USDC'), usdc, str(10**12), '0', signer_list, '2',
                        f'({10**11},86400,3,604800)', f'([{guardian}],{PAUSE},{COOLDOWN})')
             vu = str(2**40)

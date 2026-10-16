@@ -174,6 +174,6 @@ Config: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`, `prover_dir`, `s
 `password_file`, `cast`, `state`, `log_chunk` (5000). Choose the grace above the prover's worst latency
 (the burn's settlement must be L1-finalized, then about 30 min of proving on one host).
 
-Tests: `python3 test_sombra.py <foundry project>` (anvil, vault fixture with one guardian, MockSP1 under a
+Tests: `python3 test_sombra.py <foundry project>` (anvil, vault (contracts/usdt) with one guardian, MockSP1 under a
 real `SP1ReleaseVerifier`, fake L1 RPC): 18 checks. Live drill: `devnet4_ensaio.py` `shadow-config`,
 `shadow-verifier`, `release-unbacked`, `unpause`.
