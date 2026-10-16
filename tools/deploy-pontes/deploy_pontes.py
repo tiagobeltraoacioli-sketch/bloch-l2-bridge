@@ -200,7 +200,8 @@ def validate(cfg, rehearsal):
     spec = CONTRACTS[bridge]
     if bridge == 'wgnb':
         exact_keys(tok, ['contract'], 'token')
-        name, symbol = 'Wrapped GnB', 'wGnB'
+        # fixed in WrappedGnBV2's constructor (de067dc): the GnB-SMH coin's ticker is GSMH
+        name, symbol = 'Wrapped GnB-SMH', 'wGSMH'
     else:
         exact_keys(tok, ['contract', 'name', 'symbol'], 'token')
         name, symbol = tok['name'], tok['symbol']
