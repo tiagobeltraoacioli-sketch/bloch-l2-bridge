@@ -3,6 +3,9 @@ pragma solidity 0.8.24;
 
 import {ContextBoundSourceVault} from "../contracts/usdt/ContextBoundSourceVault.sol";
 
+/// No guardians: the vault behaves as before the shadow-mode guardian pause.
+function noGuard() pure returns (ContextBoundSourceVault.Guard memory guard) {}
+
 interface ContextVm {
     function etch(address target, bytes calldata code) external;
     function store(address target, bytes32 slot, bytes32 value) external;
@@ -81,7 +84,7 @@ contract ContextBoundSourceVaultTest {
 
     function deployPaused(uint8 mode, bytes32 domain) private returns (ContextBoundSourceVault) {
         return new ContextBoundSourceVault(
-            domain, bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, mode, committee(), 2, ContextBoundSourceVault.Policy(1_000_000, 1 days, 2, 7 days)
+            domain, bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, mode, committee(), 2, ContextBoundSourceVault.Policy(1_000_000, 1 days, 2, 7 days), noGuard()
         );
     }
 
@@ -382,12 +385,12 @@ contract ContextBoundSourceVaultTest {
     function testInvalidCommitteeAndTransferPolicy() public {
         address[] memory s = committee();
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 1, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 1, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days), noGuard());
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 2, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 2, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days), noGuard());
         s[1] = s[0];
         vm.expectRevert();
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 2, 7 days), noGuard());
     }
 
     function testIndependentPythonAndRustWireVectors() public {
@@ -422,7 +425,7 @@ contract ContextBoundSourceVaultTest {
                 uint8(i),
                 committee(),
                 2,
-                ContextBoundSourceVault.Policy(10_000_000_000, 1 days, 2, 7 days)
+                ContextBoundSourceVault.Policy(10_000_000_000, 1 days, 2, 7 days), noGuard()
             );
             vm.etch(fixedVault, address(configured).code);
             ContextBoundSourceVault subject = ContextBoundSourceVault(fixedVault);
@@ -560,7 +563,7 @@ contract ContextBoundSourceVaultTest {
 
     function testReleasesAreCappedPerWindowAtDeploymentLimits() public {
         ContextBoundSourceVault small = new ContextBoundSourceVault(
-            bytes32(uint256(9)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, committee(), 2, ContextBoundSourceVault.Policy(50, 1 hours, 2, 7 days)
+            bytes32(uint256(9)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, committee(), 2, ContextBoundSourceVault.Policy(50, 1 hours, 2, 7 days), noGuard()
         );
         controls(small, true, true, 0);
         small.deposit(200, bytes32(uint256(8)));
@@ -581,10 +584,10 @@ contract ContextBoundSourceVaultTest {
     function testWindowLimitsAreValidatedOnce() public {
         address[] memory s = committee();
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(0, 1 days, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(0, 1 days, 2, 7 days), noGuard());
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(101, 1 days, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(101, 1 days, 2, 7 days), noGuard());
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 0, 2, 7 days));
+        new ContextBoundSourceVault(bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 0, 2, 7 days), noGuard());
     }
 }

@@ -2,6 +2,9 @@
 pragma solidity 0.8.24;
 
 import {ContextBoundSourceVault, IReleaseVerifier} from "../contracts/usdt/ContextBoundSourceVault.sol";
+
+/// No guardians: the vault behaves as before the shadow-mode guardian pause.
+function noGuard() pure returns (ContextBoundSourceVault.Guard memory guard) {}
 import {SP1ReleaseVerifier, ISP1Verifier} from "../contracts/usdt/SP1ReleaseVerifier.sol";
 
 interface SwitchVm {
@@ -93,7 +96,7 @@ contract ContextBoundSourceVaultSwitchTest {
             s[i] = vm.addr(keys[i]);
         }
         v = new ContextBoundSourceVault(
-            bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, switchThreshold, delay)
+            bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, switchThreshold, delay), noGuard()
         );
         bytes32 h = v.controlDigest(true, true, 0, block.timestamp + 100);
         v.setControls(true, true, 0, block.timestamp + 100, sign(h, 2));
@@ -141,11 +144,11 @@ contract ContextBoundSourceVaultSwitchTest {
         bytes32 a = bytes32(uint256(1));
         bytes32 b = bytes32(uint256(2));
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 1, 7 days)); // below threshold
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 1, 7 days), noGuard()); // below threshold
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 4, 7 days)); // above n
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 4, 7 days), noGuard()); // above n
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days - 1)); // short delay
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days - 1), noGuard()); // short delay
         require(vault.switchThreshold() == 3 && vault.switchDelay() == 7 days && vault.verifier() == address(0));
     }
 
