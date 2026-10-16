@@ -11,7 +11,10 @@
 //! * **roll-forward** with parent-hash linkage checks;
 //! * **atomic source validation**: missing or inconsistent source data is a
 //!   typed refusal through `try_sync`, without changing persisted state;
-//!   catch-up and rewinds have an explicit per-call block limit;
+//!   catch-up and rewinds have an explicit per-call block limit. Hosts with a
+//!   real snapshot handle should implement [`BlockSourceView`] and call
+//!   [`DepositWatcher::try_sync_view`] so token invalidation/ABA is also a
+//!   typed atomic refusal;
 //! * **replay safety**: re-syncing an unchanged source emits nothing —
 //!   a reprocessed block can never double-observe or double-credit a
 //!   deposit (dedup key = `deposit_id = (txid, first vault-paying vout)`,
@@ -37,7 +40,9 @@
 //!   [`DepositWatcher::from_state`]) so a HOST can persist it across
 //!   process restarts — a restarted watcher re-syncing the same chain
 //!   emits nothing and never re-credits history. This crate itself still
-//!   does NO file I/O;
+//!   does NO file I/O. [`DepositWatcher::restore_json_for`] is the preferred
+//!   JSON boundary: it bounds the stream before decoding and binds the
+//!   snapshot to independently trusted vault/chain configuration;
 //! * the **K(amount) gate**: a deposit is announced [`WatcherUpdate::
 //!   Creditable`] only at depth ≥ K for the Automatic tiers, and is parked
 //!   as [`WatcherUpdate::NeedsOperatorReview`] on the review tier — NEVER
@@ -58,16 +63,28 @@
 //! JSON-RPC (see `stubs::L1DepositWatcher`); the RPC client does not
 //! exist in this crate.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
+use tiny_keccak::{Hasher, Keccak};
 
 use crate::envelope::{extract_deposit_envelope, TxOutput};
 use crate::status::{confirmation_depth, ConfirmationRequirement, DepositEvent};
 
 /// `deposit_id := (txid, first vault-paying vout)` — §5.
 pub type DepositId = ([u8; 32], u32);
+
+/// Facts committed by a transaction/deposit identity and therefore invariant
+/// when that transaction is re-mined in another block.
+fn same_deposit_facts(left: &DepositEvent, right: &DepositEvent) -> bool {
+    left.deposit_id() == right.deposit_id()
+        && left.amount_atoms == right.amount_atoms
+        && left.l2_chain_id == right.l2_chain_id
+        && left.l2_recipient == right.l2_recipient
+}
 
 /// Anti-dust minimum deposit, in atoms. §5 marks the real value TBD
 /// ("MIN_DEPOSIT_ATOMS, anti-dust, TBD"); 1 atom is the PLACEHOLDER floor
@@ -83,11 +100,32 @@ pub const DEFAULT_SYNC_LIMIT: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatcherSyncError {
     EmptySource,
-    MissingBlock { height: u64 },
-    WrongHeight { requested: u64, received: u64 },
-    InconsistentParent { height: u64 },
+    MissingBlock {
+        height: u64,
+    },
+    WrongHeight {
+        requested: u64,
+        received: u64,
+    },
+    InconsistentParent {
+        height: u64,
+    },
     ViewChanged,
     RewindLimitExceeded,
+    RestoreValidationLimitExceeded,
+    RestoredDepositMismatch {
+        deposit: DepositId,
+    },
+    TrustedCheckpointUnavailable {
+        height: u64,
+        tip: u64,
+    },
+    TrustedCheckpointMismatch {
+        height: u64,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+    ViewInvalidated,
     ZeroWorkLimit,
 }
 
@@ -100,7 +138,8 @@ impl core::fmt::Display for WatcherSyncError {
 impl std::error::Error for WatcherSyncError {}
 
 /// A Bloch L1 transaction as this layer sees it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L1Tx {
     /// Transaction id.
     pub txid: [u8; 32],
@@ -109,7 +148,8 @@ pub struct L1Tx {
 }
 
 /// A Bloch L1 block as this layer sees it. Heights are contiguous from 0.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L1Block {
     /// Block height.
     pub height: u64,
@@ -131,6 +171,29 @@ pub trait BlockSource {
     fn tip_height(&self) -> Option<u64>;
     /// The block at `height` under the source's CURRENT view.
     fn block_at(&self, height: u64) -> Option<L1Block>;
+}
+
+/// A [`BlockSource`] exposed through one host-managed immutable view.
+///
+/// The token is an operational consistency contract, not chain
+/// authentication. Implementations MUST assign a token that is never reused
+/// for a distinct view, make [`Self::token_is_current`] monotonically false
+/// once that view is invalidated, and return one coherent snapshot from all
+/// [`BlockSource`] calls while the token is current. A database read
+/// transaction or node RPC snapshot handle can satisfy this contract.
+///
+/// This crate cannot verify that an implementation honors those rules. Even a
+/// correct implementation proves neither PoW nor canonicality; the host still
+/// authenticates what the immutable view represents.
+pub trait BlockSourceView: BlockSource {
+    type ViewToken: Eq;
+
+    /// Capture the identity of the currently exposed immutable view.
+    fn view_token(&self) -> Self::ViewToken;
+
+    /// Whether `token` still identifies the immutable view returned by this
+    /// source. Once false for a token, this MUST remain false forever.
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool;
 }
 
 /// A simple in-memory [`BlockSource`] for tests and tooling, with strict
@@ -176,10 +239,327 @@ impl BlockSource for MemorySource {
     }
 }
 
+impl BlockSourceView for MemorySource {
+    type ViewToken = ();
+
+    fn view_token(&self) -> Self::ViewToken {}
+
+    fn token_is_current(&self, _token: &Self::ViewToken) -> bool {
+        // MemorySource has no interior mutation; an immutable borrow is a
+        // stable view for the entire call.
+        true
+    }
+}
+
+/// Opaque, non-reused generation of a [`VersionedMemorySource`] snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceViewToken(u64);
+
+/// Refusal to advance a versioned source after exhausting its token space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceGenerationExhausted;
+
+impl core::fmt::Display for SourceGenerationExhausted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "block-source view generation exhausted")
+    }
+}
+
+impl std::error::Error for SourceGenerationExhausted {}
+
+const SOURCE_SEAL_VERSION: u32 = 1;
+
+fn memory_source_commitment(source: &MemorySource) -> [u8; 32] {
+    let mut hash = Keccak::v256();
+    hash.update(b"BLOCH-L2-BLOCK-SOURCE-v1\0");
+    hash.update(&(source.blocks.len() as u64).to_be_bytes());
+    for block in &source.blocks {
+        hash.update(&block.height.to_be_bytes());
+        hash.update(&block.hash);
+        hash.update(&block.parent_hash);
+        hash.update(&(block.txs.len() as u64).to_be_bytes());
+        for tx in &block.txs {
+            hash.update(&tx.txid);
+            hash.update(&(tx.outputs.len() as u64).to_be_bytes());
+            for output in &tx.outputs {
+                hash.update(&output.value.to_be_bytes());
+                hash.update(&(output.script_pubkey.len() as u64).to_be_bytes());
+                hash.update(&output.script_pubkey);
+            }
+        }
+    }
+    let mut commitment = [0; 32];
+    hash.finalize(&mut commitment);
+    commitment
+}
+
+/// Persistable commitment to one published versioned source.
+///
+/// The host must atomically persist this seal with the source snapshot and
+/// retain `generation` (or a greater floor) in an independently protected,
+/// non-rollbackable store. Persisting the floor beside the same rollbackable
+/// bytes does not prevent rollback, and an attacker who can rewrite the
+/// snapshot, seal and floor together is outside this local contract. The
+/// commitment detects mismatched bytes; it is not a signature or proof of
+/// canonicality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionedSourceSeal {
+    version: u32,
+    generation: u64,
+    checkpoint: Option<SourceCheckpoint>,
+    source_commitment: [u8; 32],
+}
+
+impl VersionedSourceSeal {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn checkpoint(&self) -> Option<SourceCheckpoint> {
+        self.checkpoint
+    }
+
+    pub fn source_commitment(&self) -> [u8; 32] {
+        self.source_commitment
+    }
+}
+
+/// Fail-closed source seal/restore errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionedSourceRestoreError {
+    Invalidated,
+    UnsupportedVersion { found: u32 },
+    Rollback { minimum: u64, found: u64 },
+    SourceMismatch,
+}
+
+impl core::fmt::Display for VersionedSourceRestoreError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Invalidated => write!(f, "cannot seal an invalidated block source"),
+            Self::UnsupportedVersion { found } => {
+                write!(f, "unsupported block-source seal version {found}")
+            }
+            Self::Rollback { minimum, found } => write!(
+                f,
+                "block-source generation {found} is below trusted floor {minimum}"
+            ),
+            Self::SourceMismatch => write!(f, "block-source snapshot does not match its seal"),
+        }
+    }
+}
+
+impl std::error::Error for VersionedSourceRestoreError {}
+
+#[derive(Debug)]
+struct VersionedMemoryState {
+    source: MemorySource,
+    generation: u64,
+    valid: bool,
+}
+
+/// Host-facing staging adapter for atomically replacing immutable block views.
+///
+/// Build and authenticate a complete [`MemorySource`] outside this adapter,
+/// then [`Self::install`] it under one write lock. Existing [`Self::view`]
+/// handles become permanently invalid because every install/invalidation uses
+/// a checked, never-wrapping generation. Reinstalling byte-identical blocks
+/// still gets a fresh token, preventing ABA by construction.
+///
+/// This adapter guarantees only in-process snapshot consistency. `MemorySource`
+/// checks height/parent linkage, but neither type verifies consensus hashes,
+/// PoW, canonicality, RPC provenance, or persistence across process restart.
+/// The host must also bound the staged source's block/transaction count and
+/// byte size before installation.
+#[derive(Debug)]
+pub struct VersionedMemorySource {
+    state: RwLock<VersionedMemoryState>,
+}
+
+impl VersionedMemorySource {
+    pub fn new(source: MemorySource) -> Self {
+        Self {
+            state: RwLock::new(VersionedMemoryState {
+                source,
+                generation: 0,
+                valid: true,
+            }),
+        }
+    }
+
+    /// Reconstruct a versioned adapter from atomically persisted source bytes
+    /// and a seal, enforcing an independently trusted generation floor.
+    pub fn restore(
+        source: MemorySource,
+        seal: VersionedSourceSeal,
+        minimum_generation: u64,
+    ) -> Result<Self, VersionedSourceRestoreError> {
+        if seal.version != SOURCE_SEAL_VERSION {
+            return Err(VersionedSourceRestoreError::UnsupportedVersion {
+                found: seal.version,
+            });
+        }
+        if seal.generation < minimum_generation {
+            return Err(VersionedSourceRestoreError::Rollback {
+                minimum: minimum_generation,
+                found: seal.generation,
+            });
+        }
+        let checkpoint = source.blocks.last().map(|block| SourceCheckpoint {
+            height: block.height,
+            hash: block.hash,
+        });
+        if seal.checkpoint != checkpoint
+            || seal.source_commitment != memory_source_commitment(&source)
+        {
+            return Err(VersionedSourceRestoreError::SourceMismatch);
+        }
+        Ok(Self {
+            state: RwLock::new(VersionedMemoryState {
+                source,
+                generation: seal.generation,
+                valid: true,
+            }),
+        })
+    }
+
+    /// Produce the small deterministic seal the host persists atomically with
+    /// the staged source snapshot.
+    pub fn seal(&self) -> Result<VersionedSourceSeal, VersionedSourceRestoreError> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        if !state.valid {
+            return Err(VersionedSourceRestoreError::Invalidated);
+        }
+        Ok(VersionedSourceSeal {
+            version: SOURCE_SEAL_VERSION,
+            generation: state.generation,
+            checkpoint: state.source.blocks.last().map(|block| SourceCheckpoint {
+                height: block.height,
+                hash: block.hash,
+            }),
+            source_commitment: memory_source_commitment(&state.source),
+        })
+    }
+
+    pub(crate) fn snapshot_and_seal(
+        &self,
+    ) -> Result<(Vec<L1Block>, VersionedSourceSeal), VersionedSourceRestoreError> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        if !state.valid {
+            return Err(VersionedSourceRestoreError::Invalidated);
+        }
+        let seal = VersionedSourceSeal {
+            version: SOURCE_SEAL_VERSION,
+            generation: state.generation,
+            checkpoint: state.source.blocks.last().map(|block| SourceCheckpoint {
+                height: block.height,
+                hash: block.hash,
+            }),
+            source_commitment: memory_source_commitment(&state.source),
+        };
+        Ok((state.source.blocks.clone(), seal))
+    }
+
+    /// Capture a handle to the current generation. The handle itself does not
+    /// hold a lock; replacement remains possible and is observed as monotonic
+    /// token invalidation by [`BlockSourceView`].
+    pub fn view(&self) -> VersionedMemoryView<'_> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        VersionedMemoryView {
+            owner: self,
+            token: SourceViewToken(state.generation),
+        }
+    }
+
+    /// Atomically publish a fully staged immutable source under a fresh token.
+    pub fn install(
+        &self,
+        source: MemorySource,
+    ) -> Result<SourceViewToken, SourceGenerationExhausted> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(SourceGenerationExhausted)?;
+        state.source = source;
+        state.generation = generation;
+        state.valid = true;
+        Ok(SourceViewToken(generation))
+    }
+
+    /// Invalidate every existing handle without publishing a replacement.
+    pub fn invalidate(&self) -> Result<(), SourceGenerationExhausted> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or(SourceGenerationExhausted)?;
+        state.generation = generation;
+        state.valid = false;
+        Ok(())
+    }
+}
+
+/// One captured generation of a [`VersionedMemorySource`].
+#[derive(Debug)]
+pub struct VersionedMemoryView<'a> {
+    owner: &'a VersionedMemorySource,
+    token: SourceViewToken,
+}
+
+impl BlockSource for VersionedMemoryView<'_> {
+    fn tip_height(&self) -> Option<u64> {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (state.valid && SourceViewToken(state.generation) == self.token)
+            .then(|| state.source.tip_height())
+            .flatten()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        (state.valid && SourceViewToken(state.generation) == self.token)
+            .then(|| state.source.block_at(height))
+            .flatten()
+    }
+}
+
+impl BlockSourceView for VersionedMemoryView<'_> {
+    type ViewToken = SourceViewToken;
+
+    fn view_token(&self) -> Self::ViewToken {
+        self.token
+    }
+
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool {
+        let state = self
+            .owner
+            .state
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        *token == self.token && state.valid && SourceViewToken(state.generation) == self.token
+    }
+}
+
 /// The disclosed vault address set (§5: N single-key ML-DSA-65 addresses,
 /// published). Addresses are the node's own 20-byte key-hash form; an
 /// output "pays the vault" iff its script_pubkey is exactly one of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultSet {
     addrs: BTreeSet<[u8; 20]>,
 }
@@ -224,6 +604,7 @@ pub enum DepositPhase {
 
 /// A deposit the watcher is tracking under its current L1 view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackedDeposit {
     /// The observed deposit facts (txid, vout, amount, recipient, view).
     pub event: DepositEvent,
@@ -293,6 +674,12 @@ pub struct DepositWatcher {
     /// Ephemeral: snapshots cannot attest to a current source view. A restore
     /// or a failed sync must not expose a stale pending-mint worklist.
     view_verified: bool,
+    /// Ephemeral: after restore, retained deposits must be re-derived from
+    /// authenticated source blocks before the mint worklist can be exposed.
+    restore_needs_validation: bool,
+    /// Ephemeral host trust policy. Kept out of [`WatcherState`] because a
+    /// checkpoint restored from the same rollbackable bytes adds no trust.
+    source_checkpoint: Option<SourceCheckpoint>,
     vaults: VaultSet,
     /// Only envelopes naming THIS chain id are deposits for this L2.
     l2_chain_id: u64,
@@ -320,6 +707,7 @@ pub struct DepositWatcher {
 /// host serializes/stores/restores via [`DepositWatcher::state`] and
 /// [`DepositWatcher::from_state`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatcherState {
     /// The disclosed vault address set.
     pub vaults: VaultSet,
@@ -335,6 +723,22 @@ pub struct WatcherState {
     pub credit_reorg_alarms: Vec<DepositEvent>,
 }
 
+/// A source checkpoint authenticated and retained independently by the host.
+///
+/// This value is not authenticated by the crate. Supplying it from the same
+/// rollbackable snapshot provides no protection; the host must obtain and
+/// preserve it through a stronger trust/durability boundary. Bloch has no
+/// finite finality: an authenticated reorg at or below this height makes the
+/// check fail closed, and only the host's explicit fork policy may replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCheckpoint {
+    /// Absolute L1 block height.
+    pub height: u64,
+    /// Authenticated block hash at `height`.
+    pub hash: [u8; 32],
+}
+
 /// Why a persisted [`WatcherState`] was rejected by
 /// [`DepositWatcher::from_state`]. A corrupt/partial persisted file must fail
 /// the restore CLOSED — like the sibling [`crate::release::WithdrawalQueue`]
@@ -343,6 +747,14 @@ pub struct WatcherState {
 pub enum WatcherRestoreError {
     /// Snapshot configuration disagrees with the host's trusted configuration.
     ConfigurationMismatch,
+    /// The snapshot predates a host-supplied checkpoint.
+    CheckpointBeyondJournal { height: u64, journal_len: usize },
+    /// The snapshot's journal disagrees with a host-supplied checkpoint.
+    CheckpointMismatch {
+        height: u64,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
     /// A derived field or deposit fact violates the watcher invariants.
     InvalidDeposit {
         deposit: DepositId,
@@ -368,12 +780,79 @@ pub enum WatcherRestoreError {
     },
     /// The same `deposit_id` appears more than once in `tracked`.
     DuplicateDeposit { deposit: DepositId },
+    /// A permanent reorg alarm contains impossible or cross-configuration
+    /// deposit facts, or disagrees with the automatic-credit log.
+    InvalidReorgAlarm {
+        deposit: DepositId,
+        reason: &'static str,
+    },
+    /// A durable automatic-credit entry is neither currently tracked nor
+    /// represented by the permanent alarm emitted when it was removed.
+    UnaccountedCredit { deposit: DepositId },
+}
+
+/// Failures at the bounded JSON snapshot boundary.
+///
+/// This is deliberately separate from [`WatcherRestoreError`]: decoding an
+/// untrusted byte stream can fail before a typed [`WatcherState`] exists.
+#[derive(Debug)]
+pub enum WatcherSnapshotError {
+    /// Reading the bounded snapshot stream failed.
+    Io(std::io::Error),
+    /// The stream contained more bytes than the host-selected limit.
+    TooLarge { limit: u64 },
+    /// `limit + 1` cannot be represented for the bounded probe read.
+    InvalidSizeLimit,
+    /// The bounded bytes are not a valid [`WatcherState`] JSON document.
+    Json(serde_json::Error),
+    /// The decoded state failed invariant or trusted-configuration checks.
+    Restore(WatcherRestoreError),
+}
+
+impl core::fmt::Display for WatcherSnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "watcher snapshot read failed: {error}"),
+            Self::TooLarge { limit } => {
+                write!(f, "watcher snapshot exceeds the {limit}-byte host limit")
+            }
+            Self::InvalidSizeLimit => write!(f, "watcher snapshot size limit is invalid"),
+            Self::Json(error) => write!(f, "watcher snapshot JSON is invalid: {error}"),
+            Self::Restore(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for WatcherSnapshotError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Restore(error) => Some(error),
+            Self::TooLarge { .. } | Self::InvalidSizeLimit => None,
+        }
+    }
 }
 
 impl core::fmt::Display for WatcherRestoreError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::ConfigurationMismatch => write!(f, "watcher restore: configuration mismatch"),
+            Self::CheckpointBeyondJournal {
+                height,
+                journal_len,
+            } => write!(
+                f,
+                "watcher restore: checkpoint height {height} is outside a {journal_len}-block journal"
+            ),
+            Self::CheckpointMismatch {
+                height,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "watcher restore: checkpoint at height {height} is {actual:?}, expected {expected:?}"
+            ),
             Self::InvalidDeposit { deposit, reason } => {
                 write!(f, "watcher restore: invalid deposit {deposit:?}: {reason}")
             }
@@ -403,6 +882,16 @@ impl core::fmt::Display for WatcherRestoreError {
                     "watcher restore: duplicate deposit_id {deposit:?} in tracked set"
                 )
             }
+            Self::InvalidReorgAlarm { deposit, reason } => {
+                write!(
+                    f,
+                    "watcher restore: invalid reorg alarm {deposit:?}: {reason}"
+                )
+            }
+            Self::UnaccountedCredit { deposit } => write!(
+                f,
+                "watcher restore: credited deposit {deposit:?} is neither tracked nor alarmed"
+            ),
         }
     }
 }
@@ -410,9 +899,31 @@ impl core::fmt::Display for WatcherRestoreError {
 impl std::error::Error for WatcherRestoreError {}
 
 impl DepositWatcher {
+    fn decode_json_bounded<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+    ) -> Result<WatcherState, WatcherSnapshotError> {
+        use std::io::Read;
+
+        let probe = limit
+            .checked_add(1)
+            .ok_or(WatcherSnapshotError::InvalidSizeLimit)?;
+        let mut encoded = Vec::new();
+        reader
+            .take(probe)
+            .read_to_end(&mut encoded)
+            .map_err(WatcherSnapshotError::Io)?;
+        if encoded.len() as u64 > limit {
+            return Err(WatcherSnapshotError::TooLarge { limit });
+        }
+        serde_json::from_slice(&encoded).map_err(WatcherSnapshotError::Json)
+    }
+
     pub fn new(vaults: VaultSet, l2_chain_id: u64) -> Self {
         DepositWatcher {
             view_verified: false,
+            restore_needs_validation: false,
+            source_checkpoint: None,
             vaults,
             l2_chain_id,
             journal: Vec::new(),
@@ -434,15 +945,62 @@ impl DepositWatcher {
         }
     }
 
+    /// Read, decode and validate a JSON snapshot under a host-selected byte
+    /// limit and independently trusted configuration.
+    ///
+    /// Prefer this over an unbounded `serde_json::from_reader` followed by
+    /// [`Self::from_state`]. The `limit + 1` probe refuses an oversized stream
+    /// before serde can materialize its historical vectors. The host chooses
+    /// the limit because journal size grows with chain history; this crate
+    /// cannot impose one universal operational retention policy.
+    ///
+    /// This does NOT authenticate the bytes, establish file ownership, or
+    /// detect rollback to an older valid snapshot. The host must provide those
+    /// durability/provenance guarantees and revalidate the restored view
+    /// against its authenticated [`BlockSource`] before using the worklist.
+    pub fn restore_json_for<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+    ) -> Result<Self, WatcherSnapshotError> {
+        let state = Self::decode_json_bounded(reader, limit)?;
+        Self::from_state_for(state, vaults, l2_chain_id).map_err(WatcherSnapshotError::Restore)
+    }
+
+    /// Bounded JSON restore additionally pinned to an independently trusted
+    /// source checkpoint. This prevents an older, otherwise valid snapshot
+    /// from being accepted when the host retained a newer L1 checkpoint.
+    ///
+    /// The checkpoint proves only that this journal contains the supplied
+    /// `(height, hash)`. It does not authenticate later blocks, prove the
+    /// snapshot complete, or replace the mandatory post-restore source sync.
+    /// A real reorg at/below the checkpoint is a refusal until the host updates
+    /// its external checkpoint under its own disclosed fork policy.
+    pub fn restore_json_at_checkpoint<R: std::io::Read>(
+        reader: R,
+        limit: u64,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+        checkpoint: SourceCheckpoint,
+    ) -> Result<Self, WatcherSnapshotError> {
+        let state = Self::decode_json_bounded(reader, limit)?;
+        Self::from_state_for_checkpoint(state, vaults, l2_chain_id, checkpoint)
+            .map_err(WatcherSnapshotError::Restore)
+    }
+
     /// Restore a watcher from a persisted [`WatcherState`], VALIDATING it
     /// first (like the sibling [`crate::release::WithdrawalQueue`] restore).
     /// A restored watcher re-syncing the SAME chain view emits nothing
     /// (journal intact), and the durable `credited` set means restart can
     /// never re-credit already-announced deposits.
     /// Deposit identity, chain, nonzero facts, amount-derived K, current phase,
-    /// journal membership and credit-log consistency must all agree. This is
-    /// not snapshot authentication; prefer `from_state_for` with trusted config.
-    /// Resync successfully before reading the restart mint worklist.
+    /// journal membership and the tracked/credited/permanent-alarm histories
+    /// must all agree. This is not snapshot authentication; prefer
+    /// `from_state_for` with trusted config.
+    /// Resync successfully before reading the restart mint worklist: that
+    /// first sync re-derives every retained tracked deposit from its source
+    /// block, so internal snapshot consistency alone cannot fabricate work.
     ///
     /// Rejects (rather than trusting) a corrupt/partial persisted state whose
     /// tracked deposits are inconsistent with the journal — otherwise a
@@ -454,6 +1012,36 @@ impl DepositWatcher {
     /// [`WatcherRestoreError::DepositHashNotInJournal`]).
     pub fn from_state(state: WatcherState) -> Result<Self, WatcherRestoreError> {
         let journal_len = state.journal.len();
+        let mut alarmed = BTreeMap::new();
+        for event in &state.credit_reorg_alarms {
+            let deposit = event.deposit_id();
+            let invalid = |reason| WatcherRestoreError::InvalidReorgAlarm { deposit, reason };
+            if event.l2_chain_id != state.l2_chain_id {
+                return Err(invalid("foreign L2 chain"));
+            }
+            if state.vaults.is_empty()
+                || event.amount_atoms < MIN_DEPOSIT_ATOMS
+                || event.l2_recipient == [0; 20]
+            {
+                return Err(invalid("missing vault configuration, amount or recipient"));
+            }
+            if confirmation_depth(event.amount_atoms).needs_operator_review() {
+                if state.credited.contains(&deposit) {
+                    return Err(invalid(
+                        "operator-review alarm appears in automatic credit log",
+                    ));
+                }
+            } else if !state.credited.contains(&deposit) {
+                return Err(invalid(
+                    "automatic-credit alarm is absent from durable credit log",
+                ));
+            }
+            if let Some(previous) = alarmed.insert(deposit, *event) {
+                if !same_deposit_facts(&previous, event) {
+                    return Err(invalid("conflicting immutable deposit facts"));
+                }
+            }
+        }
         let mut tracked = BTreeMap::new();
         for (id, t) in state.tracked {
             let invalid = |reason| WatcherRestoreError::InvalidDeposit {
@@ -522,12 +1110,28 @@ impl DepositWatcher {
             if requirement.needs_operator_review() && state.credited.contains(&id) {
                 return Err(invalid("operator-review deposit in automatic credit log"));
             }
+            if alarmed
+                .get(&id)
+                .is_some_and(|alarm| !same_deposit_facts(alarm, &t.event))
+            {
+                return Err(WatcherRestoreError::InvalidReorgAlarm {
+                    deposit: id,
+                    reason: "conflicting immutable deposit facts",
+                });
+            }
             if tracked.insert(id, t).is_some() {
                 return Err(WatcherRestoreError::DuplicateDeposit { deposit: id });
             }
         }
+        for deposit in &state.credited {
+            if !tracked.contains_key(deposit) && !alarmed.contains_key(deposit) {
+                return Err(WatcherRestoreError::UnaccountedCredit { deposit: *deposit });
+            }
+        }
         Ok(DepositWatcher {
             view_verified: false,
+            restore_needs_validation: true,
+            source_checkpoint: None,
             vaults: state.vaults,
             l2_chain_id: state.l2_chain_id,
             journal: state.journal,
@@ -549,6 +1153,59 @@ impl DepositWatcher {
             return Err(WatcherRestoreError::ConfigurationMismatch);
         }
         Self::from_state(state)
+    }
+
+    /// The host-supplied source checkpoint currently enforced on every sync.
+    /// It is intentionally absent from [`Self::state`].
+    pub fn source_checkpoint(&self) -> Option<SourceCheckpoint> {
+        self.source_checkpoint
+    }
+
+    /// Explicitly replace the external checkpoint after the host has
+    /// authenticated a fork according to its own policy.
+    ///
+    /// Merely calling this method is the host's authorization; this crate
+    /// cannot authenticate the replacement. The current mint worklist is
+    /// disabled immediately and remains unavailable until a successful sync
+    /// proves the source contains the replacement checkpoint.
+    pub fn replace_source_checkpoint(&mut self, checkpoint: SourceCheckpoint) {
+        self.source_checkpoint = Some(checkpoint);
+        self.view_verified = false;
+    }
+
+    /// Restore using trusted configuration and an independently authenticated
+    /// source checkpoint. Prefer this over [`Self::from_state_for`] when the
+    /// host can retain a checkpoint outside the snapshot store and explicitly
+    /// replace it when its authenticated fork policy requires recovery.
+    pub fn from_state_for_checkpoint(
+        state: WatcherState,
+        vaults: &VaultSet,
+        l2_chain_id: u64,
+        checkpoint: SourceCheckpoint,
+    ) -> Result<Self, WatcherRestoreError> {
+        if &state.vaults != vaults || state.l2_chain_id != l2_chain_id {
+            return Err(WatcherRestoreError::ConfigurationMismatch);
+        }
+        let Some(actual) = usize::try_from(checkpoint.height)
+            .ok()
+            .and_then(|height| state.journal.get(height))
+            .copied()
+        else {
+            return Err(WatcherRestoreError::CheckpointBeyondJournal {
+                height: checkpoint.height,
+                journal_len: state.journal.len(),
+            });
+        };
+        if actual != checkpoint.hash {
+            return Err(WatcherRestoreError::CheckpointMismatch {
+                height: checkpoint.height,
+                expected: checkpoint.hash,
+                actual,
+            });
+        }
+        let mut watcher = Self::from_state(state)?;
+        watcher.source_checkpoint = Some(checkpoint);
+        Ok(watcher)
     }
 
     /// The durable credit log: deposit_ids ever announced `Creditable`.
@@ -596,8 +1253,9 @@ impl DepositWatcher {
     }
 
     /// Fold a coherent source view in, atomically. Missing data is NOT evidence
-    /// of a reorg. Validate a staged suffix and recheck the source endpoints
-    /// before changing the journal, deposits, credit log or permanent alarms.
+    /// of a reorg. Validate a staged suffix and recheck every source block
+    /// touched by the call before changing the journal, deposits, credit log
+    /// or permanent alarms.
     pub fn try_sync<S: BlockSource>(
         &mut self,
         source: &S,
@@ -607,7 +1265,10 @@ impl DepositWatcher {
 
     /// Bounded sync: append at most `limit` blocks, or refuse a rewind deeper
     /// than `limit`. Repeat successful calls until `tip_height()` catches up.
-    /// At most `2 * limit + 4` block requests are made; only the new suffix is
+    /// At most `6 * limit + 8` block requests are made after restore (the
+    /// additional budget re-derives retained deposits and rechecks every block
+    /// read during the call), and at most `4 * limit + 8` otherwise. Only the
+    /// new suffix and a limit-bounded ledger of observed source blocks are
     /// staged, without copying the full historical journal or credit log.
     ///
     /// The host must bound individual block/transaction sizes and RPC latency,
@@ -620,24 +1281,102 @@ impl DepositWatcher {
         source: &S,
         limit: usize,
     ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        self.try_sync_with_limit_guarded(source, limit, || true)
+    }
+
+    /// Sync against an explicitly versioned immutable source view.
+    ///
+    /// The captured token is checked before every source read and immediately
+    /// before durable state changes. Invalidation therefore fails atomically;
+    /// a host that obeys [`BlockSourceView`]'s non-reuse contract also closes
+    /// the ABA window that repeated block reads alone cannot detect.
+    pub fn try_sync_view<S: BlockSourceView>(
+        &mut self,
+        source: &S,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        self.try_sync_view_with_limit(source, DEFAULT_SYNC_LIMIT)
+    }
+
+    /// Bounded variant of [`Self::try_sync_view`].
+    pub fn try_sync_view_with_limit<S: BlockSourceView>(
+        &mut self,
+        source: &S,
+        limit: usize,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError> {
+        let token = source.view_token();
+        self.try_sync_with_limit_guarded(source, limit, || source.token_is_current(&token))
+    }
+
+    fn try_sync_with_limit_guarded<S, F>(
+        &mut self,
+        source: &S,
+        limit: usize,
+        view_is_current: F,
+    ) -> Result<Vec<WatcherUpdate>, WatcherSyncError>
+    where
+        S: BlockSource,
+        F: Fn() -> bool,
+    {
         self.view_verified = false;
         if limit == 0 {
             return Err(WatcherSyncError::ZeroWorkLimit);
         }
-        let tip = source.tip_height().ok_or(WatcherSyncError::EmptySource)?;
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
+        }
+        let reported_tip = source.tip_height();
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
+        }
+        let tip = reported_tip.ok_or(WatcherSyncError::EmptySource)?;
+        // Record the first complete value returned at every touched height.
+        // Repeated reads must agree immediately, and the full ledger is read
+        // once more before commit. Hash equality alone is insufficient because
+        // BlockSource is an untrusted trait and this crate cannot recalculate
+        // a consensus block hash from its reduced L1Block representation.
+        let observed = RefCell::new(BTreeMap::<u64, L1Block>::new());
         let read = |height| {
-            let block = source
-                .block_at(height)
-                .ok_or(WatcherSyncError::MissingBlock { height })?;
+            if !view_is_current() {
+                return Err(WatcherSyncError::ViewInvalidated);
+            }
+            let block = source.block_at(height);
+            if !view_is_current() {
+                return Err(WatcherSyncError::ViewInvalidated);
+            }
+            let block = block.ok_or(WatcherSyncError::MissingBlock { height })?;
             if block.height != height {
                 return Err(WatcherSyncError::WrongHeight {
                     requested: height,
                     received: block.height,
                 });
             }
+            let mut observed = observed.borrow_mut();
+            if let Some(first) = observed.get(&height) {
+                if first != &block {
+                    return Err(WatcherSyncError::ViewChanged);
+                }
+            } else {
+                observed.insert(height, block.clone());
+            }
             Ok(block)
         };
-        let tip_hash = read(tip)?.hash;
+        read(tip)?;
+        if let Some(checkpoint) = self.source_checkpoint {
+            if tip < checkpoint.height {
+                return Err(WatcherSyncError::TrustedCheckpointUnavailable {
+                    height: checkpoint.height,
+                    tip,
+                });
+            }
+            let block = read(checkpoint.height)?;
+            if block.hash != checkpoint.hash {
+                return Err(WatcherSyncError::TrustedCheckpointMismatch {
+                    height: checkpoint.height,
+                    expected: checkpoint.hash,
+                    actual: block.hash,
+                });
+            }
+        }
 
         // Locate the common prefix without popping any live state. Heights
         // beyond a confirmed shorter tip may be rewound; a missing block AT
@@ -655,13 +1394,101 @@ impl DepositWatcher {
         }
         while keep > 0 {
             let height = (keep - 1) as u64;
-            if read(height)?.hash == self.journal[keep - 1] {
+            let block = read(height)?;
+            if block.hash == self.journal[keep - 1] {
+                if height > 0 && block.parent_hash != self.journal[keep - 2] {
+                    return Err(WatcherSyncError::InconsistentParent { height });
+                }
                 break;
             }
             if self.journal.len() - keep >= limit {
                 return Err(WatcherSyncError::RewindLimitExceeded);
             }
             keep -= 1;
+        }
+
+        // A snapshot is only internally consistent; it cannot prove that a
+        // tracked event was actually present in the named source block. In
+        // particular, a forged event can reuse the real journal tip and block
+        // hash, pass `from_state`, and otherwise become visible through
+        // `creditable()` after a no-op tip sync. Re-derive every deposit that
+        // will survive this sync before changing any durable state. A deposit
+        // at/above `keep` cannot be re-derived from the replacement branch, so
+        // it must fail closed rather than generate durable history.
+        if self.restore_needs_validation {
+            // A restored snapshot is not source authentication. If the
+            // current source has already reorged a retained deposit away, its
+            // old block is unavailable here and the event cannot be
+            // re-derived. Refuse instead of converting an unverified snapshot
+            // entry into a permanent reorg alarm / credited-id tombstone.
+            if let Some(deposit) = self
+                .tracked
+                .iter()
+                .find(|(_, tracked)| tracked.event.l1_block_height >= keep as u64)
+                .map(|(deposit, _)| *deposit)
+            {
+                return Err(WatcherSyncError::RestoredDepositMismatch { deposit });
+            }
+            // When the retained journal fits the explicit work budget, replay
+            // every block. This proves snapshot completeness against the
+            // supplied source, including a snapshot that omitted the only
+            // deposit in a block. For larger journals, retain the bounded
+            // historical behavior of authenticating every claimed deposit's
+            // source block; a local snapshot alone cannot prove omissions in
+            // unvisited history.
+            let heights: BTreeSet<u64> = if keep <= limit {
+                (0..keep as u64).collect()
+            } else {
+                self.tracked
+                    .values()
+                    .filter(|tracked| tracked.event.l1_block_height < keep as u64)
+                    .map(|tracked| tracked.event.l1_block_height)
+                    .collect()
+            };
+            if heights.len() > limit {
+                return Err(WatcherSyncError::RestoreValidationLimitExceeded);
+            }
+            // Replay sampled blocks through one verifier. A fresh verifier per
+            // height would forget deposit-id dedup between blocks and could
+            // replace an earlier legitimate observation when the same tx is
+            // repeated in a later block that also contains another tracked
+            // deposit. Restore validation must match normal watcher replay.
+            let mut verifier = DepositWatcher::new(self.vaults.clone(), self.l2_chain_id);
+            let mut ignored = Vec::new();
+            for height in heights {
+                let block = read(height)?;
+                if block.hash != self.journal[height as usize]
+                    || (height > 0 && block.parent_hash != self.journal[height as usize - 1])
+                {
+                    return Err(WatcherSyncError::ViewChanged);
+                }
+                verifier.scan_block(&block, &mut ignored);
+                ignored.clear();
+            }
+            for (deposit, tracked) in self
+                .tracked
+                .iter()
+                .filter(|(_, tracked)| tracked.event.l1_block_height < keep as u64)
+            {
+                let matches_source = verifier.tracked.get(deposit).is_some_and(|observed| {
+                    observed.event == tracked.event && observed.requirement == tracked.requirement
+                });
+                if !matches_source {
+                    return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
+                }
+            }
+            // Scanning a retained deposit's block can also reveal another
+            // valid deposit omitted from the snapshot. Refuse that detectable
+            // truncation instead of silently accepting an incomplete replay.
+            for deposit in verifier.tracked.keys() {
+                if self
+                    .tracked
+                    .get(deposit)
+                    .is_none_or(|tracked| tracked.event.l1_block_height >= keep as u64)
+                {
+                    return Err(WatcherSyncError::RestoredDepositMismatch { deposit: *deposit });
+                }
+            }
         }
 
         let mut staged = Vec::new();
@@ -681,15 +1508,26 @@ impl DepositWatcher {
             next = successor;
         }
 
-        // Revalidate both the end of the staged prefix and the advertised
-        // tip. A source changing during discovery cannot poison durable logs.
-        if let Some(last) = staged.last() {
-            if read(last.height)?.hash != last.hash {
+        // Revalidate every complete block observed by this call, not only the
+        // staged endpoint/tip/checkpoint. An interior same-hash content change
+        // must not poison durable state. This catches observable changes; a
+        // malicious source that performs an ABA change entirely between reads
+        // still requires an atomic/authenticated host snapshot API.
+        let final_tip = source.tip_height();
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
+        }
+        if final_tip != Some(tip) {
+            return Err(WatcherSyncError::ViewChanged);
+        }
+        let observed_blocks: Vec<L1Block> = observed.borrow().values().cloned().collect();
+        for expected in observed_blocks {
+            if read(expected.height)? != expected {
                 return Err(WatcherSyncError::ViewChanged);
             }
         }
-        if source.tip_height() != Some(tip) || read(tip)?.hash != tip_hash {
-            return Err(WatcherSyncError::ViewChanged);
+        if !view_is_current() {
+            return Err(WatcherSyncError::ViewInvalidated);
         }
 
         let mut updates = Vec::new();
@@ -701,6 +1539,7 @@ impl DepositWatcher {
             self.journal.push(block.hash);
         }
         self.age_deposits(&mut updates);
+        self.restore_needs_validation = false;
         self.view_verified = true;
         Ok(updates)
     }
@@ -1011,6 +1850,74 @@ mod tests {
         extend(&mut src, "main", vec![tx]);
         assert_eq!(w.sync(&src), vec![]);
         assert_eq!(w.tracked().count(), 1);
+    }
+
+    #[test]
+    fn restore_validation_preserves_cross_block_deposit_deduplication() {
+        let mut src = chain("main", 1);
+        let first = deposit_tx(9, ATOMS_PER_BLCH, [0x33; 20], CHAIN_ID);
+        extend(&mut src, "main", vec![first.clone()]);
+        // The repeated first deposit shares a block with a second deposit, so
+        // both heights must be source-validated after restore.
+        extend(
+            &mut src,
+            "main",
+            vec![first, deposit_tx(10, ATOMS_PER_BLCH, [0x44; 20], CHAIN_ID)],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 2);
+        let state = watcher.state();
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(restored.try_sync(&src), Ok(vec![]));
+        assert_eq!(restored.state(), state);
+        assert_eq!(restored.tracked().count(), 2);
+    }
+
+    #[test]
+    fn restore_validation_refuses_omitted_deposit_in_scanned_block() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![
+                deposit_tx(11, ATOMS_PER_BLCH, [0x55; 20], CHAIN_ID),
+                deposit_tx(12, ATOMS_PER_BLCH, [0x66; 20], CHAIN_ID),
+            ],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 2);
+        let mut state = watcher.state();
+        let omitted = state.tracked.pop().unwrap().0;
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(
+            restored.try_sync(&src),
+            Err(WatcherSyncError::RestoredDepositMismatch { deposit: omitted })
+        );
+        assert_eq!(restored.state(), state, "refusal must be atomic");
+        assert_eq!(restored.creditable().count(), 0);
+    }
+
+    #[test]
+    fn restore_validation_refuses_sole_omitted_deposit_within_work_budget() {
+        let mut src = chain("main", 1);
+        extend(
+            &mut src,
+            "main",
+            vec![deposit_tx(13, ATOMS_PER_BLCH, [0x77; 20], CHAIN_ID)],
+        );
+        let mut watcher = DepositWatcher::new(vaults(), CHAIN_ID);
+        assert_eq!(watcher.sync(&src).len(), 1);
+        let mut state = watcher.state();
+        let omitted = state.tracked.pop().unwrap().0;
+
+        let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+        assert_eq!(
+            restored.try_sync_with_limit(&src, 2),
+            Err(WatcherSyncError::RestoredDepositMismatch { deposit: omitted })
+        );
+        assert_eq!(restored.state(), state, "refusal must be atomic");
     }
 
     #[test]

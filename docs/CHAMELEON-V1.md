@@ -42,9 +42,10 @@ The contract address is part of the route, preventing cross-adapter replay.
 
 `mintExport(record, proof)` is permissionless to relay. Only the recipient in
 the authenticated native record receives tokens. The contract verifies the
-configured verifier's current runtime hash, rejects a used export nonce, and
-enforces the cap before minting. It uses origin atomic units with display-only
-decimals, no transfer fee, no rebasing and no rounding.
+configured verifier's current runtime hash, rejects a zero native transaction
+identity or a used export nonce, and enforces the cap before minting. It uses
+origin atomic units with display-only decimals, no transfer fee, no rebasing and
+no rounding.
 
 `returnToBloch(amount, pqRecipientHash)` burns only the caller's balance. The
 recipient commitment is `SHA256(full native PQ public-key envelope)`, not an

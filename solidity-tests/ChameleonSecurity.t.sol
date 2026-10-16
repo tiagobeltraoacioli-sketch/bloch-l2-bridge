@@ -113,7 +113,7 @@ contract ChameleonSecurityTest {
         token.mintExport(item, proof);
         item.amount = 100;
         item.nativeTransaction = bytes32(0);
-        vm.expectRevert(ChameleonERC20.InvalidProof.selector);
+        vm.expectRevert(ChameleonERC20.InvalidExport.selector);
         token.mintExport(item, proof);
         item.nativeTransaction = bytes32(uint256(55));
         item.route = bytes32(0);
@@ -152,6 +152,9 @@ contract ChameleonSecurityTest {
     function testCapStillAppliesWhenConfiguredVerifierIsUntrustworthy() public {
         ChameleonERC20 token = unrestricted();
         ChameleonWire.Export memory item = ChameleonWire.Export(token.routeId(), 0, ALICE, 900, bytes32(0));
+        vm.expectRevert(ChameleonERC20.InvalidExport.selector);
+        token.mintExport(item, "");
+        item.nativeTransaction = bytes32(uint256(55));
         token.mintExport(item, "");
         item.nonce = 1;
         item.amount = 101;

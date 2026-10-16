@@ -167,8 +167,32 @@ impl Serialize for WithdrawalQueue {
 
 impl<'de> Deserialize<'de> for WithdrawalQueue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let messages = Vec::<WithdrawalMessage>::deserialize(deserializer)?;
-        WithdrawalQueue::from_messages(messages).map_err(serde::de::Error::custom)
+        struct QueueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for QueueVisitor {
+            type Value = WithdrawalQueue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a gapless withdrawal message sequence")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                // Replay while decoding instead of first materializing an
+                // attacker-controlled Vec. A corrupt early nonce, zero
+                // amount, zero recipient, epoch regression or full tree is
+                // therefore refused before any untrusted tail is decoded.
+                let mut queue = WithdrawalQueue::new();
+                while let Some(message) = sequence.next_element::<WithdrawalMessage>()? {
+                    queue.initiate(message).map_err(serde::de::Error::custom)?;
+                }
+                Ok(queue)
+            }
+        }
+
+        deserializer.deserialize_seq(QueueVisitor)
     }
 }
 
@@ -320,9 +344,58 @@ impl WithdrawalQueue {
 /// A log persisted by the earlier nonce-keyed form (a set of `u64`) does not
 /// deserialize; rebuild it with [`NullifierLog::from_messages`] from the
 /// paid withdrawals' messages (kept in [`WithdrawalQueue::messages`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct NullifierLog {
     paid: BTreeSet<[u8; 32]>,
+}
+
+impl<'de> Deserialize<'de> for NullifierLog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PaidLeaves(BTreeSet<[u8; 32]>);
+
+        impl<'de> Deserialize<'de> for PaidLeaves {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct PaidLeavesVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for PaidLeavesVisitor {
+                    type Value = PaidLeaves;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a sequence of unique paid withdrawal leaves")
+                    }
+
+                    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: serde::de::SeqAccess<'de>,
+                    {
+                        let mut paid = BTreeSet::new();
+                        while let Some(leaf) = sequence.next_element::<[u8; 32]>()? {
+                            if !paid.insert(leaf) {
+                                return Err(serde::de::Error::custom(
+                                    "duplicate paid withdrawal leaf",
+                                ));
+                            }
+                        }
+                        Ok(PaidLeaves(paid))
+                    }
+                }
+
+                deserializer.deserialize_seq(PaidLeavesVisitor)
+            }
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NullifierLogWire {
+            paid: PaidLeaves,
+        }
+
+        let wire = NullifierLogWire::deserialize(deserializer)?;
+        Ok(NullifierLog { paid: wire.paid.0 })
+    }
 }
 
 /// The double-pay refusal from [`NullifierLog::record_paid`] — carries the
@@ -1249,6 +1322,34 @@ mod tests {
         assert!(WithdrawalQueue::from_messages(bad).is_err());
     }
 
+    /// A corrupt prefix must be refused while it is decoded. In particular,
+    /// restoration must not first materialize an untrusted snapshot tail:
+    /// this deliberately truncated JSON would otherwise fail on EOF only
+    /// after consuming everything following the already-invalid nonce.
+    #[test]
+    fn queue_restore_refuses_invalid_prefix_before_decoding_tail() {
+        let first = serde_json::to_string(&message(0)).unwrap();
+        let gapped = serde_json::to_string(&message(2)).unwrap();
+        let truncated_tail = format!("[{first},{gapped},");
+        let error = serde_json::from_str::<WithdrawalQueue>(&truncated_tail).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("withdrawal nonce 2 != expected 1"),
+            "restore should reject the corrupt prefix before parsing its tail: {error}"
+        );
+    }
+
+    #[test]
+    fn queue_restore_refuses_unknown_message_fields() {
+        let mut snapshot =
+            serde_json::to_value(WithdrawalQueue::from_messages([message(0)]).unwrap()).unwrap();
+        snapshot[0]["payment_authorized"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<WithdrawalQueue>(snapshot).is_err());
+    }
+
     /// FIX-2 pin: nullifier-log round-trip preserves the paid set — a host
     /// restart can no longer clear it (which would re-open every past
     /// payout to a double-pay).
@@ -1271,6 +1372,26 @@ mod tests {
         // explicit constructor path too
         let from_paid = NullifierLog::from_paid(log.paid().iter().copied());
         assert_eq!(from_paid, log);
+    }
+
+    #[test]
+    fn nullifier_restore_refuses_duplicate_prefix_before_decoding_tail() {
+        let leaf = serde_json::to_string(&message(0).leaf()).unwrap();
+        let truncated_tail = format!(r#"{{"paid":[{leaf},{leaf},"#);
+        let error = serde_json::from_str::<NullifierLog>(&truncated_tail).unwrap_err();
+
+        assert!(
+            error.to_string().contains("duplicate paid withdrawal leaf"),
+            "restore should reject the duplicate prefix before parsing its tail: {error}"
+        );
+    }
+
+    #[test]
+    fn nullifier_restore_refuses_unknown_fields() {
+        let mut snapshot = serde_json::to_value(NullifierLog::new()).unwrap();
+        snapshot["payment_authorized"] = serde_json::json!(true);
+
+        assert!(serde_json::from_value::<NullifierLog>(snapshot).is_err());
     }
 
     #[test]

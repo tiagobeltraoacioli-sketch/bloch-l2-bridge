@@ -27,30 +27,172 @@
 //!   POSTERNDEX-BRIDGE-DESIGN §0 gates clear.
 
 pub mod atoms;
+pub mod authority_trust_intake;
 pub mod envelope;
+pub mod ethereum_header_ancestry;
+#[cfg(unix)]
+pub mod external_floor;
+#[cfg(unix)]
+pub mod external_floor_auth;
+#[cfg(unix)]
+pub mod external_floor_codec;
+#[cfg(unix)]
+pub mod external_floor_custodian;
+#[cfg(unix)]
+pub mod external_floor_custodian_anchor_file;
+#[cfg(unix)]
+pub mod external_floor_custodian_authority_file;
+#[cfg(unix)]
+pub mod external_floor_custodian_file;
+#[cfg(unix)]
+pub mod external_floor_custodian_mtls;
+#[cfg(unix)]
+pub mod external_floor_custodian_runtime;
+#[cfg(unix)]
+pub mod external_floor_custodian_tcp;
+#[cfg(unix)]
+pub mod external_floor_file;
 pub mod harness;
 pub mod hex;
 pub mod merkle;
 pub mod release;
 pub mod reserves;
+#[cfg(unix)]
+pub mod source_store;
 pub mod status;
 pub mod stubs;
+#[cfg(unix)]
+pub mod unix_floor;
 pub mod watcher;
 pub mod withdrawal;
 
 pub use atoms::{atoms_to_wei, wei_to_atoms, AtomConversionError, ATOM_SCALE};
 pub use envelope::{extract_deposit_envelope, DecodeError, DepositEnvelope, TxOutput};
+#[cfg(unix)]
+pub use external_floor::{
+    ExternalFloorBoundary, ExternalFloorOperation, ExternalFloorOutcome,
+    ExternalFloorReconciliation, ExternalFloorRequest, ExternalFloorResponse,
+    ExternalGenerationFloor,
+};
+#[cfg(unix)]
+pub use external_floor_auth::{
+    decode_authenticated_external_floor_request, decode_authenticated_external_floor_response,
+    encode_authenticated_external_floor_request, encode_authenticated_external_floor_response,
+    AuthenticatedExternalFloorBoundary, CustodiedDurableAuthenticatedExternalFloorServer,
+    DurableAuthenticatedExternalFloorServer, DurableExternalFloorReplayGuard,
+    ExternalFloorAuthError, ExternalFloorByteTransport, ExternalFloorDurableReplayError,
+    ExternalFloorPeerAuthentication, ExternalFloorReplayCasOutcome, ExternalFloorReplayCheckpoint,
+    ExternalFloorReplayGuard, ExternalFloorReplayStore, EXTERNAL_FLOOR_AUTH_MAGIC,
+    EXTERNAL_FLOOR_AUTH_MAX_LEN, EXTERNAL_FLOOR_AUTH_VERSION,
+};
+#[cfg(unix)]
+pub use external_floor_codec::{
+    decode_external_floor_request, decode_external_floor_response, encode_external_floor_request,
+    encode_external_floor_response, ExternalFloorCodecError, EXTERNAL_FLOOR_CODEC_MAGIC,
+    EXTERNAL_FLOOR_CODEC_MAX_LEN, EXTERNAL_FLOOR_CODEC_VERSION,
+};
+#[cfg(unix)]
+pub use external_floor_custodian::{
+    AuthenticatedExternalFloorCustodian, AuthenticatedExternalFloorCustodianServer,
+    ExternalFloorCustodianAuthentication, ExternalFloorCustodianProtocolError,
+    ExternalFloorCustodianTransport, ExternalFloorCustodianTransportCheckpoint,
+    EXTERNAL_FLOOR_CUSTODIAN_MAGIC, EXTERNAL_FLOOR_CUSTODIAN_MAX_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_MIN_LEN, EXTERNAL_FLOOR_CUSTODIAN_VERSION,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_anchor_file::{
+    decode_external_floor_custodian_rotated_quarantine_receipt,
+    encode_external_floor_custodian_rotated_quarantine_receipt,
+    external_floor_custodian_anchor_approval_message,
+    external_floor_custodian_anchor_continuity_acceptance_message,
+    external_floor_custodian_anchor_continuity_authorization_message,
+    external_floor_custodian_expected_initial_quarantine_checkpoint,
+    external_floor_custodian_expected_next_quarantine_checkpoint,
+    external_floor_custodian_expected_rotated_quarantine_checkpoint,
+    external_floor_custodian_expected_rotated_quarantine_receipt,
+    verify_external_floor_custodian_anchor_approval,
+    verify_external_floor_custodian_anchor_continuity,
+    verify_external_floor_custodian_quarantine_checkpoint,
+    verify_external_floor_custodian_rotated_quarantine_receipt,
+    ExternalFloorCustodianAnchorApproval, ExternalFloorCustodianAnchorContinuityApproval,
+    ExternalFloorCustodianAnchorQuarantineApproval,
+    ExternalFloorCustodianAnchorQuarantineCheckpoint,
+    ExternalFloorCustodianAnchorQuarantineInspection,
+    ExternalFloorCustodianAnchorQuarantineReceipt,
+    ExternalFloorCustodianAnchorQuarantineRotationReceipt, UnixExternalFloorCustodianAnchorStore,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_APPROVAL_MESSAGE_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_CONTINUITY_MESSAGE_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_ANCHOR_RECORD_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_LEN,
+    EXTERNAL_FLOOR_CUSTODIAN_QUARANTINE_ROTATION_RECEIPT_MAX_RECORDS,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_authority_file::{
+    decode_external_floor_custodian_authority_checkpoint,
+    encode_external_floor_custodian_authority_checkpoint,
+    external_floor_custodian_expected_authority_checkpoint,
+    external_floor_custodian_expected_initial_authority_checkpoint,
+    ExternalFloorCustodianAuthorityCheckpoint,
+    ExternalFloorCustodianAuthorityProvisioningReconciliation,
+    ExternalFloorCustodianAuthorityReconciliation, ExternalFloorCustodianAuthorityTuple,
+    UnixExternalFloorCustodianAuthorityStore, EXTERNAL_FLOOR_CUSTODIAN_AUTHORITY_RECORD_LEN,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_file::{
+    DurableAuthenticatedExternalFloorCustodian, ExternalFloorCustodianAnchorCasOutcome,
+    ExternalFloorCustodianAnchorStore, ExternalFloorCustodianClientAnchor,
+    ExternalFloorCustodianClientInspection, ExternalFloorCustodianPendingInspection,
+    EXTERNAL_FLOOR_CUSTODIAN_CLIENT_RECORD_LEN,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_mtls::{
+    handle_external_floor_custodian_mtls_connection, ExternalFloorCustodianMtlsClientConfig,
+    ExternalFloorCustodianMtlsServerPolicy, MtlsExternalFloorCustodianTransport,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_runtime::{
+    AuthorityPinnedUnixExternalFloorCustodianAnchorStore,
+    UnixAuthorityPinnedExternalFloorCustodian, UnixExternalFloorCustodianRuntimeConfig,
+};
+#[cfg(unix)]
+pub use external_floor_custodian_tcp::{
+    handle_external_floor_custodian_tcp_connection, ExternalFloorCustodianTcpClientConfig,
+    ExternalFloorCustodianTcpServerPolicy, TcpExternalFloorCustodianTransport,
+};
+#[cfg(unix)]
+pub use external_floor_file::{
+    UnixCustodiedExternalFloorServer, UnixExternalFloorReplayStore, UnixExternalFloorServerConfig,
+    UnixExternalFloorServerOpenError, EXTERNAL_FLOOR_REPLAY_RECORD_LEN,
+};
 pub use merkle::{keccak256, verify_inclusion, IncrementalMerkleTree, TREE_DEPTH};
 pub use release::{
     evaluate_release_checklist, AnchoredEpochView, CheckOutcome, ChecklistVerdict, NullifierLog,
     ReleaseChecklist, ReleaseObservation, WithdrawalProofBundle, WithdrawalQueue,
 };
 pub use reserves::{check_reserves, is_exactly_backed, ReserveCheck, ReserveStatement};
+#[cfg(unix)]
+pub use source_store::{
+    persist_versioned_source, restore_versioned_source, SourceFloorState, SourceGenerationFloor,
+    SourceStoreError,
+};
 pub use status::{
     confirmation_depth, ConfirmationRequirement, DepositEvent, WithdrawalEvent, WithdrawalStatus,
 };
+#[cfg(unix)]
+pub use unix_floor::{UnixFloorAuthentication, UnixGenerationFloor};
 pub use watcher::{
-    BlockSource, DepositWatcher, L1Block, L1Tx, VaultSet, WatcherState, WatcherSyncError,
-    WatcherUpdate,
+    BlockSource, BlockSourceView, DepositWatcher, L1Block, L1Tx, SourceCheckpoint,
+    SourceGenerationExhausted, SourceViewToken, VaultSet, VersionedMemorySource,
+    VersionedMemoryView, VersionedSourceRestoreError, VersionedSourceSeal, WatcherSnapshotError,
+    WatcherState, WatcherSyncError, WatcherUpdate,
 };
 pub use withdrawal::{WithdrawalInclusion, WithdrawalMessage, UNANCHORED_ROOT};
+pub mod activation_approval;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_deployment_inclusion;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_deployment_state;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_deployment_vault;
+#[cfg(feature = "ethereum-inclusion")]
+pub mod ethereum_storage_proof;

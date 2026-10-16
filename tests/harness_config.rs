@@ -23,6 +23,57 @@ fn crate_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[test]
+fn config_loader_bounds_input_before_json_decode() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "bloch-bridge-config-{}-{suffix}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        vec![b' '; bloch_l2_bridge::harness::MAX_CONFIG_BYTES as usize + 1],
+    )
+    .unwrap();
+    let result = load_config(&path);
+    std::fs::remove_file(path).unwrap();
+    assert!(matches!(result, Err(HarnessError::ConfigTooLarge { .. })));
+}
+
+#[test]
+fn config_loader_rejects_unknown_fields_in_security_critical_entries() {
+    let raw = std::fs::read(default_config_path()).unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+
+    let mut cases = Vec::new();
+
+    let mut predeploy = original.clone();
+    predeploy["predeploys"][0]["unreviewed_override"] = serde_json::json!(true);
+    cases.push(predeploy);
+
+    let mut compiler = original.clone();
+    compiler["predeploys"][0]["compiler"]["optimizer_details"] = serde_json::json!({"yul": false});
+    cases.push(compiler);
+
+    let mut uniswap = original.clone();
+    uniswap["uniswap_v2"]["shadow_router"] = serde_json::json!({});
+    cases.push(uniswap);
+
+    let mut artifact = original;
+    artifact["uniswap_v2"]["factory"]["creation_bytecode"] = serde_json::json!("0x00");
+    cases.push(artifact);
+
+    for value in cases {
+        assert!(
+            serde_json::from_value::<bloch_l2_bridge::harness::DeployConfig>(value).is_err(),
+            "unknown fields inside typed deployment entries must fail closed"
+        );
+    }
+}
+
 /// Find a solc whose version exactly matches the compiler pin, or `None`.
 /// The pinned deployed-bytecode hashes are only byte-for-byte reproducible
 /// under that exact version, so a mismatched (or absent) solc means the

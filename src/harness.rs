@@ -14,8 +14,10 @@
 //!   keccak256 matches the hash pinned in the config (so the config and
 //!   the source cannot drift silently).
 //!
-//! What it deliberately does NOT do (see [`crate::stubs`]): compile
-//! Solidity, talk to any chain, deploy anything, or hold keys.
+//! The compile helper invokes an explicitly selected, version-checked solc and
+//! hashes runtime bytecode; the tests use it when the pinned compiler exists.
+//! What this module deliberately does NOT do (see [`crate::stubs`]): talk to
+//! any chain, deploy anything, submit transactions, or hold keys.
 //!
 //! SCAFFOLD, UNAUDITED. Chain id 700771 is a PLACEHOLDER pending
 //! ethereum-lists/chains registration; the Uniswap artifact hashes are
@@ -35,6 +37,8 @@ pub const BRIDGE_PREDEPLOY_ADDRESS: &str = "0x4200000000000000000000000000000000
 pub const TESTNET_CHAIN_ID: u64 = 700_771;
 /// solc pragma the WBLCH source pins.
 pub const WBLCH_SOLC_PRAGMA: &str = "^0.8.24";
+/// Maximum serialized harness configuration accepted from disk.
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Top-level deploy harness config (`deploy/testnet.json`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,6 +59,7 @@ pub struct DeployConfig {
 
 /// One genesis predeploy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Predeploy {
     pub name: String,
     /// 0x-prefixed 20-byte EVM address.
@@ -78,6 +83,7 @@ pub struct Predeploy {
 /// under. EVM bytecode is only byte-for-byte stable for a FIXED compiler
 /// version + settings, so all of these are pinned alongside the hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CompilerConfig {
     /// Exact solc version, e.g. "0.8.24" (must satisfy the source pragma).
     pub solc_version_exact: String,
@@ -95,6 +101,7 @@ pub struct CompilerConfig {
 
 /// The unchanged Uniswap-v2 pair of artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct UniswapV2Artifacts {
     pub factory: ExternalArtifact,
     pub router02: ExternalArtifact,
@@ -102,6 +109,7 @@ pub struct UniswapV2Artifacts {
 
 /// An artifact deployed byte-for-byte from Ethereum mainnet builds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalArtifact {
     pub name: String,
     /// Provenance note ("unchanged Uniswap v2 mainnet artifact").
@@ -138,6 +146,9 @@ pub struct ValidatedPredeploy {
 pub enum HarnessError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    ConfigTooLarge {
+        limit: u64,
+    },
     BadAddress {
         field: String,
         reason: String,
@@ -198,6 +209,9 @@ impl core::fmt::Display for HarnessError {
         match self {
             HarnessError::Io(e) => write!(f, "io: {e}"),
             HarnessError::Json(e) => write!(f, "json: {e}"),
+            HarnessError::ConfigTooLarge { limit } => {
+                write!(f, "harness config exceeds {limit} bytes")
+            }
             HarnessError::BadAddress { field, reason } => {
                 write!(f, "bad address in {field}: {reason}")
             }
@@ -309,7 +323,16 @@ pub fn resolve_source_path(base_dir: &Path, source_path: &str) -> Result<PathBuf
 
 /// Load `deploy/testnet.json` (or any harness config) from disk.
 pub fn load_config(path: &Path) -> Result<DeployConfig, HarnessError> {
-    let bytes = std::fs::read(path)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(HarnessError::ConfigTooLarge {
+            limit: MAX_CONFIG_BYTES,
+        });
+    }
     Ok(serde_json::from_slice(&bytes)?)
 }
 

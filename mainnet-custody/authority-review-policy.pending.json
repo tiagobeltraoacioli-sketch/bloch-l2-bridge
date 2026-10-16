@@ -1,0 +1,5 @@
+{
+  "schema": "postern.bridge-authority-review-policy.v1",
+  "threshold": 3,
+  "reviewers": []
+}

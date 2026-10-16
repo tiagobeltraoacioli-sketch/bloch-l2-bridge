@@ -1,0 +1,12 @@
+{
+  "schema": "postern.bridge-authority-policy.v2",
+  "manifestCanonicalSha256": null,
+  "activationAuthority": {
+    "operatorId": null,
+    "organizationId": null,
+    "algorithm": "ed25519",
+    "publicKey": null,
+    "custodyAttestationSha256": null
+  },
+  "authorityPolicySha256": null
+}

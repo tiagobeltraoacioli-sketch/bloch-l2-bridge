@@ -4,7 +4,9 @@ use bloch_l2_bridge::envelope::{DepositEnvelope, TxOutput};
 use bloch_l2_bridge::harness::{default_config_path, load_config, validate};
 use bloch_l2_bridge::status::{ConfirmationRequirement, ATOMS_PER_BLCH};
 use bloch_l2_bridge::watcher::{
-    BlockSource, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource, VaultSet, WatcherState,
+    BlockSource, BlockSourceView, DepositPhase, DepositWatcher, L1Block, L1Tx, MemorySource,
+    SourceCheckpoint, VaultSet, VersionedMemorySource, VersionedSourceRestoreError,
+    VersionedSourceSeal, WatcherSnapshotError, WatcherState, WatcherSyncError,
 };
 
 const CHAIN: u64 = 700_771;
@@ -59,6 +61,184 @@ fn reject(state: WatcherState) {
 }
 
 #[test]
+fn watcher_json_restore_bounds_before_decode_and_binds_trusted_config() {
+    let (watcher, _) = fixture(1, 1);
+    let state = watcher.state();
+    let encoded = serde_json::to_vec(&state).unwrap();
+    let vaults = VaultSet::new([VAULT]);
+
+    let restored =
+        DepositWatcher::restore_json_for(encoded.as_slice(), encoded.len() as u64, &vaults, CHAIN)
+            .unwrap();
+    assert_eq!(restored.state(), state);
+
+    let oversized = vec![b' '; 129];
+    assert!(matches!(
+        DepositWatcher::restore_json_for(oversized.as_slice(), 128, &vaults, CHAIN),
+        Err(WatcherSnapshotError::TooLarge { limit: 128 })
+    ));
+    assert!(matches!(
+        DepositWatcher::restore_json_for(encoded.as_slice(), u64::MAX, &vaults, CHAIN),
+        Err(WatcherSnapshotError::InvalidSizeLimit)
+    ));
+    assert!(matches!(
+        DepositWatcher::restore_json_for(
+            encoded.as_slice(),
+            encoded.len() as u64,
+            &VaultSet::new([[0xbb; 20]]),
+            CHAIN,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::ConfigurationMismatch
+        ))
+    ));
+}
+
+#[test]
+fn trusted_checkpoint_refuses_an_older_but_internally_valid_snapshot() {
+    let (current, source) = fixture(1, 24);
+    assert_eq!(current.credited().len(), 1);
+    let vaults = VaultSet::new([VAULT]);
+    let tip = source.block_at(23).unwrap();
+    let checkpoint = SourceCheckpoint {
+        height: tip.height,
+        hash: tip.hash,
+    };
+
+    let mut old = DepositWatcher::new(vaults.clone(), CHAIN);
+    old.try_sync_with_limit(&source, 1).unwrap();
+    assert!(old.credited().is_empty());
+    let old_json = serde_json::to_vec(&old.state()).unwrap();
+
+    // Configuration and internal invariants alone cannot distinguish a valid
+    // historical snapshot from the latest durable state.
+    assert!(DepositWatcher::restore_json_for(
+        old_json.as_slice(),
+        old_json.len() as u64,
+        &vaults,
+        CHAIN,
+    )
+    .is_ok());
+    assert!(matches!(
+        DepositWatcher::restore_json_at_checkpoint(
+            old_json.as_slice(),
+            old_json.len() as u64,
+            &vaults,
+            CHAIN,
+            checkpoint,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::CheckpointBeyondJournal {
+                height: 23,
+                journal_len: 1,
+            }
+        ))
+    ));
+
+    let current_json = serde_json::to_vec(&current.state()).unwrap();
+    assert!(DepositWatcher::restore_json_at_checkpoint(
+        current_json.as_slice(),
+        current_json.len() as u64,
+        &vaults,
+        CHAIN,
+        checkpoint,
+    )
+    .is_ok());
+    let wrong_hash = SourceCheckpoint {
+        hash: [0xff; 32],
+        ..checkpoint
+    };
+    assert!(matches!(
+        DepositWatcher::restore_json_at_checkpoint(
+            current_json.as_slice(),
+            current_json.len() as u64,
+            &vaults,
+            CHAIN,
+            wrong_hash,
+        ),
+        Err(WatcherSnapshotError::Restore(
+            bloch_l2_bridge::watcher::WatcherRestoreError::CheckpointMismatch { height: 23, .. }
+        ))
+    ));
+}
+
+#[test]
+fn trusted_checkpoint_remains_enforced_until_explicit_fork_recovery() {
+    let (current, source) = fixture(1, 24);
+    let vaults = VaultSet::new([VAULT]);
+    let tip = source.block_at(23).unwrap();
+    let checkpoint = SourceCheckpoint {
+        height: tip.height,
+        hash: tip.hash,
+    };
+    let encoded = serde_json::to_vec(&current.state()).unwrap();
+    let mut pinned = DepositWatcher::restore_json_at_checkpoint(
+        encoded.as_slice(),
+        encoded.len() as u64,
+        &vaults,
+        CHAIN,
+        checkpoint,
+    )
+    .unwrap();
+    pinned.try_sync(&source).unwrap();
+    assert_eq!(pinned.creditable().count(), 1);
+
+    let mut replacement = source.clone();
+    replacement.reorg_to(0);
+    let mut parent = [0; 32];
+    for height in 0u64..24 {
+        let mut preimage = vec![0xff];
+        preimage.extend_from_slice(&height.to_le_bytes());
+        let hash = bloch_l2_bridge::merkle::keccak256(&preimage);
+        replacement
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+
+    let before = pinned.state();
+    assert!(matches!(
+        pinned.try_sync(&replacement),
+        Err(WatcherSyncError::TrustedCheckpointMismatch { height: 23, .. })
+    ));
+    assert_eq!(pinned.state(), before, "checkpoint refusal must be atomic");
+    assert_eq!(pinned.creditable().count(), 0, "refusal disables work");
+
+    let replacement_tip = replacement.block_at(23).unwrap();
+    let replacement_checkpoint = SourceCheckpoint {
+        height: replacement_tip.height,
+        hash: replacement_tip.hash,
+    };
+    pinned.replace_source_checkpoint(replacement_checkpoint);
+    assert_eq!(pinned.source_checkpoint(), Some(replacement_checkpoint));
+    assert_eq!(pinned.creditable().count(), 0);
+    let updates = pinned.try_sync(&replacement).unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        bloch_l2_bridge::WatcherUpdate::CreditableReorged { .. }
+    )));
+    assert_eq!(pinned.credit_reorg_alarms().len(), 1);
+}
+
+#[test]
+fn watcher_snapshot_refuses_unknown_authority_fields() {
+    let (watcher, _) = fixture(1, 1);
+    let mut encoded = serde_json::to_value(watcher.state()).unwrap();
+
+    encoded["mint_authorized"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WatcherState>(encoded.clone()).is_err());
+
+    encoded.as_object_mut().unwrap().remove("mint_authorized");
+    encoded["tracked"][0][1]["event"]["mint_authorized"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<WatcherState>(encoded).is_err());
+}
+
+#[test]
 fn restore_refuses_weakened_confirmation_schedule() {
     let (watcher, _) = fixture(1001 * ATOMS_PER_BLCH, 1);
     let mut state = watcher.state();
@@ -107,12 +287,122 @@ fn restore_requires_durable_log_for_creditable_deposit() {
 }
 
 #[test]
+fn restore_refuses_unaccounted_credit_log_entry() {
+    let (watcher, _) = fixture(1, 24);
+    let mut state = watcher.state();
+    state.tracked.clear();
+    state.credit_reorg_alarms.clear();
+    reject(state);
+}
+
+#[test]
+fn restore_binds_reorg_alarms_to_credit_tier_and_configuration() {
+    let (watcher, _) = fixture(1, 24);
+    let mut foreign = watcher.state();
+    let mut alarm = foreign.tracked[0].1.event;
+    alarm.l2_chain_id += 1;
+    foreign.credit_reorg_alarms.push(alarm);
+    reject(foreign);
+
+    let (pending, _) = fixture(1, 1);
+    let mut missing_credit = pending.state();
+    missing_credit
+        .credit_reorg_alarms
+        .push(missing_credit.tracked[0].1.event);
+    reject(missing_credit);
+}
+
+#[test]
+fn restore_binds_remined_deposit_facts_to_permanent_alarm_history() {
+    let (watcher, _) = fixture(1, 24);
+    let mut state = watcher.state();
+    let mut alarm = state.tracked[0].1.event;
+    // A re-mined transaction may move blocks, but its txid commits these
+    // amount/recipient facts. Conflicting history for one deposit_id is not a
+    // valid replay of the same deposit.
+    alarm.l1_block_hash = [0x77; 32];
+    alarm.l1_block_height += 10;
+    state.credit_reorg_alarms.push(alarm);
+    assert!(DepositWatcher::from_state(state.clone()).is_ok());
+
+    for field in 0..2 {
+        let mut conflicting = state.clone();
+        let alarm = conflicting.credit_reorg_alarms.last_mut().unwrap();
+        if field == 0 {
+            alarm.amount_atoms += 1;
+        } else {
+            alarm.l2_recipient = [0x99; 20];
+        }
+        reject(conflicting);
+    }
+
+    let mut duplicate = state;
+    let mut conflicting_alarm = duplicate.credit_reorg_alarms[0];
+    conflicting_alarm.amount_atoms += 1;
+    duplicate.credit_reorg_alarms.push(conflicting_alarm);
+    reject(duplicate);
+}
+
+#[test]
 fn restore_cannot_auto_credit_operator_review_tier() {
     let (watcher, _) = fixture(1001 * ATOMS_PER_BLCH, 288);
     let mut state = watcher.state();
     state.tracked[0].1.phase = DepositPhase::Creditable;
     state.credited.insert(state.tracked[0].0);
     reject(state);
+}
+
+#[test]
+fn restored_snapshot_cannot_fabricate_deposit_under_real_block_hash() {
+    let (watcher, source) = fixture(1, 24);
+    let mut state = watcher.state();
+    let old_id = state.tracked[0].0;
+    state.tracked[0].1.event.txid = [0xff; 32];
+    let forged_id = state.tracked[0].1.event.deposit_id();
+    state.tracked[0].0 = forged_id;
+    state.credited.remove(&old_id);
+    state.credited.insert(forged_id);
+
+    // The forged snapshot is internally consistent and names a real block,
+    // but its transaction never appeared in that block. Restore alone cannot
+    // authenticate this; the first source sync must re-derive and refuse it.
+    let mut restored =
+        DepositWatcher::from_state_for(state.clone(), &VaultSet::new([VAULT]), CHAIN)
+            .expect("internally consistent snapshot");
+    assert_eq!(restored.creditable().count(), 0);
+    assert_eq!(
+        restored.try_sync(&source),
+        Err(WatcherSyncError::RestoredDepositMismatch { deposit: forged_id })
+    );
+    assert_eq!(restored.state(), state, "refusal must be atomic");
+    assert_eq!(restored.creditable().count(), 0);
+}
+
+#[test]
+fn restored_unvalidated_deposit_cannot_become_a_permanent_reorg_alarm() {
+    let (watcher, _) = fixture(1, 24);
+    let state = watcher.state();
+    let deposit = state.tracked[0].0;
+    let mut restored = DepositWatcher::from_state(state.clone()).unwrap();
+
+    // The current source has replaced the whole saved branch. It cannot
+    // authenticate whether the snapshot's deposit was ever in the old block.
+    let mut replacement = MemorySource::new();
+    replacement
+        .push(L1Block {
+            height: 0,
+            hash: [0xff; 32],
+            parent_hash: [0; 32],
+            txs: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        restored.try_sync_with_limit(&replacement, 24),
+        Err(WatcherSyncError::RestoredDepositMismatch { deposit })
+    );
+    assert_eq!(restored.state(), state, "refusal must be atomic");
+    assert!(restored.credit_reorg_alarms().is_empty());
+    assert_eq!(restored.creditable().count(), 0);
 }
 
 #[test]
@@ -135,6 +425,122 @@ impl BlockSource for MissingSource {
     }
 }
 
+struct SameHashWrongParent {
+    source: MemorySource,
+}
+
+impl BlockSource for SameHashWrongParent {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if Some(height) == self.source.tip_height() && height > 0 {
+            block.parent_hash = [0xee; 32];
+        }
+        Some(block)
+    }
+}
+
+struct SameHashChangingContents {
+    source: MemorySource,
+    tip_reads: std::cell::Cell<usize>,
+}
+
+struct SameHashChangingInterior {
+    source: MemorySource,
+    interior_reads: std::cell::Cell<usize>,
+}
+
+struct InvalidatingView {
+    source: MemorySource,
+    generation: std::cell::Cell<u64>,
+    invalidated: std::cell::Cell<bool>,
+}
+
+impl BlockSource for InvalidatingView {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let block = self.source.block_at(height)?;
+        if height == 1 && !self.invalidated.replace(true) {
+            self.generation.set(self.generation.get() + 1);
+        }
+        Some(block)
+    }
+}
+
+impl BlockSourceView for InvalidatingView {
+    type ViewToken = u64;
+
+    fn view_token(&self) -> Self::ViewToken {
+        self.generation.get()
+    }
+
+    fn token_is_current(&self, token: &Self::ViewToken) -> bool {
+        *token == self.generation.get()
+    }
+}
+
+impl BlockSource for SameHashChangingInterior {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if height == 1 {
+            let reads = self.interior_reads.get();
+            self.interior_reads.set(reads + 1);
+            if reads == 0 {
+                block.txs.push(L1Tx {
+                    txid: [0x44; 32],
+                    outputs: vec![
+                        TxOutput {
+                            value: 1,
+                            script_pubkey: VAULT.to_vec(),
+                        },
+                        TxOutput {
+                            value: 0,
+                            script_pubkey: DepositEnvelope {
+                                l2_chain_id: CHAIN,
+                                l2_recipient: [0x55; 20],
+                            }
+                            .encode()
+                            .to_vec(),
+                        },
+                    ],
+                });
+            }
+        }
+        Some(block)
+    }
+}
+
+impl BlockSource for SameHashChangingContents {
+    fn tip_height(&self) -> Option<u64> {
+        self.source.tip_height()
+    }
+
+    fn block_at(&self, height: u64) -> Option<L1Block> {
+        let mut block = self.source.block_at(height)?;
+        if Some(height) == self.source.tip_height() {
+            let reads = self.tip_reads.get();
+            self.tip_reads.set(reads + 1);
+            if reads > 0 {
+                block.txs.push(L1Tx {
+                    txid: [0xdd; 32],
+                    outputs: vec![],
+                });
+            }
+        }
+        Some(block)
+    }
+}
+
 #[test]
 fn missing_rpc_blocks_do_not_erase_history_or_fabricate_reorg_alarm() {
     let (mut watcher, _) = fixture(1, 24);
@@ -142,6 +548,214 @@ fn missing_rpc_blocks_do_not_erase_history_or_fabricate_reorg_alarm() {
     assert!(watcher.sync(&MissingSource).is_empty());
     assert_eq!(watcher.state(), before);
     assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn matching_tip_hash_with_wrong_parent_cannot_reenable_worklist() {
+    let (mut watcher, source) = fixture(1, 24);
+    assert_eq!(watcher.creditable().count(), 1);
+    let before = watcher.state();
+
+    let inconsistent = SameHashWrongParent { source };
+    assert_eq!(
+        watcher.try_sync(&inconsistent),
+        Err(WatcherSyncError::InconsistentParent { height: 23 })
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.creditable().count(), 0);
+    assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn same_hash_tip_content_change_is_refused_atomically() {
+    let (mut watcher, source) = fixture(1, 24);
+    let before = watcher.state();
+    let changing = SameHashChangingContents {
+        source,
+        tip_reads: std::cell::Cell::new(0),
+    };
+
+    assert_eq!(
+        watcher.try_sync(&changing),
+        Err(WatcherSyncError::ViewChanged)
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.creditable().count(), 0);
+    assert!(watcher.credit_reorg_alarms().is_empty());
+}
+
+#[test]
+fn same_hash_interior_content_change_is_refused_before_commit() {
+    let mut source = MemorySource::new();
+    let mut parent = [0; 32];
+    for height in 0u64..3 {
+        let hash = bloch_l2_bridge::merkle::keccak256(&height.to_le_bytes());
+        source
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+    let changing = SameHashChangingInterior {
+        source,
+        interior_reads: std::cell::Cell::new(0),
+    };
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    let before = watcher.state();
+
+    assert_eq!(
+        watcher.try_sync(&changing),
+        Err(WatcherSyncError::ViewChanged)
+    );
+    assert_eq!(watcher.state(), before, "refusal must be atomic");
+    assert_eq!(watcher.tracked().count(), 0);
+    assert_eq!(watcher.creditable().count(), 0);
+}
+
+#[test]
+fn immutable_view_token_invalidation_is_refused_atomically() {
+    let mut source = MemorySource::new();
+    let mut parent = [0; 32];
+    for height in 0u64..3 {
+        let hash = bloch_l2_bridge::merkle::keccak256(&height.to_le_bytes());
+        source
+            .push(L1Block {
+                height,
+                hash,
+                parent_hash: parent,
+                txs: vec![],
+            })
+            .unwrap();
+        parent = hash;
+    }
+
+    // Complete block rechecks cannot observe an external snapshot-handle
+    // invalidation when the returned block values happen to remain identical.
+    let unguarded = InvalidatingView {
+        source: source.clone(),
+        generation: std::cell::Cell::new(0),
+        invalidated: std::cell::Cell::new(false),
+    };
+    let mut legacy = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    legacy.try_sync(&unguarded).unwrap();
+    assert_eq!(legacy.tip_height(), Some(2));
+
+    let guarded = InvalidatingView {
+        source,
+        generation: std::cell::Cell::new(0),
+        invalidated: std::cell::Cell::new(false),
+    };
+    let original_token = guarded.view_token();
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    let before = watcher.state();
+    assert_eq!(
+        watcher.try_sync_view(&guarded),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert!(!guarded.token_is_current(&original_token));
+    assert_eq!(watcher.state(), before, "invalidation must be atomic");
+    assert_eq!(watcher.creditable().count(), 0);
+}
+
+#[test]
+fn versioned_memory_adapter_invalidates_handles_and_prevents_aba() {
+    let (_, source) = fixture(1, 3);
+    let adapter = VersionedMemorySource::new(source.clone());
+    let old_view = adapter.view();
+    let old_token = old_view.view_token();
+    let mut watcher = DepositWatcher::new(VaultSet::new([VAULT]), CHAIN);
+    watcher.try_sync_view(&old_view).unwrap();
+    let before = watcher.state();
+
+    // Publishing byte-identical content is still a distinct view generation.
+    let replacement_token = adapter.install(source.clone()).unwrap();
+    assert_ne!(replacement_token, old_token);
+    assert!(!old_view.token_is_current(&old_token));
+    assert_eq!(
+        watcher.try_sync_view(&old_view),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert_eq!(watcher.state(), before, "stale handle refusal is atomic");
+    assert_eq!(watcher.creditable().count(), 0, "refusal disables work");
+
+    let replacement_view = adapter.view();
+    assert_eq!(replacement_view.view_token(), replacement_token);
+    watcher.try_sync_view(&replacement_view).unwrap();
+
+    let third_token = adapter.install(source).unwrap();
+    assert_ne!(third_token, old_token);
+    assert_ne!(third_token, replacement_token);
+    adapter.invalidate().unwrap();
+    let invalid_view = adapter.view();
+    let invalid_token = invalid_view.view_token();
+    assert!(!invalid_view.token_is_current(&invalid_token));
+    let stable = watcher.state();
+    assert_eq!(
+        watcher.try_sync_view(&invalid_view),
+        Err(WatcherSyncError::ViewInvalidated)
+    );
+    assert_eq!(watcher.state(), stable);
+}
+
+#[test]
+fn versioned_source_seal_detects_restart_rollback_and_snapshot_mismatch() {
+    let (_, source) = fixture(1, 3);
+    let adapter = VersionedMemorySource::new(source.clone());
+    adapter.install(source.clone()).unwrap();
+    let seal = adapter.seal().unwrap();
+    assert_eq!(seal.generation(), 1);
+    assert_eq!(seal.checkpoint().unwrap().height, 2);
+
+    let encoded = serde_json::to_vec(&seal).unwrap();
+    let decoded: VersionedSourceSeal = serde_json::from_slice(&encoded).unwrap();
+    let restored = VersionedMemorySource::restore(source.clone(), decoded, 1).unwrap();
+    assert_eq!(restored.view().view_token(), adapter.view().view_token());
+    assert_eq!(restored.seal().unwrap(), seal);
+
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), seal, 2),
+        Err(VersionedSourceRestoreError::Rollback {
+            minimum: 2,
+            found: 1,
+        })
+    ));
+    let mut truncated = source.clone();
+    truncated.reorg_to(2);
+    assert!(matches!(
+        VersionedMemorySource::restore(truncated, seal, 1),
+        Err(VersionedSourceRestoreError::SourceMismatch)
+    ));
+
+    let mut tampered = serde_json::to_value(seal).unwrap();
+    tampered["source_commitment"][0] = serde_json::json!(255);
+    let tampered: VersionedSourceSeal = serde_json::from_value(tampered).unwrap();
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), tampered, 1),
+        Err(VersionedSourceRestoreError::SourceMismatch)
+    ));
+    let mut future = serde_json::to_value(seal).unwrap();
+    future["version"] = serde_json::json!(2);
+    let future: VersionedSourceSeal = serde_json::from_value(future).unwrap();
+    assert!(matches!(
+        VersionedMemorySource::restore(source.clone(), future, 1),
+        Err(VersionedSourceRestoreError::UnsupportedVersion { found: 2 })
+    ));
+
+    let same_content = VersionedMemorySource::new(source);
+    assert_eq!(
+        same_content.seal().unwrap().source_commitment(),
+        seal.source_commitment(),
+        "commitment must be reproducible independently of generation"
+    );
+    same_content.invalidate().unwrap();
+    assert!(matches!(
+        same_content.seal(),
+        Err(VersionedSourceRestoreError::Invalidated)
+    ));
 }
 
 #[test]

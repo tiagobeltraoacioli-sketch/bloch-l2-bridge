@@ -8,6 +8,74 @@ unrestricted Ustav ERC-20 adapter and a local roundtrip with PQ-native escrow.
 Its checkpoints are explicitly trusted; production finality verification,
 native BLCH and Solana integration remain open.
 
+The [USDT source observer](docs/USDT-SOURCE-OBSERVER.md) checks Ethereum and
+TRON deposit evidence and can retain observations in an atomic local journal.
+It is a separate read-only tool: RPC consistency does not authorize minting,
+prove finality or make the bridge ready for deposits.
+
+The [bUSDT/bUSDC observer](docs/STABLECOIN-OBSERVER.md) adds an explicit shared
+catalog with distinct token, native asset and custody-route identities. It
+supports USDC source evidence on Ethereum while preserving the legacy USDT
+routes and refusing cross-asset observation reassignment. It remains read-only.
+
+The [custody deployment preflight](docs/CUSTODY-DEPLOYMENT-PREFLIGHT.md) validates
+an inert public plan for Ethereum USDC and Bloch mainnet bUSDC. It requires
+three-of-five custody, separate issuer and sponsor authorities, explicit caps,
+runtime pins and paused/disabled controls. It never authorizes deployment,
+broadcast or activation.
+
+The [deployment evidence tools](docs/CUSTODY-DEPLOYMENT-EVIDENCE.md) collect and
+validate a finalized, empty and paused vault snapshot. The offline comparison
+command checks two to eight retained captures, preserving per-capture commitments
+and refusing conflicting deployment or checkpoint evidence. Agreement does not
+authenticate sources, establish operator independence or authorize bridge funds.
+The [raw-header ancestry workflow](docs/CUSTODY-DEPLOYMENT-ANCESTRY.md) links the
+deployment block and all captured checkpoints with bounded, hash-checked Ethereum
+RLP headers. Collection and offline verification remain separate from consensus
+finality and activation approval.
+
+The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
+[external qualification checker](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind
+the selected custody and native authorities to public evidence and inspect a
+three-of-five reviewer quorum. Caller-supplied pins are not treated as
+authenticated roots: the checker remains observation-only. The checked-in
+state is deliberately incomplete and all operational permissions remain disabled.
+Every reviewer signature must bind its supplied complete evidence inventory;
+an opaque self-asserted review-record hash is refused.
+Qualification replay is refused against a separately checksum-pinned monotonic
+sequence and predecessor checkpoint that the package cannot select for itself.
+The [observation-only checkpoint journal](docs/AUTHORITY-QUALIFICATION-CHECKPOINT.md)
+can durably retain that sequence with locking, CAS, atomic rename, fsync and
+crash recovery, without promoting caller-supplied pins to authenticated roots.
+The [independent authority trust intake](docs/AUTHORITY-TRUST-INTAKE.md) defines
+the real organizational identities, possession proofs, recovery/conflict
+declarations and two-of-three root approvals needed to replace caller-selected
+pins. Its normal build has no anchor and refuses every request.
+The [offline authority trust ceremony](docs/OFFLINE-AUTHORITY-TRUST-CEREMONY.md)
+provides identity-free templates and byte-exact public signing requests without
+generating, loading or storing private keys; final checking requires the
+independently reviewed, anchor-pinned verifier and remains non-authorizing.
+Detached public signatures are cryptographically checked and applied to exact
+empty slots through create-only canonical outputs, avoiding manual signature
+edits and refusing role, identity, key or message substitution.
+The authority observation checker requires a caller-supplied SHA-256 pin for
+its immutable signature-verification executable but does not promote that pin
+to an authenticated root. The final readiness composer requires independently authenticated trust pins for
+the review policy and canonical qualification report; qualification cannot
+load keys, sign, deploy, broadcast or authorize activation.
+
+The [mainnet USDC activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md)
+lists the public operator decisions and independent evidence required before a
+paused deployment can be proposed. It explicitly excludes private key material
+and includes a checksum-pinned, bounded L2/native settlement prerequisite. The
+prerequisite can recognize an external verifier's explicit settlement decision
+but never enables minting, release, activation or bridge readiness by itself.
+
+The [stablecoin release inspector](docs/STABLECOIN-RELEASE-OBSERVER.md) matches
+Ethereum payout events and token transfers to a supplied native release record.
+It retains the vault checks and does not authenticate native finality or settle
+redemptions.
+
 Bridge *types* for the (design-only) Bloch EVM L2, implementing the wire
 formats and pure math of [`docs/specs/BLOCH-L2-EVM-DESIGN.md`](../../docs/specs/BLOCH-L2-EVM-DESIGN.md)
 §5 (L1<->L2 Bridge). This crate contains no networking, no keys and no chain
@@ -50,8 +118,8 @@ Genesis-4 consensus. They are not Chameleon's checkpoint verification rules.
 | `atoms` | `ATOM_SCALE = 10^10` (8-decimal L1 sats → 18-decimal L2 wei) with exactness invariants: conversion is lossless by construction, and the `withdraw()` rule `wei % ATOM_SCALE == 0` is a tested pure predicate. |
 | `withdrawal` | Withdrawal message + canonical ABI-style leaf encoding: `leaf = keccak256(abi.encode(nonce u64, l2_sender address, l1_recipient bytes20, amount_atoms u64, epoch_number u64))` — 5×32-byte words, documented padding, golden-vector tested. |
 | `merkle` | keccak256 **incremental Merkle tree, depth 32** (Ethereum-deposit-contract construction: precomputed zero-subtree hashes, insert-append, current root) + `verify_inclusion(leaf, index, branch[32], root)`; the leaf-retaining `ReferenceTree` also yields any HISTORICAL root / proof (`root_at`, `proof_at`) — the root an epoch anchor actually carried. Tested: empty-tree root equals the zero-hash cascade, insert-then-prove round-trips, historical views equal a tree frozen at that count, tampered branch/index/leaf rejected. Documented + tested caveat: the root does not commit to the leaf count, so the zero leaf is provable at unfilled positions — every message-level verifier recomputes the leaf and never trusts a prover-chosen one. |
-| `status` | `DepositEvent` (+ `deposit_id()`, the ONLY identity a downstream mint may key on) / `WithdrawalStatus` (`Queued \| Provable \| ReleaseEligible \| Frozen \| Halted`) per §2/§5. Every non-halted state CARRIES the withdrawal's `amount_atoms`; the total lifecycle transition `WithdrawalStatus::step` DERIVES its release gate from it via `confirmation_depth` (a caller cannot pass a weak depth), the >1000-BLCH tier additionally needs an explicit `operator_reviewed` attestation (the operator's DISCLOSED claim — the crate cannot verify a review happened, the same stance the release checklist takes by keeping that tier `Scaffold`), depth tracks the last report and demotes on a reorg, halt is absorbing, forks freeze, no state-skipping — all invariant-tested. The `K(amount)` schedule (24 / 96 / 288 / 288+operator-review tiers) is a pure function. |
-| `watcher` | Pure deposit replay core with strict persisted-state validation, configuration-bound restore, current-depth credit eligibility and permanent automatic-credit dedup. `try_sync` stages and validates a bounded suffix before applying a reorg; missing or mixed source data returns a typed error without changing persisted state. Catch-up proceeds in batches (1024 blocks by default); a deeper rewind requires an explicit budget. `ConfirmationsLost` cancels pending mint/review work when depth falls below K. Restored and failed-sync watchers expose no `creditable()` worklist until successfully resynced. Hosts must authenticate source data, persist state atomically and mint idempotently by `deposit_id`. This core detects reorged credits; it cannot undo an L2 mint. |
+| `status` | `DepositEvent` (+ `deposit_id()`, the ONLY identity a downstream mint may key on) / `WithdrawalStatus` (`Queued \| Provable \| ReleaseEligible \| Frozen \| Halted`) per §2/§5. Every non-halted state CARRIES the withdrawal's `amount_atoms`; the total lifecycle transition `WithdrawalStatus::step` DERIVES its release gate from it via `confirmation_depth` (a caller cannot pass a weak depth), and deserialization refuses a persisted eligible state with a weaker or unsatisfied gate. The >1000-BLCH tier additionally needs an explicit `operator_reviewed` attestation (the operator's DISCLOSED claim — the crate cannot verify a review happened, the same stance the release checklist takes by keeping that tier `Scaffold`), depth tracks the last report and demotes on a reorg, halt is absorbing, forks freeze, no state-skipping — all invariant-tested. The `K(amount)` schedule (24 / 96 / 288 / 288+operator-review tiers) is a pure function. |
+| `watcher` | Pure deposit replay core with strict persisted-state validation (including tracked/credited/permanent-alarm cross-consistency), configuration-bound restore, current-depth credit eligibility and permanent automatic-credit dedup. `try_sync` stages and validates a bounded suffix before applying a reorg; missing or mixed source data returns a typed error without changing persisted state. Catch-up proceeds in batches (1024 blocks by default); a deeper rewind requires an explicit budget. The first post-restore sync also re-derives every retained deposit from its authenticated source block before exposing restart mint work, so an internally consistent snapshot cannot invent a deposit under a real block hash. `ConfirmationsLost` cancels pending mint/review work when depth falls below K. Restored and failed-sync watchers expose no `creditable()` worklist until successfully resynced. Hosts must authenticate source data, persist state atomically and mint idempotently by `deposit_id`. This core detects reorged credits; it cannot undo an L2 mint. |
 | `release` | Withdrawal path end-to-end on pure data: `WithdrawalQueue` (gapless strictly-increasing nonces + the predeploy's own refusals — zero amount, zero recipient, epoch regression — leaf insert, current root, and any HISTORICAL root via `root_at`) → `WithdrawalProofBundle` via `prove` (current root) or `prove_at(index, leaf_count)` (the root an epoch anchor actually carried; message + index + branch + root, standalone-verifiable — the artifact an L1-side checker consumes) → `NullifierLog` (double-pay refusal, keyed by the withdrawal LEAF, never the bare nonce, so a same-nonce withdrawal differing in any other field is never confused with a paid one; IDENTICAL tuples across a reset or a second L2 still collide fail-closed until the leaf carries a chain-id domain separator, a spec-level change left open) → the seven-item §5 release checklist as typed data (`evaluate_release_checklist`): items [2] anchor depth (K derived from the amount), [3] Merkle inclusion vs the anchored root, [4] nullifier, [5] reorg freeze, [6] post-payout PoR checked FOR REAL; items [1] FRI verify and [7] rate limit are honest `Scaffold` outcomes, so the best possible verdict is `ScaffoldBlocked` — never a release authorization from this crate. |
 | `reserves` | The §5 proof-of-reserves predicate, pure: `vault_utxo_atoms >= supply_wei/ATOM_SCALE + pending_withdrawal_atoms` (`check_reserves`), plus the strict-equality form (`is_exactly_backed`); non-atom-aligned supply and accounting overflow are typed refusals, never rounded. **DETECTS theft after the fact — PREVENTS nothing** (the vault is custody). |
 | `harness` | Deploy **harness config** (types + validation only, NOT a live deploy): parses [`deploy/testnet.json`](deploy/testnet.json) describing the genesis predeploys — WBLCH (`contracts/wblch/WBLCH.sol`, fixed address `0x4200…0006`) and the L2BlochBridge withdrawal predeploy (`contracts/bridge/L2BlochBridge.sol`, `0x4200…0010`), both solc `^0.8.24` — plus the L1ReleaseVerifier design stub (not a predeploy: it has a constructor and no home chain) and the *unchanged* Uniswap-v2 factory/router artifacts (hashes are labelled placeholders; chain_id 700771 is itself a placeholder pending registration). Every `source_path` is CONFINED to the crate root (absolute paths, `..` and existing symlinks escaping the root are refused). Tests assert every referenced source — both predeploys and the design stub — exists and matches its pinned keccak; when a solc 0.8.24 is present (`$SOLC` or on `PATH`) they also recompile under the pinned settings and assert the pinned deployed-bytecode hashes (`REQUIRE_SOLC=1` turns a missing compiler from a loud skip into a failure). Compile-and-hash only: nothing is ever deployed. |
@@ -107,6 +175,17 @@ before re-driving idempotent mints from `creditable()`. Repeat bounded syncs
 to catch up; cancel pending mint/review work on `ConfirmationsLost`.
 
 Minimum supported Rust is declared in `Cargo.toml` (`rust-version`).
+The optional `ethereum-inclusion` feature is tested with Rust 1.94.1 and pins
+Alloy trie/RLP and k256 dependencies. It is not part of the default MSRV build.
+Its [offline deployment proof workflow](docs/CUSTODY-DEPLOYMENT-INCLUSION.md)
+binds signed creation transactions and receipts to retained header roots without
+authenticating consensus, replaying runtime execution or enabling the bridge.
+The [deployment state workflow](docs/CUSTODY-DEPLOYMENT-STATE.md) additionally
+proves vault/USDC runtime code and the proxy implementation slot against the
+same header state root. The [fixed-build vault workflow](docs/CUSTODY-DEPLOYMENT-VAULT.md)
+also verifies compiled constructor arguments, immutable configuration, paused
+controls, zero internal accounting and configured signer storage. USDC reserve
+balances and authenticated finality remain separate proof obligations.
 
 Standalone crate with its own empty `[workspace]` (the `crates/bloch-tokens`
 pattern) — deliberately excluded from the product root workspace.
@@ -114,3 +193,16 @@ pattern) — deliberately excluded from the product root workspace.
 ## License
 
 MIT OR Apache-2.0.
+
+### Bitcoin observation groundwork
+
+The [BTC output inspector](docs/BTC-OBSERVER.md) derives transaction IDs from raw
+bytes and matches an output in integer satoshis. Optional Merkle proofs and
+cookie-authenticated local Bitcoin Core queries assess active-chain observations
+and confirmation policy. It does not independently validate consensus, run an
+autonomous reorg watcher, operate custody, mint native BTC or enable a funded
+Bitcoin bridge.
+
+The same inspector has a [real Bitcoin Core regtest acceptance harness](docs/BTC-OBSERVER.md#real-bitcoin-core-regtest-acceptance) for confirmation thresholds, restart, cookie rotation, orphan refusal and re-mined outpoint deduplication.
+
+Optional BTC tracking persists revision-guarded refresh results and orphan status. Historical reads always require a fresh assessment and never authorize minting.
