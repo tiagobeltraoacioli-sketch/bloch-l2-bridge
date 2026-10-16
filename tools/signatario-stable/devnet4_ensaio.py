@@ -13,12 +13,22 @@
   sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-activate  # skips the 7 days on anvil
   sudo python3 tools/signatario-stable/devnet4_ensaio.py release-proof PROVER_STATE.json  # releaseWithProof for
                                                                      # every burn the light-client prover proved
+  Shadow mode (before the switch; the vault has one guardian, keys/guardian):
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py shadow-config LC_CONFIG.json  # writes DIR/prover.json for
+                                                                     # lc_prover.py (paths from LC_CONFIG.json)
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py shadow-verifier  # deploys, never proposes, the real
+                                                                     # SP1ReleaseVerifier for the prover's trustAnchor
+                                                                     # and writes DIR/sombra.json (guardian watcher)
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py release-unbacked 4  # ATTACK DRILL: 2-of-3 committee release
+                                                                     # for a burn that never happened (local keys)
+  sudo python3 tools/signatario-stable/devnet4_ensaio.py unpause      # 3-of-3 ends the guardian pause early
 
 "Ethereum" is a persistent anvil (chain id 11155111, 2 s blocks, port 18950) holding a six-decimal mock
 USDC and ContextBoundSourceVault (2-of-3 Ethereum keys). The L2 is the real devnet4 (700771) with
 BridgedStablecoinV2 (2-of-3 L2 keys, distinct from the Ethereum keys). Signers use eth_half.py (production
 Ethereum half) and rebuild the L2 from L1 data before certifying a burn. Development only: all three
-signers live on this host. Writes only under DIR; L2 transactions come from the devnet dev account.
+signers live on this host. Writes only under DIR; L2 transactions come from L2_KEY (default: the devnet dev
+account). New vaults get one guardian (keys/guardian, pause PAUSE_DURATION s, cooldown PAUSE_COOLDOWN s).
 """
 import json
 import os
@@ -38,6 +48,13 @@ ETH_PORT = 18950
 ETH_RPC = f'http://127.0.0.1:{ETH_PORT}'
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 DEV_KEY = Path('/var/lib/bloch-l2-devnet4-settler/ensaio/l2.key')
+# the L2 account that deploys bUSDC, receives mints, burns and relays mints
+L2_KEY = Path(os.environ.get('L2_KEY', str(DEV_KEY)))
+L1_RPC = 'http://127.0.0.1:18941'
+PAUSE_DURATION = int(os.environ.get('PAUSE_DURATION', 3 * 86400))
+PAUSE_COOLDOWN = int(os.environ.get('PAUSE_COOLDOWN', 86400))
+# anvil account 3: recipient of the attack drill's unbacked release
+MALLORY = '0x90f79bf6eb2c4f870365e785982e1f101e93b906'
 # anvil's public test accounts: 0 deploys and relays on "Ethereum", 1 = Alice (depositor), 2 = Bob (receives)
 ANVIL_KEYS = ['0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
               '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
@@ -79,24 +96,24 @@ def receipt(url, tx, timeout=3600):
     raise SystemExit(f'no receipt for {tx}')
 
 
-def send_raw(url, chain, key, to, data, gas=None):
+def send_raw(url, chain, key, to, data, gas=None, value=0):
     """Offline-signed legacy tx at the `latest` nonce (the settled L2 RPC has no pending level)."""
     frm = sh(CAST, 'wallet', 'address', '--private-key', key).lower()
     nonce = int(rpc(url, 'eth_getTransactionCount', [frm, 'latest']), 16)
     price = int(rpc(url, 'eth_gasPrice', []), 16) * 2
     if gas is None:
-        call = {'from': frm, 'data': data, **({'to': to} if to else {})}
+        call = {'from': frm, 'data': data, 'value': hex(value), **({'to': to} if to else {})}
         gas = int(rpc(url, 'eth_estimateGas', [call]), 16) * 3 // 2
-    target = [to, data] if to else ['--create', data]
+    target = ([to] + ([data] if data not in ('', '0x') else [])) if to else ['--create', data]
     raw = sh(CAST, 'mktx', '--private-key', key, '--chain', chain, '--nonce', nonce, '--gas-limit', gas,
-             '--gas-price', price, '--legacy', *target)
+             '--gas-price', price, '--legacy', '--value', value, *target)
     tx = rpc(url, 'eth_sendRawTransaction', [raw])
     r = receipt(url, tx)
     return tx, r, frm, nonce
 
 
-def eth_send(key, to, sig, *args):
-    return send_raw(ETH_RPC, ETH_CHAIN, key, to, sh(CAST, 'calldata', sig, *args))
+def eth_send(key, to, sig, *args, value=0):
+    return send_raw(ETH_RPC, ETH_CHAIN, key, to, sh(CAST, 'calldata', sig, *args) if sig else '0x', value=value)
 
 
 def call(url, to, sig, *args):
@@ -135,8 +152,8 @@ def setup():
         pw.write_text(os.urandom(32).hex())
         pw.chmod(0o600)
     keys = {}
-    for side in ('eth', 'l2'):  # distinct keys per chain (Harmony lesson)
-        for i in (1, 2, 3):
+    for side, ids in (('eth', (1, 2, 3)), ('l2', (1, 2, 3)), ('guardian', ('',))):  # distinct keys per chain/role
+        for i in ids:
             name = f'{side}{i}'
             if not (DIR / 'keys' / name).exists():
                 out = json.loads(subprocess.run([CAST, 'wallet', 'new', str(DIR / 'keys'), name, '--json'],
@@ -168,19 +185,24 @@ def setup():
         return art['bytecode']['object']
 
     eth_signers = sorted(keys[f'eth{i}'] for i in (1, 2, 3))
+    if int(rpc(ETH_RPC, 'eth_getBalance', [keys['guardian'], 'latest']), 16) < 10**17:
+        eth_send(ANVIL_KEYS[0], keys['guardian'], '', value=10**18)
     l2_signers = sorted(keys[f'l2{i}'] for i in (1, 2, 3))
     if 'eth_token' not in st or not rpc(ETH_RPC, 'eth_getCode', [st['eth_token'], 'latest'])[2:]:
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
                                bytecode('solidity-tests/BridgedStablecoin.t.sol:MockStable'))
         st['eth_token'] = r['contractAddress'].lower()
         k = lambda t: sh(CAST, 'keccak', t)
-        args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,(uint64,uint64,uint8,uint64))',
+        args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,(uint64,uint64,uint8,'
+                  'uint64),(address[],uint64,uint64))',
                   k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
-                  '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})')
+                  '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})',
+                  f"([{keys['guardian']}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
                                bytecode('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault')
                                + args[2:])
-        st.update(vault=r['contractAddress'].lower(), vault_tx=tx, vault_block=int(r['blockNumber'], 16))
+        st.update(vault=r['contractAddress'].lower(), vault_tx=tx, vault_block=int(r['blockNumber'], 16),
+                  guardian=keys['guardian'])
         vu = str(eth_now() + 3600)
         d = call(ETH_RPC, st['vault'], 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [sh(CAST, 'wallet', 'sign', '--no-hash', '--keystore', DIR / 'keys' / f'eth{i}', '--password-file',
@@ -200,7 +222,7 @@ def setup():
     print(f"Ethereum (anvil): USDC {st['eth_token']}  vault {st['vault']} (block {st['vault_block']})", flush=True)
 
     if 'l2_token' not in st:
-        dev = DEV_KEY.read_text().strip()
+        dev = L2_KEY.read_text().strip()
         args = sh(CAST, 'abi-encode',
                   'c(string,string,uint256,address,bytes32,address[],uint256,(uint256,uint256,uint256,uint256,uint256,'
                   'uint256),(address[],uint256,uint256))', 'Bloch Bridged USDC (devnet4)', 'bUSDC', ETH_CHAIN,
@@ -217,7 +239,7 @@ def setup():
 
     vault_code = sh(CAST, 'keccak', sh(CAST, 'code', st['vault'], '--rpc-url', ETH_RPC))
     token_code = sh(CAST, 'keccak', sh(CAST, 'code', st['l2_token'], '--rpc-url', L2_RPC))
-    (DIR / 'l2-relayer.key').write_text(DEV_KEY.read_text())
+    (DIR / 'l2-relayer.key').write_text(L2_KEY.read_text())
     (DIR / 'l2-relayer.key').chmod(0o600)
     for i in (1, 2, 3):
         ecfg = DIR / f'eth{i}.json'
@@ -260,8 +282,8 @@ def deposit(amount):
 def burn(amount):
     st = state()
     bob = sh(CAST, 'wallet', 'address', '--private-key', ANVIL_KEYS[2]).lower()
-    tx, r, _, _ = send_raw(L2_RPC, L2_CHAIN, DEV_KEY.read_text().strip(), st['l2_token'],
-                           sh(CAST, 'calldata', 'burn(uint64,address)', int(float(amount) * U), bob))
+    tx, r, _, _ = send_raw(L2_RPC, L2_CHAIN, L2_KEY.read_text().strip(), st['l2_token'],
+                           sh(CAST, 'calldata', 'burn(uint64,address)', int(float(amount) * U), bob), gas=300_000)
     print(json.dumps({'burn_tx': tx, 'l2_block': int(r['blockNumber'], 16), 'block_hash': r['blockHash'],
                       'eth_recipient': bob}, indent=1))
 
@@ -365,6 +387,96 @@ def release_proof(prover_state):
     print(json.dumps(out, indent=1))
 
 
+def eth_signatures(digest, n):
+    """`n` Ethereum committee signatures over `digest`, ordered by signer address."""
+    keys = sorted(((DIR / 'keys' / f'eth{i}.addr').read_text().strip(), i) for i in (1, 2, 3))[:n]
+    return '[' + ','.join(sh(CAST, 'wallet', 'sign', '--no-hash', '--keystore', DIR / 'keys' / f'eth{i}',
+                             '--password-file', DIR / 'password', digest) for _, i in keys) + ']'
+
+
+def shadow_config(lc_config):
+    """lc_prover.py config for this vault/token (shadow mode), from a working config's binary/ELF paths."""
+    st = state()
+    base = json.loads(Path(lc_config).read_text())
+    cfg = {f: base[f] for f in ('l1_rpc', 'observer_rpc', 'l2_rpc', 'eth_rpc', 'lc', 'step_elf', 'release_elf')}
+    slot = rpc(L1_RPC, 'getchaininfo', [])['slot']
+    cfg.update(state_dir=str(DIR / 'prover'), l2_chain_id=L2_CHAIN, l2_token=st['l2_token'], vault=st['vault'],
+               route=st['route'], source_chain_id=ETH_CHAIN, release_mode='groth16',
+               released_topic=sh(CAST, 'keccak', 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)').lower(),
+               min_mem_available_gb=base.get('min_mem_available_gb', 45), poll_seconds=60,
+               l2_scan_from=st['l2_block'], l1_scan_from_slot=max(0, slot - 64), eth_from_block=st['vault_block'])
+    (DIR / 'prover.json').write_text(json.dumps(cfg, indent=1) + '\n')
+    print(json.dumps({'prover_config': str(DIR / 'prover.json'), 'l1_scan_from_slot': cfg['l1_scan_from_slot'],
+                      'next': f"lc_prover.py {DIR / 'prover.json'} init --synthetic-epoch E"}, indent=1))
+
+
+def shadow_verifier():
+    """Deploy (never propose) the real SP1ReleaseVerifier for the prover's trustAnchor: the guardian checks every
+    shadow proof against it with eth_call, i.e. exactly what the vault would accept after the switch."""
+    st = state()
+    trust = json.loads((DIR / 'prover' / 'state.json').read_text())['trust']
+    br = Path(os.environ.get('BRIDGE_OUT', '/home/ubuntu/bridge-context-20261014/out'))
+    art = lambda f, n: json.loads((br / f / f'{n}.json').read_text())['bytecode']['object']
+    if 'sp1_groth16' not in st or not rpc(ETH_RPC, 'eth_getCode', [st['sp1_groth16'], 'latest'])[2:]:
+        _, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None, art('SP1VerifierGroth16.sol', 'SP1Verifier'))
+        st['sp1_groth16'] = r['contractAddress'].lower()
+    args = sh(CAST, 'abi-encode', 'c(address,bytes32,bytes32,uint256,address)', st['sp1_groth16'],
+              trust['release_vkey'], trust['trust_anchor'], L2_CHAIN, st['l2_token'])
+    tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
+                           art('SP1ReleaseVerifier.sol', 'SP1ReleaseVerifier') + args[2:])
+    st.update(shadow_verifier=r['contractAddress'].lower(), shadow_verifier_tx=tx, lc_trust=trust)
+    save(st)
+    cfg = {'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN, 'vault': st['vault'], 'vault_from_block': st['vault_block'],
+           'prover_dir': str(DIR / 'prover'), 'shadow_verifier': st['shadow_verifier'], 'l1_rpc': L1_RPC,
+           'grace_s': int(os.environ.get('GRACE_S', 7200)), 'grace_l1_epochs': int(os.environ.get('GRACE_EPOCHS', 2)),
+           'prover_stale_s': 1800, 'keystore': str(DIR / 'keys' / 'guardian'), 'password_file': str(DIR / 'password'),
+           'cast': CAST, 'state': str(DIR / 'sombra-state.json')}
+    (DIR / 'sombra.json').write_text(json.dumps(cfg, indent=1) + '\n')
+    print(json.dumps({'sp1_groth16': st['sp1_groth16'], 'shadow_verifier': st['shadow_verifier'], 'tx': tx,
+                      'trust_anchor': trust['trust_anchor'], 'release_vkey': trust['release_vkey'],
+                      'proposed': False, 'guardian_config': str(DIR / 'sombra.json')}, indent=1))
+
+
+def release_unbacked(amount):
+    """ATTACK DRILL: two of the three (local, devnet) Ethereum signer keys certify a release for a burn that never
+    happened on the L2. The vault pays (the committee is trusted before the switch); no light-client proof can
+    ever exist for it, so the shadow guardian must pause the vault after its grace."""
+    st = state()
+    units = int(float(amount) * U)
+    burn = sh(CAST, 'keccak', f'unbacked-burn-{time.time()}')
+    nonce = 10**9 + int(time.time()) % 10**6
+    item = f"({st['route']},{nonce},{MALLORY},{units},{burn})"
+    n = int(rpc(ETH_RPC, 'eth_blockNumber', []), 16) - 2
+    h = rpc(ETH_RPC, 'eth_getBlockByNumber', [hex(n), False])['hash']
+    fin = rpc(L2_RPC, 'eth_getBlockByNumber', ['finalized', False])
+    ctx = f"({eth_now() + 3600},{n},{h},{int(fin['number'], 16)},{fin['hash']})"
+    d = call(ETH_RPC, st['vault'], 'releaseDigest((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,'
+             'uint64,bytes32))(bytes32)', item, ctx)
+    before = int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', MALLORY))
+    locked = int(call(ETH_RPC, st['vault'], 'totalLocked()(uint64)'))
+    tx, r, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'release((bytes32,uint64,address,uint64,bytes32),(uint256,'
+                           'uint256,bytes32,uint64,bytes32),bytes[])', item, ctx, eth_signatures(d, 2))
+    rid = call(ETH_RPC, st['vault'], 'releaseId((bytes32,uint64,address,uint64,bytes32))(bytes32)', item).lower()
+    st.setdefault('unbacked', []).append({'tx': tx, 'release_id': rid, 'burn': burn, 'amount': units})
+    save(st)
+    print(json.dumps({'unbacked_release_tx': tx, 'block': int(r['blockNumber'], 16), 'gas_used': int(r['gasUsed'], 16),
+                      'release_id': rid, 'fake_burn': burn, 'nonce': nonce, 'recipient': MALLORY, 'amount': units,
+                      'recipient_before': before,
+                      'recipient_after': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', MALLORY)),
+                      'totalLocked_before': locked,
+                      'totalLocked_after': int(call(ETH_RPC, st['vault'], 'totalLocked()(uint64)'))}, indent=1))
+
+
+def unpause():
+    """switchThreshold (3-of-3) Ethereum signers end the current guardian pause early."""
+    st = state()
+    count, vu = call(ETH_RPC, st['vault'], 'pauseCount()(uint64)'), str(eth_now() + 3600)
+    d = call(ETH_RPC, st['vault'], 'unpauseDigest(uint64,uint256)(bytes32)', count, vu)
+    tx, r, _, _ = eth_send(ANVIL_KEYS[0], st['vault'], 'unpause(uint64,uint256,bytes[])', count, vu, eth_signatures(d, 3))
+    print(json.dumps({'unpause_tx': tx, 'block': int(r['blockNumber'], 16), 'gas_used': int(r['gasUsed'], 16),
+                      'guardianBlockedUntil': int(call(ETH_RPC, st['vault'], 'guardianBlockedUntil()(uint64)'))}))
+
+
 def status():
     st = state()
     alice = sh(CAST, 'wallet', 'address', '--private-key', ANVIL_KEYS[1]).lower()
@@ -376,7 +488,12 @@ def status():
                 'vault_totalLocked': int(call(ETH_RPC, st['vault'], 'totalLocked()(uint64)')),
                 'vault_usdc': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', st['vault'])),
                 'alice_usdc': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', alice)),
-                'bob_usdc': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', bob))},
+                'bob_usdc': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', bob)),
+                'mallory_usdc': int(call(ETH_RPC, st['eth_token'], 'balanceOf(address)(uint256)', MALLORY)),
+                **({'paused': call(ETH_RPC, st['vault'], 'paused()(bool)') == 'true',
+                    'pauseCount': int(call(ETH_RPC, st['vault'], 'pauseCount()(uint64)')),
+                    'pausedUntil': int(call(ETH_RPC, st['vault'], 'pausedUntil()(uint64)')), 'now': eth_now()}
+                   if st.get('guardian') else {})},
         'l2': {'latest': lb('latest'), 'finalized': lb('finalized'),
                'totalSupply': int(call(L2_RPC, st['l2_token'], 'totalSupply()(uint256)')),
                'dev_busdc': int(call(L2_RPC, st['l2_token'], 'balanceOf(address)(uint256)', st['dev']))},
@@ -385,11 +502,15 @@ def status():
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else ''
 SIMPLE = {'setup': setup, 'tick': tick, 'status': status, 'switch-propose': switch_propose,
-          'switch-activate': switch_activate}
+          'switch-activate': switch_activate, 'shadow-verifier': shadow_verifier, 'unpause': unpause}
 if cmd == 'switch-propose' and len(sys.argv) > 2:
     switch_propose(sys.argv[2])
 elif cmd == 'release-proof':
     release_proof(sys.argv[2])
+elif cmd == 'shadow-config':
+    shadow_config(sys.argv[2])
+elif cmd == 'release-unbacked':
+    release_unbacked(sys.argv[2])
 else:
     SIMPLE[cmd]() if cmd in SIMPLE \
         else deposit(sys.argv[2]) if cmd == 'deposit' else burn(sys.argv[2]) if cmd == 'burn' else print(__doc__)

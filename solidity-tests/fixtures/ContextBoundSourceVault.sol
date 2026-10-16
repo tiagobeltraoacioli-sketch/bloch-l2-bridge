@@ -1,5 +1,5 @@
-// FIXTURE: byte-for-byte copy of contracts/usdt/ContextBoundSourceVault.sol at bloch-l2-bridge dc1d8fc
-// (branch feat/vault-context-binding-20261014, owned by the DEX/bridge terminal). Tests only; do not edit.
+// FIXTURE: byte-for-byte copy of contracts/usdt/ContextBoundSourceVault.sol at bloch-l2-bridge ea20b3f
+// (branch feat/vault-shadow-guardian-20261016: shadow-mode guardians). Tests only; do not edit.
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity 0.8.24;
 
@@ -31,6 +31,14 @@ interface IReleaseVerifier {
 ///      disagree can exit first) unless the same quorum cancelled it. Once
 ///      active, committee releases stop for good, releases need a proof and
 ///      the committee can no longer disable them; per-window limits still apply.
+///      Shadow-mode guardians (committee mode only): before the switch, a light-client
+///      prover proves every committee release after the fact, and guardians fixed at
+///      deployment (never signers) watch for a release that stays unproven. Their only
+///      power is `guardianPause()`: it stops committee releases for `pauseDuration`
+///      (deposits, the switch and proofs are untouched). A guardian cannot release,
+///      unpause, or pause again until the pause ends; only `switchThreshold` signers
+///      (more than the release quorum) may end a pause early, after which guardians
+///      wait `pauseCooldown`. Once the verifier is active, guardians have no power.
 contract ContextBoundSourceVault {
     bytes32 public immutable sourceDomain;
     bytes32 public immutable nativeDomain;
@@ -69,6 +77,17 @@ contract ContextBoundSourceVault {
     uint64 public verifierActivatesAt;
     uint64 public switchNonce;
     address public verifier;
+    /// Guardians, fixed at deployment (sorted, disjoint from the signers; may be empty).
+    address[] public guardians;
+    mapping(address => bool) public isGuardian;
+    uint64 public immutable pauseDuration;
+    uint64 public immutable pauseCooldown;
+    uint8 public constant MAX_GUARDIANS = 7;
+    /// Committee releases are refused while `block.timestamp < pausedUntil`.
+    uint64 public pausedUntil;
+    uint64 public pauseCount;
+    /// After a committee unpause, guardians may not pause before this time.
+    uint64 public guardianBlockedUntil;
     uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     struct Release {
@@ -86,6 +105,14 @@ contract ContextBoundSourceVault {
         uint64 windowSeconds;
         uint8 switchThreshold;
         uint64 switchDelay;
+    }
+
+    /// Guardian policy fixed at deployment. No guardians: `pauseDuration` and
+    /// `pauseCooldown` must be zero.
+    struct Guard {
+        address[] guardians;
+        uint64 pauseDuration;
+        uint64 pauseCooldown;
     }
 
     /// What a release certificate binds beyond the release itself.
@@ -109,6 +136,8 @@ contract ContextBoundSourceVault {
     event VerifierProposed(address indexed verifier, bytes32 codehash, uint64 activatesAt, uint64 indexed nonce);
     event VerifierCancelled(address indexed verifier, uint64 indexed nonce);
     event VerifierActivated(address indexed verifier, bytes32 codehash);
+    event GuardianPaused(address indexed guardian, uint64 indexed pauseCount, uint64 pausedUntil);
+    event Unpaused(uint64 indexed pauseCount, uint64 guardianBlockedUntil);
 
     error InvalidConfiguration();
     error InvalidTransfer();
@@ -122,6 +151,9 @@ contract ContextBoundSourceVault {
     error InvalidSwitch();
     error CommitteeRetired();
     error InvalidProof();
+    error NotGuardian();
+    error InvalidPause();
+    error Paused();
 
     constructor(
         bytes32 source_,
@@ -132,7 +164,8 @@ contract ContextBoundSourceVault {
         uint8 transferMode_,
         address[] memory signers_,
         uint8 threshold_,
-        Policy memory policy
+        Policy memory policy,
+        Guard memory guard
     ) {
         if (
             source_ == 0 || native_ == 0 || source_ == native_ || asset_ == 0 || token_.code.length == 0 || cap_ == 0
@@ -150,6 +183,21 @@ contract ContextBoundSourceVault {
             isSigner[previous] = true;
             signers.push(previous);
         }
+        uint256 count = guard.guardians.length;
+        if (
+            count > MAX_GUARDIANS || (count == 0 && (guard.pauseDuration != 0 || guard.pauseCooldown != 0))
+                || (count != 0 && guard.pauseDuration == 0)
+        ) revert InvalidConfiguration();
+        previous = address(0);
+        for (uint256 i; i < count; ++i) {
+            address guardian = guard.guardians[i];
+            if (guardian <= previous || isSigner[guardian]) revert InvalidConfiguration();
+            previous = guardian;
+            isGuardian[guardian] = true;
+            guardians.push(guardian);
+        }
+        pauseDuration = guard.pauseDuration;
+        pauseCooldown = guard.pauseCooldown;
         sourceDomain = source_;
         nativeDomain = native_;
         nativeAsset = asset_;
@@ -173,6 +221,16 @@ contract ContextBoundSourceVault {
     /// @notice Exposes the complete committee size for block-bound observer checks.
     function signerCount() external view returns (uint256) {
         return signers.length;
+    }
+
+    /// @notice Number of guardians fixed at deployment.
+    function guardianCount() external view returns (uint256) {
+        return guardians.length;
+    }
+
+    /// @notice True while committee releases are stopped by a guardian pause.
+    function paused() public view returns (bool) {
+        return verifier == address(0) && block.timestamp < pausedUntil;
     }
 
     function routeId() public view returns (bytes32) {
@@ -293,6 +351,7 @@ contract ContextBoundSourceVault {
         nonReentrant
     {
         if (verifier != address(0)) revert CommitteeRetired();
+        if (block.timestamp < pausedUntil) revert Paused();
         if (!releasesEnabled || block.timestamp > context.validUntil) revert InvalidRelease();
         _checkRelease(item);
         // The anchor must be a past block of THIS chain, still within the
@@ -318,6 +377,39 @@ contract ContextBoundSourceVault {
             revert InvalidProof();
         }
         _pay(item);
+    }
+
+    /// @notice A guardian stops committee releases for `pauseDuration`. Only in
+    ///         committee mode, not while paused, not within `pauseCooldown` of a
+    ///         committee unpause. A pause that expired may be renewed at once.
+    function guardianPause() external nonReentrant {
+        if (!isGuardian[msg.sender]) revert NotGuardian();
+        if (verifier != address(0)) revert CommitteeRetired();
+        if (block.timestamp < pausedUntil || block.timestamp < guardianBlockedUntil) revert InvalidPause();
+        uint64 count = ++pauseCount;
+        pausedUntil = uint64(block.timestamp) + pauseDuration;
+        emit GuardianPaused(msg.sender, count, pausedUntil);
+    }
+
+    function unpauseDigest(uint64 count, uint256 validUntil) public view returns (bytes32) {
+        bytes32 authorization = keccak256(
+            abi.encode(
+                bytes32("BLOCH-USDT-UNPAUSE-v1"), block.chainid, address(this), routeId(), count, validUntil
+            )
+        );
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", authorization));
+    }
+
+    /// @notice `switchThreshold` signers end the current pause (bound to its
+    ///         `pauseCount`) early; guardians then wait `pauseCooldown`.
+    function unpause(uint64 count, uint256 validUntil, bytes[] calldata signatures) external nonReentrant {
+        if (block.timestamp >= pausedUntil || count != pauseCount || block.timestamp > validUntil) {
+            revert InvalidPause();
+        }
+        _checkCertificate(unpauseDigest(count, validUntil), signatures, switchThreshold);
+        pausedUntil = uint64(block.timestamp);
+        guardianBlockedUntil = uint64(block.timestamp) + pauseCooldown;
+        emit Unpaused(count, guardianBlockedUntil);
     }
 
     function switchDigest(bool cancel, address verifier_, bytes32 codehash, uint64 nonce, uint256 validUntil)

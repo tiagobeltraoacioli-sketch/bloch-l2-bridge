@@ -111,7 +111,7 @@ def main():
         for native in ('bloch-l2-700771', 'another-native-domain'):
             v = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k(native), k('USDC'), token, str(VAULT_CAP), '0', addrs, '2',
-                       f'({WINDOW_LIMIT},{WINDOW},2,604800)')
+                       f'({WINDOW_LIMIT},{WINDOW},2,604800)', '([],0,0)')
             vu = str(int(time.time()) + 3600)
             d = out(CAST, 'call', v, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu,
                     '--rpc-url', eth)

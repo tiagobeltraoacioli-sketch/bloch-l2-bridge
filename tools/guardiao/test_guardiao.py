@@ -290,7 +290,7 @@ def main():
         k = lambda t: out(CAST, 'keccak', t)
         vault = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), mock, str(10**12), '0', signer_list,
-                       '2', f'({10**11},86400,2,604800)')
+                       '2', f'({10**11},86400,2,604800)', '([],0,0)')
         vu = str(int(time.time()) + 3600)
         d = view(eth, vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in signers[:2]]

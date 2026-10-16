@@ -329,7 +329,7 @@ contract BridgedStablecoinTest {
         MockStable usdc = new MockStable();
         ContextBoundSourceVault vault = new ContextBoundSourceVault(
             bytes32("ETHEREUM-SEPOLIA"), bytes32("BLOCH-L2-700771"), bytes32("USDC"), address(usdc), 1_000_000e6, 0,
-            _addrs(), 2, ContextBoundSourceVault.Policy(50_000e6, 1 days, 2, 7 days)
+            _addrs(), 2, ContextBoundSourceVault.Policy(50_000e6, 1 days, 2, 7 days), ContextBoundSourceVault.Guard(new address[](0), 0, 0)
         );
         uint256 validUntil = block.timestamp + 1 hours;
         bytes32 cd = vault.controlDigest(true, true, 0, validUntil);
