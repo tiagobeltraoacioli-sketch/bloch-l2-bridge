@@ -137,6 +137,8 @@ class Vigia:
     def rounds(self, d, margin):
         """Live rounds of a burn, newest first: (validUntil, dir)."""
         now = int(time.time())
+        if self.cfg.get('eth_clock') == 'chain':
+            now = int(self.rpc(self.cfg['eth_rpc'], 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
         out = []
         for r in d.glob('r-*'):
             try:

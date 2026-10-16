@@ -124,3 +124,43 @@ and matched releases), soft liveness alert only, forged mint → pause, no secon
 cooldown and a re-pause after it, queued large mint without provenance → pause before `readyAt` and
 `executeMint` reverts `IsPaused`, vault drain → pause, forged stablecoin mint → pause, vault release
 without a burn → pause.
+
+# sombra.py — shadow-mode guardian of the Ethereum vault (pause-only)
+
+Before the `ContextBoundSourceVault`'s one-way switch to the Bloch light-client verifier, its 2-of-3
+committee releases USDC and the light-client prover (`bloch-light-client` `lc_prover.py`, shadow mode)
+proves every release after the fact from Bloch L1 finality. `sombra.py` makes a missing proof matter:
+
+```
+python3 sombra.py --config CFG.json check [--dry-run]                 # one round; exit 0 ok, 2 hard, 3 soft, 1 error
+python3 sombra.py --config CFG.json watch [--interval 60] [--dry-run]  # daemon
+```
+
+- Reads the vault's `Released` events from the guardian's own Ethereum node and the prover's `state.json`
+  (proof bytes and public values per burn).
+- A release is **proven** only if the deployed, never-activated `SP1ReleaseVerifier` (`shadow_verifier`, the
+  contract the vault would switch to) accepts the proof in an `eth_call`. A proof for another burn or one
+  the verifier rejects does not count.
+- A release still unproven after `grace_s` seconds of Ethereum time **and** `grace_l1_epochs` Bloch L1
+  finalized epochs is a hard finding: `guardianPause()` on the vault.
+
+The vault side (bloch-l2-bridge `ea20b3f`): guardians are fixed in the constructor (`Guard{guardians,
+pauseDuration, pauseCooldown}`, at most 7, never signers). `guardianPause()` stops committee `release()` for
+`pauseDuration`; deposits, `setControls`, the switch and `releaseWithProof` never stop. A guardian cannot
+release or unpause. Only `switchThreshold` signers (3-of-3 in the rehearsal, more than the 2-of-3 a
+guardian reacts to) end a pause early (`unpause`, bound to `pauseCount`), after which guardians wait
+`pauseCooldown`. An expired pause may be renewed at once, so a compromised release quorum cannot wait it
+out. After `activateVerifier()` guardians have no power and the watcher retires itself.
+
+Acting follows `guardiao.py`: alerts are JSON lines, a pause is sent once per pause (`pause-skip` while
+paused or in the cooldown), and again when the pause expires with the finding still open. A stale prover
+status file (`prover_stale_s`) and read errors are soft alerts only.
+
+Config: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`, `prover_dir`, `shadow_verifier`, `l1_rpc`
+(for `grace_l1_epochs`), `grace_s` (7200), `grace_l1_epochs` (0), `prover_stale_s` (1800), `keystore`,
+`password_file`, `cast`, `state`, `log_chunk` (5000). Choose the grace above the prover's worst latency
+(the burn's settlement must be L1-finalized, then about 30 min of proving on one host).
+
+Tests: `python3 test_sombra.py <foundry project>` (anvil, vault fixture with one guardian, MockSP1 under a
+real `SP1ReleaseVerifier`, fake L1 RPC): 18 checks. Live drill: `devnet4_ensaio.py` `shadow-config`,
+`shadow-verifier`, `release-unbacked`, `unpause`.

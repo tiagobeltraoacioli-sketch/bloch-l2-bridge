@@ -251,6 +251,8 @@ def cmd_release(eth, args):
     head_block = eth.block('latest')
     head, now = int(head_block['number'], 16), int(time.time())
     chain_now = int(head_block['timestamp'], 16)
+    if eth.cfg.get('eth_clock') == 'chain':  # the vault checks validUntil against block.timestamp
+        now = chain_now
     limit, seconds = eth.word(eth.call('windowLimit()')), eth.word(eth.call('windowSeconds()'))
     start, used = eth.word(eth.call('windowStart()')), eth.word(eth.call('windowReleased()'))
     if chain_now >= start + seconds:

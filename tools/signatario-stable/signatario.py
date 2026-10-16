@@ -564,6 +564,8 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source):
     if int(context['sourceAnchorHash'], 16) == 0:
         refuse('zero Ethereum anchor hash')
     now = int(time.time())
+    if ctx.cfg.get('eth_clock') == 'chain':  # a test chain whose clock was moved (e.g. anvil evm_increaseTime)
+        now = int(ctx.rpc(ctx.cfg['eth_rpc'], 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
     if not now < context['validUntil'] <= now + int(ctx.cfg.get('max_valid_seconds', 3600)):
         refuse('validUntil outside (now, now + max_valid_seconds]', validUntil=context['validUntil'], now=now)
     digest = ctx.release_digest(release, context)

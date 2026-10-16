@@ -246,7 +246,8 @@ def setup():
         ecfg.write_text(json.dumps({
             'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN, 'vault': st['vault'], 'vault_code_keccak': vault_code,
             'vault_from_block': st['vault_block'], 'keystore': str(DIR / 'keys' / f'eth{i}'),
-            'password_file': str(pw), 'cast': CAST, 'db': str(DIR / f'ethdb{i}.json')}, indent=1))
+            'password_file': str(pw), 'cast': CAST, 'db': str(DIR / f'ethdb{i}.json'),
+            'eth_clock': 'chain'}, indent=1))
         half = [sys.executable, str(HERE / 'eth_half.py'), '--config', str(ecfg)]
         cfg = {'signer': i, 'l2_rpc': L2_RPC, 'l2_chain_id': L2_CHAIN, 'token': st['l2_token'],
                'token_code_keccak': token_code, 'source_chain_id': ETH_CHAIN, 'source_vault': st['vault'],
@@ -260,7 +261,8 @@ def setup():
                'eth_half_release': half + ['release', '--intent', '{intent}'],
                'shared_dir': str(DIR / 'shared'), 'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN,
                'vault_from_block': st['vault_block'], 'token_from_block': st['l2_block'],
-               'l2_relayer_key': str(DIR / 'l2-relayer.key'), 'eth_relayer_key': str(DIR / 'eth-relayer.key')}
+               'l2_relayer_key': str(DIR / 'l2-relayer.key'), 'eth_relayer_key': str(DIR / 'eth-relayer.key'),
+               'eth_clock': 'chain'}  # the shared anvil runs ahead of the wall clock (switch-activate)
         (DIR / f'signer{i}.json').write_text(json.dumps(cfg, indent=1))
     print('signer configs written: ' + ', '.join(str(DIR / f'signer{i}.json') for i in (1, 2, 3)))
 

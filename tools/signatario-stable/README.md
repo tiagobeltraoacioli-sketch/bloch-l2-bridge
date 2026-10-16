@@ -59,7 +59,7 @@ proposed one if it is a canonical block of its node, ≤ finalized and recent en
 `eth_half.py` is the production half: `eth_half.py --config ETH.json deposit|release ...` (checks in its
 docstring). Its config, one per signer: `eth_rpc` (the signer's own node), `eth_chain_id`, `vault`,
 `vault_code_keccak`, `vault_from_block`, `keystore`, `password_file` (the Ethereum key; keep it distinct from
-the L2 key), `db`, and optionally `anchor_max_age` (160 blocks), `valid_seconds` (1800), `max_valid_seconds`
+the L2 key), `db`, and optionally `anchor_max_age` (160 blocks), `valid_seconds` (1800), `eth_clock` (`chain`: take "now" for `validUntil` from the Ethereum head instead of the wall clock; for test chains whose clock was moved, e.g. anvil after `evm_increaseTime`; signer and vigia configs accept it too), `max_valid_seconds`
 (3600), `log_chunk`. Beyond the test double it pins the vault code, reads deposits only up to `finalized`
 and checks the receipt, recomputes `releaseDigest` locally against the vault's, pre-checks the release
 window, and keeps a database that refuses to sign two different releases for one nonce or one burn.
