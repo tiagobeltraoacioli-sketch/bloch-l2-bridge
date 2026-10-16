@@ -116,6 +116,10 @@ so the guardian refuses it.)
 Stablecoin: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`. The guardian checks at every round
 that the token's `sourceVault` is `vault` and its `sourceRoute` equals `vault.routeId()`.
 
+`l2_raw_tx: true` (for an L2 RPC without a `pending` level, such as the settled devnet4 RPC): the token
+`pause()` is an offline-signed legacy transaction at the `latest` nonce with a fixed gas limit (`l2_pause_gas`,
+200000), and the guardian waits for its receipt (`l2_receipt_timeout_s`, 1800).
+
 Stablecoin, vault pause (optional): `vault_pause: true`, `eth_keystore`, `eth_password_file` (this guardian's
 own Ethereum key, distinct from its L2 key and from `sombra.py`'s). When a RELEASE MATCH or RESERVES violation
 is due, the guardian also calls `guardianPause()` on the `ContextBoundSourceVault` (it must be one of the

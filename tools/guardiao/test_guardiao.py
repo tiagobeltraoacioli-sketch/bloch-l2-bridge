@@ -330,7 +330,7 @@ def main():
                    'eth_rpc': eth, 'eth_chain_id': ETH_CHAIN, 'vault': vault, 'keystore': str(work / 'guardian'),
                    'password_file': str(work / 'pw'), 'cast': CAST, 'state': str(work / f'{name}-state.json'),
                    'reserves_grace_s': 0, 'provenance_grace_s': 0, 'release_sla_s': 600,
-                   'vault_pause': vault_pause, 'eth_keystore': str(work / 'vault-guardian'), 'eth_password_file': str(work / 'pw')}
+                   'vault_pause': vault_pause, 'l2_raw_tx': True, 'eth_keystore': str(work / 'vault-guardian'), 'eth_password_file': str(work / 'pw')}
             path = work / f'{name}.json'
             path.write_text(json.dumps(cfg))
             return path

@@ -506,10 +506,11 @@ class Guardian:
             self.log(kind='resolved', id=fid)
             del self.state['open'][fid]
         if due:
-            self.pause(now, due)
+            # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
             vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:'))]
             if self.vault_pause and vault_due:
                 self.pause_vault(vault_due)
+            self.pause(now, due)
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
         return 2 if hard else 3 if self.state['open'] else 0
 
@@ -532,14 +533,40 @@ class Guardian:
         if self.dry_run:
             self.log(kind='pause-dry-run', violations=reasons)
             return
-        argv = [self.cast, 'send', self.token, 'pause()', '--keystore', self.cfg['keystore'],
-                '--password-file', self.cfg['password_file'], '--rpc-url', self.l2,
-                '--chain', str(self.cfg['l2_chain_id']), '--json']
-        rc, out, err = self.run(argv)
+        if self.cfg.get('l2_raw_tx'):
+            rc, out, err = self.send_raw_l2('pause()')
+        else:
+            argv = [self.cast, 'send', self.token, 'pause()', '--keystore', self.cfg['keystore'],
+                    '--password-file', self.cfg['password_file'], '--rpc-url', self.l2,
+                    '--chain', str(self.cfg['l2_chain_id']), '--json']
+            rc, out, err = self.run(argv)
         ok = rc == 0 and json.loads(out).get('status') in ('0x1', 1)
         tx = json.loads(out).get('transactionHash') if rc == 0 else None
         self.state['pauses'].append({'t': now, 'tx': tx, 'ok': ok, 'violations': reasons})
         self.log(kind='pause', ok=ok, tx=tx, violations=reasons, error=None if ok else (err or out).strip()[-300:])
+
+    def send_raw_l2(self, sig):
+        """For an L2 RPC with no `pending` level (the settled devnet4 RPC refuses gas estimation and pending
+        nonces): offline-signed legacy tx at the `latest` nonce with a fixed gas limit, then wait for its
+        receipt. Returns (rc, receipt json, error) like `cast send --json`."""
+        try:
+            frm = self.me()
+            nonce = int(self.rpc(self.l2, 'eth_getTransactionCount', [frm, 'latest']), 16)
+            price = int(self.rpc(self.l2, 'eth_gasPrice', []), 16) * 2
+            raw = self.cast_out('mktx', '--keystore', self.cfg['keystore'], '--password-file',
+                                self.cfg['password_file'], '--chain', str(self.cfg['l2_chain_id']), '--nonce', str(nonce),
+                                '--gas-limit', str(self.cfg.get('l2_pause_gas', 200_000)), '--gas-price', str(price),
+                                '--legacy', self.token, sig)
+            tx = self.rpc(self.l2, 'eth_sendRawTransaction', [raw])
+            end = time.time() + int(self.cfg.get('l2_receipt_timeout_s', 1800))
+            while time.time() < end:
+                r = self.rpc(self.l2, 'eth_getTransactionReceipt', [tx])
+                if r:
+                    return 0, json.dumps(r), ''
+                time.sleep(10)
+            return 1, '', f'no receipt for {tx}'
+        except Unverifiable as e:
+            return 1, '', str(e)
 
     def pause_vault(self, reasons):
         """guardianPause() on the Ethereum vault: stops committee releases and deposits for its pauseDuration.

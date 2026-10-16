@@ -246,7 +246,7 @@ def setup():
         'kind': 'stable', 'name': DIR.name, 'l2_rpc': L2_RPC, 'l2_chain_id': L2_CHAIN, 'token': st['l2_token'],
         'token_from_block': st['l2_block'], 'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN, 'vault': st['vault'],
         'vault_from_block': st['vault_block'], 'keystore': str(DIR / 'keys' / 'guardiao-l2'),
-        'password_file': str(DIR / 'password'), 'vault_pause': True,
+        'password_file': str(DIR / 'password'), 'vault_pause': True, 'l2_raw_tx': True,
         'eth_keystore': str(DIR / 'keys' / 'guardiao-eth'), 'eth_password_file': str(DIR / 'password'),
         'cast': CAST, 'state': str(DIR / 'guardiao-state.json'),
         'provenance_grace_s': int(os.environ.get('PROVENANCE_GRACE_S', 1800))}, indent=1) + '\n')
