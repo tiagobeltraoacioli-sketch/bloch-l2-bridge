@@ -431,7 +431,7 @@ def shadow_verifier():
     cfg = {'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN, 'vault': st['vault'], 'vault_from_block': st['vault_block'],
            'prover_dir': str(DIR / 'prover'), 'shadow_verifier': st['shadow_verifier'], 'l1_rpc': L1_RPC,
            'grace_s': int(os.environ.get('GRACE_S', 7200)), 'grace_l1_epochs': int(os.environ.get('GRACE_EPOCHS', 2)),
-           'prover_stale_s': 1800, 'keystore': str(DIR / 'keys' / 'guardian'), 'password_file': str(DIR / 'password'),
+           'prover_stale_s': 3600, 'keystore': str(DIR / 'keys' / 'guardian'), 'password_file': str(DIR / 'password'),
            'cast': CAST, 'state': str(DIR / 'sombra-state.json')}
     (DIR / 'sombra.json').write_text(json.dumps(cfg, indent=1) + '\n')
     print(json.dumps({'sp1_groth16': st['sp1_groth16'], 'shadow_verifier': st['shadow_verifier'], 'tx': tx,

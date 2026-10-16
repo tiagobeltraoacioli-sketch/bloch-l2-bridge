@@ -157,7 +157,7 @@ paused or in the cooldown), and again when the pause expires with the finding st
 status file (`prover_stale_s`) and read errors are soft alerts only.
 
 Config: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`, `prover_dir`, `shadow_verifier`, `l1_rpc`
-(for `grace_l1_epochs`), `grace_s` (7200), `grace_l1_epochs` (0), `prover_stale_s` (1800), `keystore`,
+(for `grace_l1_epochs`), `grace_s` (7200), `grace_l1_epochs` (0), `prover_stale_s` (3600; the prover writes no status while a ~30 min proof runs), `keystore`,
 `password_file`, `cast`, `state`, `log_chunk` (5000). Choose the grace above the prover's worst latency
 (the burn's settlement must be L1-finalized, then about 30 min of proving on one host).
 

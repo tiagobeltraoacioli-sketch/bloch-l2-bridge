@@ -25,7 +25,7 @@ Soft alerts (never pause): the prover's status file is older than `prover_stale_
 
 CONFIG (JSON): eth_rpc, eth_chain_id, vault, vault_from_block, prover_dir (lc_prover state_dir: state.json,
 status.json), shadow_verifier (SP1ReleaseVerifier address; omit only in tests that trust the prover),
-l1_rpc (needed when grace_l1_epochs > 0), grace_s (7200), grace_l1_epochs (0), prover_stale_s (1800),
+l1_rpc (needed when grace_l1_epochs > 0), grace_s (7200), grace_l1_epochs (0), prover_stale_s (3600: above one proof job, during which the prover writes no status),
 keystore, password_file, cast, state, log_chunk (5000).
 Development tool; UNAUDITED.
 """
@@ -54,7 +54,7 @@ class Sombra:
         self.prover_dir = Path(c['prover_dir'])
         self.grace_s = int(c.get('grace_s', 7200))
         self.grace_epochs = int(c.get('grace_l1_epochs', 0))
-        self.stale_s = int(c.get('prover_stale_s', 1800))
+        self.stale_s = int(c.get('prover_stale_s', 3600))
         self.state_file = Path(c['state'])
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {}
         self.state.setdefault('releases', {})
