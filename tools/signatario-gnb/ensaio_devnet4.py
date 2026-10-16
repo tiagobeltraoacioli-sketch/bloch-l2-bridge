@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wGnB rehearsal on devnet4 + a GnB testnet node: lock -> mint -> DEX (wGnB/WBLCH) -> burn -> release.
+"""wGSMH rehearsal on devnet4 + a GnB testnet node: lock -> mint -> DEX (wGSMH/WBLCH) -> burn -> release.
 
   sudo python3 ensaio_devnet4.py lock | mint | dex-burn | release | replay | report
 

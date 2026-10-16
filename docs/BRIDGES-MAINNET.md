@@ -22,16 +22,16 @@ There is no treasury, owner or fee recipient in either bridge.
 
 ## 2. Initial parameters (start small, raise by redeploy)
 
-Units: wGnB 8 decimals (1 GNB = 1e8), bUSDC 6 decimals (1 USDC = 1e6).
+Units: wGSMH 8 decimals (1 GSMH = 1e8), bUSDC 6 decimals (1 USDC = 1e6).
 
-| Parameter | wGnB | bUSDC | Rationale |
+| Parameter | wGSMH | bUSDC | Rationale |
 | --- | --- | --- | --- |
-| `supplyCap` | 30 GNB (`3000000000`) | 100,000 USDC (`100000000000`) | wGnB: GnB mainnet was just reset and the pilot is 30 GNB, so the L2 can never hold more than the pilot. bUSDC: checklist §6 (≤ 100k); must also be ≤ the vault `cap` (validated, and `verify --source-rpc` reads the vault) |
-| `bucketCapacity` | 10 GNB (`1000000000`) | 10,000 USDC (`10000000000`) | Token bucket (Chainlink CCIP style): the most a full key compromise can mint before refill. wGnB: 1/3 of the pilot per day (the checklist's "1% of circulating supply" has no meaning right after a reset; revisit when supply is known). bUSDC: checklist §6 |
-| `refillPerSecond` | `11574` (= 10 GNB / 86400, floor) | `115740` (= 10,000 USDC / 86400, floor) | Full refill in 24 h (86,400.6 s after flooring); continuous, so no window boundary lets 2x through |
-| `largeMintThreshold` | 1 GNB (`100000000`) | 1,000 USDC (`1000000000`) | 10% of the bucket capacity (checklist §6): larger mints are queued |
+| `supplyCap` | 30 GSMH (`3000000000`) | 100,000 USDC (`100000000000`) | wGSMH: GnB mainnet was just reset and the pilot is 30 GSMH, so the L2 can never hold more than the pilot. bUSDC: checklist §6 (≤ 100k); must also be ≤ the vault `cap` (validated, and `verify --source-rpc` reads the vault) |
+| `bucketCapacity` | 10 GSMH (`1000000000`) | 10,000 USDC (`10000000000`) | Token bucket (Chainlink CCIP style): the most a full key compromise can mint before refill. wGSMH: 1/3 of the pilot per day (the checklist's "1% of circulating supply" has no meaning right after a reset; revisit when supply is known). bUSDC: checklist §6 |
+| `refillPerSecond` | `11574` (= 10 GSMH / 86400, floor) | `115740` (= 10,000 USDC / 86400, floor) | Full refill in 24 h (86,400.6 s after flooring); continuous, so no window boundary lets 2x through |
+| `largeMintThreshold` | 1 GSMH (`100000000`) | 1,000 USDC (`1000000000`) | 10% of the bucket capacity (checklist §6): larger mints are queued |
 | `largeMintDelay` | 12 h (`43200`) | 12 h (`43200`) | Wormhole-governor style delay; gives guardians time to pause before a queued mint becomes executable |
-| `minBurn` | 0.01 GNB (`1000000`) | 10 USDC (`10000000`) | Every burn costs a release on the source chain (a GnB policy transaction / an Ethereum `vault.release` paid by the relayer); dust burns would be uneconomic and spam the signers. Small enough not to trap users |
+| `minBurn` | 0.01 GSMH (`1000000`) | 10 USDC (`10000000`) | Every burn costs a release on the source chain (a GnB policy transaction / an Ethereum `vault.release` paid by the relayer); dust burns would be uneconomic and spam the signers. Small enough not to trap users |
 | `pauseDuration` | 72 h (`259200`) | 72 h (`259200`) | Checklist §3: long enough to investigate and coordinate a response; expires by itself |
 | `pauseCooldown` | 72 h (`259200`) | 72 h (`259200`) | ≥ duration (enforced): a malicious guardian can delay at most half the time, never stop the bridge |
 | signers / threshold | 7 / 5 | 7 / 5 | Section 1 |
@@ -40,7 +40,7 @@ Units: wGnB 8 decimals (1 GNB = 1e8), bUSDC 6 decimals (1 USDC = 1e6).
 | `tx.maxGasPriceWei` | **undecided** | **undecided** | Depends on the L2 mainnet fee market; the tool refuses above it |
 
 Raising a limit later = deploy a new contract with a new reviewed config (same tooling), then migrate.
-Suggested steps after each audit: wGnB bucket = 1% of circulating GnB once known, supply cap per the
+Suggested steps after each audit: wGSMH bucket = 1% of circulating GnB once known, supply cap per the
 vault rotation (new vault every 30 days or at 25% of the supply cap, checklist §6); bUSDC x2–x5 per step.
 
 ## 3. Deployment tooling
@@ -108,7 +108,7 @@ new config, new plan, new review.
 
 ## 5. Automation (vigia)
 
-- wGnB: `tools/signatario-gnb/vigia.py` (unchanged).
+- wGSMH: `tools/signatario-gnb/vigia.py` (unchanged).
 - bUSDC: `tools/signatario-stable/vigia.py`. `sign`: finalized `Deposited` logs (own Ethereum node) →
   `signatario.py mint`; finalized `Burned` logs (L2) → release certificates in rounds that share the
   Ethereum anchor (`--context`); a round close to `validUntil` is replaced. `relay`: `mint` on the L2 with

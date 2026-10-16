@@ -1,4 +1,4 @@
-# Audit scope: Bloch bridges (bUSDC ↔ Ethereum, wGnB/wGSMH ↔ GnB), audit candidate 2026-10-16
+# Audit scope: Bloch bridges (bUSDC ↔ Ethereum, wGSMH ↔ GnB), audit candidate 2026-10-16
 
 Branch `release/bridge-audit-candidate-20261016` of `bloch-l2-bridge`. It merges the mainnet line
 (`feat/pontes-mainnet`: v1.1 tokens, guardian, deploy tooling, stablecoin vigia), the Ethereum half and
@@ -11,6 +11,11 @@ UNAUDITED.
 
 ## 1. Contracts in scope
 
+Naming: the GnB-SMH chain's coin is **GSMH**; its wrapped token on the L2 is **wGSMH** ("Wrapped GnB-SMH",
+fixed in `WrappedGnBV2`'s constructor). "GnB" names the chain. Kept on purpose as protocol identifiers: the
+EIP-712 domain name `Bloch wGnB`, the release marker tag `GNB-RELEASE-v1`, chain ids `0x474E0001/2`, `gnb1`
+addresses, the `wgnb` bridge kind and paths, and the legacy v1 `WrappedGnB` (symbol `wGnB`, devnet only).
+
 Solidity 0.8.24, optimizer 200 runs, `evm_version = shanghai`, `bytecode_hash = none` (`foundry.toml`). LOC =
 non-blank, non-comment lines.
 
@@ -20,7 +25,7 @@ non-blank, non-comment lines.
 | `SP1ReleaseVerifier` | `contracts/usdt/SP1ReleaseVerifier.sol` | 36 (60) | `dc1d8fc` | Ethereum | Adapter between the vault's `IReleaseVerifier` and a version-pinned SP1 verifier. Pins `programVKey`, `trustAnchor`, `l2ChainId` and `l2Token`. |
 | `SignerMintedToken` | `contracts/bridged/SignerMintedToken.sol` | 274 (336) | `da4a26c` | Bloch L2 | Shared core of the v1.1 tokens: k-of-n EIP-712 mints, token bucket, queued large mints, supply cap, expiring pause-only guardians, burns. |
 | `BridgedStablecoinV2` | `contracts/stable/BridgedStablecoinV2.sol` | 59 (76) | `da4a26c` | Bloch L2 | bUSDC: one vault route (`sourceVault`, `sourceRoute`). Burns map to vault `Release` items. |
-| `WrappedGnBV2` | `contracts/wgnb/WrappedGnBV2.sol` | 42 (62) | `de067dc` | Bloch L2 | wGnB / wGSMH (name and symbol set in the constructor). GnB chain id is pinned. |
+| `WrappedGnBV2` | `contracts/wgnb/WrappedGnBV2.sol` | 42 (62) | `de067dc` | Bloch L2 | wGSMH (name and symbol set in the constructor). GnB chain id is pinned. |
 
 Out of scope, but pinned and listed for completeness:
 
@@ -37,7 +42,7 @@ Out of scope, but pinned and listed for completeness:
 | Stablecoin signer, Bloch half | `tools/signatario-stable/signatario.py` | 601 | `3ee7c49` | L2 mint key (k-of-n). Rebuilds the L2 from L1 data before certifying a burn. |
 | Stablecoin signer, Ethereum half | `tools/signatario-stable/eth_half.py` | 326 | `3ee7c49` | Ethereum release key (k-of-n). Pins the vault code, uses `finalized` only, recomputes `releaseDigest`. |
 | Stablecoin automation | `tools/signatario-stable/vigia.py` | 307 | `3ee7c49` | Calls the signer. The relayer holds only gas keys. |
-| GnB signer and automation | `tools/signatario-gnb/signatario.py`, `vigia.py` | 438, 243 | `da4a26c`, `f6de7ab` | Same pattern for wGnB/wGSMH. |
+| GnB signer and automation | `tools/signatario-gnb/signatario.py`, `vigia.py` | 438, 243 | `da4a26c`, `f6de7ab` | Same pattern for wGSMH. |
 | Guardian (fast path) | `tools/guardiao/guardiao.py` | 626 | `28cd313` | Pause only: token `pause()` and vault `guardianPause()`. Each uses its own key. |
 | Guardian (proof path) | `tools/guardiao/sombra.py` | 276 | `5b98d79` | Pause only: vault `guardianPause()`. |
 | Reserves monitor | `tools/reservas/reservas.py` | 164 | `29323e0` | None (read-only). |

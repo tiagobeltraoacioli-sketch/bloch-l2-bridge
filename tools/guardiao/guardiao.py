@@ -219,7 +219,7 @@ class Guardian:
             self.state['burn_time'][key] = self.block(self.l2, burn['block'])[1]
         return self.state['burn_time'][key]
 
-    # ── GnB source (wGnB) ────────────────────────────────────────────────────
+    # ── GnB source (wGSMH) ────────────────────────────────────────────────────
     def gnb(self, template, **subs):
         argv = [a.format(**subs) for a in self.cfg[template]]
         rc, out, err = self.run(argv)
@@ -335,7 +335,7 @@ class Guardian:
         return None
 
     def gnb_provenance(self, m):
-        """'ok' | 'pending' | error string, for one wGnB mint."""
+        """'ok' | 'pending' | error string, for one wGSMH mint."""
         if m['lock_vout'] != 0:
             return 'lockVout is not 0'
         tx = self.gnb_tx(m['lock_txid'])

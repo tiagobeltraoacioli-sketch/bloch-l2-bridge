@@ -4,7 +4,7 @@
   python3 test_reservas.py FOUNDRY_PROJECT_DIR
 
 Stable: ContextBoundSourceVault (contracts/usdt) over MockStable (deposits, a committee release) against a
-MockSupplyV2 token. wGnB: a fake `getutxos` against a MockSupplyV1 / V2 token. Scenarios: equal -> ok;
+MockSupplyV2 token. wGSMH: a fake `getutxos` against a MockSupplyV1 / V2 token. Scenarios: equal -> ok;
 deposit not yet minted -> surplus (soft) and a tolerance absorbs it; release without a burn -> deficit
 (hard); pendingSupply counts as a liability; GnB equal / deficit; truncated GnB answer, foreign script and
 a token without totalSupply -> unverifiable, never a deficit; exit codes with several bridges.
@@ -171,7 +171,7 @@ def main():
         check('stable release without a burn: deficit 3 USDC, hard, exit 2', code == 2 and hard
               and hard[0]['shortfall'] == 3 * 10**6 and rows(lines)[0]['total_locked'] == 9 * 10**6, lines)
 
-        # wGnB
+        # wGSMH
         send(DEPLOYER, wtoken, 'set(uint256)', '68295768')
         send(DEPLOYER, wtoken2, 'set(uint256,uint256)', '60000000', '8295768')
         finalize()

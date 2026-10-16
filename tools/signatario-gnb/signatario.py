@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wGnB bridge signer, Bloch half: signs only what it verified itself (devnet4 rehearsal).
+"""wGSMH bridge signer, Bloch half: signs only what it verified itself (devnet4 rehearsal).
 
   python3 signatario.py --config CFG.json mint    --txid HEX --vout 0 --out SIG.json
   python3 signatario.py --config CFG.json combine --sig A.json --sig B.json [...] --out MINT.json
@@ -9,7 +9,7 @@ Message formats: INTERFACE-PONTE-BLOCH-GNB.md, section "Bloch" (B2-B7).
 
 mint: the GnB half (`gnb_half_lock` argv template in the config, run on this signer's own GnB node) checks the lock
 format and depth/finality and returns the lock fields. This half then requires, on the L2:
-  1. the chain id and the wGnB runtime code hash pinned in the config (set once at deploy);
+  1. the chain id and the wGSMH runtime code hash pinned in the config (set once at deploy);
   2. the contract's gnbChainId and threshold equal the config;
   3. the lock not minted yet and the amount within the period and supply caps (level latest);
   4. the EIP-712 digest computed here equal to the contract's mintDigest;
@@ -20,7 +20,7 @@ release: the burn must be finalized, read from an L2 this signer rebuilt itself:
   2. the whole L2 is rebuilt from L1 blocks (produce reconstruct, as atestador.py) and served by a
      private settled RPC over the rebuilt database; finalized comes from the follower's FFG replay;
   3. the burn receipt is read from that private RPC, in a block <= finalized whose hash equals the
-     rebuilt one; the wGnB code at finalized equals the pin; the Burned log is decoded and its burnId
+     rebuilt one; the wGSMH code at finalized equals the pin; the Burned log is decoded and its burnId
      recomputed;
   4. the burn goes to the GnB half (`gnb_half_release`) as its BURN.json together with the release tx
      (`--spend`, built by anyone with gnb-cli vaultrelease); the GnB half checks the tx on its own node
@@ -161,7 +161,7 @@ class Ctx:
             refuse('the L2 RPC serves another chain', rpc=chain, config=self.l2_chain_id)
         code = self.rpc(url, 'eth_getCode', [self.wgnb, block])
         if code in ('0x', '') or self.keccak(code) != self.cfg['wgnb_code_keccak'].lower():
-            refuse('the wGnB runtime code differs from the pinned hash', at=block,
+            refuse('the wGSMH runtime code differs from the pinned hash', at=block,
                    got=None if code in ('0x', '') else self.keccak(code), pinned=self.cfg['wgnb_code_keccak'])
         if self.word(self.call(url, 'gnbChainId()(uint32)', block=block)) != self.gnb_chain_id:
             refuse('the contract serves another GnB network')
@@ -377,7 +377,7 @@ def cmd_release(ctx, args):
         topic0 = ctx.keccak_text(BURNED_TOPIC_STR)
         logs = [l for l in receipt['logs'] if l['address'].lower() == ctx.wgnb and l['topics'][0].lower() == topic0]
         if len(logs) != 1:
-            refuse(f'expected exactly one Burned log of the wGnB, found {len(logs)}')
+            refuse(f'expected exactly one Burned log of the wGSMH, found {len(logs)}')
         log = logs[0]
         burn_id, nonce = log['topics'][1].lower(), int(log['topics'][2], 16)
         sender = '0x' + log['topics'][3][-40:].lower()

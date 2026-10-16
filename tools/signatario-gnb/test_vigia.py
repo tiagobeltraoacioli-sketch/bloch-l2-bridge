@@ -112,7 +112,7 @@ def main():
         relay = vigia(cfgs[0], 'relay')
         check('relay: submits the mint with k signatures', any(e.get('kind') == 'relay-mint' and e.get('tx') for e in relay), relay)
         bal = int(sh(CAST, 'call', wgnb, 'balanceOf(address)(uint256)', user, '--rpc-url', url).stdout.split()[0])
-        check('mint: recipient credited 20 GNB', bal == 20 * 10**8, bal)
+        check('mint: recipient credited 20 GSMH', bal == 20 * 10**8, bal)
         check('relay: nothing to do after the mint', not vigia(cfgs[0], 'relay'))
         check('sign: a minted lock is not signed again', not any(e.get('kind') == 'mint' for c in cfgs for e in vigia(c, 'sign')))
 

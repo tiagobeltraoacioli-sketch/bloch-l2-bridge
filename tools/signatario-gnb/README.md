@@ -1,11 +1,11 @@
-# signatario-gnb — Bloch half of the wGnB bridge signer
+# signatario-gnb — Bloch half of the wGSMH bridge signer
 
 Set-once automatic signer, same pattern as `atestador.py` (devnet4): it signs only what it verified on
 its own nodes. Formats: `INTERFACE-PONTE-BLOCH-GNB.md`, section "Bloch" (B2–B7).
 
 | Command | Checks before signing |
 | --- | --- |
-| `mint --txid HEX --vout 0 --out SIG.json` | GnB half: lock format + depth N / PoWit on the signer's own GnB node. L2: chain id, pinned wGnB code hash, gnbChainId/threshold, not minted, within caps, local EIP-712 digest == contract `mintDigest`. Signs with a `cast` keystore. |
+| `mint --txid HEX --vout 0 --out SIG.json` | GnB half: lock format + depth N / PoWit on the signer's own GnB node. L2: chain id, pinned wGSMH code hash, gnbChainId/threshold, not minted, within caps, local EIP-712 digest == contract `mintDigest`. Signs with a `cast` keystore. |
 | `combine --sig A --sig B --out MINT.json` | Same mint in every partial; k distinct signers ordered by address; prints the `mint(...)` call. Anyone may run it. |
 | `release --burn-tx HASH --spend RELEASE.json --out PARTIAL.json` | Rebuilds the L2 from L1 data (`produce reconstruct` over the native follower), serves it on a private `settled-rpc`, requires the burn in a block ≤ finalized whose hash matches the follower's FFG replay, checks the code pin and the `burnId`, then hands the intent to the GnB half (marker absent → co-sign). |
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automatic wGnB signer and relayer: the set-once bridge running without anyone in the loop.
+"""Automatic wGSMH signer and relayer: the set-once bridge running without anyone in the loop.
 
   python3 vigia.py --config CFG.json sign  [--once] [--interval 60]
   python3 vigia.py --config CFG.json relay [--once] [--interval 60]
@@ -8,7 +8,7 @@
 doing every check before it signs (nothing here weakens them):
   - mints: every vault output at index 0 (a lock, per INTERFACE-PONTE-BLOCH-GNB.md) not yet minted on
     the L2 -> `signatario.py mint`; the partial goes to SHARED/mint/<lockId>/<signer>.json;
-  - releases: every `Burned` log of the wGnB (discovered on the L2 RPC; verified again on the rebuilt L2
+  - releases: every `Burned` log of the wGSMH (discovered on the L2 RPC; verified again on the rebuilt L2
     by `signatario.py release`) without a release -> the proposer (config `proposer: true`) builds the
     release tx once (`gnb_vault_release`, deterministic inputs: largest vault outputs first, then txid)
     into SHARED/release/<burnId>/release.json; every signer co-signs that file in turn (file lock),
@@ -106,7 +106,7 @@ class Vigia:
             return rc, {'reason': 'no JSON from signatario.py: ' + err.strip()[-300:]}
 
     def burns(self):
-        """Burned logs of the wGnB from the deploy block to the L2 `finalized` head (discovery only)."""
+        """Burned logs of the wGSMH from the deploy block to the L2 `finalized` head (discovery only)."""
         topic = self.cast_out('keccak', BURNED_TOPIC_STR).lower()
         final = self.rpc('eth_getBlockByNumber', ['finalized', False])
         if final is None:

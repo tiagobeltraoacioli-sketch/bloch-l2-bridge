@@ -140,7 +140,7 @@ def main():
         def kinds(lines, kind, **match):
             return [l for l in lines if l.get('kind') == kind and all(l.get(k) == v for k, v in match.items())]
 
-        # ════════════════════════════ wGnB ════════════════════════════
+        # ════════════════════════════ wGSMH ════════════════════════════
         def deploy_wgnb():
             unit = 10**8
             limits = f'({1000 * unit},{100 * unit},{100 * unit // 86400},{10 * unit},{DELAY},100000)'

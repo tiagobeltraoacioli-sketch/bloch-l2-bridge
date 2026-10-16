@@ -26,7 +26,7 @@ is enough to pause.
 
 ## Invariants
 
-Notation, all amounts in token base units (wGnB = GnB satoshis, 8 decimals; stablecoin = 6 decimals):
+Notation, all amounts in token base units (wGSMH = GnB satoshis, 8 decimals; stablecoin = 6 decimals):
 
 - `B` = L2 block pinned at the start of the round (`latest`); `F` = L2 `finalized`; `now` = timestamp of `B`.
 - `burns(≤B)` = every `Burned` log of the token in blocks `token_from_block..B`.
@@ -44,7 +44,7 @@ The token reduces `totalSupply` at burn time, but the vault pays only at release
 (a release removes exactly the burned amount from the vault on both chains). Equality holds when every
 lock is minted. Counting `inFlight` makes the check exact instead of leaving the unreleased burns as slack.
 
-- **wGnB:** `backing = Σ value` of the vault's UTXOs as returned by the guardian's own GnB node
+- **wGSMH:** `backing = Σ value` of the vault's UTXOs as returned by the guardian's own GnB node
   (`gnb_utxos` for `gnb_vault_address`; every row must pay `gnb_vault_script`; a truncated answer is an
   error, never a shortfall). A burn is released when its marker address
   (`SHA3-256("GNB-RELEASE-v1" ‖ burnId)[..20]`, a 546-unit output nobody can spend) holds a UTXO.
@@ -60,7 +60,7 @@ round can only make the check more lenient. Nodes that lag each other (the guard
 
 Every `Minted` log (queued or not; a queued mint also has `MintQueued`) must match the source chain:
 
-- **wGnB:** `lockVout == 0`; the guardian's GnB node knows `lockTxid` with output 0 paying the vault script
+- **wGSMH:** `lockVout == 0`; the guardian's GnB node knows `lockTxid` with output 0 paying the vault script
   exactly `amount`, output 1 = the 20 bytes of `recipient` with value 546, no other output paying the vault,
   and `confirmations ≥ gnb_min_conf` (set it to the signers' depth N).
 - **Stablecoin:** a `Deposited` log of the vault in a block `≤ E` with `id == depositId`, `route == sourceRoute`,
@@ -74,8 +74,8 @@ can be executed. A verified mint is cached and not re-checked (a later source re
 
 ### 3. RELEASES (hard) and LIVENESS (soft)
 
-- Every release on the source must match an L2 burn: same `burnId` (stablecoin `nativeBurn`; wGnB marker),
-  amount (stablecoin exact; wGnB payout in `[amount − 546 − 1_000_000, amount − 546]`), recipient (Ethereum
+- Every release on the source must match an L2 burn: same `burnId` (stablecoin `nativeBurn`; wGSMH marker),
+  amount (stablecoin exact; wGSMH payout in `[amount − 546 − 1_000_000, amount − 546]`), recipient (Ethereum
   address / GnB script), route and nonce (stablecoin). A mismatch, or two releases for one burn, is due at
   once. A release whose burn the guardian's L2 does not show is due after `provenance_grace_s`.
   On GnB the guardian also checks every vault UTXO at index ≥ 1 (change of a spend): if its transaction
@@ -100,7 +100,7 @@ Common: `kind` (`wgnb`|`stable`), `name`, `l2_rpc`, `l2_chain_id`, `token`, `tok
 `password_file`, `cast`, `state`, `reserves_grace_s` (900), `provenance_grace_s` (1800), `pause_margin_s`
 (3600), `release_sla_s` (21600), `log_chunk` (5000).
 
-wGnB: `gnb_chain_id`, `gnb_vault_address`, `gnb_vault_script` (hex, 33 B), `gnb_address_prefix`
+wGSMH: `gnb_chain_id`, `gnb_vault_address`, `gnb_vault_script` (hex, 33 B), `gnb_address_prefix`
 (`gnb1t` testnet), `gnb_min_conf`, and two argv templates run against the guardian's own GnB node, each
 printing the node's JSON (a raw JSON-RPC answer is unwrapped):
 

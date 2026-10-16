@@ -9,8 +9,8 @@ BIN=/home/ubuntu/.foundry/bin
 RPC=${RPC:-http://127.0.0.1:18946}          # forge-compatible proxy over the settled RPC (18945)
 DEV_KEY=/var/lib/bloch-l2-devnet4-settler/ensaio/l2.key
 GNB_CHAIN_ID=${GNB_CHAIN_ID:-0x474E0002}     # GnB testnet; 0x474E0001 = mainnet pilot
-PERIOD=${PERIOD:-86400} PERIOD_CAP=${PERIOD_CAP:-100000000000} SUPPLY_CAP=${SUPPLY_CAP:-1000000000000}  # 1,000 / 10,000 GNB
-MIN_BURN=${MIN_BURN:-100000}                 # 0.001 GNB
+PERIOD=${PERIOD:-86400} PERIOD_CAP=${PERIOD_CAP:-100000000000} SUPPLY_CAP=${SUPPLY_CAP:-1000000000000}  # 1,000 / 10,000 GSMH
+MIN_BURN=${MIN_BURN:-100000}                 # 0.001 GSMH
 [ "$(id -u)" = 0 ] || { echo "run as root"; exit 1; }
 
 install -d -m 700 "$DIR" "$DIR/keys" "$DIR/work"

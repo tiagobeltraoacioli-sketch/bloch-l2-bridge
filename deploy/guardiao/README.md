@@ -7,7 +7,7 @@ with the signers but the public contracts:
 | --- | --- |
 | Operator | a party that operates no signer of this bridge (CCIP RMN model); 2–3 guardians per bridge, each a different operator |
 | Machine | its own host and provider; never a signer machine, never the L2 sequencer host |
-| Nodes | its own L2 RPC (ideally its own follower), its own GnB node (wGnB) or Ethereum node (stablecoin) |
+| Nodes | its own L2 RPC (ideally its own follower), its own GnB node (wGSMH) or Ethereum node (stablecoin) |
 | Key | one EVM key, generated on the machine, imported as a `cast` keystore under `/etc/bloch-guardiao/` (mode 0400, user `bloch-guardiao`) with a password file; its address goes into the token constructor as a guardian. It only needs L2 gas |
 | Code | `tools/guardiao` only, installed under `/opt/bloch-guardiao` (read-only); `cast` in `/opt/bloch-guardiao/bin` (config `cast`, because `ProtectHome=yes`) |
 
