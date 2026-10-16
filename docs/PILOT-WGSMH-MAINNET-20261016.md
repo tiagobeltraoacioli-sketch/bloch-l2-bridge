@@ -73,3 +73,35 @@ Token `0xB2B4952b6E57e589109aF764859886e236798AD4`, runtime code keccak
 - On the mainnet line (main 820c102) policy trees are consensus from the PoWit height (10,000), which mainnet has
   passed, so a two-branch vault with timelocked recovery is now possible on mainnet for anything beyond the pilot.
 - The signers run on one host here (rehearsal); a real signer set runs one machine per signer with its own GnB node.
+
+## Exit back to GnB mainnet (after the DEX test)
+
+The DEX test left the holder `0x4630a5EB8d04401e610Dd986b481A489410122D9` with 161,704,232 (1.61704232 wGSMH):
+0.31704232 of that came from a DEX multi-hop swap bUSDC→WBLCH→wGSMH (tx `0xe6d85dc5…`, L2 block 437).
+
+| Step | Result |
+| --- | --- |
+| Burn 131,704,232 (1.31704232 wGSMH; 0.3 stays on the holder) to the pilot wallet | tx `0x0b535068b902a05b6ea9d257b9289874242adb5a78a3cb87e6af8acab4a059fb`, L2 block 438 (`0xe6d09f4aa2e476f56b334d62d3a6e04914c20133fd5c368a2f831afe293b2084`), gas 43,564; burnNonce 2, burnId `0x8dce1b37a10b5220a21b68af71ae63912349568711bbe2b62bdccd2d63fad830` = keccak(abi.encode(700771, token, 2)) |
+| Release built (`--next-height 14992`) from the vault UTXO `8bb33a9a…:2` (200,000,000) | payout 131,661,712 + marker 546 + fee 41,974 = 131,704,232; change 68,295,768 to the vault |
+| Signatures (after L2 finalized ≥ 438) | signers 1 and 2, each after rebuilding the L2 from L1 (128,063 native blocks, 438 L2 blocks): keys 0 and 1 |
+| Broadcast (node 17520) | release txid `4d9e17856583055d5b34e0e32f22e197d83a2b946c649b4c1301a28451182643`, GnB block 15034 (`f8a81a450626c1e0a1885f15b78f281ecb3314c0b1c37481bd26fe7f52eea5e9`); outputs 131,661,712 → pilot wallet, 546 → burn marker (script `de5795bf…5371`), 68,295,768 → vault |
+
+Replays (all refused). The vault no longer holds enough to fund a second release of 131,704,232, so the signers
+got the same release again with its signatures removed:
+
+| Attempt | Refusal |
+| --- | --- |
+| Signer 3 (never signed it) | GnB half: "a release for this burn already exists on chain" |
+| Signer 1 (signed it) | GnB half: "a release for this burn already exists on chain" |
+| Rebroadcast of the signed release | node: "transaction already confirmed" |
+
+### Final state after the exit (L2 finalized 438, GnB h15034)
+
+| | |
+| --- | --- |
+| Vault | 68,295,768 (0.68295768 GSMH) in `4d9e1785…:2` |
+| wGSMH totalSupply | 68,295,768: **matches the vault**; pendingSupply 0; burnNonce 2 |
+| Holder `0x4630…22D9` | 30,000,000 (0.3 wGSMH) |
+| Pilot wallet | 2,931,601,660 (29.3160166 GSMH) in 3 UTXOs: 131,661,712 + 99,957,480 + 2,699,982,468 |
+| Supply accounting | minted 300,000,000 − burned 100,000,000 − burned 131,704,232 = 68,295,768. The other 38,295,768 wGSMH (0.38295768) sit outside the holder, in the DEX pool and other DEX test accounts |
+| Pilot cost on GnB | 30 − 29.3160166 − 0.68295768 = 0.00102572 GSMH: lock fee 16,986 + 3 markers × 546 + 2 release fees × 41,974 |
