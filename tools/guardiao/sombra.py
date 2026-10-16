@@ -246,7 +246,7 @@ class Sombra:
         rc, out, err = self.run(argv)
         r = json.loads(out) if rc == 0 else {}
         ok = r.get('status') in ('0x1', 1)
-        entry = {'t': now, 'tx': r.get('transactionHash'), 'ok': ok, 'violations': reasons,
+        entry = {'chain_time': now, 'tx': r.get('transactionHash'), 'ok': ok, 'violations': reasons,
                  'block': int(r['blockNumber'], 16) if r.get('blockNumber') else None,
                  'gas_used': int(r['gasUsed'], 16) if r.get('gasUsed') else None}
         self.state['pauses'].append(entry)
