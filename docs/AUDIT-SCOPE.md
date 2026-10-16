@@ -244,4 +244,19 @@ From a clean checkout with Foundry in `~/.foundry/bin`:
   `signatario-gnb` and `signatario-stable` (also with `ETH_HALF=real` for the production Ethereum half)
 - `python3 tools/deploy-pontes/rehearse_anvil.py`
 
-The counts for this candidate are in the commit that adds this file.
+Results for `eba8e02`, from a clean clone on 45.77 (Foundry stable, anvil):
+
+| Suite | Fake / default | `ETH_HALF=real` |
+| --- | --- | --- |
+| forge (11 suites) | 141 passed, 0 failed, 1 skipped | |
+| `guardiao/test_guardiao` | 32/32 | 32/32 |
+| `guardiao/test_sombra` | 18/18 | 18/18 |
+| `reservas/test_reservas` | 14/14 | 14/14 |
+| `signatario-gnb/test_signatario` | 15/15 | 15/15 |
+| `signatario-gnb/test_vigia` | 16/16 | 16/16 |
+| `signatario-stable/test_signatario` | 23/23 | 34/34 (production `eth_half.py`) |
+| `signatario-stable/test_vigia` | 26/26 | 26/26 (production `eth_half.py`) |
+| `deploy-pontes/rehearse_anvil` | 56/56, `REHEARSAL OK` | |
+
+`ETH_HALF=real` changes only the two `signatario-stable` suites; the other suites run the same code in both
+columns.
