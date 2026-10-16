@@ -250,7 +250,7 @@ From a clean checkout with Foundry in `~/.foundry/bin`:
   `signatario-gnb` and `signatario-stable` (also with `ETH_HALF=real` for the production Ethereum half)
 - `python3 tools/deploy-pontes/rehearse_anvil.py`
 
-Results for `eba8e02`, from a clean clone on 45.77 (Foundry stable, anvil):
+Results for `ba1657c` (same counts as `eba8e02`), from a clean clone on 45.77 (Foundry stable, anvil):
 
 | Suite | Fake / default | `ETH_HALF=real` |
 | --- | --- | --- |
