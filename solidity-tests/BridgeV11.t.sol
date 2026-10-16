@@ -131,6 +131,26 @@ contract BridgeV11Test {
         new WrappedGnBV2(GNB, s, 2, _limits(), none);
     }
 
+    // ── GSMH mainnet pilot (wGSMH on devnet4, 2026-10-16) ──────────────────────
+    function testGsmhMainnetPilotConfig() public {
+        SignerMintedToken.Limits memory l = SignerMintedToken.Limits({supplyCap: 30e8, bucketCapacity: 10e8,
+            refillPerSecond: uint256(10e8) / 1 days, largeMintThreshold: 5e8, largeMintDelay: 1 hours, minBurn: 100_000});
+        SignerMintedToken.Guard memory none;
+        WrappedGnBV2 p = new WrappedGnBV2(0x474E0001, _signers(), 2, l, none);
+        require(keccak256(bytes(p.symbol())) == keccak256("wGSMH"), "symbol");
+        require(keccak256(bytes(p.name())) == keccak256("Wrapped GnB-SMH"), "name");
+        _eq(p.decimals(), 8, "decimals");
+        _eq(p.gnbChainId(), 0x474E0001, "GnB mainnet");
+        _eq(p.bucketCapacity(), 10e8, "bucket = 10 GSMH, so the DEX cap is bucket/10 = 1 wGSMH");
+        _eq(p.availableToMint(), 10e8, "starts full");
+        bytes32 t = keccak256("pilot-lock");
+        p.mint(t, 0, 3e8, alice, _two(p.mintDigest(t, 0, 3e8, alice)));
+        _eq(p.balanceOf(alice), 3e8, "3 wGSMH minted at once (below the large-mint threshold)");
+        _eq(p.availableToMint(), 7e8, "bucket debited");
+        vm.warp(block.timestamp + 1 days);
+        _eq(p.availableToMint(), 10e8, "refilled in 24 h");
+    }
+
     // ── token bucket ─────────────────────────────────────────────────────────
     function testBucketHasNoWindowBoundary() public {
         _eq(w.availableToMint(), CAP, "starts full");

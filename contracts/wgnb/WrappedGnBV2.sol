@@ -3,10 +3,12 @@ pragma solidity ^0.8.24;
 
 import {SignerMintedToken} from "../bridged/SignerMintedToken.sol";
 
-/// @title WrappedGnBV2 — GNB on the Bloch EVM L2, bridge v1.1
+/// @title WrappedGnBV2 — GnB-SMH (ticker GSMH) on the Bloch EVM L2, bridge v1.1
 /// @notice Same messages as WrappedGnB v1 (INTERFACE-PONTE-BLOCH-GNB.md, B2–B6) with EIP-712 domain
 ///         version "2", plus the v1.1 controls of SignerMintedToken (token bucket, large-mint delay,
-///         pause-only guardians). 1 wGnB = 1 GNB, 8 decimals. At most 7 signers (GnB policy limit).
+///         pause-only guardians). Token "Wrapped GnB-SMH" / wGSMH: 1 wGSMH = 1 GSMH, 8 decimals.
+///         At most 7 signers (GnB policy limit). The EIP-712 domain name stays "Bloch wGnB" (signers
+///         and v1 share it; it is an identifier, not the ticker).
 /// STATUS: UNAUDITED.
 contract WrappedGnBV2 is SignerMintedToken {
     uint256 public constant MAX_GNB_SIGNERS = 7;
@@ -23,7 +25,7 @@ contract WrappedGnBV2 is SignerMintedToken {
     error BadScriptPubKey();
 
     constructor(uint32 gnbChainId_, address[] memory signers_, uint256 threshold_, Limits memory limits, Guard memory guard)
-        SignerMintedToken("Bloch wGnB", "Wrapped GnB", "wGnB", 8, signers_, threshold_, limits, guard)
+        SignerMintedToken("Bloch wGnB", "Wrapped GnB-SMH", "wGSMH", 8, signers_, threshold_, limits, guard)
     {
         if (gnbChainId_ == 0 || signers_.length > MAX_GNB_SIGNERS) revert BadConfig();
         gnbChainId = gnbChainId_;
