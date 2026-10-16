@@ -32,8 +32,8 @@ interface IReleaseVerifier {
 ///      Shadow-mode guardians (committee mode only): before the switch, a light-client
 ///      prover proves every committee release after the fact, and guardians fixed at
 ///      deployment (never signers) watch for a release that stays unproven. Their only
-///      power is `guardianPause()`: it stops committee releases for `pauseDuration`
-///      (deposits, the switch and proofs are untouched). A guardian cannot release,
+///      power is `guardianPause()`: it stops committee releases and deposits for
+///      `pauseDuration` (the switch and proofs are untouched). A guardian cannot release,
 ///      unpause, or pause again until the pause ends; only `switchThreshold` signers
 ///      (more than the release quorum) may end a pause early, after which guardians
 ///      wait `pauseCooldown`. Once the verifier is active, guardians have no power.
@@ -226,7 +226,7 @@ contract ContextBoundSourceVault {
         return guardians.length;
     }
 
-    /// @notice True while committee releases are stopped by a guardian pause.
+    /// @notice True while committee releases and deposits are stopped by a guardian pause.
     function paused() public view returns (bool) {
         return verifier == address(0) && block.timestamp < pausedUntil;
     }
@@ -325,6 +325,7 @@ contract ContextBoundSourceVault {
     }
 
     function deposit(uint64 amount, bytes32 pqRecipientHash) external nonReentrant returns (bytes32 id) {
+        if (paused()) revert Paused();
         if (
             !depositsEnabled || amount == 0 || pqRecipientHash == 0 || uint256(totalLocked) + amount > cap
                 || depositCount == type(uint64).max
@@ -377,7 +378,7 @@ contract ContextBoundSourceVault {
         _pay(item);
     }
 
-    /// @notice A guardian stops committee releases for `pauseDuration`. Only in
+    /// @notice A guardian stops committee releases and deposits for `pauseDuration`. Only in
     ///         committee mode, not while paused, not within `pauseCooldown` of a
     ///         committee unpause. A pause that expired may be renewed at once.
     function guardianPause() external nonReentrant {

@@ -145,7 +145,7 @@ contract ContextBoundSourceVaultGuardianTest {
         require(vault.paused() && vault.pauseCount() == 1 && vault.pausedUntil() == block.timestamp + PAUSE);
     }
 
-    function testPauseStopsCommitteeReleasesOnlyAndExpires() public {
+    function testPauseStopsCommitteeReleasesAndDepositsThenExpires() public {
         committeeRelease(item(0, 10));
         pause();
         ContextBoundSourceVault.Release memory r = item(1, 10);
@@ -153,11 +153,16 @@ contract ContextBoundSourceVaultGuardianTest {
         bytes[] memory all = sign(vault.releaseDigest(r, c), 3);
         vm.expectRevert(ContextBoundSourceVault.Paused.selector);
         vault.release(r, c, all); // even the full committee cannot release while paused
-        vault.deposit(5, bytes32(uint256(9))); // deposits are untouched
+        vm.expectRevert(ContextBoundSourceVault.Paused.selector);
+        vault.deposit(5, bytes32(uint256(9))); // no new funds into a vault under suspicion
         vm.prank(gs[1]);
         vm.expectRevert(ContextBoundSourceVault.InvalidPause.selector);
         vault.guardianPause(); // no stacking: one pause at a time
-        vm.warp(block.timestamp + PAUSE);
+        vm.warp(block.timestamp + PAUSE - 1);
+        vm.expectRevert(ContextBoundSourceVault.Paused.selector);
+        vault.deposit(5, bytes32(uint256(9))); // still paused one second before expiry
+        vm.warp(block.timestamp + 1);
+        vault.deposit(5, bytes32(uint256(9))); // the pause expired by itself
         require(!vault.paused());
         committeeRelease(r);
         require(token.balanceOf(address(123)) == 20 && vault.totalLocked() == 485);
@@ -180,6 +185,7 @@ contract ContextBoundSourceVaultGuardianTest {
         vault.unpause(1, until, full);
         require(!vault.paused() && vault.guardianBlockedUntil() == block.timestamp + COOLDOWN);
         committeeRelease(item(0, 10));
+        vault.deposit(5, bytes32(uint256(9))); // deposits resume with the unpause
         vm.expectRevert(ContextBoundSourceVault.InvalidPause.selector);
         vault.unpause(1, until, full); // not paused any more
         vm.prank(gs[0]);
@@ -190,6 +196,38 @@ contract ContextBoundSourceVaultGuardianTest {
         vm.expectRevert(ContextBoundSourceVault.InvalidPause.selector);
         vault.unpause(1, until, full); // the old certificate is bound to pause #1
         require(vault.paused() && vault.pauseCount() == 2);
+    }
+
+    function testEitherGuardianPausesAndNeitherCanReleaseOrUnpause() public {
+        pause(); // guardian 0
+        vm.warp(block.timestamp + PAUSE);
+        vm.prank(gs[1]);
+        vault.guardianPause(); // guardian 1, independently
+        require(vault.pauseCount() == 2 && vault.paused());
+        uint256 until = block.timestamp + 100;
+        bytes32 h = vault.unpauseDigest(2, until);
+        bytes[] memory byGuardians = new bytes[](2);
+        for (uint256 i; i < 2; ++i) {
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(i == 0 ? 31 : 32, h);
+            byGuardians[i] = abi.encodePacked(r, s, v);
+        }
+        if (vm.addr(31) > vm.addr(32)) (byGuardians[0], byGuardians[1]) = (byGuardians[1], byGuardians[0]);
+        vm.prank(gs[0]);
+        vm.expectRevert(ContextBoundSourceVault.InvalidCertificate.selector);
+        vault.unpause(2, until, byGuardians); // guardian keys are not signer keys
+        vm.warp(block.timestamp + PAUSE);
+        ContextBoundSourceVault.Release memory r = item(0, 10);
+        ContextBoundSourceVault.ReleaseContext memory c = context();
+        h = vault.releaseDigest(r, c);
+        for (uint256 i; i < 2; ++i) {
+            (uint8 v, bytes32 rr, bytes32 s) = vm.sign(i == 0 ? 31 : 32, h);
+            byGuardians[i] = abi.encodePacked(rr, s, v);
+        }
+        if (vm.addr(31) > vm.addr(32)) (byGuardians[0], byGuardians[1]) = (byGuardians[1], byGuardians[0]);
+        vm.prank(gs[1]);
+        vm.expectRevert(ContextBoundSourceVault.InvalidCertificate.selector);
+        vault.release(r, c, byGuardians); // nor can they release
+        require(token.balanceOf(address(123)) == 0 && vault.totalLocked() == 500);
     }
 
     function testUnpauseDigestIsDomainSeparated() public {
@@ -218,6 +256,7 @@ contract ContextBoundSourceVaultGuardianTest {
         bytes memory pv = lc.expectedPublicValues(address(vault), vault.releaseId(r));
         vault.releaseWithProof(r, abi.encode(pv, abi.encode(keccak256(abi.encode(VKEY, pv)))));
         require(token.balanceOf(address(123)) == 60);
+        vault.deposit(5, bytes32(uint256(9))); // the old pause no longer stops deposits either
         vm.warp(block.timestamp + 30 days);
         vm.prank(gs[1]);
         vm.expectRevert(ContextBoundSourceVault.CommitteeRetired.selector);
