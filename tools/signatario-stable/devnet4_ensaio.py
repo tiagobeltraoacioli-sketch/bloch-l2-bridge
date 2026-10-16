@@ -13,7 +13,8 @@
   sudo python3 tools/signatario-stable/devnet4_ensaio.py switch-activate  # skips the 7 days on anvil
   sudo python3 tools/signatario-stable/devnet4_ensaio.py release-proof PROVER_STATE.json  # releaseWithProof for
                                                                      # every burn the light-client prover proved
-  Shadow mode (before the switch; the vault has one guardian, keys/guardian):
+  Guardians (before the switch): sombra.py (keys/guardian, proof-based) and guardiao.py (keys/guardiao-eth on the
+  vault, keys/guardiao-l2 on bUSDC; burn-vs-release, DIR/guardiao.json written by setup):
   sudo python3 tools/signatario-stable/devnet4_ensaio.py shadow-config LC_CONFIG.json  # writes DIR/prover.json for
                                                                      # lc_prover.py (paths from LC_CONFIG.json)
   sudo python3 tools/signatario-stable/devnet4_ensaio.py shadow-verifier  # deploys, never proposes, the real
@@ -28,7 +29,8 @@ USDC and ContextBoundSourceVault (2-of-3 Ethereum keys). The L2 is the real devn
 BridgedStablecoinV2 (2-of-3 L2 keys, distinct from the Ethereum keys). Signers use eth_half.py (production
 Ethereum half) and rebuild the L2 from L1 data before certifying a burn. Development only: all three
 signers live on this host. Writes only under DIR; L2 transactions come from L2_KEY (default: the devnet dev
-account). New vaults get one guardian (keys/guardian, pause PAUSE_DURATION s, cooldown PAUSE_COOLDOWN s).
+account). New vaults get two guardians (sombra.py keys/guardian and guardiao.py keys/guardiao-eth; pause
+PAUSE_DURATION s, cooldown PAUSE_COOLDOWN s); bUSDC's guardian is guardiao.py's keys/guardiao-l2.
 """
 import json
 import os
@@ -152,7 +154,7 @@ def setup():
         pw.write_text(os.urandom(32).hex())
         pw.chmod(0o600)
     keys = {}
-    for side, ids in (('eth', (1, 2, 3)), ('l2', (1, 2, 3)), ('guardian', ('',))):  # distinct keys per chain/role
+    for side, ids in (('eth', (1, 2, 3)), ('l2', (1, 2, 3)), ('guardian', ('',)), ('guardiao-eth', ('',)), ('guardiao-l2', ('',))):  # distinct keys per chain/role
         for i in ids:
             name = f'{side}{i}'
             if not (DIR / 'keys' / name).exists():
@@ -185,8 +187,10 @@ def setup():
         return art['bytecode']['object']
 
     eth_signers = sorted(keys[f'eth{i}'] for i in (1, 2, 3))
-    if int(rpc(ETH_RPC, 'eth_getBalance', [keys['guardian'], 'latest']), 16) < 10**17:
-        eth_send(ANVIL_KEYS[0], keys['guardian'], '', value=10**18)
+    for g in ('guardian', 'guardiao-eth'):
+        if int(rpc(ETH_RPC, 'eth_getBalance', [keys[g], 'latest']), 16) < 10**17:
+            eth_send(ANVIL_KEYS[0], keys[g], '', value=10**18)
+    vault_guardians = ','.join(sorted([keys['guardian'], keys['guardiao-eth']]))
     l2_signers = sorted(keys[f'l2{i}'] for i in (1, 2, 3))
     if 'eth_token' not in st or not rpc(ETH_RPC, 'eth_getCode', [st['eth_token'], 'latest'])[2:]:
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
@@ -197,12 +201,12 @@ def setup():
                   'uint64),(address[],uint64,uint64))',
                   k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
                   '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})',
-                  f"([{keys['guardian']}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
+                  f"([{vault_guardians}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
                                bytecode('solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault')
                                + args[2:])
         st.update(vault=r['contractAddress'].lower(), vault_tx=tx, vault_block=int(r['blockNumber'], 16),
-                  guardian=keys['guardian'])
+                  guardian=keys['guardian'], guardiao_eth=keys['guardiao-eth'])
         vu = str(eth_now() + 3600)
         d = call(ETH_RPC, st['vault'], 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [sh(CAST, 'wallet', 'sign', '--no-hash', '--keystore', DIR / 'keys' / f'eth{i}', '--password-file',
@@ -228,7 +232,7 @@ def setup():
                   'uint256),(address[],uint256,uint256))', 'Bloch Bridged USDC (devnet4)', 'bUSDC', ETH_CHAIN,
                   st['vault'], st['route'], '[' + ','.join(l2_signers) + ']', 2,
                   f'({SUPPLY_CAP},{BUCKET},{BUCKET // 86400},{LARGE},{DELAY},{MIN_BURN})',
-                  '([0x000000000000000000000000000000000000Ba5E],259200,259200)')
+                  f"([{keys['guardiao-l2']}],259200,259200)")
         print('deploying BridgedStablecoinV2 on devnet4 (waits for the L2 block)...', flush=True)
         tx, r, frm, nonce = send_raw(L2_RPC, L2_CHAIN, dev, None,
                                      bytecode('contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2') + args[2:],
@@ -236,6 +240,16 @@ def setup():
         st.update(l2_token=r['contractAddress'].lower(), l2_tx=tx, l2_block=int(r['blockNumber'], 16), dev=frm)
         save(st)
     print(f"L2 devnet4: bUSDC {st['l2_token']} (block {st['l2_block']}, tx {st['l2_tx']})", flush=True)
+    if int(rpc(L2_RPC, 'eth_getBalance', [keys['guardiao-l2'], 'latest']), 16) < 10**15:
+        send_raw(L2_RPC, L2_CHAIN, L2_KEY.read_text().strip(), keys['guardiao-l2'], '0x', gas=21_000, value=10**16)
+    (DIR / 'guardiao.json').write_text(json.dumps({
+        'kind': 'stable', 'name': DIR.name, 'l2_rpc': L2_RPC, 'l2_chain_id': L2_CHAIN, 'token': st['l2_token'],
+        'token_from_block': st['l2_block'], 'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN, 'vault': st['vault'],
+        'vault_from_block': st['vault_block'], 'keystore': str(DIR / 'keys' / 'guardiao-l2'),
+        'password_file': str(DIR / 'password'), 'vault_pause': True,
+        'eth_keystore': str(DIR / 'keys' / 'guardiao-eth'), 'eth_password_file': str(DIR / 'password'),
+        'cast': CAST, 'state': str(DIR / 'guardiao-state.json'),
+        'provenance_grace_s': int(os.environ.get('PROVENANCE_GRACE_S', 1800))}, indent=1) + '\n')
 
     vault_code = sh(CAST, 'keccak', sh(CAST, 'code', st['vault'], '--rpc-url', ETH_RPC))
     token_code = sh(CAST, 'keccak', sh(CAST, 'code', st['l2_token'], '--rpc-url', L2_RPC))

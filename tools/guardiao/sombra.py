@@ -14,8 +14,8 @@ would have accepted that proof after the switch. The prover's word alone is not 
 
 A release that stays unproven past its grace (`grace_s` seconds of Ethereum time since the release block
 AND `grace_l1_epochs` Bloch L1 finalized epochs since the guardian first saw it) is a hard finding: the
-guardian calls `guardianPause()` on the vault (its only power: committee releases stop for the vault's
-`pauseDuration`; deposits, the switch and proofs never stop). A proof that does not verify does not close
+guardian calls `guardianPause()` on the vault (its only power: committee releases and deposits stop for the
+vault's `pauseDuration`; the switch and proofs never stop). A proof that does not verify does not close
 the finding. While the vault is paused nothing is sent; when a pause expires and the finding is still
 open the guardian pauses again; after a committee unpause (switchThreshold signers) it waits out the
 vault's cooldown. Once the vault has switched to its verifier the shadow phase is over and the guardian

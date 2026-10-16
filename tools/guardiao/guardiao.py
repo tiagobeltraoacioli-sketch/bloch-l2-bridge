@@ -17,6 +17,8 @@ Invariants (README.md has the exact formulas):
   RELEASE MATCH (hard)     every release on the source chain matches an L2 burn (same id, amount, recipient)
   RELEASE LIVENESS (soft)  a finalized burn not released after `release_sla_s` -> alert only
 
+Stablecoin with `vault_pause`: a due RELEASE MATCH or RESERVES violation also calls `guardianPause()` on the
+Ethereum vault with the guardian's own Ethereum key (committee mode only; stops releases and deposits).
 A hard violation is acted on once it is past its deadline (grace for lagging nodes, see README): the
 guardian sends `pause()` with its cast keystore (password from a file, never a key in argv), unless the
 token is already paused or in its cooldown (no reverting transactions). Every finding is one JSON line
@@ -94,6 +96,10 @@ class Guardian:
         self._topics = {}
         self._calldata = {}
         self._me = None
+        self._eth_me = None
+        # stablecoin only: also pause the Ethereum vault (ContextBoundSourceVault.guardianPause, committee mode)
+        # on a release or reserves violation, with this guardian's own Ethereum key
+        self.vault_pause = self.kind == 'stable' and bool(c.get('vault_pause'))
 
     # ── plumbing ─────────────────────────────────────────────────────────────
     def log(self, **kv):
@@ -159,6 +165,13 @@ class Guardian:
             self._me = self.cast_out('wallet', 'address', '--keystore', self.cfg['keystore'],
                                      '--password-file', self.cfg['password_file']).lower()
         return self._me
+
+    def eth_me(self):
+        if self._eth_me is None:
+            self._eth_me = self.cast_out('wallet', 'address', '--keystore', self.cfg.get('eth_keystore', self.cfg['keystore']),
+                                         '--password-file', self.cfg.get('eth_password_file', self.cfg['password_file'])
+                                         ).lower()
+        return self._eth_me
 
     # ── L2 reads ─────────────────────────────────────────────────────────────
     def read_l2(self, b):
@@ -412,6 +425,9 @@ class Guardian:
             eth_chain = int(self.rpc(self.cfg['eth_rpc'], 'eth_chainId', []), 16)
             if eth_chain != int(self.cfg['eth_chain_id']):
                 raise Unverifiable(f'Ethereum chain id {eth_chain} != {self.cfg["eth_chain_id"]}')
+            if self.vault_pause and not uint(self.call(self.cfg['eth_rpc'], self.cfg['vault'], 'isGuardian(address)',
+                                                       self.eth_me())[0]):
+                raise Unverifiable(f'{self.eth_me()} is not a guardian of the vault {self.cfg["vault"]}')
 
     def round(self):
         self.setup()
@@ -491,6 +507,9 @@ class Guardian:
             del self.state['open'][fid]
         if due:
             self.pause(now, due)
+            vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:'))]
+            if self.vault_pause and vault_due:
+                self.pause_vault(vault_due)
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
         return 2 if hard else 3 if self.state['open'] else 0
 
@@ -521,6 +540,40 @@ class Guardian:
         tx = json.loads(out).get('transactionHash') if rc == 0 else None
         self.state['pauses'].append({'t': now, 'tx': tx, 'ok': ok, 'violations': reasons})
         self.log(kind='pause', ok=ok, tx=tx, violations=reasons, error=None if ok else (err or out).strip()[-300:])
+
+    def pause_vault(self, reasons):
+        """guardianPause() on the Ethereum vault: stops committee releases and deposits for its pauseDuration.
+        The vault's own clock (block.timestamp) decides; nothing is sent while paused, in the cooldown after a
+        committee unpause, or once the vault has switched to its light-client verifier."""
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        now = self.block(eth, 'latest')[1]
+        verifier = addr(self.call(eth, vault, 'verifier()')[0])
+        paused_until = uint(self.call(eth, vault, 'pausedUntil()')[0])
+        blocked = uint(self.call(eth, vault, 'guardianBlockedUntil()')[0])
+        count = uint(self.call(eth, vault, 'pauseCount()')[0])
+        why = ('switched to the light-client verifier' if int(verifier, 16) else 'already paused' if now < paused_until
+               else 'cooldown after a committee unpause' if now < blocked else None)
+        if why:
+            note = f'{why}:{count}'
+            if self.state.get('vault_skip') != note:
+                self.state['vault_skip'] = note
+                self.log(kind='vault-pause-skip', reason=why, until=max(paused_until, blocked), pause_count=count,
+                         violations=reasons)
+            return
+        if self.dry_run:
+            self.log(kind='vault-pause-dry-run', violations=reasons)
+            return
+        argv = [self.cast, 'send', vault, 'guardianPause()', '--keystore', self.cfg.get('eth_keystore', self.cfg['keystore']),
+                '--password-file', self.cfg.get('eth_password_file', self.cfg['password_file']), '--rpc-url', eth,
+                '--chain', str(self.cfg['eth_chain_id']), '--json']
+        rc, out, err = self.run(argv)
+        r = json.loads(out) if rc == 0 else {}
+        ok = r.get('status') in ('0x1', 1)
+        entry = {'chain_time': now, 'tx': r.get('transactionHash'), 'ok': ok, 'violations': reasons,
+                 'block': int(r['blockNumber'], 16) if r.get('blockNumber') else None,
+                 'gas_used': int(r['gasUsed'], 16) if r.get('gasUsed') else None}
+        self.state.setdefault('vault_pauses', []).append(entry)
+        self.log(kind='vault-pause', **entry, error=None if ok else (err or out).strip()[-300:])
 
 
 def main():

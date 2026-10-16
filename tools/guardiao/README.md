@@ -116,6 +116,15 @@ so the guardian refuses it.)
 Stablecoin: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`. The guardian checks at every round
 that the token's `sourceVault` is `vault` and its `sourceRoute` equals `vault.routeId()`.
 
+Stablecoin, vault pause (optional): `vault_pause: true`, `eth_keystore`, `eth_password_file` (this guardian's
+own Ethereum key, distinct from its L2 key and from `sombra.py`'s). When a RELEASE MATCH or RESERVES violation
+is due, the guardian also calls `guardianPause()` on the `ContextBoundSourceVault` (it must be one of the
+vault's guardians, checked every round): committee releases and deposits stop for the vault's
+`pauseDuration`. Nothing is sent while the vault is paused, in the cooldown after a committee unpause, or once
+it has switched to its light-client verifier (`vault-pause-skip`). A forged L2 mint pauses only the token.
+This is the fast path (detection within `provenance_grace_s`, by default 30 min); `sombra.py` is the
+proof-based one. The vault lists both guardians; either one alone can pause.
+
 ## Tests
 
 `python3 test_guardiao.py <foundry project>`: two anvil chains (L2 700771, Ethereum 11155111),
@@ -145,8 +154,8 @@ python3 sombra.py --config CFG.json watch [--interval 60] [--dry-run]  # daemon
   finalized epochs is a hard finding: `guardianPause()` on the vault.
 
 The vault side (bloch-l2-bridge `ea20b3f`): guardians are fixed in the constructor (`Guard{guardians,
-pauseDuration, pauseCooldown}`, at most 7, never signers). `guardianPause()` stops committee `release()` for
-`pauseDuration`; deposits, `setControls`, the switch and `releaseWithProof` never stop. A guardian cannot
+pauseDuration, pauseCooldown}`, at most 7, never signers). `guardianPause()` stops committee `release()` and `deposit()` for
+`pauseDuration`; `setControls`, the switch and `releaseWithProof` never stop. A guardian cannot
 release or unpause. Only `switchThreshold` signers (3-of-3 in the rehearsal, more than the 2-of-3 a
 guardian reacts to) end a pause early (`unpause`, bound to `pauseCount`), after which guardians wait
 `pauseCooldown`. An expired pause may be renewed at once, so a compromised release quorum cannot wait it

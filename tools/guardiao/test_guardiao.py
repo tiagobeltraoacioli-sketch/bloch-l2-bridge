@@ -30,6 +30,8 @@ SIGNER_KEYS = ['0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b7869
                '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a',
                '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6']
 GUARDIAN_KEY = '0x' + '6a' * 32
+VAULT_GUARDIAN_KEY = '0x' + '6b' * 32  # this guardian's Ethereum key (vault guardianPause)
+SOMBRA_GUARDIAN = '0x' + '5b' * 20  # the vault's other guardian (sombra.py); not used here
 USER_KEY = '0x' + '0b' * 32
 L2_CHAIN, ETH_CHAIN, GNB_CHAIN = 700771, 11155111, '0x474E0002'
 PREFIX = 'gnb1t'
@@ -112,6 +114,10 @@ def main():
         for url in (l2, eth):
             sh(CAST, 'rpc', 'anvil_setBalance', user, hex(10**21), '--rpc-url', url)
         sh(CAST, 'rpc', 'anvil_setBalance', guardian, hex(10**21), '--rpc-url', l2)
+        vault_guardian = out(CAST, 'wallet', 'address', '--private-key', VAULT_GUARDIAN_KEY).lower()
+        sh(CAST, 'rpc', 'anvil_setBalance', vault_guardian, hex(10**21), '--rpc-url', eth)
+        sh(CAST, 'wallet', 'import', 'vault-guardian', '--private-key', VAULT_GUARDIAN_KEY, '--keystore-dir', work,
+           '--unsafe-password', 'guardian-password')
         signers = sorted((out(CAST, 'wallet', 'address', '--private-key', k).lower(), k) for k in SIGNER_KEYS)
         signer_list = '[' + ','.join(a for a, _ in signers) + ']'
         (work / 'pw').write_text('guardian-password\n')
@@ -290,7 +296,8 @@ def main():
         k = lambda t: out(CAST, 'keccak', t)
         vault = create(project, eth, 'solidity-tests/fixtures/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), mock, str(10**12), '0', signer_list,
-                       '2', f'({10**11},86400,2,604800)', '([],0,0)')
+                       '2', f'({10**11},86400,2,604800)',
+                       f'([{",".join(sorted([vault_guardian, SOMBRA_GUARDIAN]))}],{PAUSE},{COOLDOWN})')
         vu = str(int(time.time()) + 3600)
         d = view(eth, vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in signers[:2]]
@@ -318,11 +325,12 @@ def main():
                      str(amount), user, sign_concat(d))
             assert r['status'] == '0x1', r
 
-        def stable_cfg(name, token):
+        def stable_cfg(name, token, vault_pause=True):
             cfg = {'kind': 'stable', 'name': name, 'l2_rpc': l2, 'l2_chain_id': L2_CHAIN, 'token': token,
                    'eth_rpc': eth, 'eth_chain_id': ETH_CHAIN, 'vault': vault, 'keystore': str(work / 'guardian'),
                    'password_file': str(work / 'pw'), 'cast': CAST, 'state': str(work / f'{name}-state.json'),
-                   'reserves_grace_s': 0, 'provenance_grace_s': 0, 'release_sla_s': 600}
+                   'reserves_grace_s': 0, 'provenance_grace_s': 0, 'release_sla_s': 600,
+                   'vault_pause': vault_pause, 'eth_keystore': str(work / 'vault-guardian'), 'eth_password_file': str(work / 'pw')}
             path = work / f'{name}.json'
             path.write_text(json.dumps(cfg))
             return path
@@ -361,12 +369,16 @@ def main():
         rnd = kinds(lines, 'round')[0] if kinds(lines, 'round') else {}
         check('stable healthy: release matched, backing == supply', rc == 0 and rnd.get('released') == 1
               and rnd.get('backing') == 8 * 10**6 and rnd.get('total_supply') == 8 * 10**6, (rc, lines, err))
-        check('stable healthy: never paused', guardian_nonce() == n0)
+        vault_nonce = lambda: int(out(CAST, 'nonce', vault_guardian, '--rpc-url', eth))
+        check('stable healthy: never paused', guardian_nonce() == n0 and vault_nonce() == 0
+              and view(eth, vault, 'paused()(bool)') == 'false')
         healthy_nonce = guardian_nonce()
 
         # ── forged stable mint (no deposit) ──
         forged = deploy_stable()
-        cfg2 = stable_cfg('stable-forged', forged)
+        # a second token on the same test vault: the healthy token's release is "unknown" to it, so this
+        # config leaves the vault alone (in production a vault has exactly one token)
+        cfg2 = stable_cfg('stable-forged', forged, vault_pause=False)
         mint_stable(forged, '0x' + '5e' * 32, 7, 10**6)
         rc, lines, err = run_guardian(cfg2)
         ids = {l['id'] for l in kinds(lines, 'alert', severity='hard')}
@@ -381,6 +393,19 @@ def main():
         check('stable release without burn: hard (release + reserves) -> pause', rc == 2 and 'reserves' in ids
               and any(i.startswith('release-unknown:') for i in ids) and kinds(lines, 'pause', ok=True)
               and view(l2, stable, 'paused()(bool)') == 'true', (rc, lines, err))
+        vp = kinds(lines, 'vault-pause', ok=True)
+        check('stable release without burn: vault guardianPause with the Ethereum key', vp and vault_nonce() == 1
+              and view(eth, vault, 'paused()(bool)') == 'true' and 'reserves' in vp[0]['violations'], lines)
+        dep = send(eth, USER_KEY, vault, 'deposit(uint64,bytes32)', str(10**6), '0x' + '00' * 12 + user20, ok=False)
+        check('stable vault paused: deposit reverts Paused', not isinstance(dep, dict)
+              and out(CAST, 'sig', 'Paused()') in (dep.stderr + dep.stdout), getattr(dep, 'stderr', dep))
+        rc, lines, err = run_guardian(cfg)
+        check('stable vault paused: next round skips, no second vault tx', kinds(lines, 'vault-pause-skip')
+              and not kinds(lines, 'vault-pause') and vault_nonce() == 1, lines)
+        sh(CAST, 'rpc', 'evm_increaseTime', str(PAUSE), '--rpc-url', eth)
+        sh(CAST, 'rpc', 'anvil_mine', '0x1', '--rpc-url', eth)
+        dep = send(eth, USER_KEY, vault, 'deposit(uint64,bytes32)', str(10**6), '0x' + '00' * 12 + user20)
+        check('stable vault pause expired: deposit works again', dep.get('status') == '0x1', dep)
     finally:
         for p in procs:
             p.kill()
