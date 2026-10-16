@@ -11,7 +11,7 @@
    finality, verified after -> a second run refused; a tampered plan refused; a plan replayed on another
    chain refused.
 2. Development chains: 700771 and 31337 refused without the rehearsal flag in the config AND on the CLI;
-   700771 with both: full flow (2-of-3, GnB testnet id).
+   700771 with both: full flow (2-of-3, GnB-SMH testnet id).
 Prints PASS/FAIL per check and exits 1 on any failure.
 """
 import copy

@@ -7,7 +7,7 @@
 
 Message formats: INTERFACE-PONTE-BLOCH-GNB.md, section "Bloch" (B2-B7).
 
-mint: the GnB half (`gnb_half_lock` argv template in the config, run on this signer's own GnB node) checks the lock
+mint: the GnB-SMH half (`gnb_half_lock` argv template in the config, run on this signer's own GnB-SMH node) checks the lock
 format and depth/finality and returns the lock fields. This half then requires, on the L2:
   1. the chain id and the wGSMH runtime code hash pinned in the config (set once at deploy);
   2. the contract's gnbChainId and threshold equal the config;
@@ -22,8 +22,8 @@ release: the burn must be finalized, read from an L2 this signer rebuilt itself:
   3. the burn receipt is read from that private RPC, in a block <= finalized whose hash equals the
      rebuilt one; the wGSMH code at finalized equals the pin; the Burned log is decoded and its burnId
      recomputed;
-  4. the burn goes to the GnB half (`gnb_half_release`) as its BURN.json together with the release tx
-     (`--spend`, built by anyone with gnb-cli vaultrelease); the GnB half checks the tx on its own node
+  4. the burn goes to the GnB-SMH half (`gnb_half_release`) as its BURN.json together with the release tx
+     (`--spend`, built by anyone with gnb-cli vaultrelease); the GnB-SMH half checks the tx on its own node
      (exact shape, burn marker absent on chain) and co-signs it.
 `l2_source: "rpc"` (config) skips the rebuild and trusts `l2_rpc` for finalized: tests only.
 
@@ -164,7 +164,7 @@ class Ctx:
             refuse('the wGSMH runtime code differs from the pinned hash', at=block,
                    got=None if code in ('0x', '') else self.keccak(code), pinned=self.cfg['wgnb_code_keccak'])
         if self.word(self.call(url, 'gnbChainId()(uint32)', block=block)) != self.gnb_chain_id:
-            refuse('the contract serves another GnB network')
+            refuse('the contract serves another GnB-SMH network')
         if self.word(self.call(url, 'threshold()(uint256)', block=block)) != int(self.cfg['threshold']):
             refuse('the contract threshold differs from the config')
 
@@ -178,15 +178,15 @@ class Ctx:
         return self.keccak('0x1901' + domain[2:] + struct[2:])
 
     def gnb_half(self, kind, **subs):
-        """Run the GnB half (gnb-smh tools/ponte/signatario_gnb.py) from the config's argv template."""
+        """Run the GnB-SMH half (gnb-smh tools/ponte/signatario_gnb.py) from the config's argv template."""
         argv = [a.format(**subs) for a in self.cfg[f'gnb_half_{kind}']]
         done = subprocess.run(argv, capture_output=True, text=True)
         try:
             out = json.loads(done.stdout)
         except ValueError:
-            refuse('the GnB half returned no JSON', exit=done.returncode, stderr=done.stderr.strip()[-1500:])
+            refuse('the GnB-SMH half returned no JSON', exit=done.returncode, stderr=done.stderr.strip()[-1500:])
         if done.returncode or not (out.get('ok') or out.get('signed')):
-            refuse('the GnB half refused', gnb=out)
+            refuse('the GnB-SMH half refused', gnb=out)
         return out
 
 
@@ -194,7 +194,7 @@ def gnb_address(spk_hex, gnb_chain_id):
     """20-byte key hash -> gnb1q…/gnb1t… (hash ‖ SHA3-256(SHA3-256(hash))[:4], hex), as gnb-crypto."""
     prefix = {0x474E0001: 'gnb1q', 0x474E0002: 'gnb1t'}.get(gnb_chain_id)
     if prefix is None:
-        refuse('unknown GnB network for the release address', gnb_chain_id=hex(gnb_chain_id))
+        refuse('unknown GnB-SMH network for the release address', gnb_chain_id=hex(gnb_chain_id))
     h = bytes.fromhex(spk_hex)
     check = hashlib.sha3_256(hashlib.sha3_256(h).digest()).digest()[:4]
     return prefix + (h + check).hex()
@@ -214,12 +214,12 @@ def cmd_mint(ctx, args):
     out = Path(option(args, '--out'))
     url = ctx.cfg['l2_rpc']
 
-    # GnB half: lock format, vault, depth N or PoWit finality, on this signer's own GnB node
+    # GnB-SMH half: lock format, vault, depth N or PoWit finality, on this signer's own GnB-SMH node
     lock = ctx.gnb_half('lock', txid=txid[2:])
     if hex32(lock['lock_txid'], 'lock_txid') != txid or int(lock['lock_vout']) != vout:
-        refuse('the GnB half answered for another lock', gnb=lock)
+        refuse('the GnB-SMH half answered for another lock', gnb=lock)
     if as_int(lock['gnb_chain_id']) != ctx.gnb_chain_id:
-        refuse('the lock is on another GnB network', gnb=lock['gnb_chain_id'], config=ctx.gnb_chain_id)
+        refuse('the lock is on another GnB-SMH network', gnb=lock['gnb_chain_id'], config=ctx.gnb_chain_id)
     amount = int(lock['amount'])
     recipient = lock['l2_recipient'].lower()
     if not (0 < amount < 2**64):
@@ -389,9 +389,9 @@ def cmd_release(ctx, args):
         if burn_id != expect:
             refuse('the burnId differs from keccak(chainid, wgnb, nonce)', log=burn_id, expected=expect)
         if not (spk_len == 20 or (spk_len == 33 and spk.startswith('02'))):
-            refuse('bad GnB script_pubkey in the burn', spk=spk)
+            refuse('bad GnB-SMH script_pubkey in the burn', spk=spk)
         if spk_len != 20:
-            refuse('policy (33-byte) destinations are not released by the GnB half yet', spk=spk)
+            refuse('policy (33-byte) destinations are not released by the GnB-SMH half yet', spk=spk)
 
         intent = {'l2ChainId': ctx.l2_chain_id, 'wgnb': ctx.wgnb, 'burnId': burn_id, 'burnNonce': nonce,
                   'from': sender, 'l2TxHash': burn_tx, 'l2Block': number, 'l2BlockHash': block['hash'].lower(),
@@ -405,7 +405,7 @@ def cmd_release(ctx, args):
         if prior is not None and prior != core:
             refuse('this burnId was already handled with different fields', prior=prior, now=core)
         intent['gnbRecipient'] = gnb_address(spk, ctx.gnb_chain_id)
-        burn_file = work / 'burn.json'  # the GnB half's BURN.json (tools/ponte/signatario_gnb.py)
+        burn_file = work / 'burn.json'  # the GnB-SMH half's BURN.json (tools/ponte/signatario_gnb.py)
         burn_file.write_text(json.dumps({'burn_id': burn_id.removeprefix('0x'), 'gnb_recipient': intent['gnbRecipient'],
                                          'amount_sats': str(amount), 'finalized': True, 'l2_block': number,
                                          'l2_tx': burn_tx}) + '\n')

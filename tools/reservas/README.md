@@ -11,7 +11,7 @@ liabilities, both read at finality:
 | | Backing (source, final) | Liabilities (L2 `finalized`) |
 | --- | --- | --- |
 | `stable` | `min(vault.totalLocked(), USDC.balanceOf(vault))` at Ethereum `finalized` | `totalSupply() + pendingSupply()` |
-| `wgnb` | sum of the GnB vault's UTXOs (`getutxos`; truncated answers and UTXOs paying another script are refused) | `totalSupply() + pendingSupply()` (0 pending for a v1 token) |
+| `wgnb` | sum of the GnB-SMH vault's UTXOs (`getutxos`; truncated answers and UTXOs paying another script are refused) | `totalSupply() + pendingSupply()` (0 pending for a v1 token) |
 
 Signers release only after the burn is final on the L2 and mint only after the deposit/lock is final on the
 source, so an honest bridge has backing ≥ liabilities. The difference is burns waiting for their release plus
@@ -29,5 +29,5 @@ Config: `{"bridges": [...], "cast": optional}`, each bridge `kind`, `name`, `l2_
 (base units, 0) and `eth_rpc` + `vault` (stable) or `gnb_rpc` + `gnb_vault_address` + optional
 `gnb_vault_script` (wgnb).
 
-Tests: `python3 test_reservas.py <foundry project>` (anvil, vault (contracts/usdt), `MockSupply` tokens, fake GnB
+Tests: `python3 test_reservas.py <foundry project>` (anvil, vault (contracts/usdt), `MockSupply` tokens, fake GnB-SMH
 RPC): 14 checks.

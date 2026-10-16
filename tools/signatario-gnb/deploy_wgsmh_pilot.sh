@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wGSMH mainnet pilot on devnet4: WrappedGnBV2 (symbol wGSMH, GnB MAINNET 0x474E0001) for the pilot signer set,
+# wGSMH mainnet pilot on devnet4: WrappedGnBV2 (symbol wGSMH, GnB-SMH MAINNET 0x474E0001) for the pilot signer set,
 # plus signer configs pointing at it. Run as root on the devnet4 host from the Foundry project root:
 #   sudo DEPLOY_KEY=/path/l2.key GNB_TOOLS=/home/ubuntu/gnb-vault-single-build bash tools/signatario-gnb/deploy_wgsmh_pilot.sh
 # Reuses the 2-of-3 signer keystores of the first pilot ($SRC: signers.json, keys/, password); writes only under $DIR.

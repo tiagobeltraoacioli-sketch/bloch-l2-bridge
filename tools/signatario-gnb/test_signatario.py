@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end test of signatario.py on anvil (chain id 700771) with the GnB half test double.
+"""End-to-end test of signatario.py on anvil (chain id 700771) with the GnB-SMH half test double.
 
   python3 test_signatario.py FOUNDRY_PROJECT_DIR
 
 Deploys WrappedGnB (2-of-3), mints through two signers + combine + an on-chain call, checks the
-refusals (replay, GnB refusal, other GnB network, wrong code pin, cap, too few signatures), then
+refusals (replay, GnB-SMH refusal, other GnB-SMH network, wrong code pin, cap, too few signatures), then
 burns and runs release in `l2_source: rpc` mode (not finalized -> refused; finalized -> intent;
-marker already on GnB -> refused). Needs Foundry (anvil, forge, cast) in ~/.foundry/bin.
+marker already on GnB-SMH -> refused). Needs Foundry (anvil, forge, cast) in ~/.foundry/bin.
 """
 import json
 import os
@@ -137,14 +137,14 @@ def main():
         rc, r = signer(cfgs[1], 'mint', '--txid', TXID_OK, '--vout', '0', '--out', work / 'x.json')
         check('mint: refuses an already minted lock', rc == 1 and 'already minted' in r.get('reason', ''), r)
         rc, r = signer(cfgs[1], 'mint', '--txid', TXID_REFUSED, '--vout', '0', '--out', work / 'x.json')
-        check('mint: refuses when the GnB half refuses', rc == 1 and 'GnB half refused' in r.get('reason', ''), r)
+        check('mint: refuses when the GnB-SMH half refuses', rc == 1 and 'GnB-SMH half refused' in r.get('reason', ''), r)
         rc, r = signer(cfgs[1], 'mint', '--txid', TXID_BIG, '--vout', '0', '--out', work / 'x.json')
         check('mint: refuses above the period cap / token bucket', rc == 1 and ('period cap' in r.get('reason', '') or 'token bucket' in r.get('reason', '')), r)
         bad = json.loads(cfgs[1].read_text())
         bad['wgnb_code_keccak'] = '0x' + '00' * 32
         (work / 'bad-pin.json').write_text(json.dumps(bad))
         rc, r = signer(work / 'bad-pin.json', 'mint', '--txid', 'dd' * 32, '--vout', '0', '--out', work / 'x.json')
-        rc_lock = rc  # lock not in fixture: GnB half refuses first; use a real lock to reach the pin check
+        rc_lock = rc  # lock not in fixture: GnB-SMH half refuses first; use a real lock to reach the pin check
         fixture['locks']['dd' * 32] = {'amount': 10**8, 'l2_recipient': ALICE, 'confirmations': 1000}
         (work / 'fixture.json').write_text(json.dumps(fixture))
         (work / 'fixture-mainnet.json').write_text(json.dumps({**fixture, 'gnb_chain_id': '0x474E0001'}))
@@ -155,7 +155,7 @@ def main():
         other['gnb_half_lock'][3] = str(work / 'fixture-mainnet.json')
         (work / 'other-net.json').write_text(json.dumps(other))
         rc, r = signer(work / 'other-net.json', 'mint', '--txid', 'dd' * 32, '--vout', '0', '--out', work / 'x.json')
-        check('mint: refuses a lock on another GnB network', rc == 1 and 'another GnB network' in r.get('reason', ''), r)
+        check('mint: refuses a lock on another GnB-SMH network', rc == 1 and 'another GnB-SMH network' in r.get('reason', ''), r)
 
         # burn and release
         spk = '0x' + '42' * 20
@@ -172,14 +172,14 @@ def main():
         import hashlib
         h = bytes.fromhex('42' * 20)
         expect_addr = 'gnb1t' + (h + hashlib.sha3_256(hashlib.sha3_256(h).digest()).digest()[:4]).hex()
-        check('release: finalized burn -> intent for the GnB half', rc == 0 and intent.get('burnId') == expect_id
+        check('release: finalized burn -> intent for the GnB-SMH half', rc == 0 and intent.get('burnId') == expect_id
               and intent.get('amount') == 2 * 10**8 and intent.get('gnbScriptPubKey') == '42' * 20
               and intent.get('burnNonce') == 1 and intent.get('gnbRecipient') == expect_addr
               and r.get('gnb', {}).get('gnb_recipient') == expect_addr, r)
         fixture['markers'] = [expect_id.removeprefix('0x')]
         (work / 'fixture.json').write_text(json.dumps(fixture))
         rc, r = signer(cfgs[1], 'release', '--burn-tx', burn_tx, '--spend', work / 'pw', '--out', work / 'p2.json')
-        check('release: refuses when the GnB marker already exists', rc == 1 and 'GnB half refused' in
+        check('release: refuses when the GnB-SMH marker already exists', rc == 1 and 'GnB-SMH half refused' in
               r.get('reason', ''), r)
         rc, r = signer(cfgs[0], 'release', '--burn-tx', '0x' + 'ee' * 32, '--spend', work / 'pw', '--out', work / 'p3.json')
         check('release: refuses an unknown transaction', rc == 1 and 'not in this L2' in r.get('reason', ''), r)

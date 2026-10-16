@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Test of reservas.py (self-contained: one anvil as both "Ethereum" and "L2", a fake GnB RPC, temp dir).
+"""Test of reservas.py (self-contained: one anvil as both "Ethereum" and "L2", a fake GnB-SMH RPC, temp dir).
 
   python3 test_reservas.py FOUNDRY_PROJECT_DIR
 
 Stable: ContextBoundSourceVault (contracts/usdt) over MockStable (deposits, a committee release) against a
 MockSupplyV2 token. wGSMH: a fake `getutxos` against a MockSupplyV1 / V2 token. Scenarios: equal -> ok;
 deposit not yet minted -> surplus (soft) and a tolerance absorbs it; release without a burn -> deficit
-(hard); pendingSupply counts as a liability; GnB equal / deficit; truncated GnB answer, foreign script and
+(hard); pendingSupply counts as a liability; GnB-SMH equal / deficit; truncated GnB-SMH answer, foreign script and
 a token without totalSupply -> unverifiable, never a deficit; exit codes with several bridges.
 Needs Foundry (anvil, forge, cast) in ~/.foundry/bin.
 """

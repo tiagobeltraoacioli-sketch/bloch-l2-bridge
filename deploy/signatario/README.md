@@ -7,8 +7,8 @@ did not verify there:
 | --- | --- |
 | Bloch native node + L2 follower (`bloch-l2-native-follower`) | FFG finality from the pinned genesis (no checkpoint signatures) |
 | L2 rebuild tools (`bloch-l2-produce`, `bloch-l2-settled-rpc`) | burns are read from an L2 rebuilt from L1 data |
-| Source-chain node (GnB `gnb`, later `bitcoind` / an Ethereum node) | locks and deposits at depth N / finality |
-| `bloch-ponte-vigia@<bridge>` | signs (EVM keystore + GnB/Bitcoin/Ethereum key, never in argv) |
+| Source-chain node (GnB-SMH `gnb`, later `bitcoind` / an Ethereum node) | locks and deposits at depth N / finality |
+| `bloch-ponte-vigia@<bridge>` | signs (EVM keystore + GnB-SMH/Bitcoin/Ethereum key, never in argv) |
 
 `bloch-ponte-relay@<bridge>` can run anywhere (several is fine): it only pays L2 gas and broadcasts.
 The shared directory is untrusted storage (object store, git, rsync); every reader verifies.

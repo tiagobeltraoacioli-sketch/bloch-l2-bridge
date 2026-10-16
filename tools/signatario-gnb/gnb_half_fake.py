@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""TEST DOUBLE of the GnB half (gnb-smh tools/ponte/signatario_gnb.py), no GnB node. Never use outside tests.
+"""TEST DOUBLE of the GnB-SMH half (gnb-smh tools/ponte/signatario_gnb.py), no GnB-SMH node. Never use outside tests.
 
   gnb_half_fake.py --fixture F.json lock --txid HEX
   gnb_half_fake.py --fixture F.json release --burn BURN.json --spend RELEASE.json
 
 Fixture: {"gnb_chain_id": "0x474E0002", "locks": {"<txid>": {...lock facts...} | {"refuse": "..."}},
-          "markers": ["<burn_id hex>", ...]}   (markers = releases already on the GnB chain)
+          "markers": ["<burn_id hex>", ...]}   (markers = releases already on the GnB-SMH chain)
 """
 import json
 from pathlib import Path
@@ -24,7 +24,7 @@ if 'lock' in args:
     txid = args[args.index('--txid') + 1]
     lock = fx['locks'].get(txid)
     if lock is None:
-        answer(False, reason='lock not found on this GnB node')
+        answer(False, reason='lock not found on this GnB-SMH node')
     if 'refuse' in lock:
         answer(False, reason=lock['refuse'])
     answer(True, gnb_chain_id=fx['gnb_chain_id'], lock_txid=txid, lock_vout=0, **lock)
@@ -36,7 +36,7 @@ elif 'release' in args:
     if not burn['gnb_recipient'].startswith('gnb1t') or not burn['amount_sats'].isdigit():
         answer(False, reason='malformed burn')
     if burn['burn_id'] in fx.get('markers', []):
-        answer(False, reason='a release with this burn marker already exists on GnB')
+        answer(False, reason='a release with this burn marker already exists on GnB-SMH')
     spend_path = Path(args[args.index('--spend') + 1])
     if '--signer' in args:  # sign in place, like gnb-cli policysign
         spend = json.loads(spend_path.read_text())

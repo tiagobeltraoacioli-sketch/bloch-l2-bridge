@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""wGSMH rehearsal on devnet4 + a GnB testnet node: lock -> mint -> DEX (wGSMH/WBLCH) -> burn -> release.
+"""wGSMH rehearsal on devnet4 + a GnB-SMH testnet node: lock -> mint -> DEX (wGSMH/WBLCH) -> burn -> release.
 
   sudo python3 ensaio_devnet4.py lock | mint | dex-burn | release | replay | report
 
 Each phase is resumable and appends its numbers (hashes, blocks, balances) to STATE. Signers 1-3 run
-signatario.py with the configs written by devnet4_deploy.sh (their GnB half is gnb-smh
-tools/ponte/signatario_gnb.py on the local GnB node). Development only.
+signatario.py with the configs written by devnet4_deploy.sh (their GnB-SMH half is gnb-smh
+tools/ponte/signatario_gnb.py on the local GnB-SMH node). Development only.
 """
 import json
 from pathlib import Path
@@ -140,7 +140,7 @@ def phase_mint():
             rc, out = signer(i, 'mint', '--txid', txid, '--vout', '0', '--out', D / f'mint-sig{i}.json')
             if rc == 0:
                 sigs[i] = out
-                print(f'signer {i} signed mint (GnB block {out["gnb_block_height"]})', flush=True)
+                print(f'signer {i} signed mint (GnB-SMH block {out["gnb_block_height"]})', flush=True)
             else:
                 print(f'signer {i}: {out.get("reason")} {json.dumps(out.get("gnb", {}))[:200]}', flush=True)
         if len(sigs) < 2:

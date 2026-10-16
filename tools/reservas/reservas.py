@@ -9,7 +9,7 @@ Read-only (no key, no transaction). For every configured bridge:
   liabilities = token.totalSupply() + token.pendingSupply()        at the L2 `finalized` block
                 (pendingSupply = queued large mints of a v1.1 token; 0 for a v1 token without it)
   backing     = stable: min(vault.totalLocked(), USDC.balanceOf(vault))   at the Ethereum `finalized` block
-                wgnb:   sum of the GnB vault's UTXOs from `getutxos` (a truncated answer is an error)
+                wgnb:   sum of the GnB-SMH vault's UTXOs from `getutxos` (a truncated answer is an error)
 
 Signers release on the source only after the burn is final on the L2, and mint on the L2 only after the
 deposit/lock is final on the source, so with both sides read at finality an honest bridge has

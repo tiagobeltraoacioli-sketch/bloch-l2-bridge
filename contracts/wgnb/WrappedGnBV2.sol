@@ -7,7 +7,7 @@ import {SignerMintedToken} from "../bridged/SignerMintedToken.sol";
 /// @notice Same messages as WrappedGnB v1 (INTERFACE-PONTE-BLOCH-GNB.md, B2–B6) with EIP-712 domain
 ///         version "2", plus the v1.1 controls of SignerMintedToken (token bucket, large-mint delay,
 ///         pause-only guardians). Token "Wrapped GnB-SMH" / wGSMH: 1 wGSMH = 1 GSMH, 8 decimals.
-///         At most 7 signers (GnB policy limit). The EIP-712 domain name stays "Bloch wGnB" (signers
+///         At most 7 signers (GnB-SMH policy limit). The EIP-712 domain name stays "Bloch wGnB" (signers
 ///         and v1 share it; it is an identifier, not the ticker).
 /// STATUS: UNAUDITED.
 contract WrappedGnBV2 is SignerMintedToken {
@@ -39,7 +39,7 @@ contract WrappedGnBV2 is SignerMintedToken {
         return _typedDigest(_structHash(lockTxid, lockVout, amount, recipient));
     }
 
-    /// @notice Mint for one GnB lock (k signatures, ascending signer). Large amounts are queued.
+    /// @notice Mint for one GnB-SMH lock (k signatures, ascending signer). Large amounts are queued.
     function mint(bytes32 lockTxid, uint32 lockVout, uint64 amount, address recipient, bytes calldata signatures)
         external
     {

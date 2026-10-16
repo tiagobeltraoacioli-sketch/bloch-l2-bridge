@@ -1,4 +1,4 @@
-# Audit scope: Bloch bridges (bUSDC ↔ Ethereum, wGSMH ↔ GnB), audit candidate 2026-10-16
+# Audit scope: Bloch bridges (bUSDC ↔ Ethereum, wGSMH ↔ GnB-SMH), audit candidate 2026-10-16
 
 Branch `release/bridge-audit-candidate-20261016` of `bloch-l2-bridge`. It merges the mainnet line
 (`feat/pontes-mainnet`: v1.1 tokens, guardian, deploy tooling, stablecoin vigia), the Ethereum half and
@@ -11,10 +11,11 @@ UNAUDITED.
 
 ## 1. Contracts in scope
 
-Naming: the GnB-SMH chain's coin is **GSMH**; its wrapped token on the L2 is **wGSMH** ("Wrapped GnB-SMH",
-fixed in `WrappedGnBV2`'s constructor). "GnB" names the chain. Kept on purpose as protocol identifiers: the
-EIP-712 domain name `Bloch wGnB`, the release marker tag `GNB-RELEASE-v1`, chain ids `0x474E0001/2`, `gnb1`
-addresses, the `wgnb` bridge kind and paths, and the legacy v1 `WrappedGnB` (symbol `wGnB`, devnet only).
+Naming: the coin and chain are **GnB-SMH**. Its native ticker is **GSMH**; the wrapped L2 token is **wGSMH**
+("Wrapped GnB-SMH", fixed in `WrappedGnBV2`'s constructor). Kept on purpose as protocol or code identifiers:
+the EIP-712 domain name `Bloch wGnB`, the release marker tag `GNB-RELEASE-v1`, chain ids `0x474E0001/2`, `gnb1`
+addresses, `gnb_*` config keys, the `wgnb` bridge kind and paths, and the legacy v1 `WrappedGnB` (symbol `wGnB`,
+devnet only).
 
 Solidity 0.8.24, optimizer 200 runs, `evm_version = shanghai`, `bytecode_hash = none` (`foundry.toml`). LOC =
 non-blank, non-comment lines.
@@ -25,7 +26,7 @@ non-blank, non-comment lines.
 | `SP1ReleaseVerifier` | `contracts/usdt/SP1ReleaseVerifier.sol` | 36 (60) | `dc1d8fc` | Ethereum | Adapter between the vault's `IReleaseVerifier` and a version-pinned SP1 verifier. Pins `programVKey`, `trustAnchor`, `l2ChainId` and `l2Token`. |
 | `SignerMintedToken` | `contracts/bridged/SignerMintedToken.sol` | 274 (336) | `da4a26c` | Bloch L2 | Shared core of the v1.1 tokens: k-of-n EIP-712 mints, token bucket, queued large mints, supply cap, expiring pause-only guardians, burns. |
 | `BridgedStablecoinV2` | `contracts/stable/BridgedStablecoinV2.sol` | 59 (76) | `da4a26c` | Bloch L2 | bUSDC: one vault route (`sourceVault`, `sourceRoute`). Burns map to vault `Release` items. |
-| `WrappedGnBV2` | `contracts/wgnb/WrappedGnBV2.sol` | 42 (62) | `de067dc` | Bloch L2 | wGSMH (name and symbol set in the constructor). GnB chain id is pinned. |
+| `WrappedGnBV2` | `contracts/wgnb/WrappedGnBV2.sol` | 42 (62) | `de067dc` | Bloch L2 | wGSMH (name and symbol set in the constructor). GnB-SMH chain id is pinned. |
 
 Out of scope, but pinned and listed for completeness:
 
@@ -42,7 +43,7 @@ Out of scope, but pinned and listed for completeness:
 | Stablecoin signer, Bloch half | `tools/signatario-stable/signatario.py` | 601 | `3ee7c49` | L2 mint key (k-of-n). Rebuilds the L2 from L1 data before certifying a burn. |
 | Stablecoin signer, Ethereum half | `tools/signatario-stable/eth_half.py` | 326 | `3ee7c49` | Ethereum release key (k-of-n). Pins the vault code, uses `finalized` only, recomputes `releaseDigest`. |
 | Stablecoin automation | `tools/signatario-stable/vigia.py` | 307 | `3ee7c49` | Calls the signer. The relayer holds only gas keys. |
-| GnB signer and automation | `tools/signatario-gnb/signatario.py`, `vigia.py` | 438, 243 | `da4a26c`, `f6de7ab` | Same pattern for wGSMH. |
+| GnB-SMH signer and automation | `tools/signatario-gnb/signatario.py`, `vigia.py` | 438, 243 | `da4a26c`, `f6de7ab` | Same pattern for wGSMH. |
 | Guardian (fast path) | `tools/guardiao/guardiao.py` | 626 | `28cd313` | Pause only: token `pause()` and vault `guardianPause()`. Each uses its own key. |
 | Guardian (proof path) | `tools/guardiao/sombra.py` | 276 | `5b98d79` | Pause only: vault `guardianPause()`. |
 | Reserves monitor | `tools/reservas/reservas.py` | 164 | `29323e0` | None (read-only). |
@@ -86,7 +87,7 @@ Out of scope, but pinned and listed for completeness:
 5. **L2 token guardians.** These are `SignerMintedToken` guardians: they can pause mints only. Burns and
    transfers never stop. The pause expires, `pauseCooldown ≥ pauseDuration`, and k signers may unpause.
 6. **Reserves monitor.** `reservas.py` compares, at finality, the vault backing
-   (`min(totalLocked, balanceOf)`) or the GnB vault UTXO sum with `totalSupply + pendingSupply`. It only
+   (`min(totalLocked, balanceOf)`) or the GnB-SMH vault UTXO sum with `totalSupply + pendingSupply`. It only
    alerts.
 
 ## 4. Invariants to check
@@ -167,7 +168,7 @@ Cross-system:
 
 ## 6. Live evidence index
 
-Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB = GnB mainnet.
+Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB-SMH = GnB-SMH mainnet.
 
 **v3: switched to the light client, release by a real Groth16 proof**
 
@@ -221,21 +222,21 @@ Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). G
 | Release | `0xa0019c6aaef36be604b21bbde9858938a0fb049476bf4afee9a50f8b8a2d2d88` (76577), 171,017 gas |
 | Guardian | 0 alerts, 0 pauses |
 
-**wGSMH pilot (GnB mainnet ↔ devnet4), details in `docs/PILOT-WGSMH-MAINNET-20261016.md`**
+**wGSMH pilot (GnB-SMH mainnet ↔ devnet4), details in `docs/PILOT-WGSMH-MAINNET-20261016.md`**
 
 | Item | Value |
 | --- | --- |
 | Token | `0xB2B4952b6E57e589109aF764859886e236798AD4`, deploy tx `0xc251d28a528c5c44d70aa3636371ff9c9fd1b730b6ecf4b85d0996f317ba4cb1` (L2 421) |
-| GnB lock | `ae3b6e6e49e4d6cffeee08e06a74eade9acfa66913e0fd7d54fc925a5189926d` (GnB 14641) |
+| GnB-SMH lock | `ae3b6e6e49e4d6cffeee08e06a74eade9acfa66913e0fd7d54fc925a5189926d` (GnB-SMH 14641) |
 | Mint | `0x1ab44db21c5ec05917fa2f8e90d18a05e058e847d98287b6c9b483ef4562698a` (L2 425) |
 | Burns | `0xa03a4e6b9696e9beee88d580fe345d657f96ee9bc05fde564d08e4829f82ce50` (L2 425) and `0x0b535068b902a05b6ea9d257b9289874242adb5a78a3cb87e6af8acab4a059fb` (L2 438) |
-| GnB releases | `8bb33a9a35364501b0cbe9885520ca3ebbe2aa6a4bc2a4142ca7776a5a0da78f` (GnB 14714) and `4d9e17856583055d5b34e0e32f22e197d83a2b946c649b4c1301a28451182643` (GnB 15034) |
+| GnB-SMH releases | `8bb33a9a35364501b0cbe9885520ca3ebbe2aa6a4bc2a4142ca7776a5a0da78f` (GnB-SMH 14714) and `4d9e17856583055d5b34e0e32f22e197d83a2b946c649b4c1301a28451182643` (GnB-SMH 15034) |
 
 **Reserves, 2026-10-16 (`tools/reservas`)**
 
 | Bridge | Backing | Liabilities | Result |
 | --- | --- | --- | --- |
-| wGSMH | GnB vault 68,295,768 sat | 68,295,768 | ok |
+| wGSMH | GnB-SMH vault 68,295,768 sat | 68,295,768 | ok |
 | bUSDC v3 | 21,000,000 | 21,000,000 | ok |
 | bUSDC v6 | 3,000,000 | 3,000,000 | ok |
 | bUSDC v4 | 10,000,000 | 14,000,000 | deficit of 4 USDC (drill) |

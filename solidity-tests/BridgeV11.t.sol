@@ -122,7 +122,7 @@ contract BridgeV11Test {
         _deployExpectBad(_limits(), g, s);
         address[] memory eight = new address[](8);
         for (uint256 i; i < 8; ++i) eight[i] = address(uint160(0x1000 + i));
-        _deployExpectBad(_limits(), _guard(), eight); // GnB policy limit is 7
+        _deployExpectBad(_limits(), _guard(), eight); // GnB-SMH policy limit is 7
         // no delay at all is expressed as threshold = max (delay may then be zero)
         l = _limits(); l.largeMintThreshold = type(uint256).max; l.largeMintDelay = 0;
         new WrappedGnBV2(GNB, s, 2, l, _guard());
@@ -140,7 +140,7 @@ contract BridgeV11Test {
         require(keccak256(bytes(p.symbol())) == keccak256("wGSMH"), "symbol");
         require(keccak256(bytes(p.name())) == keccak256("Wrapped GnB-SMH"), "name");
         _eq(p.decimals(), 8, "decimals");
-        _eq(p.gnbChainId(), 0x474E0001, "GnB mainnet");
+        _eq(p.gnbChainId(), 0x474E0001, "GnB-SMH mainnet");
         _eq(p.bucketCapacity(), 10e8, "bucket = 10 GSMH, so the DEX cap is bucket/10 = 1 wGSMH");
         _eq(p.availableToMint(), 10e8, "starts full");
         bytes32 t = keccak256("pilot-lock");

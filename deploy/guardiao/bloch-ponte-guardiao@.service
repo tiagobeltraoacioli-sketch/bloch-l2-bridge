@@ -1,6 +1,6 @@
 # One bridge guardian (instance = bridge name, e.g. wgnb or busdc). Pause-only: its key can call pause()
 # on the L2 token and nothing else. Runs under its own user, on a machine of the guardian operator (never
-# a signer machine), against that operator's own L2 RPC and GnB/Ethereum node. No network listener.
+# a signer machine), against that operator's own L2 RPC and GnB-SMH/Ethereum node. No network listener.
 [Unit]
 Description=Bloch bridge guardian (%i): independent check, may only pause mints
 After=network-online.target

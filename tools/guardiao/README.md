@@ -14,9 +14,9 @@ python3 guardiao.py --config CFG.json watch [--interval 60] [--dry-run]  # daemo
 | | Signers (`tools/signatario-*`) | Guardian (`tools/guardiao`) |
 | --- | --- | --- |
 | Power | k of n sign mints and releases (move value) | `pause()` only: stops `mint`/`executeMint` for `pauseDuration`; burns never stop |
-| Keys | EVM signing key + GnB/Ethereum vault key | one EVM key that is a guardian of the token; no vault key, no mint key |
-| Code | `signatario.py`, `vigia.py`, GnB/Ethereum halves | this directory only; it imports and calls none of the signer code and re-implements the few reads it needs (log decoding, lock shape, release marker, `depositId`) |
-| Nodes | the signer's own L2 follower / GnB node / Ethereum node | the guardian operator's own, different nodes (`l2_rpc`, `gnb_utxos`/`gnb_tx`, `eth_rpc`) |
+| Keys | EVM signing key + GnB-SMH/Ethereum vault key | one EVM key that is a guardian of the token; no vault key, no mint key |
+| Code | `signatario.py`, `vigia.py`, GnB-SMH/Ethereum halves | this directory only; it imports and calls none of the signer code and re-implements the few reads it needs (log decoding, lock shape, release marker, `depositId`) |
+| Nodes | the signer's own L2 follower / GnB-SMH node / Ethereum node | the guardian operator's own, different nodes (`l2_rpc`, `gnb_utxos`/`gnb_tx`, `eth_rpc`) |
 | Operator | 7 distinct signer operators | a different party from every signer (the contract also refuses a guardian that is a signer) |
 | Worst case if malicious | k colluding signers can mint up to the token bucket | delays mints by at most `pauseDuration` per `pauseDuration + pauseCooldown`; k signers can `unpause` |
 
@@ -26,7 +26,7 @@ is enough to pause.
 
 ## Invariants
 
-Notation, all amounts in token base units (wGSMH = GnB satoshis, 8 decimals; stablecoin = 6 decimals):
+Notation, all amounts in token base units (wGSMH = GnB-SMH satoshis, 8 decimals; stablecoin = 6 decimals):
 
 - `B` = L2 block pinned at the start of the round (`latest`); `F` = L2 `finalized`; `now` = timestamp of `B`.
 - `burns(≤B)` = every `Burned` log of the token in blocks `token_from_block..B`.
@@ -44,7 +44,7 @@ The token reduces `totalSupply` at burn time, but the vault pays only at release
 (a release removes exactly the burned amount from the vault on both chains). Equality holds when every
 lock is minted. Counting `inFlight` makes the check exact instead of leaving the unreleased burns as slack.
 
-- **wGSMH:** `backing = Σ value` of the vault's UTXOs as returned by the guardian's own GnB node
+- **wGSMH:** `backing = Σ value` of the vault's UTXOs as returned by the guardian's own GnB-SMH node
   (`gnb_utxos` for `gnb_vault_address`; every row must pay `gnb_vault_script`; a truncated answer is an
   error, never a shortfall). A burn is released when its marker address
   (`SHA3-256("GNB-RELEASE-v1" ‖ burnId)[..20]`, a 546-unit output nobody can spend) holds a UTXO.
@@ -60,7 +60,7 @@ round can only make the check more lenient. Nodes that lag each other (the guard
 
 Every `Minted` log (queued or not; a queued mint also has `MintQueued`) must match the source chain:
 
-- **wGSMH:** `lockVout == 0`; the guardian's GnB node knows `lockTxid` with output 0 paying the vault script
+- **wGSMH:** `lockVout == 0`; the guardian's GnB-SMH node knows `lockTxid` with output 0 paying the vault script
   exactly `amount`, output 1 = the 20 bytes of `recipient` with value 546, no other output paying the vault,
   and `confirmations ≥ gnb_min_conf` (set it to the signers' depth N).
 - **Stablecoin:** a `Deposited` log of the vault in a block `≤ E` with `id == depositId`, `route == sourceRoute`,
@@ -76,9 +76,9 @@ can be executed. A verified mint is cached and not re-checked (a later source re
 
 - Every release on the source must match an L2 burn: same `burnId` (stablecoin `nativeBurn`; wGSMH marker),
   amount (stablecoin exact; wGSMH payout in `[amount − 546 − 1_000_000, amount − 546]`), recipient (Ethereum
-  address / GnB script), route and nonce (stablecoin). A mismatch, or two releases for one burn, is due at
+  address / GnB-SMH script), route and nonce (stablecoin). A mismatch, or two releases for one burn, is due at
   once. A release whose burn the guardian's L2 does not show is due after `provenance_grace_s`.
-  On GnB the guardian also checks every vault UTXO at index ≥ 1 (change of a spend): if its transaction
+  On GnB-SMH the guardian also checks every vault UTXO at index ≥ 1 (change of a spend): if its transaction
   spends a vault output, output 1 must be the marker of a known burn. A drain with no change is caught by RESERVES.
 - LIVENESS: a burn in a block `≤ F` older than `release_sla_s` (by L2 block time) and not released is a
   **soft** alert only. Signers being slow is not theft.
@@ -92,7 +92,7 @@ can be executed. A verified mint is cached and not re-checked (a later source re
   as `kind: pause`. If the violation is still open after the cooldown, the guardian pauses again.
 - Read errors (node down, truncated answer, wrong chain id, not a guardian) are `severity: soft,
   id: unverifiable`: missing evidence never pauses.
-- State file: open findings with first-seen time, verified mints, GnB transactions read, burn times, pauses.
+- State file: open findings with first-seen time, verified mints, GnB-SMH transactions read, burn times, pauses.
 
 ## Config
 
@@ -101,7 +101,7 @@ Common: `kind` (`wgnb`|`stable`), `name`, `l2_rpc`, `l2_chain_id`, `token`, `tok
 (3600), `release_sla_s` (21600), `log_chunk` (5000).
 
 wGSMH: `gnb_chain_id`, `gnb_vault_address`, `gnb_vault_script` (hex, 33 B), `gnb_address_prefix`
-(`gnb1t` testnet), `gnb_min_conf`, and two argv templates run against the guardian's own GnB node, each
+(`gnb1t` testnet), `gnb_min_conf`, and two argv templates run against the guardian's own GnB-SMH node, each
 printing the node's JSON (a raw JSON-RPC answer is unwrapped):
 
 ```json
@@ -132,7 +132,7 @@ proof-based one. The vault lists both guardians; either one alone can pause.
 ## Tests
 
 `python3 test_guardiao.py <foundry project>`: two anvil chains (L2 700771, Ethereum 11155111),
-`gnb_node_fake.py` as the GnB node. Healthy flows with no pause (including a queued mint, in-flight burn
+`gnb_node_fake.py` as the GnB-SMH node. Healthy flows with no pause (including a queued mint, in-flight burn
 and matched releases), soft liveness alert only, forged mint → pause, no second pause while paused or in
 cooldown and a re-pause after it, queued large mint without provenance → pause before `readyAt` and
 `executeMint` reverts `IsPaused`, vault drain → pause, forged stablecoin mint → pause, vault release

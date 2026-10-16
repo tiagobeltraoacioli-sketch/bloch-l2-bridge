@@ -6,7 +6,7 @@
 
 A second, independent verification in the style of Chainlink CCIP's Risk Management Network: separate
 code (nothing here imports or calls the signer programs), a separate operator and its own nodes (its own
-L2 RPC, its own GnB node or Ethereum node). Its only power is `pause()` on the L2 token
+L2 RPC, its own GnB-SMH node or Ethereum node). Its only power is `pause()` on the L2 token
 (SignerMintedToken): the pause stops mints and executeMint for `pauseDuration`, expires by itself, and a
 new one needs `pauseCooldown`. It never signs mints or releases and holds no funds authority.
 
@@ -35,8 +35,8 @@ import sys
 import time
 import urllib.request
 
-MARKER_VALUE = 546  # GnB marker output (lock destination / release burn marker)
-MAX_RELEASE_FEE = 1_000_000  # GnB: largest fee a release may take out of the burned amount
+MARKER_VALUE = 546  # GnB-SMH marker output (lock destination / release burn marker)
+MAX_RELEASE_FEE = 1_000_000  # GnB-SMH: largest fee a release may take out of the burned amount
 RELEASE_DS = b'GNB-RELEASE-v1'
 DEPOSIT_DS = b'BLOCH-USDT-DEPOSIT-v1'
 
@@ -219,7 +219,7 @@ class Guardian:
             self.state['burn_time'][key] = self.block(self.l2, burn['block'])[1]
         return self.state['burn_time'][key]
 
-    # ── GnB source (wGSMH) ────────────────────────────────────────────────────
+    # ── GnB-SMH source (wGSMH) ────────────────────────────────────────────────────
     def gnb(self, template, **subs):
         argv = [a.format(**subs) for a in self.cfg[template]]
         rc, out, err = self.run(argv)
@@ -245,7 +245,7 @@ class Guardian:
         return res['utxos']
 
     def gnb_tx(self, txid):
-        """gettransaction from the guardian's own GnB node; None when the node does not know it."""
+        """gettransaction from the guardian's own GnB-SMH node; None when the node does not know it."""
         txid = txid.removeprefix('0x')
         res = self.gnb('gnb_tx', txid=txid)
         if res.get('error'):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end test of vigia.py (automatic signers + relayer) on anvil with the GnB test double.
+"""End-to-end test of vigia.py (automatic signers + relayer) on anvil with the GnB-SMH test double.
 
   python3 test_vigia.py FOUNDRY_PROJECT_DIR
 

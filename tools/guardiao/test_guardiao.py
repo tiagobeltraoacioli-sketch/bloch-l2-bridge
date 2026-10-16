@@ -4,7 +4,7 @@
   python3 test_guardiao.py FOUNDRY_PROJECT_DIR
 
 "L2" = anvil 700771 with WrappedGnBV2 / BridgedStablecoinV2 (2-of-3 signers, one guardian, pause 2 h,
-cooldown 2 h, large mints > 10 units delayed 1 h). "GnB" = gnb_node_fake.py over a fixture of transactions.
+cooldown 2 h, large mints > 10 units delayed 1 h). "GnB-SMH" = gnb_node_fake.py over a fixture of transactions.
 "Ethereum" = anvil 11155111 with a six-decimal MockStable and ContextBoundSourceVault (contracts/usdt).
 Scenarios: healthy flows (no pause, release accounted, soft liveness alert only), forged mint (k signer
 keys, no lock) -> pause, repeated rounds and cooldown -> no second pause tx, re-pause after the cooldown,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TEST DOUBLE of the guardian's own GnB node (the two reads it needs). Never use outside tests.
+"""TEST DOUBLE of the guardian's own GnB-SMH node (the two reads it needs). Never use outside tests.
 
   gnb_node_fake.py --fixture F.json utxos --address ADDR   -> like RPC getutxos (no limit)
   gnb_node_fake.py --fixture F.json tx --txid HEX          -> like RPC gettransaction
