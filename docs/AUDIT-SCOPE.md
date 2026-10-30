@@ -278,6 +278,8 @@ From a clean checkout with Foundry in `~/.foundry/bin`:
 - `python3 tools/<tool>/test_*.py .`, for `guardiao` (`test_guardiao`, `test_sombra`), `reservas`,
   `signatario-gnb` and `signatario-stable` (also with `ETH_HALF=real` for the production Ethereum half)
 - `python3 tools/deploy-pontes/rehearse_anvil.py`
+- new on `codex/bridge-busdc-mainnet-v2-20261030`: `python3 tools/signatario-stable/test_hf1_finality.py .`,
+  `python3 tools/guardiao/test_guardiao_hf1.py .`
 
 Results for `ba1657c` (same counts as `eba8e02`), from a clean clone on 45.77 (Foundry stable, anvil):
 
@@ -295,3 +297,21 @@ Results for `ba1657c` (same counts as `eba8e02`), from a clean clone on 45.77 (F
 
 `ETH_HALF=real` changes only the two `signatario-stable` suites; the other suites run the same code in both
 columns.
+
+Results for `8347568` (`codex/bridge-busdc-mainnet-v2-20261030`), from a clean clone on 45.77 (forge 1.7.1,
+anvil, Python 3.12; every chain a private loopback anvil):
+
+| Suite | Fake / default | `ETH_HALF=real` |
+| --- | --- | --- |
+| forge (11 suites) | 141 passed, 0 failed, 1 skipped | |
+| `guardiao/test_guardiao` | 32/32 | |
+| `guardiao/test_sombra` | 19/19 (+1 `lc_max_epoch`) | |
+| `guardiao/test_guardiao_hf1` (new) | 7/7 | |
+| `reservas/test_reservas` | 16/16 (+2 genesis pin) | |
+| `signatario-gnb/test_signatario` | 15/15 | |
+| `signatario-gnb/test_vigia` | 16/16 | |
+| `signatario-stable/test_signatario` | 23/23 | 34/34 |
+| `signatario-stable/test_vigia` | 26/26 | 26/26 |
+| `signatario-stable/test_hf1_finality` (new) | 56/56 (32 unit + 24 on private anvils) | |
+| `deploy-pontes/rehearse_anvil` | 75/75 (+19 vault tool), `REHEARSAL OK` | |
+

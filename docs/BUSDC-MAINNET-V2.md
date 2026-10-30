@@ -92,8 +92,8 @@ runs both and compares `configSha256` and the arguments.
 
 ### 4.3 Deploy the vault (deposits and releases start disabled)
 
-Bloch Inc's Safe sends the deployer only the gas (a vault creation measured ~2.5 M gas on anvil; at
-30 gwei that is ~0.075 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
+Bloch Inc's Safe sends the deployer only the gas (a mainnet-shaped vault creation, 7 signers and 2
+guardians, used 3,088,218 gas on anvil; at 30 gwei that is ~0.093 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
 
 ```
 forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
@@ -208,7 +208,7 @@ guardian's nodes.
 | `signatario-stable/test_signatario` | 23/23; `ETH_HALF=real` 34/34 |
 | `signatario-stable/test_vigia` | 26/26; `ETH_HALF=real` 26/26 |
 | `signatario-stable/test_hf1_finality` (new) | 56/56 (32 unit, 24 on private anvils) |
-| `deploy-pontes/rehearse_anvil` | `REHEARSAL OK` (section 3 adds the vault tool) |
+| `deploy-pontes/rehearse_anvil` | 75/75, `REHEARSAL OK` (56 as before + 19 for the vault tool, section 3) |
 
 Final counts and the real-binary check against the v2 follower, produce-dev and settled-rpc are recorded
 in `docs/AUDIT-SCOPE.md` section 7.
