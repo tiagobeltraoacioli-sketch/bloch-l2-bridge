@@ -7,7 +7,9 @@ import {SignerMintedToken} from "../bridged/SignerMintedToken.sol";
 /// @notice Same messages as BridgedStablecoin v1 (INTERFACE-PONTE-STABLE-ETH-L2.md, S1–S3) with EIP-712
 ///         domain version "2", plus the v1.1 controls of SignerMintedToken. 6 decimals, 1:1 with the
 ///         token of one ContextBoundSourceVault route; burns map to Release(nonce = burnNonce,
-///         nativeBurn = burnId).
+///         nativeBurn = burnId). One burn is at most `bucketCapacity`: the vault pays one burn in one
+///         release and never more than its `windowLimit` per window, and a burn cannot be undone, so
+///         deploy with `bucketCapacity` equal to the vault's `windowLimit`. Larger exits take several burns.
 /// STATUS: UNAUDITED.
 contract BridgedStablecoinV2 is SignerMintedToken {
     bytes32 public constant MINT_TYPEHASH = keccak256(
@@ -24,6 +26,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     );
 
     error BadEthRecipient();
+    error BurnTooLarge();
 
     constructor(
         string memory name_,
@@ -59,6 +62,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
 
     function burn(uint64 amount, address ethRecipient) external returns (bytes32 burnId) {
         if (ethRecipient == address(0) || ethRecipient == sourceVault) revert BadEthRecipient();
+        if (amount > bucketCapacity) revert BurnTooLarge();
         uint64 nonce;
         (nonce, burnId) = _burn(amount);
         emit Burned(burnId, nonce, msg.sender, amount, ethRecipient);

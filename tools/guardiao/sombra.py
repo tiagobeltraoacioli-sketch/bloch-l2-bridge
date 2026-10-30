@@ -281,8 +281,9 @@ def main():
         try:
             now, findings = g.round()
             code = g.act(now, findings)
-        except Unverifiable as e:
-            g.log(kind='alert', severity='soft', id='unverifiable', reason=str(e))
+        except (Unverifiable, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
+            # a malformed answer or a half-written prover file is no evidence either way
+            g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')
             code = 1
         g.save()
         if 'check' in args:

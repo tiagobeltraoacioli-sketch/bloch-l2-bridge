@@ -3,7 +3,7 @@
 
   python3 signatario.py --config CFG.json mint    --deposit-id 0xID --out SIG.json
   python3 signatario.py --config CFG.json combine --sig A.json --sig B.json [...] --out CALL.json
-  python3 signatario.py --config CFG.json release --burn-tx 0xHASH [--context CERT.json] --out CERT.json
+  python3 signatario.py --config CFG.json release --burn-tx 0xHASH [--burn-id 0xID] [--context CERT.json] --out CERT.json
 
 Message formats: INTERFACE-PONTE-STABLE-ETH-L2.md, section "L2" (S1-S4).
 
@@ -26,8 +26,9 @@ tools/signatario-gnb):
   2. the whole L2 is rebuilt from L1 blocks (produce reconstruct) and served by a private settled RPC
      over the rebuilt database; finalized comes from the follower's FFG replay;
   3. the burn receipt is read from that private RPC, in a block <= finalized whose hash equals the
-     rebuilt one; the code pin and the source fields are checked at finalized; the single Burned log is
-     decoded and its burnId recomputed;
+     rebuilt one; the code pin and the source fields are checked at finalized; the Burned log (selected by
+     --burn-id when one transaction holds several, e.g. a smart wallet batch) is decoded and its burnId
+     recomputed;
   3b. with `l2_pins` (the v2 L2 build; "mainnet-v2" for chain 700770, l2_finality.py): the follower,
      produce and settled-RPC binaries are the pinned v2 build (SHA-256); the follower status is the v2
      schema for the pinned network, chain and L2 genesis; the rebuild runs with the pinned network rules
@@ -490,7 +491,7 @@ def own_l2(ctx, work):
     return url, proc, status, rebuilt
 
 
-def finalized_burn(ctx, url, burn_tx, status):
+def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
     """The burn receipt in a block <= finalized of `url`, decoded. Returns (release, l2 facts)."""
     final = ctx.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
     if final is None:
@@ -526,8 +527,11 @@ def finalized_burn(ctx, url, burn_tx, status):
 
     topic0 = ctx.keccak_text(BURNED_TOPIC_STR)
     logs = [l for l in receipt['logs'] if l['address'].lower() == ctx.token and l['topics'][0].lower() == topic0]
+    if burn_id_wanted:
+        logs = [l for l in logs if len(l['topics']) > 1 and l['topics'][1].lower() == burn_id_wanted]
     if len(logs) != 1:
-        refuse(f'expected exactly one Burned log of the BridgedStablecoin, found {len(logs)}')
+        refuse(f'expected exactly one Burned log of the BridgedStablecoin (use --burn-id when the transaction '
+               f'holds several), found {len(logs)}', burn_id=burn_id_wanted or None)
     log = logs[0]
     if len(log['topics']) != 4 or len(log['data']) != 2 + 128:
         refuse('malformed Burned log', log=log)
@@ -559,15 +563,17 @@ def cmd_release(ctx, args):
     burn_tx = hex32(option(args, '--burn-tx'), 'burn tx hash')
     out = Path(option(args, '--out'))
     proposal_path = option(args, '--context', '')
+    burn_id = option(args, '--burn-id', '')
+    burn_id = hex32(burn_id, 'burn id') if burn_id else ''
     source = ctx.cfg.get('l2_source', 'rebuild')
     work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
     try:
-        release_in(ctx, work, burn_tx, out, proposal_path, source)
+        release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def release_in(ctx, work, burn_tx, out, proposal_path, source):
+def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
     proc = None
     try:
         if source == 'rebuild':
@@ -576,7 +582,7 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source):
             url, status, rebuilt = ctx.cfg['l2_rpc'], None, None
         else:
             refuse(f'unknown l2_source {source}')
-        release, l2 = finalized_burn(ctx, url, burn_tx, status)
+        release, l2 = finalized_burn(ctx, url, burn_tx, status, burn_id)
     finally:
         if proc is not None:
             proc.kill()

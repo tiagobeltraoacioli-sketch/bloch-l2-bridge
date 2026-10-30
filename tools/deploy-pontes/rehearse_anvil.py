@@ -137,6 +137,21 @@ def vault_rehearsal(url, work, token_cfg):
     check('[vault] cross-check refuses a different vault guard in the L2 token config', rc == 1
           and 'vaultGuard' in r.get('reason', ''), r)
 
+    tc = json.loads(json.dumps(token_cfg))
+    tc['ethereum'] = json.loads(json.dumps(be))
+    tc['limits']['supplyCap'] = vc['vault']['cap'] - 1
+    tpath2.write_text(json.dumps(tc))
+    rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+    check('[vault] cross-check refuses a vault cap different from the L2 supplyCap', rc == 1
+          and 'supplyCap' in r.get('reason', ''), r)
+    tc = json.loads(json.dumps(token_cfg))
+    tc['ethereum'] = json.loads(json.dumps(be))
+    tc['limits']['bucketCapacity'] = vc['vault']['policy']['windowLimit'] - 1
+    tpath2.write_text(json.dumps(tc))
+    rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+    check('[vault] cross-check refuses a windowLimit different from the L2 bucketCapacity', rc == 1
+          and 'bucketCapacity' in r.get('reason', ''), r)
+
     def mainnet_refused(name, mutate, needle):
         c = json.loads(json.dumps(vc))
         c['ethereum'] = {'chainId': 1, 'rehearsal': False}
@@ -166,6 +181,8 @@ def vault_rehearsal(url, work, token_cfg):
                     'release signer')
     mainnet_refused('windowLimit above the cap refused',
                     lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] + 1), 'windowLimit')
+    mainnet_refused('a switchDelay holders cannot exit within refused',
+                    lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] // 100), 'exit')
     mainnet_refused('no guardian refused', lambda c: c['vault']['guard'].update(guardians=[]), '1..7')
 
 

@@ -15,7 +15,8 @@ Invariants (README.md has the exact formulas):
   MINT PROVENANCE (hard)   every Minted/MintQueued on the L2 matches a lock/deposit on the source chain;
                            a queued large mint without provenance is paused before its readyAt
   RELEASE MATCH (hard)     every release on the source chain matches an L2 burn (same id, amount, recipient)
-  RELEASE LIVENESS (soft)  a finalized burn not released after `release_sla_s` -> alert only
+  RELEASE LIVENESS (soft)  a burn not released after `release_sla_s` (wall clock, so a stalled L2 counts too)
+                           -> alert only; `liveness-not-final` when the burn is not final either: L1 or L2 stalled
   RELEASE FINALITY         (stable) a vault release of a burn whose L2 block is not yet finalized on this
                            guardian's own L2 RPC after `provenance_grace_s` -> alert (`release_before_final`:
                            "soft", the default, or "hard" to pause). Signers may certify only burns settled
@@ -505,13 +506,16 @@ class Guardian:
             findings.append(('hard', f'mint:{m["key"]}', grace, detail))
 
         for x in burns:
-            if x['burn_id'] in released or fin is None or x['block'] > fin:
+            if x['burn_id'] in released:
                 continue
-            age = now - self.burn_time(x)
+            age = max(now, int(time.time())) - self.burn_time(x)
             if age > self.release_sla:
-                findings.append(('soft', f'liveness:{x["burn_id"]}', 0,
-                                 {'reason': 'finalized burn not released within the SLA', 'burn': x,
-                                  'age_s': age, 'sla_s': self.release_sla}))
+                final = fin is not None and x['block'] <= fin
+                fid = 'liveness' if final else 'liveness-not-final'
+                why = 'finalized burn not released within the SLA' if final else \
+                    'burn not final within the release SLA: L1 finality or L2 settlement is stalled'
+                findings.append(('soft', f'{fid}:{x["burn_id"]}', 0, {'reason': why, 'burn': x, 'age_s': age,
+                                                                      'sla_s': self.release_sla, 'l2_finalized': fin}))
         self.log(kind='round', l2_block=b, l2_finalized=fin, total_supply=supply, pending_supply=pending,
                  in_flight=in_flight, backing=backing, mints=len(mints), burns=len(burns), released=len(released))
         return now, findings
@@ -642,8 +646,9 @@ def main():
         try:
             now, findings = g.round()
             code = g.act(now, findings)
-        except Unverifiable as e:
-            g.log(kind='alert', severity='soft', id='unverifiable', reason=str(e))
+        except (Unverifiable, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
+            # a malformed or empty answer (no contract at the address, a half-synced node) is no evidence either way
+            g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')
             code = 1
         g.save()
         if 'check' in args:

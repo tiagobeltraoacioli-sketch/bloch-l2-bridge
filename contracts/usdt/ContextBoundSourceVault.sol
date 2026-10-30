@@ -22,7 +22,12 @@ interface IReleaseVerifier {
 ///      that fork and within 256 blocks) and the Bloch L2 block, finalized by
 ///      native FFG, holding the burn. Releases are also capped per time window
 ///      by limits fixed at deployment: even a colluding quorum drains at most
-///      `windowLimit` per `windowSeconds`.
+///      `windowLimit` per window. The window starts at the first release after the
+///      previous one ended, so up to twice `windowLimit` can leave around a boundary.
+///      A deposit is refused above `windowLimit` and unless `pqRecipientHash` is a
+///      left-padded address: this vault has no refund, so a deposit the L2 token can
+///      never mint (above its bucket, or with no L2 recipient) would lock the funds
+///      for good. Deploy with the token's `bucketCapacity` equal to `windowLimit`.
 ///      Light-client switch (one way, set once): `switchThreshold` of the
 ///      committee may propose a verifier (bound to its code hash); anyone
 ///      activates it after `switchDelay` (at least 7 days, so holders who
@@ -327,7 +332,8 @@ contract ContextBoundSourceVault {
     function deposit(uint64 amount, bytes32 pqRecipientHash) external nonReentrant returns (bytes32 id) {
         if (paused()) revert Paused();
         if (
-            !depositsEnabled || amount == 0 || pqRecipientHash == 0 || uint256(totalLocked) + amount > cap
+            !depositsEnabled || amount == 0 || amount > windowLimit || pqRecipientHash == 0
+                || uint256(pqRecipientHash) >> 160 != 0 || uint256(totalLocked) + amount > cap
                 || depositCount == type(uint64).max
         ) revert InvalidTransfer();
         uint256 beforeBalance = _balance(address(this));

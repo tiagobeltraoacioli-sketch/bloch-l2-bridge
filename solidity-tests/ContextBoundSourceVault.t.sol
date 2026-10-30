@@ -566,7 +566,7 @@ contract ContextBoundSourceVaultTest {
             bytes32(uint256(9)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, committee(), 2, ContextBoundSourceVault.Policy(50, 1 hours, 2, 7 days), noGuard()
         );
         controls(small, true, true, 0);
-        small.deposit(200, bytes32(uint256(8)));
+        for (uint256 i; i < 4; ++i) small.deposit(50, bytes32(uint256(8))); // one deposit is at most windowLimit
         ContextBoundSourceVault.Release memory r =
             ContextBoundSourceVault.Release(small.routeId(), 0, address(123), 40, bytes32(uint256(1)));
         small.release(r, ctx(100), signedFor(small, r, ctx(100)));

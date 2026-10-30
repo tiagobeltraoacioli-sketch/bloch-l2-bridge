@@ -9,10 +9,12 @@ One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, d
 `bloch.bridge.vault-deploy.v1`); `null` = undecided and refused.
   validate  strict schema and mainnet policy: Ethereum chain 1 and the canonical USDC contract, 5-of-7
             release signers of 7 distinct operators, switchThreshold in [threshold, n], switchDelay >= 7 days,
-            0 < windowLimit <= cap, 1..7 pause-only guardians of operators independent of every signer,
-            pause 1 h..14 d with cooldown >= duration, a fresh deployer holding no role. With
-            --token-config (busdc-mainnet.config.json): cap >= the L2 supplyCap and the vault guard equal to
-            its `ethereum.vaultGuard`. Prints the canonical config SHA-256.
+            0 < windowLimit <= cap, the whole cap able to exit through the window within switchDelay,
+            1..7 pause-only guardians of operators independent of every signer, pause 1 h..14 d with cooldown
+            >= duration, a fresh deployer holding no role. With --token-config (busdc-mainnet.config.json): cap
+            equal to the L2 supplyCap, windowLimit equal to the L2 bucketCapacity (a deposit or burn outside
+            them could never complete) and the vault guard equal to its `ethereum.vaultGuard`. Prints the
+            canonical config SHA-256.
   args      the constructor arguments in `forge create --constructor-args` order (domain labels hashed
             with keccak256, signers and guardians sorted ascending as the constructor requires) and the
             forge command line without wallet options. The owner adds the wallet (e.g. --ledger).
@@ -129,6 +131,10 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_uint(pol['windowSeconds'], lo=1), 'vault.policy.windowSeconds is undecided')
     refuse(is_uint(pol['switchThreshold'], n, k), 'vault.policy.switchThreshold is undecided or outside threshold..n')
     refuse(is_uint(pol['switchDelay'], lo=MIN_SWITCH_DELAY), 'vault.policy.switchDelay is undecided or below 7 days')
+    windows = -(-v['cap'] // pol['windowLimit'])
+    refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
+           'switchDelay is too short for holders to exit: the cap needs '
+           f'{windows * pol["windowSeconds"]} s through the release window')
 
     gd = v['guard']
     exact_keys(gd, ['guardians', 'pauseDuration', 'pauseCooldown'], 'vault.guard')
@@ -159,7 +165,10 @@ def validate(cfg, rehearsal, token_cfg=None):
 
     if token_cfg is not None:
         lim, te = token_cfg.get('limits', {}), token_cfg.get('ethereum', {})
-        refuse(is_uint(lim.get('supplyCap')) and v['cap'] >= lim['supplyCap'], 'vault cap is below the L2 supplyCap')
+        refuse(is_uint(lim.get('supplyCap')) and v['cap'] == lim['supplyCap'],
+               'vault cap differs from the L2 supplyCap (above it a deposit may never mint; below it mints stop early)')
+        refuse(lim.get('bucketCapacity') == pol['windowLimit'],
+               'vault windowLimit differs from the L2 bucketCapacity (a deposit or burn outside them can never complete)')
         vg = te.get('vaultGuard') or {}
         refuse([str(a).lower() for a in (vg.get('guardians') or [])] == sorted(guardians, key=lambda a: int(a, 16))
                and vg.get('pauseDuration') == gd['pauseDuration'] and vg.get('pauseCooldown') == gd['pauseCooldown'],

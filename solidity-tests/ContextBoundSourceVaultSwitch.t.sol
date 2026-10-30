@@ -87,7 +87,7 @@ contract ContextBoundSourceVaultSwitchTest {
         }
         vault = make(3, 7 days);
         token.mint(address(this), 1_000_000);
-        vault.deposit(500, bytes32(uint256(8)));
+        for (uint256 i; i < 5; ++i) vault.deposit(100, bytes32(uint256(8))); // one deposit is at most windowLimit
     }
 
     function make(uint8 switchThreshold, uint64 delay) private returns (ContextBoundSourceVault v) {

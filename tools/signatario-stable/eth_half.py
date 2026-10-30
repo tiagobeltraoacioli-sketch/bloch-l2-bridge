@@ -12,7 +12,7 @@ deposit  the configured chain id; the vault code at `finalized` equals the pin; 
          log of the vault with that id between `vault_from_block` and `finalized`; its block is canonical
          (hash by number) and its transaction succeeded with that same log in the receipt; the vault's own
          `depositId(...)` at `finalized` recomputes the id. Signs nothing (the Bloch half signs the mint).
-release  chain id and code pin at `latest`; `route == routeId()`; releases enabled; nonce and burn not
+release  chain id and code pin at `latest`; `route == routeId()`; releases enabled; no guardian pause; nonce and burn not
          released; the vault still in committee mode (no light-client verifier active; a pending
          proposal is reported as `pending_verifier`); amount <= totalLocked and within what the deployment-fixed window still allows;
          recipient not zero nor the vault; `nativeFinalizedHash` non-zero. Anchor: its own `finalized`
@@ -238,6 +238,9 @@ def cmd_release(eth, args):
         refuse('the vault switched to its light-client verifier; the committee is retired (releaseWithProof)')
     if not eth.word(eth.call('releasesEnabled()')):
         refuse('vault releases are disabled')
+    if eth.word(eth.call('paused()')):
+        refuse('the vault is paused by a guardian; retry after the pause',
+               paused_until=eth.word(eth.call('pausedUntil()')))
     pending = '0x' + eth.call('proposedVerifier()')[-40:]
     switch = {} if int(pending, 16) == 0 else {
         'pending_verifier': pending, 'verifier_activates_at': eth.word(eth.call('verifierActivatesAt()'))}

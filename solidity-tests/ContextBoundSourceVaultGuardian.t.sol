@@ -49,7 +49,7 @@ contract ContextBoundSourceVaultGuardianTest {
         gs = sorted(vm.addr(31), vm.addr(32));
         vault = make(gs, PAUSE, COOLDOWN);
         token.mint(address(this), 1_000_000);
-        vault.deposit(500, bytes32(uint256(8)));
+        for (uint256 i; i < 5; ++i) vault.deposit(100, bytes32(uint256(8))); // one deposit is at most windowLimit
     }
 
     function sorted(address a, address b) private pure returns (address[] memory out) {
@@ -244,7 +244,7 @@ contract ContextBoundSourceVaultGuardianTest {
 
     function testGuardiansHaveNoPowerAfterTheSwitch() public {
         vault = make(gs, 30 days, COOLDOWN);
-        vault.deposit(500, bytes32(uint256(8)));
+        for (uint256 i; i < 5; ++i) vault.deposit(100, bytes32(uint256(8))); // one deposit is at most windowLimit
         pause();
         uint256 until = block.timestamp + 100;
         // the switch is never blocked by a pause

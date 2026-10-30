@@ -7,7 +7,9 @@
 Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatario.py config plus
 `shared_dir`, `eth_rpc`, `vault_from_block`, `token_from_block`, and for `relay` `eth_chain_id`,
 `l2_relayer_key`, `eth_relayer_key` (gas keys with no authority), optional `signer_name`,
-`round_margin` (seconds, default 600).
+`round_margin` (seconds, default 600), `max_valid_seconds` (default 3600), `resend_after_s` (default 1800: a
+relayed transaction with no receipt after this long is sent again), `log_chunk` (blocks per eth_getLogs, default
+10000), `max_new_rounds` (release rounds opened per pass, default 4).
 
 `sign` (one per signer, on the signer's machine) discovers work and calls signatario.py, which keeps
 doing every check before it signs (nothing here weakens them):
@@ -25,13 +27,18 @@ doing every check before it signs (nothing here weakens them):
 large mints (`executeMint`) once their delay passed, and submits `vault.release` on Ethereum once a live
 round holds k certificates.
 
-SHARED is untrusted storage (a local directory in the rehearsal): every reader verifies what it reads;
-a forged file costs a refusal, never a wrong signature or payment. Development tool; UNAUDITED.
+SHARED is untrusted storage (a local directory in the rehearsal): every reader verifies what it reads. A
+partial counts only if its signature recovers to a current signer on the chain and the token or vault recomputes
+its digest from its fields; a round counts only with such a certificate and a validUntil the Ethereum half could
+accept; `done`, `executed` and `sent` are only records, and the chain decides. A forged file is ignored: it costs
+neither a wrong signature or payment nor a stopped bridge (deleting partials still only delays). One item that
+reverts or breaks never stops the others. Development tool; UNAUDITED.
 """
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -40,6 +47,14 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED = 'Burned(bytes32,uint64,address,uint64,address)'
+RELEASE_TUPLE = '(bytes32,uint64,address,uint64,bytes32)'
+CONTEXT_TUPLE = '(uint256,uint256,bytes32,uint64,bytes32)'
+RELEASE_FIELDS = ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')
+CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativeFinalizedNumber',
+                  'nativeFinalizedHash')
+WORD = re.compile(r'0x[0-9a-fA-F]{64}')
+ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}')
+SIGNATURE = re.compile(r'0x[0-9a-fA-F]{130}')
 
 
 def log(**kv):
@@ -66,6 +81,11 @@ class Vigia:
         self.k = int(self.cfg['threshold'])
         self.vk = int(self.cfg.get('vault_threshold', self.k))
         self.margin = int(self.cfg.get('round_margin', 600))
+        self.max_valid = int(self.cfg.get('max_valid_seconds', 3600))
+        self.resend_after = int(self.cfg.get('resend_after_s', 1800))
+        self.log_chunk = int(self.cfg.get('log_chunk', 10000))
+        self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
+        self.opened = 0
         self.me = self.cfg.get('signer_name', f"s{self.cfg.get('signer')}")
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -112,8 +132,11 @@ class Vigia:
         final = self.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
         if final is None or int(from_block) > int(final['number'], 16):
             return []  # contract newer than the finalized head: nothing final yet (and an inverted range errors)
-        return self.rpc(url, 'eth_getLogs', [{'address': address, 'topics': topics, 'fromBlock': hex(int(from_block)),
-                                              'toBlock': final['number']}])
+        found, end = [], int(final['number'], 16)
+        for lo in range(int(from_block), end + 1, self.log_chunk):  # nodes cap the block range of one query
+            found += self.rpc(url, 'eth_getLogs', [{'address': address, 'topics': topics, 'fromBlock': hex(lo),
+                                                    'toBlock': hex(min(lo + self.log_chunk - 1, end))}])
+        return found
 
     def deposits(self):
         """Deposited logs of the vault route up to the Ethereum `finalized` head (discovery only)."""
@@ -135,7 +158,8 @@ class Vigia:
         return f
 
     def rounds(self, d, margin):
-        """Live rounds of a burn, newest first: (validUntil, dir)."""
+        """Rounds of a burn with a usable validUntil, newest first: (validUntil, dir). A validUntil further away
+        than an Ethereum half would accept cannot be real."""
         now = int(time.time())
         if self.cfg.get('eth_clock') == 'chain':
             now = int(self.rpc(self.cfg['eth_rpc'], 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
@@ -145,101 +169,210 @@ class Vigia:
                 valid_until = int(r.name.split('-')[1])
             except (IndexError, ValueError):
                 continue
-            if valid_until - now > margin:
+            if margin < valid_until - now <= self.max_valid:
                 out.append((valid_until, r))
         return sorted(out, reverse=True)
+
+    # ── reading SHARED (untrusted: every file is checked against the chain before it counts) ──
+    def verified(self, path, url, to):
+        """A partial from SHARED whose signature recovers to its signer, a current signer of `to`. Else None."""
+        try:
+            rec = json.loads(path.read_text())
+            signer, digest, sig = rec['signer'], rec['digest'], rec['signature']
+            if not (ADDRESS.fullmatch(signer) and WORD.fullmatch(digest) and SIGNATURE.fullmatch(sig)):
+                return None
+            rc, _, _ = self.run([self.cast, 'wallet', 'verify', '--no-hash', '--address', signer, digest, sig])
+            return rec if rc == 0 and self.flag(url, to, 'isSigner(address)', signer) else None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            return None
+
+    def mint_partial(self, path, dep):
+        """A real partial for this deposit: fields bound to the digest by the token's own mintDigest."""
+        url = self.cfg['l2_rpc']
+        rec = self.verified(path, url, self.token)
+        if rec is None or rec.get('kind') != 'stable-mint' or str(rec.get('deposit_id')).lower() != dep \
+                or str(rec.get('token')).lower() != self.token:
+            return None
+        try:
+            want = self.call(url, self.token, 'mintDigest(bytes32,uint64,uint64,address)', dep,
+                             int(rec['deposit_nonce']), int(rec['amount']), rec['recipient'])
+        except (KeyError, ValueError, TypeError, RuntimeError):
+            return None
+        return rec if want.lower() == rec['digest'].lower() else None
+
+    def release_partial(self, path, burn_id, rnd):
+        """A real certificate of this burn and round: fields bound to the digest by the vault's releaseDigest."""
+        url = self.cfg['eth_rpc']
+        rec = self.verified(path, url, self.vault)
+        if rec is None or rec.get('kind') != 'stable-release' or str(rec.get('source_vault')).lower() != self.vault:
+            return None
+        try:
+            rel, c = rec['release'], rec['context']
+            if str(rel['nativeBurn']).lower() != burn_id or rnd.name != f"r-{c['validUntil']}-{c['sourceAnchorNumber']}":
+                return None
+            want = self.call(url, self.vault, f'releaseDigest({RELEASE_TUPLE},{CONTEXT_TUPLE})',
+                             '(' + ','.join(str(rel[k]) for k in RELEASE_FIELDS) + ')',
+                             '(' + ','.join(str(c[k]) for k in CONTEXT_FIELDS) + ')')
+        except (KeyError, ValueError, TypeError, RuntimeError):
+            return None
+        return rec if want.lower() == rec['digest'].lower() else None
+
+    def agreeing(self, files, check, k):
+        """The files of the largest group of real partials over one message, if it reaches k distinct signers."""
+        groups = {}
+        skipped = 0
+        for f in files:
+            rec = check(f)
+            if rec is None:
+                skipped += 1
+                continue
+            groups.setdefault(rec['digest'].lower(), {}).setdefault(rec['signer'].lower(), f)
+        if skipped:
+            log(kind='shared', ignored=skipped, directory=str(files[0].parent))
+        best = max(groups.values(), key=len, default={})
+        return list(best.values()) if len(best) >= k else []
+
+    def burn_done(self, d, burn_id):
+        """The vault decides. A `done` file is only a record of it, and is removed when the vault disagrees."""
+        marker = d / 'done'
+        if self.released(burn_id):
+            new = not marker.exists()
+            if new:
+                d.mkdir(parents=True, exist_ok=True)
+                marker.write_text('released\n')
+            return 'new' if new else 'known'
+        if marker.exists():
+            marker.unlink()
+            log(kind='shared', forged='done', burn=burn_id)
+        return None
+
+    def isolated(self, kind, item, work):
+        """One bad item (a mint or release that reverts, a broken file) never stops the others."""
+        try:
+            work()
+        except Exception as e:  # noqa: BLE001 - the next round retries this item
+            log(kind=kind, item=item, error=f'{type(e).__name__}: {e}')
 
     # ── sign ─────────────────────────────────────────────────────────────────
     def sign_round(self):
         for dep in self.deposits():
-            out = self.shared / 'mint' / dep[2:] / f'{self.me}.json'
-            if out.exists() or self.minted(dep):
-                continue
-            out.parent.mkdir(parents=True, exist_ok=True)
-            rc, res = self.signatario('mint', '--deposit-id', dep, '--out', out)
-            if rc:
-                out.unlink(missing_ok=True)
-            log(kind='mint', deposit=dep, signed=rc == 0, reason=res.get('reason'))
-        for b in self.burns():
-            d = self.shared / 'release' / b['burn_id'][2:]
-            if (d / 'done').exists():
-                continue
-            if self.released(b['burn_id']):
-                d.mkdir(parents=True, exist_ok=True)
-                (d / 'done').write_text('released\n')
-                continue
-            with self.locked(d):
-                live = self.rounds(d, self.margin)
-                if live and (live[0][1] / f'{self.me}.json').exists():
-                    continue
-                if live:
-                    rnd = live[0][1]
-                    proposal = next(p for p in sorted(rnd.glob('*.json')))
-                    rc, res = self.signatario('release', '--burn-tx', b['tx'], '--context', proposal,
-                                              '--out', rnd / f'{self.me}.json')
-                    if rc:
-                        (rnd / f'{self.me}.json').unlink(missing_ok=True)
-                    log(kind='release', burn=b['burn_id'], nonce=b['nonce'], round=rnd.name, joined=True,
-                        signed=rc == 0, reason=res.get('reason'))
-                    continue
-                tmp = d / f'.{self.me}.new.json'
-                rc, res = self.signatario('release', '--burn-tx', b['tx'], '--out', tmp)
-                if rc == 0:
-                    c = res['context']
-                    rnd = d / f"r-{c['validUntil']}-{c['sourceAnchorNumber']}"
-                    rnd.mkdir(exist_ok=True)
-                    os.replace(tmp, rnd / f'{self.me}.json')
-                else:
-                    tmp.unlink(missing_ok=True)
-                    rnd = None
-                log(kind='release', burn=b['burn_id'], nonce=b['nonce'], round=rnd.name if rnd else None,
-                    opened=True, signed=rc == 0, reason=res.get('reason'))
+            self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
+        burns = self.burns()
+        self.opened = 0
+        # Every certificate rebuilds the L2 from L1 (41 s measured on the v2 binaries with 186,671 L1 blocks, and
+        # growing), while a round can be joined for only ~15 min. Rounds other signers opened come first, and a pass
+        # opens few new ones, oldest burn first, so a backlog is worked through instead of expiring round after round.
+        for b in burns:
+            self.isolated('release', b['burn_id'], lambda b=b: self.sign_release(b, join_only=True))
+        for b in burns:
+            self.isolated('release', b['burn_id'], lambda b=b: self.sign_release(b))
+
+    def sign_mint(self, dep):
+        out = self.shared / 'mint' / dep[2:] / f'{self.me}.json'
+        if self.minted(dep) or (out.exists() and self.mint_partial(out, dep) is not None):
+            return
+        out.parent.mkdir(parents=True, exist_ok=True)
+        rc, res = self.signatario('mint', '--deposit-id', dep, '--out', out)
+        if rc:
+            out.unlink(missing_ok=True)
+        log(kind='mint', deposit=dep, signed=rc == 0, reason=res.get('reason'))
+
+    def live_rounds(self, d, burn_id):
+        """Live rounds holding at least one real certificate, newest first: (validUntil, dir, a certificate)."""
+        out = []
+        for valid_until, rnd in self.rounds(d, self.margin):
+            cert = next((p for p in sorted(rnd.glob('*.json')) if self.release_partial(p, burn_id, rnd)), None)
+            if cert is not None:
+                out.append((valid_until, rnd, cert))
+        return out
+
+    def sign_release(self, b, join_only=False):
+        burn_id = b['burn_id']
+        d = self.shared / 'release' / burn_id[2:]
+        if self.burn_done(d, burn_id):
+            return
+        with self.locked(d):
+            live = self.live_rounds(d, burn_id)
+            if live:
+                _, rnd, proposal = live[0]
+                mine = rnd / f'{self.me}.json'
+                if mine.exists() and self.release_partial(mine, burn_id, rnd) is not None:
+                    return
+                rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--context', proposal,
+                                          '--out', mine)
+                if rc:
+                    mine.unlink(missing_ok=True)
+                log(kind='release', burn=burn_id, nonce=b['nonce'], round=rnd.name, joined=True,
+                    signed=rc == 0, reason=res.get('reason'))
+                return
+            if join_only or self.opened >= self.max_new_rounds:
+                return
+            self.opened += 1
+            tmp = d / f'.{self.me}.new.json'
+            rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--out', tmp)
+            if rc == 0:
+                c = res['context']
+                rnd = d / f"r-{c['validUntil']}-{c['sourceAnchorNumber']}"
+                rnd.mkdir(exist_ok=True)
+                os.replace(tmp, rnd / f'{self.me}.json')
+            else:
+                tmp.unlink(missing_ok=True)
+                rnd = None
+            log(kind='release', burn=burn_id, nonce=b['nonce'], round=rnd.name if rnd else None,
+                opened=True, signed=rc == 0, reason=res.get('reason'))
 
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
         mint_dir = self.shared / 'mint'
         for d in sorted(mint_dir.glob('*')) if mint_dir.exists() else []:
-            dep = '0x' + d.name
-            if (d / 'executed').exists():
-                continue
-            if self.minted(dep):
-                self.execute_if_queued(d, dep)
-                continue
-            if (d / 'sent').exists() and not self.failed(self.cfg['l2_rpc'], d / 'sent'):
-                continue
-            sigs = sorted(d.glob('*.json'))
-            if len(sigs) < self.k:
-                continue
-            rc, comb = self.signatario('combine', *sum((['--sig', s] for s in sigs), []), '--out', d / 'mint.call')
-            if rc:
-                log(kind='relay-mint', deposit=dep, error=comb.get('reason'))
-                continue
-            tx = self.send('l2', self.token, comb['call'])
-            (d / 'sent').write_text(tx + '\n')
-            log(kind='relay-mint', deposit=dep, tx=tx)
+            self.isolated('relay-mint', d.name, lambda d=d: self.relay_mint(d))
         rel_dir = self.shared / 'release'
         for d in sorted(rel_dir.glob('*')) if rel_dir.exists() else []:
-            if (d / 'done').exists():
-                continue
-            if self.released('0x' + d.name):
-                (d / 'done').write_text('released\n')
-                log(kind='relay-release', burn='0x' + d.name, done=True)
-                continue
-            for _, rnd in self.rounds(d, 60):  # enough time left for the transaction to land
-                if (rnd / 'sent').exists() and not self.failed(self.cfg['eth_rpc'], rnd / 'sent'):
-                    break
-                certs = sorted(rnd.glob('*.json'))
-                if len(certs) < self.vk:
-                    continue
-                rc, comb = self.signatario('combine', *sum((['--sig', c] for c in certs), []),
-                                           '--out', rnd / 'release.call')
-                if rc:
-                    log(kind='relay-release', burn='0x' + d.name, round=rnd.name, error=comb.get('reason'))
-                    continue
-                tx = self.send('eth', self.vault, comb['call'])
-                (rnd / 'sent').write_text(tx + '\n')
-                log(kind='relay-release', burn='0x' + d.name, round=rnd.name, tx=tx)
+            self.isolated('relay-release', d.name, lambda d=d: self.relay_release(d))
+
+    def relay_mint(self, d):
+        dep = '0x' + d.name
+        if not WORD.fullmatch(dep):
+            return
+        if self.minted(dep):
+            self.execute_if_queued(d, dep)
+            return
+        if (d / 'sent').exists() and not self.failed(self.cfg['l2_rpc'], d / 'sent'):
+            return
+        sigs = self.agreeing(sorted(d.glob('*.json')), lambda f: self.mint_partial(f, dep), self.k)
+        if len(sigs) < self.k:
+            return
+        rc, comb = self.signatario('combine', *sum((['--sig', s] for s in sigs), []), '--out', d / 'mint.call')
+        if rc:
+            log(kind='relay-mint', deposit=dep, error=comb.get('reason'))
+            return
+        tx = self.send('l2', self.token, comb['call'])
+        (d / 'sent').write_text(tx + '\n')
+        log(kind='relay-mint', deposit=dep, tx=tx)
+
+    def relay_release(self, d):
+        burn_id = '0x' + d.name
+        if not WORD.fullmatch(burn_id):
+            return
+        state = self.burn_done(d, burn_id)
+        if state:
+            if state == 'new':
+                log(kind='relay-release', burn=burn_id, done=True)
+            return
+        for _, rnd in self.rounds(d, 60):  # enough time left for the transaction to land
+            if (rnd / 'sent').exists() and not self.failed(self.cfg['eth_rpc'], rnd / 'sent'):
                 break
+            certs = self.agreeing(sorted(rnd.glob('*.json')), lambda f, r=rnd: self.release_partial(f, burn_id, r), self.vk)
+            if len(certs) < self.vk:
+                continue
+            rc, comb = self.signatario('combine', *sum((['--sig', c] for c in certs), []), '--out', rnd / 'release.call')
+            if rc:
+                log(kind='relay-release', burn=burn_id, round=rnd.name, error=comb.get('reason'))
+                continue
+            tx = self.send('eth', self.vault, comb['call'])
+            (rnd / 'sent').write_text(tx + '\n')
+            log(kind='relay-release', burn=burn_id, round=rnd.name, tx=tx)
+            break
 
     def execute_if_queued(self, d, dep):
         """v1.1 large mints wait `largeMintDelay` in a queue; anyone executes them afterwards."""
@@ -264,8 +397,17 @@ class Vigia:
         log(kind='relay-execute', deposit=dep, tx=tx)
 
     def failed(self, url, sent_file):
-        """A sent transaction that reverted is forgotten so the next round retries it."""
-        receipt = self.rpc(url, 'eth_getTransactionReceipt', [sent_file.read_text().strip()])
+        """A sent transaction that reverted, or never landed, is forgotten so the next round retries it."""
+        tx = sent_file.read_text().strip()
+        if not WORD.fullmatch(tx):
+            sent_file.unlink()
+            log(kind='shared', forged='sent', file=str(sent_file))
+            return True
+        receipt = self.rpc(url, 'eth_getTransactionReceipt', [tx])
+        if receipt is None and time.time() - sent_file.stat().st_mtime > self.resend_after:
+            sent_file.unlink()
+            log(kind='relay', dropped=tx)
+            return True
         if receipt is not None and int(receipt['status'], 16) == 0:
             sent_file.unlink()
             log(kind='relay', reverted=receipt['transactionHash'])

@@ -12,10 +12,14 @@ UNAUDITED.
 **Update 2026-10-30, branch `codex/bridge-busdc-mainnet-v2-20261030`.** The off-chain components follow the
 L2 mainnet v2 build (bloch-l2-evm `1aad0a20` against native `78d4921c`: follower `c18752fd`, produce-dev
 `7c1cc62b`, settled-rpc `4fc9fa1e`; chain 700770, L2 genesis `632e45ae`) and the L1 HF1 claim-finality rule
-(epoch 7180). No contract changed. New: `tools/signatario-stable/l2_finality.py`,
+(epoch 7180). No contract changed on that branch (the bridge review below changes two). New: `tools/signatario-stable/l2_finality.py`,
 `tools/deploy-pontes/vault_pontes.py`, the vault deploy config and the per-role mainnet templates. The
 configuration, the owner-run deployment sequence and the host specifications are in
 `docs/BUSDC-MAINNET-V2.md`.
+
+**Update 2026-10-30, branch `codex/bridge-review-20261030`.** An adversarial review changed `deposit` in the vault
+and `burn` in `BridgedStablecoinV2`, the automation and the watchers (`docs/BUSDC-MAINNET-V2.md` section 9).
+Residual risks are listed in section 5.
 
 ## 1. Contracts in scope
 
@@ -116,6 +120,8 @@ Vault (`ContextBoundSourceVault`):
   Ethereum anchor, the L2 block and `validUntil`. Check that it cannot be replayed on another vault, chain
   or fork, or after `validUntil`. Control, switch and unpause digests are separated by their domain tags.
 - **V4. Throughput.** `windowReleased ≤ windowLimit` for each window, on both release paths.
+- **V8. Completable deposits.** Every accepted deposit can be minted: `amount ≤ windowLimit = bucketCapacity`, the
+  recipient is a left-padded address, `cap = supplyCap`.
 - **V5. Switch.**
   - At most one pending proposal.
   - Activation only after `verifierActivatesAt` and only with the proposed code hash unchanged.
@@ -147,6 +153,7 @@ L2 tokens (`SignerMintedToken`, `BridgedStablecoinV2`, `WrappedGnBV2`):
   fields: `route`, `nonce`, `recipient`, `amount`, `nativeBurn`.
 - **T5.** The EIP-712 domain (version "2") and the k-of-n signature checks: signatures sorted and distinct,
   low-s, signers only.
+- **T6.** Every accepted stablecoin burn fits one release: `amount ≤ bucketCapacity = windowLimit`.
 
 Cross-system:
 - **X1.** At finality on both sides, an honest bridge has backing ≥ supply + pending
@@ -165,6 +172,26 @@ Cross-system:
   anchor can be proven (64 s epochs, 256-epoch periods). Vault v3 (anchor e3974) can no longer prove burns
   settled after epoch 4350. Because the switch is one-way and the committee is retired, new v3 burns would
   have no exit. The definitive run uses the real anchor.
+- **The switch covers the release leg only.** After the switch `SignerMintedToken` still mints on k-of-n
+  signatures. A quorum of mint keys can mint unbacked bUSDC, burn it and prove the burn: the proof shows the burn is
+  final, not that it was backed. Guardians have no vault power then. Losses are bounded by the bucket and the window
+  (`BridgeReviewPoc.testC6`).
+- **Verifier proposals do not expire.** Anyone can activate a proposal at any time after the delay, and only
+  `switchThreshold` signers can cancel it (`testC7`).
+- **Renewed guardian pauses.** One guardian key can renew a vault pause as soon as it expires. Only `switchThreshold`
+  signatures interrupt it, then the cooldown gives releases one `pauseCooldown` (`testC5`). Guardians are immutable.
+  During a real compromise the opposite holds: each expiry leaves a block race for one more window.
+- **No signer rotation.** Three lost release keys of seven stop releases for good; two stop `unpause` and the switch
+  at the proposed 6-of-7. There is no rescue path, by design.
+- **USDC itself.** A blacklisted recipient's release reverts until Circle lifts it, and its burn cannot be redirected
+  (`testC9`). A USDC pause or a fee upgrade stops releases (exact-delta checks).
+- **No exit fairness.** Any holder can fill the release window. Relayers pay Ethereum gas for each burn of at least
+  `minBurn` (10 USDC): an attacker gets the USDC back and costs the relayer gas.
+- **Cost of a certificate.** Each one rebuilds the L2 from L1: 41 s measured on the v2 binaries at 186,671 L1 blocks
+  on a loaded host, growing with L1. `max_new_rounds` keeps a backlog from starving rounds; batching certificates
+  over one rebuild is the real fix.
+- **A stale guardian L2 RPC pauses.** A reachable RPC that stopped advancing shows no burn for a real release, and
+  `release-unknown` pauses the vault after `provenance_grace_s`. That fails safe; it costs one pause.
 - **Release window.** The per-window limit resets `windowSeconds` after the first release of a window. It is
   not a token bucket, so up to 2 × `windowLimit` can leave around a window boundary. The L2 tokens use a
   token bucket.
@@ -280,6 +307,7 @@ From a clean checkout with Foundry in `~/.foundry/bin`:
 - `python3 tools/deploy-pontes/rehearse_anvil.py`
 - new on `codex/bridge-busdc-mainnet-v2-20261030`: `python3 tools/signatario-stable/test_hf1_finality.py .`,
   `python3 tools/guardiao/test_guardiao_hf1.py .`
+- new on `codex/bridge-review-20261030`: `python3 tools/signatario-stable/test_bridge_review.py .`
 
 Results for `ba1657c` (same counts as `eba8e02`), from a clean clone on 45.77 (Foundry stable, anvil):
 
