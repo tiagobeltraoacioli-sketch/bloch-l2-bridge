@@ -1,0 +1,18 @@
+{
+  "_about": "Proof-path guardian (sombra.py), a second independent operator. Pauses only on a release the light-client prover cannot prove; until the light client is ported to the HF line and re-anchored, lc_max_epoch keeps releases after HF1 at soft alerts.",
+  "eth_rpc": "http://127.0.0.1:8545",
+  "eth_chain_id": 1,
+  "vault": "TBD-owner",
+  "vault_from_block": "TBD-owner",
+  "prover_dir": "TBD-owner (lc_prover.py state_dir)",
+  "shadow_verifier": "TBD-owner (a deployed, never-activated SP1ReleaseVerifier; needs the HF-line light-client programs)",
+  "l1_rpc": "http://80.240.16.185:8080",
+  "grace_s": 7200,
+  "grace_l1_epochs": 4,
+  "lc_max_epoch": 7180,
+  "prover_stale_s": 3600,
+  "keystore": "/etc/bloch-busdc-sombra/eth-guardian.keystore",
+  "password_file": "/etc/bloch-busdc-sombra/eth-guardian.password",
+  "state": "/var/lib/bloch-busdc-sombra/state.json",
+  "cast": "/opt/foundry/bin/cast"
+}

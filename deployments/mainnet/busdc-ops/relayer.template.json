@@ -1,0 +1,19 @@
+{
+  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying.",
+  "token": "TBD-owner",
+  "source_vault": "TBD-owner",
+  "source_route": "TBD-owner",
+  "threshold": 5,
+  "vault_threshold": 5,
+  "l2_rpc": "TBD-owner",
+  "l2_chain_id": 700770,
+  "eth_rpc": "TBD-owner (an Ethereum RPC)",
+  "eth_chain_id": 1,
+  "shared_dir": "TBD-owner",
+  "vault_from_block": "TBD-owner",
+  "token_from_block": "TBD-owner",
+  "l2_relayer_key": "/etc/bloch-busdc-relayer/l2-gas.key",
+  "eth_relayer_key": "/etc/bloch-busdc-relayer/eth-gas.key",
+  "cast": "/opt/foundry/bin/cast",
+  "round_margin": 600
+}

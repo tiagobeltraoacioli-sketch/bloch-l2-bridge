@@ -9,6 +9,14 @@ The merge changed no behaviour. The integration commit removed the byte-identica
 the SP1 verifier and added the vault's guardian policy to the bUSDC deploy config. Everything here is
 UNAUDITED.
 
+**Update 2026-10-30, branch `codex/bridge-busdc-mainnet-v2-20261030`.** The off-chain components follow the
+L2 mainnet v2 build (bloch-l2-evm `1aad0a20` against native `78d4921c`: follower `c18752fd`, produce-dev
+`7c1cc62b`, settled-rpc `4fc9fa1e`; chain 700770, L2 genesis `632e45ae`) and the L1 HF1 claim-finality rule
+(epoch 7180). No contract changed. New: `tools/signatario-stable/l2_finality.py`,
+`tools/deploy-pontes/vault_pontes.py`, the vault deploy config and the per-role mainnet templates. The
+configuration, the owner-run deployment sequence and the host specifications are in
+`docs/BUSDC-MAINNET-V2.md`.
+
 ## 1. Contracts in scope
 
 Naming: the coin and chain are **GnB-SMH**. Its native ticker is **GSMH**; the wrapped L2 token is **wGSMH**
@@ -40,14 +48,16 @@ Out of scope, but pinned and listed for completeness:
 
 | Tool | File | Lines | Last commit | Authority |
 | --- | --- | --- | --- | --- |
-| Stablecoin signer, Bloch half | `tools/signatario-stable/signatario.py` | 601 | `3ee7c49` | L2 mint key (k-of-n). Rebuilds the L2 from L1 data before certifying a burn. |
+| Stablecoin signer, Bloch half | `tools/signatario-stable/signatario.py` | 669 | `576df5b` | L2 mint key (k-of-n). Rebuilds the L2 from L1 data before certifying a burn. |
+| L2 finality rules of the signer | `tools/signatario-stable/l2_finality.py` | 260 | `576df5b` | None. v2 build pins, follower status checks, HF1 claim-finality predicate, rebuild check, L1 cross-check. |
 | Stablecoin signer, Ethereum half | `tools/signatario-stable/eth_half.py` | 326 | `3ee7c49` | Ethereum release key (k-of-n). Pins the vault code, uses `finalized` only, recomputes `releaseDigest`. |
 | Stablecoin automation | `tools/signatario-stable/vigia.py` | 307 | `3ee7c49` | Calls the signer. The relayer holds only gas keys. |
 | GnB-SMH signer and automation | `tools/signatario-gnb/signatario.py`, `vigia.py` | 438, 243 | `da4a26c`, `f6de7ab` | Same pattern for wGSMH. |
-| Guardian (fast path) | `tools/guardiao/guardiao.py` | 626 | `28cd313` | Pause only: token `pause()` and vault `guardianPause()`. Each uses its own key. |
-| Guardian (proof path) | `tools/guardiao/sombra.py` | 276 | `5b98d79` | Pause only: vault `guardianPause()`. |
-| Reserves monitor | `tools/reservas/reservas.py` | 164 | `29323e0` | None (read-only). |
+| Guardian (fast path) | `tools/guardiao/guardiao.py` | 655 | `576df5b` | Pause only: token `pause()` and vault `guardianPause()`. Each uses its own key. |
+| Guardian (proof path) | `tools/guardiao/sombra.py` | 294 | `576df5b` | Pause only: vault `guardianPause()`. |
+| Reserves monitor | `tools/reservas/reservas.py` | 173 | `576df5b` | None (read-only). |
 | Mainnet deploy tool | `tools/deploy-pontes/deploy_pontes.py` | 713 | `07ccb69` | Deployer key, single use. |
+| Vault deploy checks | `tools/deploy-pontes/vault_pontes.py` | 271 | this branch | None (validate, constructor arguments, read-only verify; the owner deploys with forge). |
 
 ## 3. Trust model
 
@@ -59,7 +69,11 @@ Out of scope, but pinned and listed for completeness:
    - chain id and vault;
    - an Ethereum block the signer saw as finalized, checked on-chain with `blockhash`, so it is valid only
      on that fork and within 256 blocks;
-   - the Bloch L2 block holding the burn, final under native FFG;
+   - the Bloch L2 block holding the burn, final under native FFG. With the v2 build the signer requires the
+     same predicate as an L1 claim after HF1 (`l2_record_finalized_for_claim`): the block is covered by an
+     accepted settlement whose native block is inside the FFG-finalized prefix of the signer's own replay,
+     whose finalized checkpoint is its own chain's, and from epoch 7180 a checkpoint of epoch ≥ 7180 must be
+     finalized first (own `CHECKPOINT-ROOTS` are recorded only from the gate);
    - `validUntil`.
    Releases are capped at `windowLimit` per `windowSeconds`. A colluding quorum can drain at most that much
    per window.
@@ -138,6 +152,10 @@ Cross-system:
 - **X1.** At finality on both sides, an honest bridge has backing ≥ supply + pending
   (`tools/reservas`). The gap is in-flight burns plus unminted deposits.
 - **X2.** Signers release only after the L2 burn is final, and mint only after the source deposit is final.
+  "Final" for a burn = covered by a finalized settlement inside the finalized native prefix, under the HF1
+  claim-finality rule (`l2_finality.require_settled_final`), on an L2 rebuilt by the pinned v2 binaries that
+  reproduces every finalized settlement (`check_rebuild`). `guardiao.py` reports a vault release whose burn
+  is above its own L2 `finalized` block (`release-before-final`).
 
 ## 5. Known limitations
 
@@ -162,6 +180,17 @@ Cross-system:
   - Losses before a pause are bounded by `windowLimit`.
 - **L2 RPC.** The settled devnet4 RPC has no `pending` level. L2 transactions from tools are offline-signed
   legacy transactions with fixed gas (`l2_raw_tx` in `guardiao.py`).
+- **L2 mainnet not settling yet.** On 2026-10-30 `getl2settlement` shows `accepted: null`: no L2 block has
+  ever been settled. Until the settler, prover and attestors run, no burn can be final and no release can be
+  certified. Deposits must stay disabled until a full round trip works.
+- **Light-client programs predate the L1 hard forks.** HF1 makes finality 2/3 of the frozen finality set
+  (the roster must come from that set) and HF2 (epoch 7270) moves votes to the bound signature form. The
+  deployed step/release programs implement neither, so `sombra.py` must run with `lc_max_epoch` (7180) and
+  the one-way switch must not be proposed before the LC port and a re-anchor.
+- **v2 settled RPC fails closed.** Without a verified follower status it serves `finalized` = null.
+  `guardiao.py` then checks only at `latest`; `reservas.py` reports `unverifiable`.
+- **HF1 claim-finality pause.** From epoch 7180 until a checkpoint of epoch ≥ 7180 finalizes (~2 epochs),
+  signers refuse new release certificates, as L1 refuses claims.
 - **Devnet residues.** These come from the drills; they are not accounting bugs.
   - Vault v4 (`0xe6e340d1…`) holds 10 USDC against 14 bUSDC: a deliberate unbacked release of 4 USDC.
   - Vault v5 (`0x70e0ba84…`) is paused, with 3 USDC released without a burn and deposits never minted.

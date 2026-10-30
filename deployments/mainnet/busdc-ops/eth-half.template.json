@@ -1,0 +1,15 @@
+{
+  "_about": "One per signer operator: the Ethereum half (eth_half.py). It reads only this operator's own Ethereum node.",
+  "eth_rpc": "http://127.0.0.1:8545",
+  "eth_chain_id": 1,
+  "vault": "TBD-owner (vault_pontes.py verify: ethHalf.vault)",
+  "vault_code_keccak": "TBD-owner (vault_pontes.py verify: ethHalf.vault_code_keccak)",
+  "vault_from_block": "TBD-owner (Ethereum block of the vault deployment)",
+  "keystore": "/etc/bloch-busdc-signer/eth-release.keystore",
+  "password_file": "/etc/bloch-busdc-signer/eth-release.password",
+  "db": "/var/lib/bloch-busdc-signer/eth-half-db.json",
+  "cast": "/opt/foundry/bin/cast",
+  "anchor_max_age": 160,
+  "valid_seconds": 1800,
+  "max_valid_seconds": 3600
+}

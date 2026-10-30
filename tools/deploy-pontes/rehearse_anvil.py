@@ -12,6 +12,11 @@
    chain refused.
 2. Development chains: 700771 and 31337 refused without the rehearsal flag in the config AND on the CLI;
    700771 with both: full flow (2-of-3, GnB-SMH testnet id).
+3. Ethereum vault (vault_pontes.py) on the rehearsal chain 31337: the committed busdc-vault template is
+   refused while it holds nulls; filled with throwaway keys -> validate -> args -> forge create with those
+   arguments -> verify at finalized (immutables, signers, guardians, committee mode) and its busdcEthereum
+   output equals the chain; a config that differs from the deployment is refused; the L2 token config
+   cross-check; the mainnet policy refusals (canonical USDC, 5-of-7, switch delay, independent guardians).
 Prints PASS/FAIL per check and exits 1 on any failure.
 """
 import copy
@@ -29,6 +34,7 @@ import time
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 TOOL = HERE / 'deploy_pontes.py'
+VTOOL = HERE / 'vault_pontes.py'
 BIN = Path.home() / '.foundry/bin'
 CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
 ANVIL_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -58,6 +64,109 @@ def tool(*args):
     except ValueError:
         res = {'raw': done.stdout[-500:], 'stderr': done.stderr[-800:]}
     return done.returncode, res
+
+
+def vtool(*args):
+    done = sh(sys.executable, VTOOL, *args, ok=False)
+    try:
+        res = json.loads(done.stdout)
+    except ValueError:
+        res = {'raw': done.stdout[-500:], 'stderr': done.stderr[-800:]}
+    return done.returncode, res
+
+
+def vault_rehearsal(url, work, token_cfg):
+    """Section 3: the Ethereum vault deployment tool on the rehearsal chain 31337."""
+    tpath = ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json'
+    rc, r = vtool('validate', '--config', tpath)
+    check('[vault template] the committed vault config is refused while decisions are null',
+          rc == 1 and 'undecided' in r.get('reason', ''), r)
+    vc = json.loads(tpath.read_text())
+    dkey, daddr = new_key()
+    sh(CAST, 'rpc', 'anvil_setBalance', daddr, hex(10**19), '--rpc-url', url)
+    mock = next(l.split()[-1] for l in out(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', url,
+                                           '--private-key', ANVIL_KEY, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
+                .splitlines() if 'Deployed to' in l).lower()
+    vc['ethereum'] = {'chainId': 31337, 'rehearsal': True}
+    vc['source']['revision'] = out('git', 'rev-parse', 'HEAD')
+    vc['deployer'] = {'address': daddr, 'fundedBy': {'entity': 'rehearsal funder', 'safe': new_key()[1]}}
+    vc['vault']['token'] = mock
+    vc['vault']['signers']['set'] = [{'operator': f'vault-op-{i}', 'address': new_key()[1]} for i in range(7)]
+    vc['vault']['guard']['guardians'] = [{'operator': f'vault-guardian-org-{i}', 'address': new_key()[1]}
+                                         for i in range(2)]
+    vpath = work / 'vault.config.json'
+    vpath.write_text(json.dumps(vc, indent=2))
+    rc, v = vtool('validate', '--config', vpath, '--rehearsal')
+    check('[vault] validate accepts the filled rehearsal config', rc == 0 and v.get('decision') == 'config-valid', v)
+    rc, r = vtool('validate', '--config', vpath)
+    check('[vault] refused without --rehearsal', rc == 1 and 'disagree' in r.get('reason', ''), r)
+    rc, a = vtool('args', '--config', vpath, '--rehearsal')
+    check('[vault] args: ten constructor arguments, sorted signers and guardians', rc == 0
+          and len(a.get('constructorArgs', [])) == 10
+          and a['constructorArgs'][6] == '[' + ','.join(v['signers']) + ']', a)
+    dep = out(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', url, '--private-key', dkey,
+              vc['vault']['contract'], '--constructor-args', *a['constructorArgs'])
+    vault = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
+    rc, r = vtool('verify', '--config', vpath, '--rehearsal', '--rpc', url, '--address', vault)
+    check('[vault] verify refuses before the deployment is finalized', rc == 1 and 'no code' in r.get('reason', ''), r)
+    sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', url)
+    rc, ver = vtool('verify', '--config', vpath, '--rehearsal', '--rpc', url, '--address', vault)
+    route = out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', url).lower()
+    code_hash = out(CAST, 'keccak', out(CAST, 'code', vault, '--rpc-url', url)).lower()
+    be = ver.get('busdcEthereum', {})
+    check('[vault] verify at finalized: immutables, signers, guardians, committee mode', rc == 0
+          and ver.get('decision') == 'verified' and ver['state'].get('depositsEnabled') == 'false', ver)
+    check('[vault] verify output = the chain (route, code hash, cap, sorted guard) for the L2 token config',
+          be.get('route') == route and be.get('vaultCodeHash') == code_hash and be.get('vault') == vault
+          and be.get('vaultCap') == vc['vault']['cap'] and be['vaultGuard']['guardians'] == v['guardians'], be)
+    bad = json.loads(json.dumps(vc))
+    bad['vault']['policy']['windowLimit'] += 1
+    bpath = work / 'vault.bad.json'
+    bpath.write_text(json.dumps(bad))
+    rc, r = vtool('verify', '--config', bpath, '--rehearsal', '--rpc', url, '--address', vault)
+    check('[vault] a config that differs from the deployment is refused', rc == 1 and 'windowLimit' in r.get('reason', ''), r)
+    tc = json.loads(json.dumps(token_cfg))
+    tc['ethereum'] = be
+    tpath2 = work / 'busdc.cross.json'
+    tpath2.write_text(json.dumps(tc))
+    rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+    check('[vault] cross-check with the L2 token config passes', rc == 0, r)
+    tc['ethereum']['vaultGuard']['pauseDuration'] = 3600
+    tpath2.write_text(json.dumps(tc))
+    rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+    check('[vault] cross-check refuses a different vault guard in the L2 token config', rc == 1
+          and 'vaultGuard' in r.get('reason', ''), r)
+
+    def mainnet_refused(name, mutate, needle):
+        c = json.loads(json.dumps(vc))
+        c['ethereum'] = {'chainId': 1, 'rehearsal': False}
+        c['vault']['token'] = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+        mutate(c)
+        mp = work / 'vault.policy.json'
+        mp.write_text(json.dumps(c))
+        rc, r = vtool('validate', '--config', mp)
+        check(f'[vault policy] {name}', rc == 1 and needle in r.get('reason', ''), r)
+    rc_ok = json.loads(json.dumps(vc))
+    rc_ok['ethereum'] = {'chainId': 1, 'rehearsal': False}
+    rc_ok['vault']['token'] = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+    mp = work / 'vault.mainnet.json'
+    mp.write_text(json.dumps(rc_ok))
+    rc, r = vtool('validate', '--config', mp)
+    check('[vault policy] a filled mainnet config (chain 1, canonical USDC, 5-of-7) validates', rc == 0, r)
+    mainnet_refused('another token than canonical USDC refused', lambda c: c['vault'].update(token=mock), 'canonical USDC')
+    mainnet_refused('4-of-7 refused', lambda c: c['vault']['signers'].update(threshold=4), '5-of-7')
+    mainnet_refused('switch delay below 7 days refused', lambda c: c['vault']['policy'].update(switchDelay=3 * 86400),
+                    'switchDelay')
+    mainnet_refused('switchThreshold below the release threshold refused',
+                    lambda c: c['vault']['policy'].update(switchThreshold=4), 'switchThreshold')
+    mainnet_refused('a guardian run by a signer operator refused',
+                    lambda c: c['vault']['guard']['guardians'][0].update(operator='vault-op-0'), 'independent')
+    mainnet_refused('a guardian that is a signer refused',
+                    lambda c: c['vault']['guard']['guardians'][0].update(address=c['vault']['signers']['set'][0]['address']),
+                    'release signer')
+    mainnet_refused('windowLimit above the cap refused',
+                    lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] + 1), 'windowLimit')
+    mainnet_refused('no guardian refused', lambda c: c['vault']['guard'].update(guardians=[]), '1..7')
 
 
 def start_anvil(chain_id):
@@ -259,6 +368,9 @@ def main():
         rc, r = tool('validate', '--config', path)
         check('[31337] refused without the rehearsal flags', rc == 1 and 'development network' in r.get('reason', ''), r)
         full_flow('wgnb-700771-rehearsal', dev, dwallet, dev_url, work, ['--rehearsal'])
+
+        # ── 3. the Ethereum vault tool on the rehearsal chain 31337 ──
+        vault_rehearsal(local_url, work, cfg)
     finally:
         for p in procs:
             p.kill()

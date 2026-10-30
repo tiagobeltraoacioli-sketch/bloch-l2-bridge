@@ -1,0 +1,16 @@
+{
+  "_about": "Reserves monitor (read-only, no key). Any host; it may share the guardian's nodes.",
+  "cast": "/opt/foundry/bin/cast",
+  "bridges": [
+    {
+      "kind": "stable",
+      "name": "busdc-mainnet",
+      "l2_rpc": "http://127.0.0.1:18955",
+      "l2_genesis_hash": "0x632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468",
+      "token": "TBD-owner",
+      "eth_rpc": "http://127.0.0.1:8545",
+      "vault": "TBD-owner",
+      "tolerance": 0
+    }
+  ]
+}
