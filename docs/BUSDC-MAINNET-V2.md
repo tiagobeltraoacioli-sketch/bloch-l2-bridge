@@ -227,7 +227,7 @@ in `docs/AUDIT-SCOPE.md` section 7.
 | Vault address, route, code hash, cap | L2 config `ethereum.*` (from 4.4) |
 | L2 gas price cap | L2 config `tx.maxGasPriceWei` |
 | cap, windowLimit, switchThreshold (proposed 6), switchDelay (proposed 14 d) | vault config (proposed values filled) |
-| Shared storage for partial signatures | `shared_dir` (signer, relayer) |
+| Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | Light-client prover and shadow verifier (after the LC port) | sombra `prover_dir`, `shadow_verifier` |
 
@@ -235,7 +235,7 @@ in `docs/AUDIT-SCOPE.md` section 7.
 
 1. switchThreshold 6-of-7 and switchDelay 14 days (contract minimum 7 days), windowLimit 10,000 USDC/24 h.
 2. Whether the Ethereum release keys must differ from the same operators' L2 mint keys (recommended).
-3. Transport for `shared_dir` (the content is untrusted; any store works).
+3. Transport for partial signatures: per-operator read-only feeds, built. See `docs/SIG-TRANSPORT.md`, which also states the one setting to decide.
 4. Where the guardians' independent L2 RPC comes from (the follower-rpc package installs on the settler
    host; a non-settler host needs a replica).
 5. `release_before_final` soft (default) or hard on the fast-path guardian.

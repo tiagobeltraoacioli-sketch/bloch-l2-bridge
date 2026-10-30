@@ -248,9 +248,9 @@ def main():
         check('mint: recipient credited on the real token', uint(l2, stable, 'balanceOf(address)(uint256)', alice) == 10 * U)
         check('the hostile feed was asked and contributed nothing that stuck',
               hits and all(bridge_feed.load(p).get('digest') for p in (shared(2) / 'mint' / dep).glob('*.json')))
-        rejected = [e for e in relay if e.get('kind') == 'feed-rejected']
-        check('the refusals are logged by peer', all(str(hostile_port) in e['peer'] for e in rejected) and rejected, relay)
         status = json.loads((shared(2).parent / 'status.json').read_text())
+        evil = status['peers'][f'http://127.0.0.1:{hostile_port}']
+        check('operator status counts the hostile peer', evil['rejected'] + evil['failures'] >= 1 and not evil['accepted'], status)
         check('operator status names the dead peer', status['peers'][f'http://127.0.0.1:{dead}']['failures'] >= 1, status)
 
         # ── operator 0 returns ──

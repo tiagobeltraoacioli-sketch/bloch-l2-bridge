@@ -1,0 +1,47 @@
+# bUSDC bridge: this operator's read-only feed of verified signatures. It holds no key, sees only the
+# publish directory and has no write path of any kind. The signer writes publish_dir; this only reads it.
+[Unit]
+Description=bUSDC bridge read-only signature feed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=true
+ExecStart=/usr/bin/python3 -I /opt/bloch-bridge/tools/signatario-stable/sigfeed.py serve --root /var/lib/bloch-busdc-feed/publish --bind 0.0.0.0 --port 8787
+Restart=always
+RestartSec=10
+TemporaryFileSystem=/var/lib:ro
+BindReadOnlyPaths=/var/lib/bloch-busdc-feed/publish
+InaccessiblePaths=-/etc/bloch-busdc-signer
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6
+LimitCORE=0
+MemoryMax=128M
+CPUQuota=50%
+TasksMax=128
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

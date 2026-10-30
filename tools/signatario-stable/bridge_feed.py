@@ -23,6 +23,7 @@ import sigfeed
 
 MAX_CERTS = 4
 MAX_ROUNDS_PER_BURN = 32
+MAX_OPEN_ITEMS = 512
 SECP_P = 2**256 - 2**32 - 977
 SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 SECP_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
@@ -323,7 +324,10 @@ class BridgeFeed:
 
     def sync(self, deposits, burns):
         """Pull what these open items still lack, then export. Items come from the caller's own chain view."""
-        self.used = sigfeed.tree_bytes(self.shared)
+        deposits, burns = deposits[:MAX_OPEN_ITEMS], burns[:MAX_OPEN_ITEMS]
+        # The quota covers open items, so finished history can never stall a later deposit.
+        self.used = sigfeed.tree_bytes(*[self.shared / 'mint' / d[2:] for d in deposits],
+                                       *[self.shared / 'release' / b[2:] for b in burns])
         self.full_logged = False
         self.prune(burns)
         paths = []

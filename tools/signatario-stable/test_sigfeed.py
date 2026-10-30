@@ -575,6 +575,19 @@ class Feed(Base):
         own.write_text(json.dumps(mint(1)))  # the signer's own write does not go through the quota
         self.assertTrue(own.exists())
 
+    def test_finished_history_does_not_count_against_the_quota(self):
+        f = self.feed([self.host({self.mint_path(0): mint(0)})], max_store_bytes=4000)
+        old = f.shared / 'mint' / ('ee' * 32)
+        old.mkdir(parents=True)
+        (old / 'x.json').write_bytes(b'x' * 100000)
+        f.sync([DEPOSIT], [])
+        self.assertEqual(self.mints(f), [ADDR[0]])
+
+    def test_sigfeed_is_the_pinned_file(self):
+        here = Path(sigfeed.__file__).resolve().parent
+        pinned = (here / 'sigfeed.sha256').read_text().split()[0]
+        self.assertEqual(hashlib.sha256((here / 'sigfeed.py').read_bytes()).hexdigest(), pinned)
+
     def test_low_disk_refuses_ingest(self):
         f = self.feed([self.host({self.mint_path(0): mint(0)})], min_free_bytes=2**62)
         f.sync([DEPOSIT], [])
