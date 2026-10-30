@@ -41,18 +41,26 @@ import time
 import urllib.request
 
 DIR = Path(os.environ.get('DIR', '/var/lib/bloch-l2-devnet4-stable'))
-BIN = '/home/ubuntu/.foundry/bin'
+# Private-network overrides (full-stack rehearsal, 2026-10-30): every path, port and chain id below can be
+# set from the environment; the defaults are the devnet4 values. NO_ROOT=1 runs as the invoking user.
+BIN = os.environ.get('FOUNDRY_BIN', '/home/ubuntu/.foundry/bin')
 CAST, FORGE, ANVIL = f'{BIN}/cast', f'{BIN}/forge', f'{BIN}/anvil'
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent.parent
-L2_RPC = 'http://127.0.0.1:18945'
-ETH_PORT = 18950
+L2_RPC = os.environ.get('L2_RPC', 'http://127.0.0.1:18945')
+ETH_PORT = int(os.environ.get('ETH_PORT', 18950))
 ETH_RPC = f'http://127.0.0.1:{ETH_PORT}'
-ETH_CHAIN, L2_CHAIN = 11155111, 700771
-DEV_KEY = Path('/var/lib/bloch-l2-devnet4-settler/ensaio/l2.key')
+ETH_CHAIN, L2_CHAIN = 11155111, int(os.environ.get('L2_CHAIN', 700771))
+DEV_KEY = Path(os.environ.get('DEV_KEY', '/var/lib/bloch-l2-devnet4-settler/ensaio/l2.key'))
 # the L2 account that deploys bUSDC, receives mints, burns and relays mints
 L2_KEY = Path(os.environ.get('L2_KEY', str(DEV_KEY)))
-L1_RPC = 'http://127.0.0.1:18941'
+L1_RPC = os.environ.get('L1_RPC', 'http://127.0.0.1:18941')
+L2_FOLLOWER = os.environ.get('L2_FOLLOWER', '/var/lib/bloch-l2-devnet4-follower')
+L2_GENESIS = os.environ.get('L2_GENESIS', '/etc/bloch-l2-devnet4/public/genesis.blg')
+L2_PRODUCE = os.environ.get('L2_PRODUCE', '/opt/bloch/l2-devnet4-settler/bloch-l2-produce-dev')
+L2_SETTLED_RPC = os.environ.get('L2_SETTLED_RPC', '/opt/bloch/l2-devnet4-finality/bloch-l2-settled-rpc')
+# e.g. '--rules mainnet --domain 1c3f.. --genesis-time 1786656679' for chain 700770
+L2_NETWORK_ARGS = os.environ.get('L2_NETWORK_ARGS', '').split()
 PAUSE_DURATION = int(os.environ.get('PAUSE_DURATION', 3 * 86400))
 PAUSE_COOLDOWN = int(os.environ.get('PAUSE_COOLDOWN', 86400))
 # anvil account 3: recipient of the attack drill's unbacked release
@@ -143,7 +151,7 @@ def anvil_up():
 
 
 def setup():
-    if os.geteuid():
+    if os.geteuid() and os.environ.get('NO_ROOT') != '1':
         raise SystemExit('run as root')
     DIR.mkdir(mode=0o700, exist_ok=True)
     (DIR / 'keys').mkdir(mode=0o700, exist_ok=True)
@@ -179,7 +187,7 @@ def setup():
             raise SystemExit('anvil did not start')
 
     st = json.loads((DIR / 'state.json').read_text()) if (DIR / 'state.json').exists() else {}
-    sh(FORGE, 'build', '--root', PROJECT, user='ubuntu')
+    sh(FORGE, 'build', '--root', PROJECT, user=None if os.environ.get('NO_ROOT') == '1' else 'ubuntu')
 
     def bytecode(target):
         path, name = target.split(':')
@@ -199,7 +207,7 @@ def setup():
         k = lambda t: sh(CAST, 'keccak', t)
         args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,(uint64,uint64,uint8,'
                   'uint64),(address[],uint64,uint64))',
-                  k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
+                  k('ethereum-sepolia'), k(f'bloch-l2-{L2_CHAIN}'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
                   '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})',
                   f"([{vault_guardians}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
@@ -229,7 +237,7 @@ def setup():
         dev = L2_KEY.read_text().strip()
         args = sh(CAST, 'abi-encode',
                   'c(string,string,uint256,address,bytes32,address[],uint256,(uint256,uint256,uint256,uint256,uint256,'
-                  'uint256),(address[],uint256,uint256))', 'Bloch Bridged USDC (devnet4)', 'bUSDC', ETH_CHAIN,
+                  'uint256),(address[],uint256,uint256))', os.environ.get('BUSDC_NAME', 'Bloch Bridged USDC (devnet4)'), 'bUSDC', ETH_CHAIN,
                   st['vault'], st['route'], '[' + ','.join(l2_signers) + ']', 2,
                   f'({SUPPLY_CAP},{BUCKET},{BUCKET // 86400},{LARGE},{DELAY},{MIN_BURN})',
                   f"([{keys['guardiao-l2']}],259200,259200)")
@@ -268,9 +276,8 @@ def setup():
                'source_route': st['route'], 'threshold': 2, 'vault_threshold': 2,
                'keystore': str(DIR / 'keys' / f'l2{i}'), 'password_file': str(pw), 'eth_signer': keys[f'eth{i}'],
                'cast': CAST, 'db': str(DIR / f'db{i}.json'), 'l2_source': 'rebuild', 'work_dir': str(DIR / 'work'),
-               'follower': '/var/lib/bloch-l2-devnet4-follower', 'genesis': '/etc/bloch-l2-devnet4/public/genesis.blg',
-               'produce': '/opt/bloch/l2-devnet4-settler/bloch-l2-produce-dev',
-               'settled_rpc': '/opt/bloch/l2-devnet4-finality/bloch-l2-settled-rpc',
+               'follower': L2_FOLLOWER, 'genesis': L2_GENESIS, 'produce': L2_PRODUCE, 'settled_rpc': L2_SETTLED_RPC,
+               'network_args': L2_NETWORK_ARGS,
                'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
                'eth_half_release': half + ['release', '--intent', '{intent}'],
                'shared_dir': str(DIR / 'shared'), 'eth_rpc': ETH_RPC, 'eth_chain_id': ETH_CHAIN,
