@@ -132,7 +132,8 @@ def main():
 
         pq_alice = '0x' + '00' * 12 + alice[2:]
         dep_ok = deposit(vault, 10 * 10**6, pq_alice)
-        dep_high = deposit(vault, 10**6, '0x01' + '00' * 11 + alice[2:])
+        high = sh(CAST, 'send', vault, 'deposit(uint64,bytes32)', str(10**6), '0x01' + '00' * 11 + alice[2:],
+                  '--rpc-url', eth, '--private-key', ALICE_KEY, '--json', ok=False)
         dep_other = deposit(vault2, 10**6, pq_alice)
         dep_more = deposit(vault, 5 * 10**6, pq_alice)
 
@@ -205,8 +206,7 @@ def main():
 
         rc, r = signer(cfgs[1], 'mint', '--deposit-id', dep_ok, '--out', work / 'x.json')
         check('mint: refuses a deposit minted twice', rc == 1 and 'already minted' in r.get('reason', ''), r)
-        rc, r = signer(cfgs[1], 'mint', '--deposit-id', dep_high, '--out', work / 'x.json')
-        check('mint: refuses high bits in pqRecipientHash', rc == 1 and 'high 12 bytes' in r.get('reason', ''), r)
+        check('deposit: the vault refuses high bits in pqRecipientHash (no mint could follow)', high.returncode != 0)
         dep_argv, _ = half(vault2, str(work / 's2'))
         rc, r = signer(variant('vault2', 1, eth_half_deposit=dep_argv), 'mint', '--deposit-id', dep_other,
                        '--out', work / 'x.json')
