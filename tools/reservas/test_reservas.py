@@ -145,6 +145,12 @@ def main():
         code, lines = run(stable)
         check('stable deposit not yet minted: surplus, soft, exit 3', code == 3 and rows(lines)[0]['difference'] == 2 * 10**6
               and alerts(lines, 'soft'), lines)
+        g0 = json.loads(out(CAST, 'block', '0', '--json', '--rpc-url', url))['hash']
+        code, lines = run(dict(stable, l2_genesis_hash=g0))
+        check('l2_genesis_hash pin matches: still reported', code == 3 and rows(lines), lines)
+        code, lines = run(dict(stable, l2_genesis_hash='0x' + '63' * 32))
+        check('l2_genesis_hash pin differs: unverifiable (exit 1), no deficit', code == 1 and not rows(lines)
+              and not alerts(lines, 'hard') and alerts(lines, 'soft')[0]['id'] == 'unverifiable', lines)
         code, lines = run(dict(stable, tolerance=2 * 10**6))
         check('stable surplus within tolerance: ok', code == 0 and rows(lines)[0]['status'] == 'ok', lines)
         send(DEPLOYER, token, 'set(uint256,uint256)', str(10 * 10**6), str(2 * 10**6))

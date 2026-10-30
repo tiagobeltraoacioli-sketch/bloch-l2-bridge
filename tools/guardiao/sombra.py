@@ -23,9 +23,18 @@ does nothing.
 
 Soft alerts (never pause): the prover's status file is older than `prover_stale_s`, read errors.
 
+Light-client build range (`lc_max_epoch`, optional, needs `l1_rpc`): the deployed step/release programs
+judge L1 finality with the rules they were built for. The L1 hard forks change those rules (HF1 at epoch
+7180: finality is 2/3 of the frozen finality set, so the roster must come from that set; HF2 at 7270:
+votes in the bound signature form). A program built before a fork cannot prove a burn finalized after it,
+so a release first seen at an L1 finalized epoch >= `lc_max_epoch` that stays unproven is a soft
+`lc-out-of-range` alert, never a pause. Set it to the first fork epoch the deployed programs do not
+implement (7180 for the pre-HF1 programs) and raise it after the light-client port and re-anchor.
+
 CONFIG (JSON): eth_rpc, eth_chain_id, vault, vault_from_block, prover_dir (lc_prover state_dir: state.json,
 status.json), shadow_verifier (SP1ReleaseVerifier address; omit only in tests that trust the prover),
-l1_rpc (needed when grace_l1_epochs > 0), grace_s (7200), grace_l1_epochs (0), prover_stale_s (3600: above one proof job, during which the prover writes no status),
+l1_rpc (needed when grace_l1_epochs > 0 or lc_max_epoch is set), grace_s (7200), grace_l1_epochs (0),
+lc_max_epoch (none), prover_stale_s (3600: above one proof job, during which the prover writes no status),
 keystore, password_file, cast, state, log_chunk (5000).
 Development tool; UNAUDITED.
 """
@@ -55,6 +64,9 @@ class Sombra:
         self.grace_s = int(c.get('grace_s', 7200))
         self.grace_epochs = int(c.get('grace_l1_epochs', 0))
         self.stale_s = int(c.get('prover_stale_s', 3600))
+        self.lc_max_epoch = c.get('lc_max_epoch')
+        if self.lc_max_epoch is not None and not c.get('l1_rpc'):
+            raise SystemExit('lc_max_epoch needs l1_rpc')
         self.state_file = Path(c['state'])
         self.state = json.loads(self.state_file.read_text()) if self.state_file.exists() else {}
         self.state.setdefault('releases', {})
@@ -177,7 +189,7 @@ class Sombra:
             raise Unverifiable(f'{me} is not a guardian of the vault')
         self.releases(number)
         proofs, age = self.proofs()
-        epoch = self.l1_epoch() if self.grace_epochs else None
+        epoch = self.l1_epoch() if self.grace_epochs or self.lc_max_epoch is not None else None
         findings = []
         if age is None or age > self.stale_s:
             findings.append(('soft', 'prover-stale', {'status_age_s': None if age is None else int(age)}))
@@ -199,7 +211,13 @@ class Sombra:
                     self.log(kind='alert', severity='hard', id=rid, reason=f'proof rejected: {how}')
             elapsed = now - rel['time']
             epochs = (epoch - rel['first_epoch']) if epoch is not None else None
-            if elapsed >= self.grace_s and (not self.grace_epochs or epochs >= self.grace_epochs):
+            out_of_range = self.lc_max_epoch is not None and rel.get('first_epoch', 0) >= int(self.lc_max_epoch)
+            if out_of_range and elapsed >= self.grace_s:
+                findings.append(('soft', f'lc-out-of-range:{rid}', {
+                    'reason': 'released after the last L1 epoch the deployed light-client programs can prove',
+                    'tx': rel['tx'], 'first_epoch': rel.get('first_epoch'), 'lc_max_epoch': self.lc_max_epoch,
+                    'amount': rel['amount'], 'burn': rel['burn']}))
+            elif elapsed >= self.grace_s and (not self.grace_epochs or epochs >= self.grace_epochs):
                 findings.append(('hard', rid, {'reason': 'released without proof', 'tx': rel['tx'],
                                                'age_s': elapsed, 'l1_epochs': epochs, 'amount': rel['amount'],
                                                'burn': rel['burn'], 'prover_error': (proof or {}).get('error')}))

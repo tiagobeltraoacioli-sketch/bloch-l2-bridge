@@ -28,6 +28,14 @@ tools/signatario-gnb):
   3. the burn receipt is read from that private RPC, in a block <= finalized whose hash equals the
      rebuilt one; the code pin and the source fields are checked at finalized; the single Burned log is
      decoded and its burnId recomputed;
+  3b. with `l2_pins` (the v2 L2 build; "mainnet-v2" for chain 700770, l2_finality.py): the follower,
+     produce and settled-RPC binaries are the pinned v2 build (SHA-256); the follower status is the v2
+     schema for the pinned network, chain and L2 genesis; the rebuild runs with the pinned network rules
+     and timestamp rule, yields the pinned L2 genesis and reproduces every finalized settlement; the burn
+     block is covered by a finalized settlement whose native block lies in the FFG-finalized prefix; and
+     the L1 HF1 claim-finality rule holds: from HF1_CLAIM_FINALITY_EPOCH on, nothing is signed until a
+     checkpoint of epoch >= the gate is finalized (own CHECKPOINT-ROOTS exist only from the gate), and
+     the optional `l1_rpc_urls` must not report a finalized checkpoint that is not their own chain's;
   4. the vault Release {route, nonce = burnNonce, recipient = ethRecipient, amount, nativeBurn = burnId}
      and the L2 part of the ReleaseContext (nativeFinalizedNumber/Hash = the finalized L2 block holding
      the burn, the same for every signer) go to the Ethereum half (`eth_half_release`), which adds the
@@ -53,6 +61,9 @@ import sys
 import tempfile
 import time
 import urllib.request
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import l2_finality  # noqa: E402
 
 MAX_STATUS_AGE = 600  # seconds, as atestador.py
 MINT_TYPEHASH_STR = ('Mint(uint256 sourceChainId,address sourceVault,bytes32 sourceRoute,bytes32 depositId,'
@@ -127,6 +138,10 @@ class Ctx:
         self.source_route = c['source_route'].lower()
         self.db_path = Path(c['db'])
         self.db = json.loads(self.db_path.read_text()) if self.db_path.exists() else {'mints': {}, 'releases': {}}
+        try:
+            self.pins = l2_finality.pins_from_config(c)
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
 
     def save_db(self):
         tmp = self.db_path.with_suffix('.tmp')
@@ -389,22 +404,42 @@ def free_port():
 def own_l2(ctx, work):
     """Rebuild the L2 from L1 data and serve it on a private port (as tools/signatario-gnb).
     Returns (url, process, status, rebuilt)."""
-    c = ctx.cfg
+    c, pins = ctx.cfg, ctx.pins
     follower = Path(c['follower'])
-    status = json.loads((follower / 'status.json').read_text())
-    network = hashlib.sha3_256(Path(c['genesis']).read_bytes()).hexdigest()
-    if status.get('network') != network:
-        refuse('the follower verifies another network', follower=status.get('network'), genesis=network)
-    age = time.time() - status['written_at_unix']
-    if age > MAX_STATUS_AGE:
-        refuse(f'the follower status is {int(age)} s old (stalled follower)')
+    if pins is not None:
+        try:
+            l2_finality.check_binaries({'follower': c.get('follower_bin'), 'produce': c['produce'],
+                                        'settled_rpc': c['settled_rpc']}, pins)
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
+    try:
+        status = json.loads((follower / 'status.json').read_text())
+    except (OSError, ValueError) as e:
+        refuse('the follower status is unreadable', error=str(e))
+    if pins is not None:
+        network = l2_finality.strip0x(pins['network_pin'])
+        try:
+            l2_finality.check_status(status, pins, time.time(), c.get('max_status_age', MAX_STATUS_AGE))
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
+        rule = ['--timestamp-rule', pins['timestamp_rule']]
+        net_args = [str(a) for a in pins['l2_network_args']]
+    else:
+        network = l2_finality.legacy_network(c['genesis'])
+        if status.get('network') != network:
+            refuse('the follower verifies another network', follower=status.get('network'), genesis=network)
+        age = time.time() - status['written_at_unix']
+        if age > MAX_STATUS_AGE:
+            refuse(f'the follower status is {int(age)} s old (stalled follower)')
+        # the L2 timestamp rule switch (as atestador.py): devnet4 /etc/bloch-l2-devnet4/public/timestamp-rule.txt
+        rule_file = Path(c.get('timestamp_rule_file', Path(c['genesis']).parent / 'timestamp-rule.txt'))
+        rule = ['--timestamp-rule', rule_file.read_text().strip()] if rule_file.exists() else []
+        net_args = []
     target = work / 'l2'
-    # the L2 timestamp rule switch (as atestador.py): devnet4 /etc/bloch-l2-devnet4/public/timestamp-rule.txt
-    rule_file = Path(c.get('timestamp_rule_file', Path(c['genesis']).parent / 'timestamp-rule.txt'))
-    rule = ['--timestamp-rule', rule_file.read_text().strip()] if rule_file.exists() else []
     for _ in range(3):  # the follower may be rewriting its index
         done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),
-                               '--l1-follower', str(follower / 'native'), *rule], capture_output=True, text=True)
+                               '--l1-follower', str(follower / 'native'), *rule, *net_args],
+                              capture_output=True, text=True)
         if done.returncode == 0:
             break
         shutil.rmtree(target, ignore_errors=True)
@@ -412,24 +447,46 @@ def own_l2(ctx, work):
     else:
         refuse('reconstruct from L1 data failed', stderr=done.stderr.strip()[-1500:])
     rebuilt = json.loads(done.stdout)
+    if pins is not None:
+        try:
+            l2_finality.check_rebuild(rebuilt, status, pins)
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
     status_copy = work / 'status.json'  # a frozen copy: the same finality view for every query
     status_copy.write_text(json.dumps(status))
     port = free_port()
     proc = subprocess.Popen([c['settled_rpc'], '--data-dir', str(target), '--view-dir', str(work / 'view'),
-                             '--finality-status', str(status_copy), '--network', network, '--port', str(port)],
+                             '--finality-status', str(status_copy), '--network', network, '--port', str(port),
+                             *net_args],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     url = f'http://127.0.0.1:{port}'
-    for _ in range(60):
-        if proc.poll() is not None:
-            refuse('the private settled RPC exited', stderr=proc.stderr.read()[-1500:])
-        try:
-            with socket.create_connection(('127.0.0.1', port), timeout=1):
-                break
-        except OSError:
-            time.sleep(0.5)
-    else:
+    try:
+        for _ in range(120):
+            if proc.poll() is not None:
+                refuse('the private settled RPC exited', stderr=proc.stderr.read()[-1500:])
+            try:
+                with socket.create_connection(('127.0.0.1', port), timeout=1):
+                    break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            proc.kill()
+            refuse('the private settled RPC did not start')
+        if pins is not None:
+            # the settled RPC reloads the status on its own poll: wait until it serves the finalized level
+            want = (status.get('finalized_settlements') or [{'l2_number': 0}])[-1]['l2_number']
+            for _ in range(120):
+                final = ctx.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
+                if final is not None and int(final['number'], 16) >= want:
+                    break
+                time.sleep(0.5)
+            else:
+                proc.kill()
+                refuse('the private settled RPC does not serve the follower finalized level', want=want)
+    except BaseException:
         proc.kill()
-        refuse('the private settled RPC did not start')
+        proc.wait()
+        raise
     return url, proc, status, rebuilt
 
 
@@ -441,6 +498,8 @@ def finalized_burn(ctx, url, burn_tx, status):
     fin_number, fin_hash = int(final['number'], 16), final['hash'].lower()
     if status is not None:
         settled = {s['l2_number']: s['l2_hash'] for s in status['finalized_settlements']}
+        if ctx.pins is not None:
+            settled[0] = l2_finality.strip0x(ctx.pins['l2_genesis_hash'])  # final once l2_genesis.finalized
         if settled.get(fin_number) != fin_hash.removeprefix('0x'):
             refuse('the rebuilt finalized block differs from the follower', number=fin_number,
                    rebuilt=fin_hash, follower=settled.get(fin_number))
@@ -456,6 +515,13 @@ def finalized_burn(ctx, url, burn_tx, status):
     block = ctx.rpc(url, 'eth_getBlockByNumber', [hex(number), False])
     if block['hash'].lower() != receipt['blockHash'].lower():
         refuse('the receipt block hash differs from the block at its height', number=number)
+    finality = None
+    if status is not None and ctx.pins is not None:
+        try:
+            finality = l2_finality.require_settled_final(status, ctx.pins, time.time(), number, block['hash'])
+            finality['l1_rpc'] = l2_finality.l1_cross_check(ctx.cfg.get('l1_rpc_urls'), ctx.pins, time.time())
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
     ctx.check_contract(url, block=hex(fin_number))
 
     topic0 = ctx.keccak_text(BURNED_TOPIC_STR)
@@ -484,6 +550,8 @@ def finalized_burn(ctx, url, burn_tx, status):
     l2 = {'chain_id': ctx.l2_chain_id, 'token': ctx.token, 'burn_tx': burn_tx, 'burn_block': number,
           'burn_block_hash': block['hash'].lower(), 'log_index': int(log['logIndex'], 16), 'from': sender,
           'finalized_number': fin_number, 'finalized_hash': fin_hash}
+    if finality is not None:
+        l2['finality'] = finality
     return release, l2
 
 

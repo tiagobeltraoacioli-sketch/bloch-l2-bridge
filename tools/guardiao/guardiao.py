@@ -16,6 +16,16 @@ Invariants (README.md has the exact formulas):
                            a queued large mint without provenance is paused before its readyAt
   RELEASE MATCH (hard)     every release on the source chain matches an L2 burn (same id, amount, recipient)
   RELEASE LIVENESS (soft)  a finalized burn not released after `release_sla_s` -> alert only
+  RELEASE FINALITY         (stable) a vault release of a burn whose L2 block is not yet finalized on this
+                           guardian's own L2 RPC after `provenance_grace_s` -> alert (`release_before_final`:
+                           "soft", the default, or "hard" to pause). Signers may certify only burns settled
+                           and finalized under the L1 HF1 claim-finality rule; the v2 settled RPC serves
+                           `finalized` only from its follower's native FFG replay.
+
+The v2 L2 build (bloch-l2-settled-rpc 4fc9fa1e) fails closed: until its follower status verifies it
+serves `finalized` = null. The guardian then keeps checking RELEASE MATCH, RESERVES and MINT PROVENANCE at
+`latest` and skips only the finality-based checks. Optional `l2_genesis_hash` pins the L2 (block 0 hash;
+mainnet 632e45ae...): another chain is unverifiable, never a reason to pause.
 
 Stablecoin with `vault_pause`: a due RELEASE MATCH or RESERVES violation also calls `guardianPause()` on the
 Ethereum vault with the guardian's own Ethereum key (committee mode only; stops releases and deposits).
@@ -92,6 +102,9 @@ class Guardian:
         self.provenance_grace = int(c.get('provenance_grace_s', 1800))
         self.pause_margin = int(c.get('pause_margin_s', 3600))
         self.release_sla = int(c.get('release_sla_s', 6 * 3600))
+        self.release_before_final = c.get('release_before_final', 'soft')
+        if self.release_before_final not in ('soft', 'hard'):
+            raise SystemExit('release_before_final must be "soft" or "hard"')
         self.chunk = int(c.get('log_chunk', 5000))
         self._topics = {}
         self._calldata = {}
@@ -150,6 +163,11 @@ class Guardian:
         if b is None:
             raise Unverifiable(f'no {tag} block on {url}')
         return int(b['number'], 16), int(b['timestamp'], 16), b['hash']
+
+    def finalized_l2(self):
+        """The L2 `finalized` number, or None while the settled RPC has no verified finality (v2 fails closed)."""
+        b = self.rpc(self.l2, 'eth_getBlockByNumber', ['finalized', False])
+        return None if b is None else int(b['number'], 16)
 
     def logs(self, url, address, topic0, start, end):
         out = []
@@ -356,7 +374,7 @@ class Guardian:
         return 'ok'
 
     # ── Ethereum source (stablecoin) ─────────────────────────────────────────
-    def eth_source(self, burns):
+    def eth_source(self, burns, fin=None):
         eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
         e = self.block(eth, 'finalized')[0]
         locked = uint(self.call(eth, vault, 'totalLocked()', block=e)[0])
@@ -387,6 +405,11 @@ class Guardian:
                                                                          b['amount']):
                 findings.append(('hard', f'release-mismatch:{r["tx"]}', 0,
                                  {'reason': 'vault release differs from its L2 burn', 'release': r, 'burn': b}))
+            elif fin is None or b['block'] > fin:
+                findings.append((self.release_before_final, f'release-before-final:{r["tx"]}',
+                                 self.provenance_grace,
+                                 {'reason': 'vault release of a burn not finalized on this guardian\'s L2',
+                                  'release': r, 'burn_block': b['block'], 'l2_finalized': fin}))
         self.deposits = deposits
         return min(locked, balance), released, findings
 
@@ -412,6 +435,11 @@ class Guardian:
         chain = int(self.rpc(self.l2, 'eth_chainId', []), 16)
         if chain != int(self.cfg['l2_chain_id']):
             raise Unverifiable(f'L2 chain id {chain} != {self.cfg["l2_chain_id"]}')
+        pin = self.cfg.get('l2_genesis_hash')
+        if pin:
+            g = self.block(self.l2, 0)[2].lower().removeprefix('0x')
+            if g != str(pin).lower().removeprefix('0x'):
+                raise Unverifiable(f'L2 genesis {g} != pinned {pin}')
         if not uint(self.call(self.l2, self.token, 'isGuardian(address)', self.me())[0]):
             raise Unverifiable(f'{self.me()} is not a guardian of {self.token}')
         if self.kind == 'wgnb' and 'gnb_chain_id' in self.cfg:
@@ -432,7 +460,7 @@ class Guardian:
     def round(self):
         self.setup()
         b, now, _ = self.block(self.l2, 'latest')
-        fin = self.block(self.l2, 'finalized')[0]
+        fin = self.finalized_l2()
         findings = []
         # The L2 at the pinned height b first, then the source (backing before release status). Reads
         # are not atomic across chains; every race between them either makes a check more lenient or
@@ -442,7 +470,7 @@ class Guardian:
             backing, released, rel_findings = self.gnb_source(burns)
             provenance = self.gnb_provenance
         else:
-            backing, released, rel_findings = self.eth_source(burns)
+            backing, released, rel_findings = self.eth_source(burns, fin)
             provenance = self.eth_provenance
         findings += rel_findings
 
@@ -477,7 +505,7 @@ class Guardian:
             findings.append(('hard', f'mint:{m["key"]}', grace, detail))
 
         for x in burns:
-            if x['burn_id'] in released or x['block'] > fin:
+            if x['burn_id'] in released or fin is None or x['block'] > fin:
                 continue
             age = now - self.burn_time(x)
             if age > self.release_sla:
@@ -507,7 +535,8 @@ class Guardian:
             del self.state['open'][fid]
         if due:
             # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
-            vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:'))]
+            vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:',
+                                                                             'release-before-final:'))]
             if self.vault_pause and vault_due:
                 self.pause_vault(vault_due)
             self.pause(now, due)

@@ -12,6 +12,7 @@ Scenarios: a proven committee release -> no pause; an unproven one -> pending, t
 not close it, then after the grace -> guardianPause (committee releases revert Paused), no second tx while
 paused, a 3-of-3 unpause -> cooldown skip, re-pause after the cooldown, a valid proof -> resolved and no
 pause after expiry; stale prover -> soft only; epoch grace holds the pause until L1 finalizes N epochs;
+release first seen at or after `lc_max_epoch` (programs built before an L1 fork) -> soft only;
 not a guardian -> unverifiable; after the light-client switch -> retired, no action.
 Needs Foundry (anvil, forge, cast) in ~/.foundry/bin.
 """
@@ -292,6 +293,19 @@ def main():
         code, lines, _ = run(cfg2)
         check('epoch grace: 3 L1 epochs -> pause', code == 2 and kinds(lines, 'pause')
               and view(eth, vault2, 'paused()(bool)') == 'true', lines)
+
+        # 7b. a release first seen at an L1 epoch the deployed light-client programs cannot prove: soft only
+        vault3 = deploy_vault('third-native-domain')
+        cfg3 = config('lc-range', vault3, l1_rpc=l1_url, lc_max_epoch=L1['epoch'])
+        committee_release(11, 5 * 10**6, v=vault3)
+        code, lines, _ = run(cfg3)
+        warp(eth, GRACE)
+        n3 = nonce_of()
+        code, lines, _ = run(cfg3)
+        soft = [l for l in lines if str(l.get('id', '')).startswith('lc-out-of-range:')]
+        check('lc_max_epoch: unproven release past the light-client build range -> soft lc-out-of-range, no pause',
+              code == 3 and soft and soft[0]['severity'] == 'soft' and nonce_of() == n3
+              and view(eth, vault3, 'paused()(bool)') == 'false', lines)
 
         # 8. a key that is not a guardian: unverifiable, no tx
         out_cfg = config('outsider', vault, keystore=str(work / 'outsider'))
