@@ -9,8 +9,8 @@ The merge changed no behaviour. The integration commit removed the byte-identica
 the SP1 verifier and added the vault's guardian policy to the bUSDC deploy config. Everything here is
 UNAUDITED.
 
-**Update 2026-10-31.** The signer's pins (`l2_finality.MAINNET_V2`) now hold the provisional v2.1 build: settled-rpc
-`1e76b99a`, produce-dev `fb0d5313`, follower `c18752fd` unchanged. They stay marked provisional until the final hashes are recorded.
+**Update 2026-10-31.** The signer's pins (`l2_finality.MAINNET_V2`) now hold the v2.1 build, unsigned: settled-rpc
+`e24ea5f1`, produce-dev `fb0d5313`, follower `c18752fd` unchanged. They stay marked provisional until the owner signs that release.
 
 **Update 2026-10-30, branch `codex/bridge-busdc-mainnet-v2-20261030`.** The off-chain components follow the
 L2 mainnet v2 build (bloch-l2-evm `1aad0a20` against native `78d4921c`: follower `c18752fd`, produce-dev
@@ -201,8 +201,10 @@ Cross-system:
 - **Cost of a certificate.** Each one rebuilds the L2 from L1: 41 s measured on the v2 binaries at 186,671 L1 blocks
   on a loaded host, growing with L1. `max_new_rounds` keeps a backlog from starving rounds; batching certificates
   over one rebuild is the real fix.
-- **A stale guardian L2 RPC pauses.** A reachable RPC that stopped advancing shows no burn for a real release, and
-  `release-unknown` pauses the vault after `provenance_grace_s`. That fails safe; it costs one pause.
+- **A stale guardian L2 RPC does not pause (open).** `guardiao.py` measures grace on the L2 head's timestamp, so when the head
+  stops, grace never expires: `release-unknown` and `reserves` never fall due, and a forged release raises no vault pause
+  while the view stays frozen. `release-mismatch` has zero grace and still fires. An earlier revision of this section said
+  the opposite. Reproduced with stubbed reads, not on a real settled RPC.
 - **Release bucket.** A release above what the bucket holds waits, so a release of the full `windowLimit` needs a full
   bucket. Small releases can delay it (10 USDC of `minBurn` every 86 s at mainnet values, gas paid by the relayer), and
   nothing orders exits. Large holders should split their burns.

@@ -67,7 +67,7 @@ window, and keeps a database that refuses to sign two different releases for one
 <project>` run the suites with it.
 
 **Provisional pin:** `l2_finality.MAINNET_V2` holds the provisional v2.1 settled-RPC and produce-dev hashes, marked by
-`SETTLED_RPC_PIN_PROVISIONAL`, until the final v2.1 hashes are recorded. Do not deploy signers while it is `True`.
+`SETTLED_RPC_PIN_PROVISIONAL`, until the owner signs the v2.1 release. Do not deploy signers while it is `True`.
 
 ## Config
 

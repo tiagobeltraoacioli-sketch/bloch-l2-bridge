@@ -293,7 +293,7 @@ become final within the SLA (L1 finality or L2 settlement stalled).
 Tooling: `vault_pontes.py validate` requires the cap to equal `supplyCap`, `windowLimit` to equal
 `bucketCapacity`, `l2MinBurn` to equal `minBurn` and `l2MinBurn <= minDeposit <= windowLimit`, and the whole cap to fit through the window within `switchDelay`.
 
-Pins: `l2_finality.MAINNET_V2` holds the **provisional** v2.1 release (build commit `18b9e1d`): settled-rpc
-`1e76b99a…1d38`, produce-dev `fb0d5313…0be9`, follower unchanged. `SETTLED_RPC_PIN_PROVISIONAL` stays `True`, and signers
-must not be deployed, until the final hashes are recorded. A signer on any other build refuses with
+Pins: `l2_finality.MAINNET_V2` holds the **provisional** v2.1 release (build commit `2782f5a`): settled-rpc
+`e24ea5f1…7f0e`, produce-dev `fb0d5313…0be9`, follower unchanged. `SETTLED_RPC_PIN_PROVISIONAL` stays `True`, and signers
+must not be deployed, until the owner signs that release. A signer on any other build refuses with
 "the <role> binary is not the pinned build".

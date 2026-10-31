@@ -80,7 +80,7 @@ def unit():
         return s
 
     check('unit: mainnet-v2 pins are the provisional v2.1 build and chain 700770',
-          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('1e76b99a')
+          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('e24ea5f1')
           and lf.MAINNET_V2['binaries']['follower'].startswith('c18752fd')
           and lf.MAINNET_V2['binaries']['produce'].startswith('fb0d5313')
           and lf.MAINNET_V2['l2_genesis_hash'].startswith('632e45ae') and lf.MAINNET_V2['hf1_claim_finality_epoch'] == 7180)
