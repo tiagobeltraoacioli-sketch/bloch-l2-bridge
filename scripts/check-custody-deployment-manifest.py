@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an inert Ethereum USDC/Bloch bUSDC custody plan offline."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Validate an inert Ethereum USDC/Bloch bUSDC custody plan offline."""
 import argparse
 import json
 import sys

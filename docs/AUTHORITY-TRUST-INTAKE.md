@@ -1,5 +1,9 @@
 # Independent bridge authority trust intake
 
+> **Legacy line, not the mainnet path.** This describes the earlier three-of-five custody and authority line for a Bloch L1
+> bUSDC asset. The bridge on the path to mainnet is the 5-of-7 committee vault: see
+> [the activation handoff](MAINNET-USDC-ACTIVATION-HANDOFF.md) and [BUSDC-MAINNET-V2](BUSDC-MAINNET-V2.md).
+
 `bridge_authority_trust_verifier` verifies a complete public authority package
 against one trust-anchor package whose canonical SHA-256 is compiled into the
 binary as `BLOCH_BRIDGE_AUTHORITY_TRUST_ANCHOR_SHA256`. A normal build has no

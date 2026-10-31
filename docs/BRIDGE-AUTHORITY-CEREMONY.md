@@ -1,5 +1,9 @@
 # Bridge authority ceremony preflight
 
+> **Legacy line, not the mainnet path.** This describes the earlier three-of-five custody and authority line for a Bloch L1
+> bUSDC asset. The bridge on the path to mainnet is the 5-of-7 committee vault: see
+> [the activation handoff](MAINNET-USDC-ACTIVATION-HANDOFF.md) and [BUSDC-MAINNET-V2](BUSDC-MAINNET-V2.md).
+
 `scripts/check-bridge-authority-ceremony.py` verifies the public bindings of a
 future bridge authority ceremony package. It has no key generation, key-load,
 signing, deployment, RPC, broadcast or activation capability.

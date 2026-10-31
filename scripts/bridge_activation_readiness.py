@@ -1,4 +1,4 @@
-"""Compose authenticated bridge prerequisites without changing bridge state.
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Compose authenticated bridge prerequisites without changing bridge state.
 
 The custody and settlement checkers intentionally emit non-authorizing
 reports.  This module binds those reports to an authority qualification and a

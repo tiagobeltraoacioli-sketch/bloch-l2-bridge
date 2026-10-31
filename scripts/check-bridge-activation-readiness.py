@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticate a complete bridge activation package without activating it."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Authenticate a complete bridge activation package without activating it."""
 import argparse
 import json
 from pathlib import Path

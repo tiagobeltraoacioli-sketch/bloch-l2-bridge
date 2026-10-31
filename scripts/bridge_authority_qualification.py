@@ -1,4 +1,4 @@
-"""Authenticate an independent review quorum for one authority ceremony.
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Authenticate an independent review quorum for one authority ceremony.
 
 The trust policy is a separate operator input.  This module verifies public
 Ed25519 signatures only; it cannot create keys, sign, deploy or authorize any

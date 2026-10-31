@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticate independent review of one exact bridge authority ceremony."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Authenticate independent review of one exact bridge authority ceremony."""
 import argparse
 import json
 import sys

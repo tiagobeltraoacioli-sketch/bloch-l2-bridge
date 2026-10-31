@@ -1,5 +1,9 @@
 # Custody deployment preflight
 
+> **Legacy line, not the mainnet path.** This describes the earlier three-of-five custody and authority line for a Bloch L1
+> bUSDC asset. The bridge on the path to mainnet is the 5-of-7 committee vault: see
+> [the activation handoff](MAINNET-USDC-ACTIVATION-HANDOFF.md) and [BUSDC-MAINNET-V2](BUSDC-MAINNET-V2.md).
+
 `scripts/check-custody-deployment-manifest.py` performs strict, offline
 configuration qualification for a future Ethereum USDC to Bloch mainnet bUSDC
 route. It cannot deploy contracts, load private keys, inspect balances, sign,
