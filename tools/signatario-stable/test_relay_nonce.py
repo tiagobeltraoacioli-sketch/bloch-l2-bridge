@@ -130,7 +130,8 @@ def main():
         tx = rpc(url, 'eth_getTransactionByHash', [fix])
         check('after resend_after_s the gap is filled at the chain nonce', int(tx['nonce'], 16) == n)
         check('the replacement pays at least 25% more than the record', int(tx['gasPrice'], 16) >= old_price * 125 // 100, (tx['gasPrice'], old_price))
-        rpc(url, 'evm_mine', [])
+        for _ in range(3):  # anvil promotes what waited behind the gap only after the block that fills it
+            rpc(url, 'evm_mine', [])
         check('the gap closes and what waited behind it lands', count() == n + 3 and rpc(url, 'eth_getTransactionReceipt', [third]) is not None, count())
 
         # A replaced transaction: same nonce again after a record reset must bump over a transaction still in the pool.
