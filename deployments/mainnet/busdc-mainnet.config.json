@@ -5,7 +5,7 @@
     "rationale": "docs/BRIDGES-MAINNET.md",
     "units": "1 USDC = 1e6 units (6 decimals)",
     "pilot": "checklist section 6: 10,000 USDC bucket refilled in 24 h, supply <= 100,000 USDC",
-    "l2Build": "L2 mainnet v2.1 build: bloch-l2-evm (build commit pending the rebuild) against native 78d4921c (follower c18752fd, produce-dev fb0d5313, settled-rpc 1e76b99a; release unsigned); network.genesisHash = the pinned L2 genesis 632e45ae",
+    "l2Build": "L2 mainnet v2.1 build: bloch-l2-evm (build commit `a39b04e`) against native 78d4921c (follower c18752fd, produce-dev fb0d5313, settled-rpc 18be911a; release unsigned); network.genesisHash = the pinned L2 genesis 632e45ae",
     "vault": "deploy the Ethereum vault first (busdc-vault-mainnet.config.json, tools/deploy-pontes/vault_pontes.py); its verify output fills ethereum.vault/route/vaultCodeHash/vaultCap/vaultGuard",
     "sequence": "docs/BUSDC-MAINNET-V2.md",
     "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator (the 7 signer addresses are set, operators are not); guardians.set[0..2].operator; ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 2 Ethereum guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)"

@@ -4,10 +4,10 @@ Used by signatario.py (release). Pure functions over the native follower's statu
 read-only helpers (binary pins, an optional L1 RPC cross-check). Guardians do not import this module on
 purpose (independent code); they apply the same rule from their own RPC.
 
-The v2.1 L2 build, unsigned, (bloch-l2-evm build commit pending the rebuild, native 78d4921c) pins:
+The v2.1 L2 build, unsigned, (bloch-l2-evm a39b04e, native 78d4921c) pins:
   follower     bloch-l2-native-follower  c18752fd...  writes status schema bloch.l2.native-follower-status.v2
   produce      bloch-l2-produce-dev      fb0d5313...  `reconstruct` rebuilds the L2 from the follower's L1 blocks
-  settled RPC  bloch-l2-settled-rpc      1e76b99a...  serves `finalized` only from a verified status
+  settled RPC  bloch-l2-settled-rpc      18be911a...  serves `finalized` only from a verified status
   chain 700770, native network f47d3e49..., L2 genesis 632e45ae...
 
 HF1 claim finality (native params HF1_CLAIM_FINALITY_EPOCH = 7180; transition/l2_claim.rs
@@ -37,14 +37,14 @@ SLOTS_PER_EPOCH = 32  # bloch-pos-committee params (mainnet: 30 s slots, 960 s e
 EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
 
-# PROVISIONAL: `binaries` below hold the v2.1 release of agents/PINS-V21.md (rebuild pending: settled_rpc expected at this hash, new SHA256SUMS, unsigned). Set the
+# PROVISIONAL: `binaries` below hold the v2.1 release of agents/PINS-V21.md (unsigned). Set the
 # flag to False once the owner has signed that release and its suites have passed. v2.1 changed two pins, not
-# one: settled_rpc (spool-dos and receipt/latest fixes) and produce (F2, the flag-day inbox height fix in `reconstruct`).
+# one: settled_rpc (spool-dos, receipt/latest, and finality closing on a lost follower status) and produce (F2, the flag-day inbox height fix in `reconstruct`).
 # A producer without F2 stops at the first deposit. Do not deploy signers while this is True.
 SETTLED_RPC_PIN_PROVISIONAL = True
 
 MAINNET_V2 = {
-    'name': 'bloch-l2-mainnet-v2.1-provisional (L2 rebuild pending / native 78d4921c)',
+    'name': 'bloch-l2-mainnet-v2.1-provisional (L2 a39b04e / native 78d4921c)',
     'l2_chain_id': 700770,
     'network_pin': 'f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966',
     'l2_genesis_hash': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
@@ -58,7 +58,7 @@ MAINNET_V2 = {
         'follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
         # PROVISIONAL, see SETTLED_RPC_PIN_PROVISIONAL.
         'produce': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
-        'settled_rpc': '1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38',
+        'settled_rpc': '18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f',
     },
 }
 PIN_KEYS = ('l2_chain_id', 'network_pin', 'l2_genesis_hash', 'l1_genesis_time', 'hf1_claim_finality_epoch',
