@@ -41,7 +41,7 @@ A bridge reader stores a body only if all of these hold:
 
 Fields outside the signature are dropped before storing, so a relay cannot attach anything to a signature.
 Verified items live in the operator's private `shared_dir` and are re-exported, so each feed also relays
-the others. A server can withhold, delay or lie about nothing it can make stick, and it cannot evict what a
+the others. A server can withhold or delay, but it cannot forge, and it cannot evict what a
 reader holds. Signing checks are unchanged: `signatario.py` still verifies every deposit and burn itself.
 
 Attestor partials need post-quantum verification, which only the native binary does, and only over a full
