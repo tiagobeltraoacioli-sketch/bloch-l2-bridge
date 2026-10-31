@@ -34,7 +34,16 @@ A hard violation is acted on once it is past its deadline (grace for lagging nod
 guardian sends `pause()` with its cast keystore (password from a file, never a key in argv), unless the
 token is already paused or in its cooldown (no reverting transactions). Every finding is one JSON line
 on stdout. The state file makes rounds idempotent: a finding is alerted once, a pause sent once.
-`check` runs one round; exit 0 = no open violation, 2 = hard violation open, 3 = soft only, 1 = error.
+`check` runs one round; exit 0 = no open violation, 2 = hard violation open, 3 = soft only, 1 = error,
+4 = a due pause failed or never became visible.
+
+Reads and sends are separate on purpose. `l2_rpc` (reads) may be a read-only replica, which refuses transactions and
+shows settled blocks only. `l2_tx_rpc` (required on chain 700770) takes the transaction, its nonce and its receipt. It is
+not trusted for state: its receipt only means "sent", and the pause counts once `l2_rpc` shows it. A due pause that fails is
+retried (`pause_attempts`, default 3, `pause_retry_s` apart, then every round), raises a `critical` alert, runs
+`alert_command` (argv with {id} and {detail}) and marks `health_file` (default <state>.health.json) unhealthy until it lands.
+A pause not visible on `l2_rpc` within `pause_confirm_s` (default 3600) is alerted too, and sent again.
+On chain 700770 the grace periods default to 2700 s; see README "Reads on a replica".
 Development tool; UNAUDITED.
 """
 import hashlib
@@ -50,6 +59,11 @@ MARKER_VALUE = 546  # GnB-SMH marker output (lock destination / release burn mar
 MAX_RELEASE_FEE = 1_000_000  # GnB-SMH: largest fee a release may take out of the burned amount
 RELEASE_DS = b'GNB-RELEASE-v1'
 DEPOSIT_DS = b'BLOCH-USDT-DEPOSIT-v1'
+MAINNET_L2_CHAIN = 700770
+# Settlement delay of the L2 as a replica shows it: up to two 8-14 min cycles (a transaction waits for the current proof
+# and its own), plus the replica's refresh and one guardian round. Grace periods below this can pause on a lagging view.
+SETTLEMENT_DELAY_S = 2400
+MAINNET_GRACE_S = 2700
 
 EVENTS = {
     'wgnb': {'Minted': 'Minted(bytes32,bytes32,uint32,address,uint64)',
@@ -93,14 +107,22 @@ class Guardian:
         self.name = c.get('name', self.kind)
         self.cast = c.get('cast', str(Path.home() / '.foundry/bin/cast'))
         self.l2 = c['l2_rpc']
+        mainnet = int(c.get('l2_chain_id', 0)) == MAINNET_L2_CHAIN
+        if mainnet and not c.get('l2_tx_rpc'):
+            raise SystemExit('chain 700770 needs `l2_tx_rpc`: a read-only l2_rpc refuses the pause transaction')
+        self.l2_tx = c.get('l2_tx_rpc') or self.l2
         self.token = c['token'].lower()
         self.dry_run = dry_run
         self.state_path = Path(c['state'])
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         for key in ('open', 'mints_ok', 'txs', 'burn_time', 'pauses'):
             self.state.setdefault(key, [] if key == 'pauses' else {})
-        self.reserves_grace = int(c.get('reserves_grace_s', 900))
-        self.provenance_grace = int(c.get('provenance_grace_s', 1800))
+        self.reserves_grace = int(c.get('reserves_grace_s', MAINNET_GRACE_S if mainnet else 900))
+        self.provenance_grace = int(c.get('provenance_grace_s', MAINNET_GRACE_S if mainnet else 1800))
+        self.pause_attempts = max(1, int(c.get('pause_attempts', 3)))
+        self.pause_retry = int(c.get('pause_retry_s', 10))
+        self.pause_confirm = int(c.get('pause_confirm_s', 3600))
+        self.health_path = Path(c.get('health_file', f'{c["state"]}.health.json'))
         self.pause_margin = int(c.get('pause_margin_s', 3600))
         self.release_sla = int(c.get('release_sla_s', 6 * 3600))
         self.release_before_final = c.get('release_before_final', 'soft')
@@ -114,10 +136,40 @@ class Guardian:
         # stablecoin only: also pause the Ethereum vault (ContextBoundSourceVault.guardianPause, committee mode)
         # on a release or reserves violation, with this guardian's own Ethereum key
         self.vault_pause = self.kind == 'stable' and bool(c.get('vault_pause'))
+        self.state.setdefault('problems', {})
+        if mainnet and min(self.reserves_grace, self.provenance_grace) < SETTLEMENT_DELAY_S:
+            self.log(kind='alert', severity='soft', id='grace-below-settlement-delay', settlement_delay_s=SETTLEMENT_DELAY_S,
+                     reserves_grace_s=self.reserves_grace, provenance_grace_s=self.provenance_grace)
 
     # ── plumbing ─────────────────────────────────────────────────────────────
     def log(self, **kv):
         print(json.dumps({'t': int(time.time()), 'bridge': self.name, **kv}), flush=True)
+
+    def problem(self, pid, detail):
+        """Something that stops this guardian protecting the bridge: never only a log line."""
+        self.state['problems'][pid] = {'t': int(time.time()), 'detail': str(detail)[-300:]}
+        self.log(kind='alert', severity='critical', id=pid, detail=str(detail)[-300:])
+        command = self.cfg.get('alert_command')
+        if command:
+            argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+            try:
+                done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                if done.returncode:
+                    self.log(kind='alert-command-failed', rc=done.returncode, error=done.stderr.strip()[-200:])
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(kind='alert-command-failed', error=str(e))
+
+    def clear_problem(self, *pids):
+        for pid in pids:
+            if self.state['problems'].pop(pid, None):
+                self.log(kind='resolved', id=pid)
+
+    def write_health(self):
+        doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'],
+               'problems': self.state['problems']}
+        tmp = self.health_path.with_name(self.health_path.name + '.tmp')
+        tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.replace(self.health_path)
 
     def save(self):
         tmp = self.state_path.with_suffix('.tmp')
@@ -544,13 +596,24 @@ class Guardian:
             if self.vault_pause and vault_due:
                 self.pause_vault(vault_due)
             self.pause(now, due)
+        if self.state['problems']:
+            return 4
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
         return 2 if hard else 3 if self.state['open'] else 0
 
+    def pause_view(self, url):
+        return (uint(self.call(url, self.token, 'pausedUntil()')[0]), uint(self.call(url, self.token, 'pauseCount()')[0]),
+                uint(self.call(url, self.token, 'pauseCooldown()')[0]))
+
     def pause(self, now, reasons):
-        paused_until = uint(self.call(self.l2, self.token, 'pausedUntil()')[0])
-        count = uint(self.call(self.l2, self.token, 'pauseCount()')[0])
-        cooldown = uint(self.call(self.l2, self.token, 'pauseCooldown()')[0])
+        try:
+            paused_until, count, cooldown = self.pause_view(self.l2)
+        except Unverifiable:  # the read side is gone, the violation is not: ask the send side
+            try:
+                paused_until, count, cooldown = self.pause_view(self.l2_tx)
+            except Unverifiable as e:
+                self.problem('pause-failed', f'cannot read the pause state: {e}')
+                return
         if now < paused_until:
             why, until = 'already paused', paused_until
         elif count and now < paused_until + cooldown:
@@ -558,25 +621,57 @@ class Guardian:
         else:
             why = None
         if why:
+            self.clear_problem('pause-failed', 'pause-not-visible')
             note = f'{why}:{count}'
             if self.state.get('skip') != note:  # once per pause, not every round
                 self.state['skip'] = note
                 self.log(kind='pause-skip', reason=why, until=until, pause_count=count, violations=reasons)
             return
+        # A pause lands before the reads can show it: the replica serves settled blocks only.
+        last = self.state['pauses'][-1] if self.state['pauses'] else None
+        if last and last.get('ok') and last.get('count_before') == count:
+            if now - last['t'] < self.pause_confirm:
+                note = f'awaiting settled view:{last.get("tx")}'
+                if self.state.get('skip') != note:
+                    self.state['skip'] = note
+                    self.log(kind='pause-skip', reason='sent, not yet visible on l2_rpc', tx=last.get('tx'), violations=reasons)
+                return
+            self.problem('pause-not-visible', f'pause {last.get("tx")} not visible on l2_rpc after {now - last["t"]} s; sending again')
+        if self.l2_tx != self.l2:  # another guardian's pause: the send would revert. Same bound, not trusted beyond it.
+            try:
+                tx_until = self.pause_view(self.l2_tx)[0]
+            except Unverifiable:
+                tx_until = 0
+            seen = self.state.setdefault('tx_rpc_paused', {}).setdefault(str(tx_until), now) if now < tx_until else None
+            if seen is not None and now - seen < self.pause_confirm:
+                self.log(kind='pause-skip', reason='paused per l2_tx_rpc, not yet visible on l2_rpc', until=tx_until, violations=reasons)
+                return
         if self.dry_run:
             self.log(kind='pause-dry-run', violations=reasons)
             return
-        if self.cfg.get('l2_raw_tx'):
-            rc, out, err = self.send_raw_l2('pause()')
-        else:
-            argv = [self.cast, 'send', self.token, 'pause()', '--keystore', self.cfg['keystore'],
-                    '--password-file', self.cfg['password_file'], '--rpc-url', self.l2,
-                    '--chain', str(self.cfg['l2_chain_id']), '--json']
-            rc, out, err = self.run(argv)
-        ok = rc == 0 and json.loads(out).get('status') in ('0x1', 1)
-        tx = json.loads(out).get('transactionHash') if rc == 0 else None
-        self.state['pauses'].append({'t': now, 'tx': tx, 'ok': ok, 'violations': reasons})
-        self.log(kind='pause', ok=ok, tx=tx, violations=reasons, error=None if ok else (err or out).strip()[-300:])
+        for attempt in range(1, self.pause_attempts + 1):
+            if self.cfg.get('l2_raw_tx'):
+                rc, out, err = self.send_raw_l2('pause()')
+            else:
+                argv = [self.cast, 'send', self.token, 'pause()', '--keystore', self.cfg['keystore'],
+                        '--password-file', self.cfg['password_file'], '--rpc-url', self.l2_tx,
+                        '--chain', str(self.cfg['l2_chain_id']), '--json']
+                rc, out, err = self.run(argv)
+            try:
+                receipt = json.loads(out) if rc == 0 else {}
+            except ValueError:
+                receipt, err = {}, f'unreadable answer: {out[-200:]}'
+            ok = receipt.get('status') in ('0x1', 1)
+            tx = receipt.get('transactionHash')
+            self.state['pauses'].append({'t': now, 'tx': tx, 'ok': ok, 'violations': reasons, 'count_before': count})
+            self.log(kind='pause', ok=ok, tx=tx, attempt=attempt, violations=reasons,
+                     error=None if ok else (err or out).strip()[-300:])
+            if ok:
+                self.clear_problem('pause-failed')
+                return
+            if attempt < self.pause_attempts:
+                time.sleep(self.pause_retry)
+        self.problem('pause-failed', f'{self.pause_attempts} attempts through l2_tx_rpc: {(err or out).strip()[-200:]}')
 
     def send_raw_l2(self, sig):
         """For an L2 RPC with no `pending` level (the settled devnet4 RPC refuses gas estimation and pending
@@ -584,21 +679,21 @@ class Guardian:
         receipt. Returns (rc, receipt json, error) like `cast send --json`."""
         try:
             frm = self.me()
-            nonce = int(self.rpc(self.l2, 'eth_getTransactionCount', [frm, 'latest']), 16)
-            price = int(self.rpc(self.l2, 'eth_gasPrice', []), 16) * 2
+            nonce = int(self.rpc(self.l2_tx, 'eth_getTransactionCount', [frm, 'latest']), 16)
+            price = int(self.rpc(self.l2_tx, 'eth_gasPrice', []), 16) * 2
             raw = self.cast_out('mktx', '--keystore', self.cfg['keystore'], '--password-file',
                                 self.cfg['password_file'], '--chain', str(self.cfg['l2_chain_id']), '--nonce', str(nonce),
                                 '--gas-limit', str(self.cfg.get('l2_pause_gas', 200_000)), '--gas-price', str(price),
                                 '--legacy', self.token, sig)
-            tx = self.rpc(self.l2, 'eth_sendRawTransaction', [raw])
+            tx = self.rpc(self.l2_tx, 'eth_sendRawTransaction', [raw])
             end = time.time() + int(self.cfg.get('l2_receipt_timeout_s', 1800))
             while time.time() < end:
-                r = self.rpc(self.l2, 'eth_getTransactionReceipt', [tx])
+                r = self.rpc(self.l2_tx, 'eth_getTransactionReceipt', [tx])
                 if r:
                     return 0, json.dumps(r), ''
                 time.sleep(10)
             return 1, '', f'no receipt for {tx}'
-        except Unverifiable as e:
+        except (Unverifiable, RuntimeError) as e:
             return 1, '', str(e)
 
     def pause_vault(self, reasons):
@@ -637,6 +732,10 @@ class Guardian:
                  'gas_used': int(r['gasUsed'], 16) if r.get('gasUsed') else None}
         self.state.setdefault('vault_pauses', []).append(entry)
         self.log(kind='vault-pause', **entry, error=None if ok else (err or out).strip()[-300:])
+        if ok:
+            self.clear_problem('vault-pause-failed')
+        else:
+            self.problem('vault-pause-failed', (err or out).strip()[-200:])
 
 
 def main():
@@ -654,6 +753,7 @@ def main():
             g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')
             code = 1
         g.save()
+        g.write_health()
         if 'check' in args:
             raise SystemExit(code)
         time.sleep(interval)

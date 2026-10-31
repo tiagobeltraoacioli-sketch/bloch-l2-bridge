@@ -234,6 +234,7 @@ been made on real L2 data.
 | cap, windowLimit, minDeposit (proposed 10 USDC), switchThreshold (proposed 6), switchDelay (proposed 14 d) | vault config (proposed values filled) |
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
+| L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |
 | Light-client prover and shadow verifier (after the LC port) | sombra `prover_dir`, `shadow_verifier` |
 
 ## 8. Open decisions
@@ -281,6 +282,10 @@ Automation (`vigia.py`, `signatario.py`, `eth_half.py`):
 - `eth_half.py` refuses while the vault is paused.
 - A signer joins open rounds first and opens at most `max_new_rounds` per pass.
 - `eth_getLogs` is chunked.
+
+Guardian on a replica: `l2_rpc` may be read-only, and `l2_tx_rpc` takes the sends. A failed pause raises a critical alert, retries,
+and marks the guardian unhealthy (`check` exits 4). Grace periods must exceed the settlement delay, because a replica does not show
+unsettled mints: defaults on chain 700770 are now 2700 s (`tools/guardiao/README.md`, "Reads on a replica").
 
 Watchers: a malformed answer is `unverifiable`, never a crash; `liveness-not-final` reports a burn that does not
 become final within the SLA (L1 finality or L2 settlement stalled).

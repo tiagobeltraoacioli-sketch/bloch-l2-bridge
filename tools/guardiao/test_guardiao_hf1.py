@@ -183,7 +183,7 @@ def main():
         genesis = json.loads(out(CAST, 'block', '0', '--json', '--rpc-url', l2_raw))['hash']
 
         def cfg(name, **extra):
-            c = {'kind': 'stable', 'name': name, 'l2_rpc': l2, 'l2_chain_id': L2_CHAIN, 'token': stable,
+            c = {'kind': 'stable', 'name': name, 'l2_rpc': l2, 'l2_tx_rpc': l2, 'l2_chain_id': L2_CHAIN, 'token': stable,
                  'eth_rpc': eth, 'eth_chain_id': ETH_CHAIN, 'vault': vault, 'keystore': str(work / 'guardian'),
                  'password_file': str(work / 'pw'), 'cast': CAST, 'state': str(work / f'{name}-state.json'),
                  'reserves_grace_s': 0, 'provenance_grace_s': 0, 'release_sla_s': 600, 'vault_pause': True,

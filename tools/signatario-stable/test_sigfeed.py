@@ -723,6 +723,16 @@ class Rounds(Base):
         self.assertFalse(v.over_budget(d))
         self.assertTrue(v.over_budget(d))
 
+    def test_relaying_on_mainnet_needs_l2_tx_rpc(self):
+        cfg = self.d / 'r.json'
+        base = {**CFG, 'threshold': 5, 'shared_dir': str(self.d), 'l2_rpc': 'http://127.0.0.1:1'}
+        cfg.write_text(json.dumps(base))
+        with self.assertRaises(SystemExit) as e:
+            vigia_mod.Vigia(cfg).relay_round()
+        self.assertIn('l2_tx_rpc', str(e.exception))
+        cfg.write_text(json.dumps({**base, 'l2_tx_rpc': 'http://127.0.0.1:2'}))
+        self.assertEqual(vigia_mod.Vigia(cfg).l2_tx, 'http://127.0.0.1:2')
+
     def test_a_mainnet_config_refuses_a_bare_shared_dir(self):
         cfg = self.d / 'c.json'
         cfg.write_text(json.dumps({**CFG, 'threshold': 5, 'shared_dir': str(self.d), 'l2_pins': 'mainnet-v2'}))

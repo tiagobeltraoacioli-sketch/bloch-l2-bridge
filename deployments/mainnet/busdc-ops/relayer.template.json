@@ -6,6 +6,7 @@
   "threshold": 5,
   "vault_threshold": 5,
   "l2_rpc": "TBD-owner",
+  "l2_tx_rpc": "https://l2rpc.blochl1.com",
   "l2_chain_id": 700770,
   "eth_rpc": "TBD-owner (an Ethereum RPC)",
   "eth_chain_id": 1,

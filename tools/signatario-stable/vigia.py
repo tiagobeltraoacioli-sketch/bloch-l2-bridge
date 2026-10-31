@@ -9,7 +9,9 @@ Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatar
 `l2_relayer_key`, `eth_relayer_key` (gas keys with no authority), optional `signer_name`,
 `round_margin` (seconds, default 600), `max_valid_seconds` (default 3600), `resend_after_s` (default 1800: a
 relayed transaction with no receipt after this long is sent again), `log_chunk` (blocks per eth_getLogs, default
-10000), `max_new_rounds` (release rounds opened per pass, default 4).
+10000), `max_new_rounds` (release rounds opened per pass, default 4), `l2_tx_rpc` (L2 sends: required to relay on
+chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction, its nonce and its receipt use it, and every
+read that decides anything stays on `l2_rpc`).
 
 `sign` (one per signer, on the signer's machine) discovers work and calls signatario.py, which keeps
 doing every check before it signs (nothing here weakens them):
@@ -99,6 +101,8 @@ class Vigia:
         self.resend_after = int(self.cfg.get('resend_after_s', 1800))
         self.log_chunk = int(self.cfg.get('log_chunk', 10000))
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
+        self.l2_tx = self.cfg.get('l2_tx_rpc') or self.cfg['l2_rpc']
+        self.mainnet = int(self.cfg.get('l2_chain_id', 0)) == 700770 or bool(self.cfg.get('l2_pins'))
         self.opened = 0
         self.me = self.cfg.get('signer_name', f"s{self.cfg.get('signer')}")
         self.signs_per_hour = int(self.cfg.get('max_release_signs_per_hour', 6))
@@ -438,6 +442,8 @@ class Vigia:
 
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
+        if self.mainnet and not self.cfg.get('l2_tx_rpc'):
+            raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
         if self.feed:
             self.sync(self.deposits(), self.burns())
         mint_dir = self.shared / 'mint'
@@ -454,7 +460,7 @@ class Vigia:
         if self.minted(dep):
             self.execute_if_queued(d, dep)
             return
-        if (d / 'sent').exists() and not self.failed(self.cfg['l2_rpc'], d / 'sent'):
+        if (d / 'sent').exists() and not self.failed(self.l2_tx, d / 'sent'):
             return
         sigs = self.agreeing(sorted(d.glob('*.json')), lambda f: self.mint_partial(f, dep), self.k)
         if len(sigs) < self.k:
@@ -503,7 +509,7 @@ class Vigia:
         if words[1] == 0:  # executed (or never queued)
             (d / 'executed').write_text('done\n')
             return
-        if (d / 'execute-sent').exists() and not self.failed(url, d / 'execute-sent'):
+        if (d / 'execute-sent').exists() and not self.failed(self.l2_tx, d / 'execute-sent'):
             return
         now = int(self.rpc(url, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
         if now < words[2] or self.flag(url, self.token, 'paused()'):
@@ -532,7 +538,7 @@ class Vigia:
         return False
 
     def send(self, side, to, call):
-        url = self.cfg['l2_rpc'] if side == 'l2' else self.cfg['eth_rpc']
+        url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         key = Path(self.cfg[f'{side}_relayer_key']).read_text().strip()
         frm = self.cast_out('wallet', 'address', '--private-key', key)

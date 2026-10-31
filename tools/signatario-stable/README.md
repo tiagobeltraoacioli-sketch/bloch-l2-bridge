@@ -88,7 +88,7 @@ Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 1115511
 `vigia.py --config CFG sign|relay [--once]` runs the signer and a relayer without anyone in the loop (same
 shape as `tools/signatario-gnb/vigia.py`; config adds `shared_dir`, `eth_rpc`, `vault_from_block`,
 `token_from_block`, `eth_chain_id`, `l2_relayer_key`, `eth_relayer_key`, `round_margin`, and `feed`, required
-with `l2_pins`). Partial signatures travel over each operator's read-only feed: `docs/SIG-TRANSPORT.md`,
+with `l2_pins`, and `l2_tx_rpc`, required to relay on chain 700770: L2 sends go there, reads stay on `l2_rpc`). Partial signatures travel over each operator's read-only feed: `docs/SIG-TRANSPORT.md`,
 `sigfeed.py`, `bridge_feed.py`; adversarial tests in `test_sigfeed.py` (`python3 -m unittest test_sigfeed`),
 loopback rehearsal in `rehearse_feed.py <foundry project>`. Release certificates are grouped in rounds sharing one Ethereum anchor (`--context`). Test:
 `python3 test_vigia.py <foundry project>` (two anvils, `BridgedStablecoinV2`, 26 checks).

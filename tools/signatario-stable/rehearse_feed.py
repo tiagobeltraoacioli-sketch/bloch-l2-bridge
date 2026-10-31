@@ -322,6 +322,29 @@ def main():
               below.returncode != 0 and uint(eth, vault, 'totalLocked()(uint64)') == locked)
         send(eth, ALICE_KEY, vault, 'deposit(uint64,bytes32)', str(U), '0x' + '00' * 12 + alice[2:])
         check('a deposit of exactly minDeposit is accepted', uint(eth, vault, 'totalLocked()(uint64)') == locked + U)
+
+        # ── relaying with a read-only l2_rpc: refused without l2_tx_rpc, lands with it ──
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        vigia(cfgs[0], 'sign')
+        vigia(cfgs[1], 'sign')
+        sys.path.insert(0, str(HERE.parent / 'guardiao'))
+        from test_l2_tx_rpc import Replica
+        replica = Replica(l2)
+        servers.append(replica.server.socket)
+        ro = json.loads(cfgs[2].read_text())
+        ro['l2_rpc'] = replica.url
+        ro_path = work / 'relay-replica.json'
+        ro_path.write_text(json.dumps(ro))
+        supply = uint(l2, stable, 'totalSupply()(uint256)')
+        relay = vigia(ro_path, 'relay')
+        check('a relayer sending through a read-only l2_rpc is refused, nothing minted',
+              replica.refused >= 1 and uint(l2, stable, 'totalSupply()(uint256)') == supply, relay)
+        ro['l2_tx_rpc'] = l2
+        ro_path.write_text(json.dumps(ro))
+        before = replica.refused
+        relay = vigia(ro_path, 'relay')
+        check('with l2_tx_rpc the mint lands, reads on the replica and sends elsewhere',
+              replica.refused == before and uint(l2, stable, 'totalSupply()(uint256)') == supply + U, relay)
     finally:
         for p in procs:
             p.kill()

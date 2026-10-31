@@ -96,7 +96,7 @@ can be executed. A verified mint is cached and not re-checked (a later source re
 
 ## Config
 
-Common: `kind` (`wgnb`|`stable`), `name`, `l2_rpc`, `l2_chain_id`, `token`, `token_from_block`, `keystore`,
+Common: `kind` (`wgnb`|`stable`), `name`, `l2_rpc`, `l2_tx_rpc` (required on chain 700770), `l2_chain_id`, `token`, `token_from_block`, `keystore`,
 `password_file`, `cast`, `state`, `reserves_grace_s` (900), `provenance_grace_s` (1800), `pause_margin_s`
 (3600), `release_sla_s` (21600), `log_chunk` (5000).
 
@@ -177,3 +177,28 @@ Config: `eth_rpc`, `eth_chain_id`, `vault`, `vault_from_block`, `prover_dir`, `s
 Tests: `python3 test_sombra.py <foundry project>` (anvil, vault (contracts/usdt) with one guardian, MockSP1 under a
 real `SP1ReleaseVerifier`, fake L1 RPC): 18 checks. Live drill: `devnet4_ensaio.py` `shadow-config`,
 `shadow-verifier`, `release-unbacked`, `unpause`.
+
+## Reads on a replica
+
+`l2_rpc` may be a read-only replica; it refuses transactions. On mainnet set `l2_tx_rpc` to the public gateway
+(`https://l2rpc.blochl1.com`), which routes transactions to the sequencer. Only the pause transaction, its nonce, gas price and
+receipt go there. The gateway is not trusted for state: its receipt means "sent", and a pause counts once `l2_rpc` shows it.
+
+**Pausing therefore depends on the gateway and the sequencer being up.** If they are down, the pause fails, which raises a
+`critical` alert, runs `alert_command`, marks `health_file` unhealthy and makes `check` exit 4. The guardian retries every round.
+`vault_pause` goes to Ethereum and does not depend on them.
+
+**Grace periods must exceed the settlement delay.** A replica shows settled blocks only, so unsettled mints and burns are not
+visible. One settlement cycle takes 8-14 min, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and
+one round: `SETTLEMENT_DELAY_S` = 2400 s in `guardiao.py`. A shorter grace can pause on a lagging view.
+
+| Setting | Default on chain 700770 | Elsewhere | Against 2400 s |
+| --- | --- | --- | --- |
+| `reserves_grace_s` | 2700 | 900 | Above. The old 900 s was below two cycles |
+| `provenance_grace_s` | 2700 | 1800 | Above. The old 1800 s was below |
+| `release_sla_s` | 21600 | 21600 | Above |
+| `pause_margin_s` | 3600 | 3600 | A queued mint is paused 1 h before `readyAt`; `largeMintDelay` is 12 h, so the mint is visible in time at normal cadence |
+| `pause_confirm_s` | 3600 | 3600 | Above |
+
+A configured grace below 2400 s on chain 700770 raises a soft `grace-below-settlement-delay` alert at start. The cost is slower
+action: a reserves violation now waits 45 min from first sight before its pause, where it waited 15 min before.
