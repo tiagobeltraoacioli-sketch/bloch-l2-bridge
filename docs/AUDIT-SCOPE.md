@@ -343,3 +343,21 @@ anvil, Python 3.12; every chain a private loopback anvil):
 | `signatario-stable/test_hf1_finality` (new) | 56/56 (32 unit + 24 on private anvils) | |
 | `deploy-pontes/rehearse_anvil` | 75/75 (+19 vault tool), `REHEARSAL OK` | |
 
+Results for `20ef8cf` (`codex/bridge-review-20261030`), from a clean clone on 45.77 (forge 1.7.1, anvil, Python 3.12;
+every chain a private loopback anvil):
+
+| Suite | Fake / default | `ETH_HALF=real` |
+| --- | --- | --- |
+| forge (12 suites, +`BridgeReviewPoc`) | 149 passed, 0 failed, 1 skipped | |
+| `signatario-stable/test_bridge_review` (new; always the real half) | 21/21 | |
+| `guardiao/test_guardiao` | 32/32 | |
+| `guardiao/test_sombra` | 19/19 | |
+| `guardiao/test_guardiao_hf1` | 7/7 | |
+| `reservas/test_reservas` | 16/16 | |
+| `signatario-gnb/test_signatario` | 15/15 | |
+| `signatario-gnb/test_vigia` | 16/16 | |
+| `signatario-stable/test_signatario` | 23/23 | 34/34 |
+| `signatario-stable/test_vigia` | 26/26 | 26/26 |
+| `signatario-stable/test_hf1_finality` | 56/56 | |
+| `deploy-pontes/rehearse_anvil` | 78/78 (+3 vault tool), `REHEARSAL OK` | |
+

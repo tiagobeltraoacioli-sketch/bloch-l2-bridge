@@ -211,8 +211,12 @@ guardian's nodes.
 | `signatario-stable/test_hf1_finality` (new) | 56/56 (32 unit, 24 on private anvils) |
 | `deploy-pontes/rehearse_anvil` | 75/75, `REHEARSAL OK` (56 as before + 19 for the vault tool, section 3) |
 
-Final counts and the real-binary check against the v2 follower, produce-dev and settled-rpc are recorded
-in `docs/AUDIT-SCOPE.md` section 7.
+These counts are for `8347568`. Counts for the bridge review are in `docs/AUDIT-SCOPE.md` section 7.
+
+Real-binary dry check (2026-10-30, the three pinned v2 binaries, a follower state at 186,671 L1 blocks and no L2
+history, since the L2 has never settled): every pin and status check passed, with the status age limit relaxed to
+one day, and `signatario.py release` refused only because the burn does not exist, after 41 s. No certificate has
+been made on real L2 data.
 
 ## 7. TBD-owner
 
