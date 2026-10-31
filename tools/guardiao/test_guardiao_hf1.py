@@ -220,8 +220,12 @@ def main():
         proxy.finalized = None
         rc, lines, err = run(soft)
         rnd = (kinds(lines, 'round') or [{}])[0]
-        check('finalized null: the round still runs (no unverifiable), no alert', rc == 0
-              and rnd.get('l2_finalized') is None and rnd.get('in_flight') == 2 * U and not kinds(lines, 'alert'),
+        # This test sets its grace periods to 0 on chain 700770, which the guardian reports once at start.
+        check('grace below the settlement delay is reported at start', kinds(lines, 'alert', id='grace-below-settlement-delay'),
+              (rc, lines, err))
+        check('finalized null: the round still runs (no unverifiable), no other alert', rc == 0
+              and rnd.get('l2_finalized') is None and rnd.get('in_flight') == 2 * U
+              and not [x for x in kinds(lines, 'alert') if x.get('id') != 'grace-below-settlement-delay'],
               (rc, lines, err))
 
         proxy.finalized = burn_block - 1
