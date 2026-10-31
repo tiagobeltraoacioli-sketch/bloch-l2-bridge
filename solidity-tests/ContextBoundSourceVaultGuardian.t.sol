@@ -23,7 +23,7 @@ contract ContextBoundSourceVaultGuardianTest {
     uint256 constant ANCHOR_NUMBER = 99;
     bytes32 constant ANCHOR_HASH = keccak256("eth block 99");
     uint64 constant PAUSE = 3 days;
-    uint64 constant COOLDOWN = 1 days;
+    uint64 constant COOLDOWN = 3 days;
 
     SwitchToken token;
     SP1ReleaseVerifier lc;
@@ -126,6 +126,10 @@ contract ContextBoundSourceVaultGuardianTest {
         deploy(gs, 0, COOLDOWN); // guardians need a pause duration
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
         deploy(none, PAUSE, 0); // no guardians: no pause policy
+        vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
+        deploy(gs, PAUSE, PAUSE - 1); // the cooldown bounds renewals, so it is at least the duration
+        vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
+        deploy(gs, 14 days + 1, 14 days + 1);
         ContextBoundSourceVault bare = deploy(none, 0, 0);
         require(bare.guardianCount() == 0 && !bare.paused());
         vm.prank(gs[0]);
@@ -167,7 +171,7 @@ contract ContextBoundSourceVaultGuardianTest {
         committeeRelease(r);
         require(token.balanceOf(address(123)) == 20 && vault.totalLocked() == 485);
         vm.prank(gs[1]);
-        vault.guardianPause(); // an expired pause may be renewed at once
+        vault.guardianPause(); // another guardian may renew an expired pause at once
         require(vault.paused() && vault.pauseCount() == 2);
     }
 
@@ -243,7 +247,7 @@ contract ContextBoundSourceVaultGuardianTest {
     }
 
     function testGuardiansHaveNoPowerAfterTheSwitch() public {
-        vault = make(gs, 30 days, COOLDOWN);
+        vault = make(gs, 14 days, 14 days);
         for (uint256 i; i < 5; ++i) vault.deposit(100, bytes32(uint256(8))); // one deposit is at most windowLimit
         pause();
         uint256 until = block.timestamp + 100;
@@ -251,7 +255,7 @@ contract ContextBoundSourceVaultGuardianTest {
         vault.proposeVerifier(address(lc), 0, until, sign(vault.switchDigest(false, address(lc), address(lc).codehash, 0, until), 3));
         vm.warp(block.timestamp + 7 days);
         vault.activateVerifier();
-        require(!vault.paused()); // still inside the 30-day pause, but it no longer applies
+        require(!vault.paused()); // still inside the 14-day pause, but it no longer applies
         ContextBoundSourceVault.Release memory r = item(0, 60);
         bytes memory pv = lc.expectedPublicValues(address(vault), vault.releaseId(r));
         vault.releaseWithProof(r, abi.encode(pv, abi.encode(keccak256(abi.encode(VKEY, pv)))));

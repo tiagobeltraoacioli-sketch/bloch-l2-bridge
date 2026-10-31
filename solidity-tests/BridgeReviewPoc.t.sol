@@ -62,7 +62,7 @@ contract BatchBurner {
 
 /// Mainnet-shaped parameters (deployments/mainnet/busdc*.config.json) with a 3-of-3 switch committee.
 /// Bridge review (agents/29). C1-C3 assert the fixes; on 8678454 they were reproduced as accepted, stuck funds.
-/// C6 and C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
+/// C7 is fixed in its own commit; C6 and C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
 contract BridgeReviewPoc {
     ReviewVm constant vm = ReviewVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint64 constant U = 1e6;
@@ -73,6 +73,7 @@ contract BridgeReviewPoc {
     address constant ALICE = address(0xA11CE);
     address constant BOB = address(0xB0B);
     address constant GUARD = address(0xBA5E);
+    address constant GUARD2 = address(0xBA5F);
 
     ReviewUsdc usdc;
     ContextBoundSourceVault vault;
@@ -99,8 +100,8 @@ contract BridgeReviewPoc {
             signers.push(a[i]);
         }
         usdc = new ReviewUsdc();
-        address[] memory g = new address[](1);
-        g[0] = GUARD;
+        address[] memory g = new address[](2);
+        (g[0], g[1]) = (GUARD, GUARD2);
         vault = new ContextBoundSourceVault(
             keccak256("ethereum-mainnet"), keccak256("bloch-l2-700770"), keccak256("USDC"), address(usdc), CAP, 0,
             signers, 2, ContextBoundSourceVault.Policy(WINDOW, 1 days, 3, 14 days),
@@ -229,15 +230,53 @@ contract BridgeReviewPoc {
         }
     }
 
-    /// C5: one guardian holds the vault paused forever by renewing; only 3-of-3 (6-of-7 on mainnet) can interrupt.
-    function testC5_singleGuardianRenewsForever() public {
-        for (uint256 i; i < 100; ++i) {
-            vm.prank(GUARD);
-            vault.guardianPause();
-            require(vault.paused(), "paused");
-            vm.warp(block.timestamp + 3 days);
+    /// C5 (fixed): one guardian key could hold the vault paused forever by renewing at each expiry. Behaviour only, so
+    /// it also runs on 8678454, where the second pause goes through and this test fails.
+    function testC5_singleGuardianCannotRenewAtOnce() public {
+        vm.prank(GUARD);
+        vault.guardianPause(); // the fast path: one key, no quorum
+        require(vault.paused(), "paused");
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(GUARD);
+        (bool renewed,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.guardianPause, ()));
+        require(!renewed, "the same guardian renews at once");
+        require(!vault.paused(), "the vault is open");
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(GUARD);
+        vault.guardianPause(); // a new chain after the cooldown
+        require(vault.pauseCount() == 2, "second pause");
+    }
+
+    /// A second guardian renews at once: the real-incident path. Every guardian used: the cooldown is open.
+    function testC5_otherGuardianRenewsThenTheChainEnds() public {
+        vm.prank(GUARD);
+        vault.guardianPause();
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(GUARD2);
+        vault.guardianPause();
+        require(vault.paused(), "renewed by the other guardian");
+        vm.warp(block.timestamp + 3 days);
+        require(!vault.guardianCanPause(GUARD) && !vault.guardianCanPause(GUARD2), "chain exhausted");
+        vm.warp(block.timestamp + 3 days);
+        require(vault.guardianCanPause(GUARD) && vault.guardianCanPause(GUARD2), "new chain after the cooldown");
+    }
+
+    /// Whatever two guardians do over a year, the vault is open at least a third of the time.
+    function testC5_bothGuardiansBoundedOverAYear() public {
+        uint256 start = block.timestamp;
+        uint256 paused;
+        while (block.timestamp < start + 365 days) {
+            address who = vault.guardianCanPause(GUARD) ? GUARD : vault.guardianCanPause(GUARD2) ? GUARD2 : address(0);
+            if (who != address(0)) {
+                vm.prank(who);
+                vault.guardianPause();
+                paused += 3 days;
+                vm.warp(block.timestamp + 3 days);
+            } else {
+                vm.warp(block.timestamp + 1 hours);
+            }
         }
-        require(vault.pauseCount() == 100, "300 days frozen by one key");
+        require(paused * 3 <= (block.timestamp - start) * 2 + 3 days * 3, "more than two thirds frozen");
     }
 
     /// C6: after the one-way switch the mint committee still mints; a mint backed by nothing, burned, is a valid

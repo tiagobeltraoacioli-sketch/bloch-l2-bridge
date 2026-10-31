@@ -16,10 +16,11 @@ A release that stays unproven past its grace (`grace_s` seconds of Ethereum time
 AND `grace_l1_epochs` Bloch L1 finalized epochs since the guardian first saw it) is a hard finding: the
 guardian calls `guardianPause()` on the vault (its only power: committee releases and deposits stop for the
 vault's `pauseDuration`; the switch and proofs never stop). A proof that does not verify does not close
-the finding. While the vault is paused nothing is sent; when a pause expires and the finding is still
-open the guardian pauses again; after a committee unpause (switchThreshold signers) it waits out the
-vault's cooldown. Once the vault has switched to its verifier the shadow phase is over and the guardian
-does nothing.
+the finding. While the vault is paused nothing is sent. Each guardian may start one pause per chain of
+consecutive pauses (ContextBoundSourceVault.guardianCanPause): when a pause expires and the finding is
+still open this guardian pauses again if it did not start the last one, or else after the vault's cooldown;
+another guardian can renew in between. After a committee unpause (switchThreshold signers) it waits out the
+cooldown. Once the vault has switched to its verifier the shadow phase is over and the guardian does nothing.
 
 Soft alerts (never pause): the prover's status file is older than `prover_stale_s`, read errors.
 
@@ -183,10 +184,10 @@ class Sombra:
                 self.state['switched'] = verifier
                 self.log(kind='switched', verifier=verifier, note='light-client verifier active: guardian retired')
             return now, []
-        me = self.cast_out('wallet', 'address', '--keystore', self.cfg['keystore'], '--password-file',
-                           self.cfg['password_file']).lower()
-        if self.call(self.vault, 'isGuardian(address)(bool)', me) != 'true':
-            raise Unverifiable(f'{me} is not a guardian of the vault')
+        self.me = self.cast_out('wallet', 'address', '--keystore', self.cfg['keystore'], '--password-file',
+                                self.cfg['password_file']).lower()
+        if self.call(self.vault, 'isGuardian(address)(bool)', self.me) != 'true':
+            raise Unverifiable(f'{self.me} is not a guardian of the vault')
         self.releases(number)
         proofs, age = self.proofs()
         epoch = self.l1_epoch() if self.grace_epochs or self.lc_max_epoch is not None else None
@@ -248,6 +249,8 @@ class Sombra:
         blocked = self.num('guardianBlockedUntil()(uint64)')
         count = self.num('pauseCount()(uint64)')
         why = 'already paused' if now < paused_until else 'cooldown after a committee unpause' if now < blocked else None
+        if why is None and self.call(self.vault, 'guardianCanPause(address)(bool)', self.me) != 'true':
+            why = 'this guardian already paused in this chain'
         if why:
             note = f'{why}:{count}'
             if self.state.get('skip') != note:  # once per pause, not every round

@@ -39,10 +39,15 @@ interface IReleaseVerifier {
 ///      prover proves every committee release after the fact, and guardians fixed at
 ///      deployment (never signers) watch for a release that stays unproven. Their only
 ///      power is `guardianPause()`: it stops committee releases and deposits for
-///      `pauseDuration` (the switch and proofs are untouched). A guardian cannot release,
-///      unpause, or pause again until the pause ends; only `switchThreshold` signers
-///      (more than the release quorum) may end a pause early, after which guardians
-///      wait `pauseCooldown`. Once the verifier is active, guardians have no power.
+///      `pauseDuration` (the switch and proofs are untouched). One key is enough and no
+///      quorum is asked. A guardian cannot release or unpause. Pauses not separated by
+///      `pauseCooldown` form a chain, and each guardian may start one pause per chain: a
+///      different guardian can renew an expired pause at once, but with g guardians a
+///      chain lasts at most g * `pauseDuration`, followed by at least `pauseCooldown`
+///      open. One bad key holds the vault for at most half the time. Only
+///      `switchThreshold` signers (more than the release quorum) may end a pause early,
+///      after which guardians wait `pauseCooldown`. Once the verifier is active,
+///      guardians have no power.
 contract ContextBoundSourceVault {
     bytes32 public immutable sourceDomain;
     bytes32 public immutable nativeDomain;
@@ -88,11 +93,15 @@ contract ContextBoundSourceVault {
     uint64 public immutable pauseDuration;
     uint64 public immutable pauseCooldown;
     uint8 public constant MAX_GUARDIANS = 7;
+    uint64 public constant MAX_PAUSE_DURATION = 14 days;
     /// Committee releases are refused while `block.timestamp < pausedUntil`.
     uint64 public pausedUntil;
     uint64 public pauseCount;
     /// After a committee unpause, guardians may not pause before this time.
     uint64 public guardianBlockedUntil;
+    /// Current chain of consecutive pauses, and the last chain each guardian started a pause in.
+    uint64 public pauseChain;
+    mapping(address => uint64) public guardianLastChain;
     uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     struct Release {
@@ -113,7 +122,8 @@ contract ContextBoundSourceVault {
     }
 
     /// Guardian policy fixed at deployment. No guardians: `pauseDuration` and
-    /// `pauseCooldown` must be zero.
+    /// `pauseCooldown` must be zero. Otherwise 0 < `pauseDuration` <= 14 days and
+    /// `pauseCooldown` >= `pauseDuration`.
     struct Guard {
         address[] guardians;
         uint64 pauseDuration;
@@ -191,7 +201,11 @@ contract ContextBoundSourceVault {
         uint256 count = guard.guardians.length;
         if (
             count > MAX_GUARDIANS || (count == 0 && (guard.pauseDuration != 0 || guard.pauseCooldown != 0))
-                || (count != 0 && guard.pauseDuration == 0)
+                || (count != 0
+                    && (
+                        guard.pauseDuration == 0 || guard.pauseDuration > MAX_PAUSE_DURATION
+                            || guard.pauseCooldown < guard.pauseDuration
+                    ))
         ) revert InvalidConfiguration();
         previous = address(0);
         for (uint256 i; i < count; ++i) {
@@ -395,13 +409,26 @@ contract ContextBoundSourceVault {
         _pay(item);
     }
 
+    /// @notice True if `guardian` could pause right now: committee mode, not paused, no committee-unpause
+    ///         cooldown, and this guardian has not started a pause in the current chain.
+    function guardianCanPause(address guardian) public view returns (bool) {
+        return isGuardian[guardian] && verifier == address(0) && block.timestamp >= pausedUntil
+            && block.timestamp >= guardianBlockedUntil && (_chainEnded() || guardianLastChain[guardian] != pauseChain);
+    }
+
+    function _chainEnded() private view returns (bool) {
+        return pauseCount == 0 || block.timestamp >= uint256(pausedUntil) + pauseCooldown;
+    }
+
     /// @notice A guardian stops committee releases and deposits for `pauseDuration`. Only in
-    ///         committee mode, not while paused, not within `pauseCooldown` of a
-    ///         committee unpause. A pause that expired may be renewed at once.
+    ///         committee mode, not while paused, not within `pauseCooldown` of a committee
+    ///         unpause, and once per guardian in a chain of consecutive pauses.
     function guardianPause() external nonReentrant {
         if (!isGuardian[msg.sender]) revert NotGuardian();
         if (verifier != address(0)) revert CommitteeRetired();
-        if (block.timestamp < pausedUntil || block.timestamp < guardianBlockedUntil) revert InvalidPause();
+        if (!guardianCanPause(msg.sender)) revert InvalidPause();
+        if (_chainEnded()) ++pauseChain;
+        guardianLastChain[msg.sender] = pauseChain;
         uint64 count = ++pauseCount;
         pausedUntil = uint64(block.timestamp) + pauseDuration;
         emit GuardianPaused(msg.sender, count, pausedUntil);

@@ -91,8 +91,9 @@ Out of scope, but pinned and listed for completeness:
    - There is no recurring signature.
 4. **Guardians (committee mode only).** The guardians are fixed in the constructor: at most 7, sorted, never
    a signer.
-   - `guardianPause()` stops `release()` and `deposit()` for `pauseDuration`. The pause expires by itself
-     and may be renewed only after it ends.
+   - `guardianPause()` stops `release()` and `deposit()` for `pauseDuration`, on one key with no quorum. The
+     pause expires by itself. Another guardian may renew it at once, and the same guardian only after
+     `pauseCooldown`.
    - Only `switchThreshold` signers may end it early (`unpause`, bound to `pauseCount`). Guardians then wait
      `pauseCooldown`. A guardian can never release or unpause.
    - `releaseWithProof`, `setControls` and the switch never stop.
@@ -135,7 +136,8 @@ Vault (`ContextBoundSourceVault`):
   - Deposits and committee releases revert `Paused` exactly while `block.timestamp < pausedUntil` and the
     verifier is unset.
   - `unpause` needs `switchThreshold` and the current `pauseCount`.
-  - The cooldown applies only after an `unpause`.
+  - Each guardian starts at most one pause per chain; pauses at least `pauseCooldown` apart start a new chain. A
+    chain lasts at most g × `pauseDuration`. `pauseDuration ≤ 14 days`, `pauseCooldown ≥ pauseDuration`.
   - No guardian path moves funds or changes any other state.
 - **V7. Immutables.** No upgrade, owner, signer rotation, rescue or mint path. Everything listed as
   immutable stays fixed.
@@ -179,9 +181,11 @@ Cross-system:
   (`BridgeReviewPoc.testC6`).
 - **Verifier proposals do not expire.** Anyone can activate a proposal at any time after the delay, and only
   `switchThreshold` signers can cancel it (`testC7`).
-- **Renewed guardian pauses.** One guardian key can renew a vault pause as soon as it expires. Only `switchThreshold`
-  signatures interrupt it, then the cooldown gives releases one `pauseCooldown` (`testC5`). Guardians are immutable.
-  During a real compromise the opposite holds: each expiry leaves a block race for one more window.
+- **Guardian pause chains.** One key still pauses at once, but each guardian may start one pause per chain of
+  consecutive pauses. With g guardians a chain lasts at most g × `pauseDuration`, then `pauseCooldown` stays open
+  (`testC5`). The cost: in a real, lasting compromise the vault reopens after the chain, and the attacker gets the
+  bucket plus its refill over the cooldown (mainnet: 10,000 + 30,000 USDC per 72 h gap). Until the LC port only
+  `guardiao.py` pauses automatically, so the second guardian's operator must be ready to renew by hand.
 - **No signer rotation.** Three lost release keys of seven stop releases for good; two stop `unpause` and the switch
   at the proposed 6-of-7. There is no rescue path, by design.
 - **USDC itself.** A blacklisted recipient's release reverts until Circle lifts it, and its burn cannot be redirected

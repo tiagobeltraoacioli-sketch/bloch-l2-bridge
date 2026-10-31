@@ -604,7 +604,8 @@ class Guardian:
     def pause_vault(self, reasons):
         """guardianPause() on the Ethereum vault: stops committee releases and deposits for its pauseDuration.
         The vault's own clock (block.timestamp) decides; nothing is sent while paused, in the cooldown after a
-        committee unpause, or once the vault has switched to its light-client verifier."""
+        committee unpause, when this guardian already paused in the current chain of consecutive pauses, or once
+        the vault has switched to its light-client verifier."""
         eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
         now = self.block(eth, 'latest')[1]
         verifier = addr(self.call(eth, vault, 'verifier()')[0])
@@ -613,6 +614,8 @@ class Guardian:
         count = uint(self.call(eth, vault, 'pauseCount()')[0])
         why = ('switched to the light-client verifier' if int(verifier, 16) else 'already paused' if now < paused_until
                else 'cooldown after a committee unpause' if now < blocked else None)
+        if why is None and not uint(self.call(eth, vault, 'guardianCanPause(address)', self.eth_me())[0]):
+            why = 'this guardian already paused in this chain'
         if why:
             note = f'{why}:{count}'
             if self.state.get('vault_skip') != note:
