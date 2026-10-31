@@ -6,6 +6,7 @@
 Loopback only. It reads and never sends. The levels close by editing the status file, as in report 41, not by a follower
 failing on its own. Each state prints one JSON line, and the exit code is non-zero if any expectation fails.
 """
+import ast
 import json
 import os
 from pathlib import Path
@@ -19,8 +20,14 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'guardiao'), str(ROOT / 'signatario-stable')]
 import guardiao  # noqa: E402
-import signatario  # noqa: E402
 import vigia  # noqa: E402
+
+# signatario.py runs on import, so only the function under test is taken from its source.
+_tree = ast.parse((ROOT / 'signatario-stable/signatario.py').read_text())
+_ns = {'json': json, 'urllib': urllib}
+exec(compile(ast.Module([n for n in _tree.body if isinstance(n, ast.FunctionDef) and n.name in ('refuse', 'finalized_or_closed')], []),
+             'signatario.py', 'exec'), _ns)
+finalized_or_closed = _ns['finalized_or_closed']
 
 NET = ['--rules', 'mainnet', '--domain', '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
        '--genesis-time', '1786656679']
@@ -120,7 +127,7 @@ def main():
             v = relay(url, work)
             burns = v.burns()
             expect(state, 'vigia: closed keeps the last burns, open reads the chain', burns == [{'burn_id': '0xkept'}] if closed else burns == [], burns)
-            got = signatario.finalized_or_closed(url)
+            got = finalized_or_closed(url)
             expect(state, 'signer: wait loop reads closed as not yet', (got is None) if closed else isinstance(got, dict), bool(got))
             levels = monitor(mon, url)
             want_age = {'frozen': 'CRIT', 'restored': 'CRIT', 'fresh': 'OK'}.get(state)
