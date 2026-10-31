@@ -101,7 +101,7 @@ class Vigia:
         self.resend_after = int(self.cfg.get('resend_after_s', 1800))
         self.log_chunk = int(self.cfg.get('log_chunk', 10000))
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
-        self.l2_tx = self.cfg.get('l2_tx_rpc') or self.cfg['l2_rpc']
+        self.l2_tx = self.cfg.get('l2_tx_rpc') or self.cfg.get('l2_rpc')
         self.mainnet = int(self.cfg.get('l2_chain_id', 0)) == 700770 or bool(self.cfg.get('l2_pins'))
         self.opened = 0
         self.me = self.cfg.get('signer_name', f"s{self.cfg.get('signer')}")
