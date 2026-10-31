@@ -291,10 +291,38 @@ def main():
         check('reconnected, they converge on one round and it pays',
               uint(eth, token, 'balanceOf(address)(uint256)', BOB) == 3 * U, relay)
 
+        # ── two burns in one transaction: --burn-id through the feeds, reviewed contract limits ──
+        burner = create(project, l2, 'solidity-tests/BridgeReviewPoc.t.sol:BatchBurner')
+        send(l2, ALICE_KEY, stable, 'transfer(address,uint256)', burner, str(3 * U))
+        send(l2, ALICE_KEY, burner, 'run(address,uint64,uint64,address)', stable, str(U), str(2 * U), BOB)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', l2)
+        vigia(cfgs[0], 'sign')
+        events = vigia(cfgs[1], 'sign')
+        check('batch burn: the second signer joins both rounds over the feed',
+              sum(e.get('kind') == 'release' and e.get('joined') and e.get('signed') is True for e in events) == 2, events)
+        relay = vigia(cfgs[2], 'relay')
+        check('batch burn: both burns of one transaction are paid', uint(eth, token, 'balanceOf(address)(uint256)', BOB) == 6 * U, relay)
+        too_big = sh(CAST, 'send', stable, 'burn(uint64,address)', str(cap + 1), BOB, '--rpc-url', l2, '--private-key',
+                     ALICE_KEY, ok=False)
+        check('reviewed limit: a burn above the bucket is refused', too_big.returncode != 0)
+        over = sh(CAST, 'send', vault, 'deposit(uint64,bytes32)', str(100_000 * U + 1), '0x' + '00' * 12 + alice[2:],
+                  '--rpc-url', eth, '--private-key', ALICE_KEY, ok=False)
+        check('reviewed limit: a deposit above windowLimit is refused', over.returncode != 0)
+
         # ── finished items leave the feeds ──
         for i in (0, 1):
             vigia(cfgs[i], 'sign')
         check('finished items are retired from the feeds', not published(0), published(0))
+
+        # ── reported, not asserted: a deposit below the token's minBurn ──
+        dust = U // 2
+        send(eth, ALICE_KEY, vault, 'deposit(uint64,bytes32)', str(dust), '0x' + '00' * 12 + BOB[2:])
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        vigia(cfgs[0], 'sign')
+        vigia(cfgs[1], 'sign')
+        vigia(cfgs[2], 'relay')
+        got = uint(l2, stable, 'balanceOf(address)(uint256)', BOB)
+        print(f'NOTE minBurn: vault accepted a deposit of {dust} with minBurn {U}; minted {got} to the recipient')
     finally:
         for p in procs:
             p.kill()
