@@ -165,7 +165,9 @@ def main():
         d = v.send('l2', TO, call)
         check('a record far ahead of the chain is ignored', int(rpc(url, 'eth_getTransactionByHash', [d])['nonce'], 16) == count())
         rpc(url, 'evm_mine', [])
-        check('sides keep separate records', set(json.loads(v.nonce_path.read_text())) == {f'l2:{FROM}'})
+        v.send('eth', TO, call)
+        rpc(url, 'evm_mine', [])
+        check('sides keep separate records', set(json.loads(v.nonce_path.read_text())) == {f'l2:{FROM}', f'eth:{FROM}'})
     finally:
         anvil.terminate()
         shutil.rmtree(work, ignore_errors=True)

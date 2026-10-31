@@ -215,6 +215,15 @@ def main():
         check('settled: the replica shows the pause, the guardian skips and is healthy again',
               kinds(lines, 'pause-skip') and not kinds(lines, 'pause')
               and healthy('split') is True, lines)
+        doc = json.loads((work / 'split.state.health.json').read_text())
+        check('health: a verified round records verified_t', abs(doc.get('verified_t', 0) - time.time()) < 60, doc)
+        check('health: group-readable for the monitor, under any umask',
+              (work / 'split.state.health.json').stat().st_mode & 0o777 == 0o640)
+        rc, lines, err = run(config('blind', l2_genesis_hash='0x' + 'ab' * 32))
+        doc = json.loads((work / 'blind.state.health.json').read_text())
+        check('health: an unverifiable guardian looks healthy but has no verified_t, which the monitor raises',
+              doc.get('healthy') is True and doc.get('verified_t') is None
+              and any(x.get('id') == 'unverifiable' for x in lines), (doc, lines))
     finally:
         for p in procs:
             p.kill()
