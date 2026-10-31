@@ -244,9 +244,8 @@ been made on real L2 data.
 4. Where the guardians' independent L2 RPC comes from (the follower-rpc package installs on the settler
    host; a non-settler host needs a replica).
 5. `release_before_final` soft (default) or hard on the fast-path guardian.
-6. Items from the bridge review (2026-10-30), `docs/AUDIT-SCOPE.md` section 5: token bucket instead of the
-   tumbling release window; a cooldown on renewed guardian pauses; an expiry on verifier proposals; who pays
-   relayer gas (`minBurn`); the mint leg after the switch.
+6. Items from the bridge review (2026-10-30), `docs/AUDIT-SCOPE.md` section 5: who pays relayer gas (`minBurn`) and
+   the mint leg after the switch.
 
 ## 9. Bridge review, 2026-10-30 (`codex/bridge-review-20261030`)
 
@@ -257,6 +256,14 @@ Contracts:
   the vault has no refund.
 - `BridgedStablecoinV2.burn` refuses `amount > bucketCapacity`. Before, a burn above the vault window was accepted
   and could never be released. A holder above the limit exits with several burns.
+
+- The release limit is a token bucket (capacity `windowLimit`, full refill in `windowSeconds`) instead of a tumbling
+  window, so no boundary lets 2x through.
+- Each guardian starts one pause per chain of consecutive pauses (`pauseCooldown` apart starts a new chain). One key
+  still pauses at once; another guardian can renew at once. Mainnet shape: at most 6 days frozen, then 3 days open.
+  **Runbook consequence:** in a real incident the second guardian's operator must renew when the first pause ends.
+  Until the LC port `sombra.py` will not do this by itself.
+- A verifier proposal can be activated only within 30 days after its delay; then it expires and can be replaced.
 
 Automation (`vigia.py`, `signatario.py`, `eth_half.py`):
 

@@ -83,7 +83,7 @@ Out of scope, but pinned and listed for completeness:
    quorum can drain at most that capacity plus the refill.
 3. **One-way switch to the light client.** `switchThreshold` signers (at least `threshold`; 3-of-3 in the
    rehearsals) propose an `IReleaseVerifier`, pinned to its code hash. Anyone activates it after
-   `switchDelay ≥ 7 days`, unless the same quorum cancelled it.
+   `switchDelay ≥ 7 days` and within 30 days after that, unless the same quorum cancelled it.
    - After activation, `release()` reverts `CommitteeRetired` forever.
    - Releases then need `releaseWithProof`: an SP1 Groth16 proof that the burn is final under Bloch L1 FFG,
      starting from the one-time `trustAnchor`.
@@ -125,8 +125,9 @@ Vault (`ContextBoundSourceVault`):
 - **V8. Completable deposits.** Every accepted deposit can be minted: `amount ≤ windowLimit = bucketCapacity`, the
   recipient is a left-padded address, `cap = supplyCap`.
 - **V5. Switch.**
-  - At most one pending proposal.
-  - Activation only after `verifierActivatesAt` and only with the proposed code hash unchanged.
+  - At most one live proposal. An expired one can be replaced.
+  - Activation only from `verifierActivatesAt` to 30 days after it (`VERIFIER_ACTIVATION_WINDOW`), and only with the
+    proposed code hash unchanged.
   - Activation is irreversible.
   - Afterwards: committee `release` always reverts, and `setControls` cannot disable releases.
   - Only an exact `verifyRelease.selector` return accepts a proof.
@@ -179,8 +180,6 @@ Cross-system:
   signatures. A quorum of mint keys can mint unbacked bUSDC, burn it and prove the burn: the proof shows the burn is
   final, not that it was backed. Guardians have no vault power then. Losses are bounded by the bucket and the window
   (`BridgeReviewPoc.testC6`).
-- **Verifier proposals do not expire.** Anyone can activate a proposal at any time after the delay, and only
-  `switchThreshold` signers can cancel it (`testC7`).
 - **Guardian pause chains.** One key still pauses at once, but each guardian may start one pause per chain of
   consecutive pauses. With g guardians a chain lasts at most g × `pauseDuration`, then `pauseCooldown` stays open
   (`testC5`). The cost: in a real, lasting compromise the vault reopens after the chain, and the attacker gets the

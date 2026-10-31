@@ -32,7 +32,9 @@ interface IReleaseVerifier {
 ///      Light-client switch (one way, set once): `switchThreshold` of the
 ///      committee may propose a verifier (bound to its code hash); anyone
 ///      activates it after `switchDelay` (at least 7 days, so holders who
-///      disagree can exit first) unless the same quorum cancelled it. Once
+///      disagree can exit first) and within `VERIFIER_ACTIVATION_WINDOW` after
+///      that, unless the same quorum cancelled it. An expired proposal can no
+///      longer activate, and the quorum may replace it with a new one. Once
 ///      active, committee releases stop for good, releases need a proof and
 ///      the committee can no longer disable them; per-window limits still apply.
 ///      Shadow-mode guardians (committee mode only): before the switch, a light-client
@@ -65,6 +67,8 @@ contract ContextBoundSourceVault {
     /// Seconds between a switch proposal and its earliest activation.
     uint64 public immutable switchDelay;
     uint64 public constant MIN_SWITCH_DELAY = 7 days;
+    /// A proposal can be activated only this long after `verifierActivatesAt`.
+    uint64 public constant VERIFIER_ACTIVATION_WINDOW = 30 days;
     /// 0: optional boolean; 1: configured TRON token, exact deltas authoritative.
     uint8 public immutable transferMode;
     address[] public signers;
@@ -150,6 +154,7 @@ contract ContextBoundSourceVault {
     event ControlsUpdated(bytes32 indexed route, uint64 indexed nonce, bool depositsEnabled, bool releasesEnabled);
     event VerifierProposed(address indexed verifier, bytes32 codehash, uint64 activatesAt, uint64 indexed nonce);
     event VerifierCancelled(address indexed verifier, uint64 indexed nonce);
+    event VerifierExpired(address indexed verifier, uint64 indexed nonce);
     event VerifierActivated(address indexed verifier, bytes32 codehash);
     event GuardianPaused(address indexed guardian, uint64 indexed pauseCount, uint64 pausedUntil);
     event Unpaused(uint64 indexed pauseCount, uint64 guardianBlockedUntil);
@@ -475,19 +480,27 @@ contract ContextBoundSourceVault {
         return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", authorization));
     }
 
+    /// @notice True while a proposal exists that can still activate (now or after its delay).
+    function verifierProposalLive() public view returns (bool) {
+        return proposedVerifier != address(0)
+            && block.timestamp <= uint256(verifierActivatesAt) + VERIFIER_ACTIVATION_WINDOW;
+    }
+
     /// @notice One-time switch, step 1: `switchThreshold` signers propose a verifier,
-    ///         pinned to its current code hash. Only one proposal may be pending.
+    ///         pinned to its current code hash. Only one live proposal at a time; an
+    ///         expired one is replaced.
     function proposeVerifier(address verifier_, uint64 nonce, uint256 validUntil, bytes[] calldata signatures)
         external
         nonReentrant
     {
         bytes32 codehash = verifier_.codehash;
         if (
-            verifier != address(0) || proposedVerifier != address(0) || verifier_ == address(0)
+            verifier != address(0) || verifierProposalLive() || verifier_ == address(0)
                 || verifier_ == address(this) || verifier_.code.length == 0 || nonce != switchNonce
                 || block.timestamp > validUntil
         ) revert InvalidSwitch();
         _checkCertificate(switchDigest(false, verifier_, codehash, nonce, validUntil), signatures, switchThreshold);
+        if (proposedVerifier != address(0)) emit VerifierExpired(proposedVerifier, nonce);
         switchNonce = nonce + 1;
         proposedVerifier = verifier_;
         proposedVerifierCodehash = codehash;
@@ -509,12 +522,12 @@ contract ContextBoundSourceVault {
         emit VerifierCancelled(pending, nonce);
     }
 
-    /// @notice One-time switch, step 2: anyone activates after the delay, if the
-    ///         verifier code is unchanged. Irreversible.
+    /// @notice One-time switch, step 2: anyone activates after the delay and before the
+    ///         proposal expires, if the verifier code is unchanged. Irreversible.
     function activateVerifier() external nonReentrant {
         address pending = proposedVerifier;
         if (
-            pending == address(0) || block.timestamp < verifierActivatesAt
+            pending == address(0) || block.timestamp < verifierActivatesAt || !verifierProposalLive()
                 || pending.codehash != proposedVerifierCodehash
         ) revert InvalidSwitch();
         verifier = pending;

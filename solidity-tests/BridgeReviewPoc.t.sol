@@ -61,8 +61,8 @@ contract BatchBurner {
 }
 
 /// Mainnet-shaped parameters (deployments/mainnet/busdc*.config.json) with a 3-of-3 switch committee.
-/// Bridge review (agents/29). C1-C3 assert the fixes; on 8678454 they were reproduced as accepted, stuck funds.
-/// C7 is fixed in its own commit; C6 and C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
+/// Bridge review (agents/29). C1-C5 and C7 assert the fixes.
+/// C6 and C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
 contract BridgeReviewPoc {
     ReviewVm constant vm = ReviewVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint64 constant U = 1e6;
@@ -302,14 +302,37 @@ contract BridgeReviewPoc {
         require(usdc.balanceOf(BOB) == 1_000 * U, "unbacked mint paid with Alice's USDC");
     }
 
-    /// C7: a proposal never expires: years later anyone activates it.
-    function testC7_proposalHasNoExpiry() public {
+    /// C7 (fixed): a proposal could be activated by anyone years later. Behaviour only, so it also runs on 8678454,
+    /// where the late activation succeeds and this test fails.
+    function testC7_proposalExpires() public {
         AcceptAll lc = new AcceptAll();
         uint256 vu = block.timestamp + 1 hours;
         vault.proposeVerifier(address(lc), 0, vu, _certs(vault.switchDigest(false, address(lc), address(lc).codehash, 0, vu), 3));
         vm.warp(block.timestamp + 3650 days);
+        (bool ok,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.activateVerifier, ()));
+        require(!ok, "activated ten years later by anyone");
+        require(vault.verifier() == address(0), "still the committee");
+    }
+
+    /// Activation works up to the last second of the window. After it, the quorum may propose again, with a full delay.
+    function testC7_windowAndReplacement() public {
+        AcceptAll lc = new AcceptAll();
+        uint256 vu = block.timestamp + 1 hours;
+        vault.proposeVerifier(address(lc), 0, vu, _certs(vault.switchDigest(false, address(lc), address(lc).codehash, 0, vu), 3));
+        vu = block.timestamp + 1 hours;
+        bytes[] memory twice = _certs(vault.switchDigest(false, address(lc), address(lc).codehash, 1, vu), 3);
+        (bool ok,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.proposeVerifier, (address(lc), 1, vu, twice)));
+        require(!ok, "one live proposal at a time");
+        uint256 last = uint256(vault.verifierActivatesAt()) + vault.VERIFIER_ACTIVATION_WINDOW();
+        vm.warp(last + 1);
+        require(!vault.verifierProposalLive(), "expired");
+        vu = block.timestamp + 1 hours;
+        vault.proposeVerifier(address(lc), 1, vu, _certs(vault.switchDigest(false, address(lc), address(lc).codehash, 1, vu), 3));
+        (ok,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.activateVerifier, ()));
+        require(!ok, "a replacement waits the full delay");
+        vm.warp(uint256(vault.verifierActivatesAt()) + vault.VERIFIER_ACTIVATION_WINDOW());
         vault.activateVerifier();
-        require(vault.verifier() == address(lc), "activated ten years later by anyone");
+        require(vault.verifier() == address(lc), "the last second of the window still activates");
     }
 
     /// C9: one blacklisted recipient makes its own release revert forever (USDC blacklist); the burn is lost.

@@ -242,7 +242,7 @@ def cmd_release(eth, args):
         refuse('the vault is paused by a guardian; retry after the pause',
                paused_until=eth.word(eth.call('pausedUntil()')))
     pending = '0x' + eth.call('proposedVerifier()')[-40:]
-    switch = {} if int(pending, 16) == 0 else {
+    switch = {} if int(pending, 16) == 0 or not eth.word(eth.call('verifierProposalLive()')) else {
         'pending_verifier': pending, 'verifier_activates_at': eth.word(eth.call('verifierActivatesAt()'))}
     if eth.word(eth.call('releasedBurn(bytes32)', rel['nativeBurn'])) or \
             eth.word(eth.call('releasedNonce(uint64)', rel['nonce'])):
