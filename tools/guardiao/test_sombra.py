@@ -171,14 +171,10 @@ def main():
             ctx = f'({2**40},{n},{h},7,{k("l2-block-7")})'
             d = view(eth, v, 'releaseDigest((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,uint64,'
                      'bytes32))(bytes32)', item(nonce, amount, v), ctx)
-            for attempt in range(3):
-                r = send(eth, DEPLOYER, v, 'release((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,'
-                         'uint64,bytes32),bytes[])', item(nonce, amount, v), ctx, sigs(d, 2), ok=ok)
-                # cast exits 0 on a mined revert. About 1 run in 20 on a loaded host: the test must not read that as "no release".
-                if not ok or not isinstance(r, dict) or r.get('status') == '0x1':
-                    return r
-                print(f'harness: release {nonce} reverted on chain, attempt {attempt + 1}', flush=True)
-            raise SystemExit(f'release {nonce} reverted three times')
+            # An explicit limit: cast sends the bare estimate. Estimated in the second the vault was deployed, the bucket's elapsed
+            # time is 0 and the checked multiply costs 8 gas less, so a release mined a second later ran out at its reentrancy guard.
+            return send(eth, DEPLOYER, v, 'release((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,'
+                        'uint64,bytes32),bytes[])', item(nonce, amount, v), ctx, sigs(d, 2), '--gas-limit', '400000', ok=ok)
 
         def proof(nonce, amount, v=None, valid=True):
             pv = view(eth, shadow, 'expectedPublicValues(address,bytes32)(bytes)', v or vault, rid(nonce, amount, v))

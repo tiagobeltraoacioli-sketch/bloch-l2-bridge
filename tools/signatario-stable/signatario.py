@@ -127,6 +127,22 @@ def uint(value, bits, what):
     return n
 
 
+def finalized_or_closed(url):
+    """The `finalized` block, or None while the settled RPC has none: null, or -32001 until it has loaded a valid status."""
+    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_getBlockByNumber', 'params': ['finalized', False]}).encode()
+    req = urllib.request.Request(url, body, {'content-type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            out = json.loads(r.read())
+    except OSError as e:
+        refuse('L2 RPC eth_getBlockByNumber unreachable', url=url, error=str(e))
+    if 'error' in out:
+        if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
+            return None
+        refuse('L2 RPC eth_getBlockByNumber error', error=out['error'])
+    return out['result']
+
+
 class Ctx:
     def __init__(self, cfg_path):
         self.cfg = json.loads(Path(cfg_path).read_text())
@@ -479,7 +495,7 @@ def own_l2(ctx, work):
             # the settled RPC reloads the status on its own poll: wait until it serves the finalized level
             want = (status.get('finalized_settlements') or [{'l2_number': 0}])[-1]['l2_number']
             for _ in range(120):
-                final = ctx.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
+                final = finalized_or_closed(url)
                 if final is not None and int(final['number'], 16) >= want:
                     break
                 time.sleep(0.5)

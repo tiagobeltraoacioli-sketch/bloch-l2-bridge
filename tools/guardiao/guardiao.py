@@ -35,7 +35,8 @@ guardian sends `pause()` with its cast keystore (password from a file, never a k
 token is already paused or in its cooldown (no reverting transactions). Every finding is one JSON line
 on stdout. The state file makes rounds idempotent: a finding is alerted once, a pause sent once.
 `check` runs one round; exit 0 = no open violation, 2 = hard violation open, 3 = soft only, 1 = error,
-4 = a critical problem: a due pause failed or never became visible, the L2 view stalled, or a verifier proposal is live.
+4 = a critical problem: a due pause failed or never became visible, the L2 view stalled, its follower status is stale or lost,
+or a verifier proposal is live.
 
 Reads and sends are separate on purpose. `l2_rpc` (reads) may be a read-only replica, which refuses transactions and
 shows settled blocks only. `l2_tx_rpc` (required on chain 700770) takes the transaction, its nonce and its receipt. It is
@@ -87,6 +88,11 @@ EVENTS = {
 MINT_QUEUED = 'MintQueued(bytes32,address,uint64,uint256)'
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
+
+
+class LevelClosed(Exception):
+    """-32001 from the settled RPC: its follower status is lost or invalid, so `safe` and `finalized` are unavailable.
+    Not evidence of anything, and `latest` still answers, so the other checks carry on."""
 
 
 class Unverifiable(Exception):
@@ -175,6 +181,10 @@ class Guardian:
             except (OSError, subprocess.SubprocessError) as e:
                 self.log(kind='alert-command-failed', error=str(e))
 
+    def problem_once(self, pid, detail):
+        if pid not in self.state['problems']:
+            self.problem(pid, detail)
+
     def clear_problem(self, *pids):
         for pid in pids:
             if self.state['problems'].pop(pid, None):
@@ -219,6 +229,8 @@ class Guardian:
         except (OSError, ValueError) as e:
             raise Unverifiable(f'{method} on {url}: {e}') from e
         if 'error' in out:
+            if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
+                raise LevelClosed(f'{method}: {out["error"].get("message")}')
             raise Unverifiable(f'{method}: {out["error"]}')
         return out['result']
 
@@ -237,9 +249,25 @@ class Guardian:
         return int(b['number'], 16), int(b['timestamp'], 16), b['hash']
 
     def finalized_l2(self):
-        """The L2 `finalized` number, or None while the settled RPC has no verified finality (v2 fails closed)."""
-        b = self.rpc(self.l2, 'eth_getBlockByNumber', ['finalized', False])
+        """The L2 `finalized` number, or None while the settled RPC has no verified finality: it answers null before the
+        first settlement, and -32001 when its follower status is lost or invalid."""
+        try:
+            b = self.rpc(self.l2, 'eth_getBlockByNumber', ['finalized', False])
+        except LevelClosed as e:
+            self.problem_once('l2-finality-closed', f'{e}; finality checks are skipped, the others run at latest')
+            return None
+        self.clear_problem('l2-finality-closed')
         return None if b is None else int(b['number'], 16)
+
+    def status_age(self):
+        """`bloch_finality.status.age_s` of the settled RPC. A stopped follower keeps old levels open with this growing, and
+        the levels stay true, so only this shows it. None when the RPC does not report it."""
+        try:
+            status = (self.rpc(self.l2, 'bloch_finality', []) or {}).get('status')
+        except (Unverifiable, LevelClosed, AttributeError):
+            return None
+        age = status.get('age_s') if isinstance(status, dict) else None
+        return age if isinstance(age, int) else None
 
     def logs(self, url, address, topic0, start, end):
         out = []
@@ -531,14 +559,21 @@ class Guardian:
 
     def track_head(self, head_time, wall):
         """Note whether the L2 view still advances. Returns nothing: the clock is max(head, wall) either way."""
+        age = self.status_age()
+        stale = age is not None and age > SETTLEMENT_DELAY_S
+        self.frozen = stale
+        if self.stall_alert and age is not None and age > self.stall_alert:
+            self.problem_once('l2-status-stale', f'the follower status behind l2_rpc is {age} s old: the follower has stopped, and '
+                                                 'old levels stay open; grace runs on the wall clock')
+        elif age is not None:
+            self.clear_problem('l2-status-stale')
         last = self.state.get('l2_head')
         if not last or head_time > last['time']:
             self.state['l2_head'] = {'time': head_time, 'seen': wall}
-            self.frozen = False
             self.clear_problem('l2-view-stalled')
             return
         still = wall - last['seen']
-        self.frozen = still > SETTLEMENT_DELAY_S
+        self.frozen = self.frozen or still > SETTLEMENT_DELAY_S
         if self.stall_alert and still > self.stall_alert and 'l2-view-stalled' not in self.state['problems']:
             self.problem('l2-view-stalled', f'the L2 head on l2_rpc has not advanced for {still} s; grace now runs on the wall '
                                             'clock, and a real release beyond this view will pause the vault')
@@ -741,6 +776,7 @@ class Guardian:
             else:
                 argv = [self.cast, 'send', self.token, 'pause()', '--keystore', self.cfg['keystore'],
                         '--password-file', self.cfg['password_file'], '--rpc-url', self.l2_tx,
+                        '--gas-limit', str(self.cfg.get('l2_pause_gas', 200_000)),
                         '--chain', str(self.cfg['l2_chain_id']), '--json']
                 rc, out, err = self.run(argv)
             try:
@@ -807,8 +843,10 @@ class Guardian:
         if self.dry_run:
             self.log(kind='vault-pause-dry-run', violations=reasons)
             return
+        # An explicit limit: `cast send` uses the bare estimate, and a nonReentrant call estimated a few gas short runs out at its end.
         argv = [self.cast, 'send', vault, 'guardianPause()', '--keystore', self.cfg.get('eth_keystore', self.cfg['keystore']),
                 '--password-file', self.cfg.get('eth_password_file', self.cfg['password_file']), '--rpc-url', eth,
+                '--gas-limit', str(self.cfg.get('eth_pause_gas', 200_000)),
                 '--chain', str(self.cfg['eth_chain_id']), '--json']
         rc, out, err = self.run(argv)
         r = json.loads(out) if rc == 0 else {}

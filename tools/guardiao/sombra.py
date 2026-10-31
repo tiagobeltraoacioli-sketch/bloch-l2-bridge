@@ -281,8 +281,10 @@ class Sombra:
         if self.dry_run:
             self.log(kind='pause-dry-run', violations=reasons)
             return
+        # An explicit limit: `cast send` uses the bare estimate, and a nonReentrant call estimated a few gas short runs out at its end.
         argv = [self.cast, 'send', self.vault, 'guardianPause()', '--keystore', self.cfg['keystore'],
                 '--password-file', self.cfg['password_file'], '--rpc-url', self.eth,
+                '--gas-limit', str(self.cfg.get('eth_pause_gas', 200_000)),
                 '--chain', str(self.cfg['eth_chain_id']), '--json']
         rc, out, err = self.run(argv)
         r = json.loads(out) if rc == 0 else {}

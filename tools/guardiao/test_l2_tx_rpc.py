@@ -7,6 +7,7 @@ The "replica" is a loopback stub in front of anvil: it refuses eth_sendRawTransa
 message, and can freeze `latest` to show only settled blocks. Throwaway keys.
 """
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
@@ -66,6 +67,8 @@ class Replica:
 
     def __init__(self, upstream):
         self.frozen, self.refused, self.down = None, 0, False
+        self.closed, self.age = False, None  # stub finality; with REAL_SETTLED_RPC the real binary answers instead
+        self.real = os.environ.get('REAL_SETTLED_RPC')
         me = self
 
         class H(BaseHTTPRequestHandler):
@@ -79,6 +82,17 @@ class Replica:
                     return self.reply({'jsonrpc': '2.0', 'id': req.get('id'),
                                        'error': {'code': -32003, 'message': me.REFUSAL}})
                 params = list(req.get('params') or [])
+                tagged = req.get('method') == 'eth_getBlockByNumber' and params[:1] in (['finalized'], ['safe'])
+                if me.real and (tagged or req.get('method') == 'bloch_finality'):
+                    body = json.dumps(req).encode()
+                    with urllib.request.urlopen(urllib.request.Request(me.real, body, {'content-type': 'application/json'})) as r:
+                        return self.reply(json.loads(r.read()))
+                if me.closed and tagged:
+                    return self.reply({'jsonrpc': '2.0', 'id': req.get('id'),
+                                       'error': {'code': -32001, 'message': 'finality unavailable: the follower status is missing'}})
+                if req.get('method') == 'bloch_finality' and (me.closed or me.age is not None):
+                    status = {'state': 'missing', 'age_s': None} if me.closed else {'state': 'ok', 'age_s': me.age}
+                    return self.reply({'jsonrpc': '2.0', 'id': req.get('id'), 'result': {'status': status}})
                 if me.frozen is not None:
                     params = [hex(me.frozen) if p == 'latest' else p for p in params]
                     if req.get('method') == 'eth_blockNumber':
@@ -224,6 +238,43 @@ def main():
         check('health: an unverifiable guardian looks healthy but has no verified_t, which the monitor raises',
               doc.get('healthy') is True and doc.get('verified_t') is None
               and any(x.get('id') == 'unverifiable' for x in lines), (doc, lines))
+
+        # ── the settled RPC's finality levels close, or its follower stops (stub, or the real binary with REAL_SETTLED_RPC) ──
+        status_file = os.environ.get('REAL_STATUS_FILE')
+        saved = Path(status_file).read_bytes() if status_file else None
+
+        def finality(state):
+            stub.closed, stub.age = state == 'closed', {'stale': 100_000, 'fresh': 10}.get(state)
+            if status_file:
+                if state == 'closed':
+                    Path(status_file).unlink()
+                else:
+                    doc = json.loads(saved)
+                    if state == 'fresh':
+                        doc['written_at_unix'] = int(time.time())
+                    Path(status_file).write_text(json.dumps(doc))
+                time.sleep(4)
+
+        closed_cfg = config('closed', l2_stall_alert_s=2700)
+        finality('closed')
+        rc, lines, err = run(closed_cfg)
+        ids = [x.get('id') for x in kinds(lines, 'alert')]
+        check('closed: -32001 raises its own critical alert, exit 4', 'l2-finality-closed' in ids and rc == 4, (rc, ids, err))
+        check('closed: not unverifiable, the round completes with finalized unknown',
+              'unverifiable' not in ids and kinds(lines, 'round') and kinds(lines, 'round')[0].get('l2_finalized') is None, lines)
+        check('closed: the checks at latest still find the violation', any(str(i).startswith(('reserves', 'provenance', 'mint')) for i in ids), ids)
+        doc = json.loads((work / 'closed.state.health.json').read_text())
+        check('closed: health is unhealthy for the monitor, verified_t still set',
+              doc['healthy'] is False and 'l2-finality-closed' in doc['problems'] and doc.get('verified_t'), doc)
+        finality('stale')
+        rc, lines, err = run(closed_cfg)
+        ids = [x.get('id') for x in kinds(lines, 'alert')]
+        check('stale: a reopened level clears the closed problem', not json.loads((work / 'closed.state.health.json').read_text())['problems'].get('l2-finality-closed'), lines)
+        check('stale: a follower stopped past the limit is critical, from age_s', 'l2-status-stale' in ids and rc == 4, (rc, ids, err))
+        finality('fresh')
+        rc, lines, err = run(closed_cfg)
+        doc = json.loads((work / 'closed.state.health.json').read_text())
+        check('fresh: a young status clears it', 'l2-status-stale' not in doc['problems'], doc)
     finally:
         for p in procs:
             p.kill()

@@ -105,6 +105,10 @@ def option(args, name, default=None):
     return default
 
 
+class LevelClosed(RuntimeError):
+    """-32001 from the settled RPC: its follower status is lost or invalid, so `safe` and `finalized` are unavailable."""
+
+
 class Vigia:
     def __init__(self, cfg_path):
         self.cfg_path = Path(cfg_path)
@@ -122,6 +126,8 @@ class Vigia:
         self.log_chunk = int(self.cfg.get('log_chunk', 10000))
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
         self.max_inflight = int(self.cfg.get('max_inflight', 16))
+        self.status_stale = int(self.cfg.get('l2_status_stale_s', 2700))
+        self.last_burns = []
         self.nonce_path = Path(self.cfg.get('relayer_state', self.shared / 'relayer-nonces.json'))
         self.anchor_max_age = int(self.cfg.get('anchor_max_age', 160))
         self.parked_now, self.parked_logged, self.chain_cache = {}, set(), {}
@@ -311,6 +317,8 @@ class Vigia:
         with urllib.request.urlopen(req, timeout=60) as r:
             out = json.loads(r.read())
         if 'error' in out:
+            if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
+                raise LevelClosed(f'{method}: {out["error"].get("message")}')
             raise RuntimeError(f'{method}: {out["error"]}')
         return out['result']
 
@@ -359,10 +367,29 @@ class Vigia:
     def burns(self):
         """Burned logs of the token up to the L2 `finalized` head (discovery only)."""
         topic = self.cast_out('keccak', BURNED).lower()
-        return [{'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash'],
-                 'amount': int(l['data'][2:66], 16), 'recipient': '0x' + l['data'][-40:].lower(),
-                 'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()}
-                for l in self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0))]
+        self.log_status_age()
+        try:
+            logs = self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0))
+        except LevelClosed as e:
+            # Unavailable, not "no burns": the last list stays open, so mints and relaying of held certificates carry on.
+            # New burns wait, and signing them is refused anyway. After a restart here the list starts empty, and what
+            # is on disk still relays.
+            log(kind='alert', severity='critical', id='l2-finality-closed', detail=str(e)[-200:], burns_kept=len(self.last_burns))
+            return self.last_burns
+        self.last_burns = [{'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash'],
+                            'amount': int(l['data'][2:66], 16), 'recipient': '0x' + l['data'][-40:].lower(),
+                            'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()} for l in logs]
+        return self.last_burns
+
+    def log_status_age(self):
+        """A stopped follower keeps old levels open: burns stop appearing, with `bloch_finality.status.age_s` the only sign."""
+        try:
+            status = (self.rpc(self.cfg['l2_rpc'], 'bloch_finality', []) or {}).get('status') or {}
+            age = status.get('age_s')
+        except (RuntimeError, OSError, ValueError, AttributeError):
+            return
+        if isinstance(age, int) and age > self.status_stale:
+            log(kind='alert', severity='critical', id='l2-status-stale', age_s=age, limit_s=self.status_stale)
 
     @staticmethod
     def locked(directory):
