@@ -9,7 +9,21 @@
   "l2_chain_id": 700770,
   "eth_rpc": "TBD-owner (an Ethereum RPC)",
   "eth_chain_id": 1,
-  "shared_dir": "TBD-owner",
+  "source_chain_id": 1,
+  "shared_dir": "/var/lib/bloch-busdc-relayer/signatures",
+  "feed": {
+    "_about": "docs/SIG-TRANSPORT.md. A relayer only reads: no publish_dir.",
+    "status_file": "/var/lib/bloch-busdc-relayer/feed-status.json",
+    "peers": [
+      "TBD-owner (all seven operators' feeds, http://IP:8787)"
+    ],
+    "mint_signers": [
+      "TBD-owner (the token's 7 signers)"
+    ],
+    "release_signers": [
+      "TBD-owner (the vault's 7 signers)"
+    ]
+  },
   "vault_from_block": "TBD-owner",
   "token_from_block": "TBD-owner",
   "l2_relayer_key": "/etc/bloch-busdc-relayer/l2-gas.key",

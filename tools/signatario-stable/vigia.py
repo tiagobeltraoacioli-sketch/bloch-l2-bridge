@@ -19,7 +19,7 @@ doing every check before it signs (nothing here weakens them):
   - releases: every `Burned` log of the token up to the L2 `finalized` block (discovery; signatario.py
     re-reads the burn from the L2 it rebuilt) not yet released by the vault -> a release certificate.
     k certificates combine only if they share the Ethereum anchor and validUntil, so they are grouped in
-    rounds SHARED/release/<burnId>/r-<validUntil>-<anchorNumber>/: the first signer to find no live
+    rounds SHARED/release/<burnId>/r-<validUntil>-<anchorNumber>-<digest>/: the first signer to find no live
     round (validUntil more than `round_margin` ahead) opens one with a plain `release`; the others join
     the newest live round with `release --context <a certificate of that round>` (the Ethereum half
     decides whether the proposed anchor is acceptable). An expired round is simply replaced.
@@ -27,8 +27,19 @@ doing every check before it signs (nothing here weakens them):
 large mints (`executeMint`) once their delay passed, and submits `vault.release` on Ethereum once a live
 round holds k certificates.
 
-SHARED is untrusted storage (a local directory in the rehearsal): every reader verifies what it reads. A
-partial counts only if its signature recovers to a current signer on the chain and the token or vault recomputes
+Transport. With a `feed` block (required with `l2_pins`) SHARED is this operator's private directory: `sign` and
+`relay` first pull the open items' signatures from the peers' read-only feeds into it, verified on the way in
+(bridge_feed.py, sigfeed.py), and export what they hold to `feed.publish_dir`, which `sigfeed.py serve` exposes.
+Without `feed`, SHARED is a local directory for rehearsals. A shared store must not be used on mainnet: a writer
+cannot forge anything, but deleting partials delays the bridge. See docs/SIG-TRANSPORT.md.
+
+Round choice, with no shared lock: a signer stays in its round unless a live round holds more distinct real signers,
+or as many with a higher name (the newest validUntil). Concurrent openers converge, and a lone key cannot pull the
+others away from a growing round. `max_release_signs_per_hour` (per burn, default 6) bounds the rebuilds a malicious
+proposer can cause. A refused round is skipped for `refused_retry` seconds (default 300), and when every live round
+was refused the signer may open its own.
+
+In both modes every reader verifies what it uses, against the chain. A partial counts only if its signature recovers to a current signer on the chain and the token or vault recomputes
 its digest from its fields; a round counts only with such a certificate and a validUntil the Ethereum half could
 accept; `done`, `executed` and `sent` are only records, and the chain decides. A forged file is ignored: it costs
 neither a wrong signature or payment nor a stopped bridge (deleting partials still only delays). One item that
@@ -45,6 +56,9 @@ import time
 import urllib.request
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import bridge_feed  # noqa: E402
+
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED = 'Burned(bytes32,uint64,address,uint64,address)'
 RELEASE_TUPLE = '(bytes32,uint64,address,uint64,bytes32)'
@@ -87,6 +101,100 @@ class Vigia:
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
         self.opened = 0
         self.me = self.cfg.get('signer_name', f"s{self.cfg.get('signer')}")
+        self.signs_per_hour = int(self.cfg.get('max_release_signs_per_hour', 6))
+        self.refused_retry = int(self.cfg.get('refused_retry', 300))
+        if self.cfg.get('l2_pins') and not self.cfg.get('feed'):
+            raise SystemExit('a mainnet config needs a `feed` block: shared_dir alone is a local rehearsal mode')
+        self.feed = None
+        self._version = None
+        self.signers_checked = False
+        if self.cfg.get('feed'):
+            self.feed = bridge_feed.BridgeFeed(self.cfg, self.token_version, self.eth_now, log)
+
+    # ── feed ─────────────────────────────────────────────────────────────────
+    def eth_now(self):
+        if self.cfg.get('eth_clock') == 'chain':
+            return int(self.rpc(self.cfg['eth_rpc'], 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
+        return int(time.time())
+
+    def token_version(self):
+        """The EIP-712 version, as signatario.py derives it: '2' for the tokens with availableToMint."""
+        if self._version is None:
+            try:
+                out = self.call(self.cfg['l2_rpc'], self.token, 'availableToMint()')
+                self._version = '2' if len(out) == 66 else '1'
+            except RuntimeError:
+                self._version = '1'
+        return self._version
+
+    def check_signer_sets(self):
+        """The feed's pinned signers must be the contracts' own (set-once) signers."""
+        if self.signers_checked:
+            return
+        for url, to, names in ((self.cfg['l2_rpc'], self.token, self.feed.mint_signers),
+                               (self.cfg['eth_rpc'], self.vault, self.feed.release_signers)):
+            for a in names:
+                if not self.flag(url, to, 'isSigner(address)', a):
+                    raise RuntimeError(f'feed signer {a} is not a signer of {to}')
+        self.signers_checked = True
+
+    def sync(self, deposits, burns):
+        """Pull the peers' signatures for this pass's open items, found on this operator's own nodes. The chain
+        decides what is open. One item whose state cannot be read is left for the next pass."""
+        if self.feed is None:
+            return
+        self.check_signer_sets()
+        self.open_deps, self.open_burns = [], []
+
+        def classify(item, finished, kind, bucket):
+            if finished(item):
+                self.feed.retire(kind, item)
+            else:
+                bucket.append(item)
+        for dep in deposits:
+            self.isolated('feed', dep, lambda dep=dep: classify(dep, self.minted, 'mint', self.open_deps))
+        for b in burns:
+            self.isolated('feed', b['burn_id'],
+                          lambda b=b: classify(b['burn_id'], self.released, 'release', self.open_burns))
+        self.feed.sync(self.open_deps, self.open_burns)
+
+    def over_budget(self, d):
+        """At most `max_release_signs_per_hour` certificates per burn: each one costs a full L2 rebuild."""
+        path, now = d / '.signs', time.time()
+        try:
+            recent = [t for t in json.loads(path.read_text()) if now - t < 3600]
+        except (OSError, ValueError, TypeError):
+            recent = []
+        if len(recent) >= self.signs_per_hour:
+            return True
+        path.write_text(json.dumps(recent + [now]))
+        return False
+
+    def round_rank(self, rnd, burn_id):
+        """(distinct real signers, name): what signers converge on. Forged files add nothing."""
+        recs = [self.release_partial(p, burn_id, rnd) for p in rnd.glob('*.json')]
+        return len({r['signer'].lower() for r in recs if r}), rnd.name
+
+    def join_target(self, live, burn_id):
+        """From (validUntil, dir, certificate): the round to sign next as (dir, certificate), None to stay put, or
+        'open' when no live round can be joined."""
+        now, candidates, mine = time.time(), [], None
+        for _, rnd, cert in live:
+            rank = self.round_rank(rnd, burn_id)
+            own = rnd / f'{self.me}.json'
+            if own.exists() and self.release_partial(own, burn_id, rnd) is not None:
+                mine = max(mine, rank) if mine else rank
+                continue
+            try:
+                if now - (rnd / f'.refused-{self.me}').stat().st_mtime < self.refused_retry:
+                    continue
+            except OSError:
+                pass
+            candidates.append((rank, rnd, cert))
+        best = max(candidates, key=lambda x: x[0], default=None)
+        if mine is not None:
+            return (best[1], best[2]) if best and best[0] > mine else None
+        return (best[1], best[2]) if best else 'open'
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def run(self, argv):
@@ -160,9 +268,7 @@ class Vigia:
     def rounds(self, d, margin):
         """Rounds of a burn with a usable validUntil, newest first: (validUntil, dir). A validUntil further away
         than an Ethereum half would accept cannot be real."""
-        now = int(time.time())
-        if self.cfg.get('eth_clock') == 'chain':
-            now = int(self.rpc(self.cfg['eth_rpc'], 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
+        now = self.eth_now()
         out = []
         for r in d.glob('r-*'):
             try:
@@ -208,7 +314,7 @@ class Vigia:
             return None
         try:
             rel, c = rec['release'], rec['context']
-            if str(rel['nativeBurn']).lower() != burn_id or rnd.name != f"r-{c['validUntil']}-{c['sourceAnchorNumber']}":
+            if str(rel['nativeBurn']).lower() != burn_id or rnd.name != bridge_feed.round_name(rec):
                 return None
             want = self.call(url, self.vault, f'releaseDigest({RELEASE_TUPLE},{CONTEXT_TUPLE})',
                              '(' + ','.join(str(rel[k]) for k in RELEASE_FIELDS) + ')',
@@ -255,9 +361,10 @@ class Vigia:
 
     # ── sign ─────────────────────────────────────────────────────────────────
     def sign_round(self):
-        for dep in self.deposits():
+        deposits, burns = self.deposits(), self.burns()
+        self.sync(deposits, burns)
+        for dep in deposits:
             self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
-        burns = self.burns()
         self.opened = 0
         # Every certificate rebuilds the L2 from L1 (41 s measured on the v2 binaries with 186,671 L1 blocks, and
         # growing), while a round can be joined for only ~15 min. Rounds other signers opened come first, and a pass
@@ -266,6 +373,8 @@ class Vigia:
             self.isolated('release', b['burn_id'], lambda b=b: self.sign_release(b, join_only=True))
         for b in burns:
             self.isolated('release', b['burn_id'], lambda b=b: self.sign_release(b))
+        if self.feed:
+            self.feed.export(self.open_deps, self.open_burns)
 
     def sign_mint(self, dep):
         out = self.shared / 'mint' / dep[2:] / f'{self.me}.json'
@@ -292,27 +401,33 @@ class Vigia:
         if self.burn_done(d, burn_id):
             return
         with self.locked(d):
-            live = self.live_rounds(d, burn_id)
-            if live:
-                _, rnd, proposal = live[0]
+            target = self.join_target(self.live_rounds(d, burn_id), burn_id)
+            if target is None:
+                return
+            if target != 'open':
+                rnd, proposal = target
                 mine = rnd / f'{self.me}.json'
-                if mine.exists() and self.release_partial(mine, burn_id, rnd) is not None:
+                if self.over_budget(d):
+                    log(kind='release', burn=burn_id, nonce=b['nonce'], signed=False, reason='hourly signing budget')
                     return
                 rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--context', proposal,
                                           '--out', mine)
                 if rc:
                     mine.unlink(missing_ok=True)
+                    (rnd / f'.refused-{self.me}').write_text('')
                 log(kind='release', burn=burn_id, nonce=b['nonce'], round=rnd.name, joined=True,
                     signed=rc == 0, reason=res.get('reason'))
                 return
             if join_only or self.opened >= self.max_new_rounds:
                 return
+            if self.over_budget(d):
+                log(kind='release', burn=burn_id, nonce=b['nonce'], signed=False, reason='hourly signing budget')
+                return
             self.opened += 1
             tmp = d / f'.{self.me}.new.json'
             rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--out', tmp)
             if rc == 0:
-                c = res['context']
-                rnd = d / f"r-{c['validUntil']}-{c['sourceAnchorNumber']}"
+                rnd = d / bridge_feed.round_name(res)
                 rnd.mkdir(exist_ok=True)
                 os.replace(tmp, rnd / f'{self.me}.json')
             else:
@@ -323,6 +438,8 @@ class Vigia:
 
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
+        if self.feed:
+            self.sync(self.deposits(), self.burns())
         mint_dir = self.shared / 'mint'
         for d in sorted(mint_dir.glob('*')) if mint_dir.exists() else []:
             self.isolated('relay-mint', d.name, lambda d=d: self.relay_mint(d))
@@ -446,4 +563,5 @@ def main():
         time.sleep(interval)
 
 
-main()
+if __name__ == '__main__':
+    main()
