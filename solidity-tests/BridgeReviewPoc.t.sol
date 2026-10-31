@@ -104,7 +104,7 @@ contract BridgeReviewPoc {
         (g[0], g[1]) = (GUARD, GUARD2);
         vault = new ContextBoundSourceVault(
             keccak256("ethereum-mainnet"), keccak256("bloch-l2-700770"), keccak256("USDC"), address(usdc), CAP, 0,
-            signers, 2, ContextBoundSourceVault.Policy(WINDOW, 1 days, 3, 14 days),
+            signers, 2, ContextBoundSourceVault.Policy(WINDOW, 1 days, 3, 14 days, 10 * U, 10 * U),
             ContextBoundSourceVault.Guard(g, 3 days, 3 days)
         );
         uint256 vu = block.timestamp + 1 hours;
@@ -162,6 +162,34 @@ contract BridgeReviewPoc {
     }
 
     /// C1 (fixed): a deposit above the token bucket could never be minted and has no refund: the vault refuses it.
+    /// C8: a direct deposit below the L2 minBurn could not be bridged back alone. It reverts before funds move.
+    function testC8_depositBelowMinDepositRefusedBeforeFundsMove() public {
+        uint256 aliceBefore = usdc.balanceOf(ALICE);
+        vm.prank(ALICE);
+        (bool ok,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.deposit, (10 * U - 1, _pq(ALICE))));
+        require(!ok, "a deposit below minDeposit is refused");
+        require(usdc.balanceOf(ALICE) == aliceBefore && usdc.balanceOf(address(vault)) == 0, "no funds moved");
+        require(vault.depositCount() == 0, "nothing recorded");
+    }
+
+    /// C8: the constructor ties minDeposit to the declared L2 minBurn and the window.
+    function testC8_constructorRefusesABadMinDeposit() public {
+        address[] memory g = new address[](0);
+        uint64[3][3] memory bad = [[10 * U - 1, 10 * U, WINDOW], [WINDOW + 1, 10 * U, WINDOW], [10 * U, 0, WINDOW]];
+        for (uint256 i; i < bad.length; ++i) {
+            try new ContextBoundSourceVault(
+                keccak256("a"), keccak256("b"), keccak256("USDC"), address(usdc), CAP, 0, signers, 2,
+                ContextBoundSourceVault.Policy(bad[i][2], 1 days, 3, 14 days, bad[i][0], bad[i][1]),
+                ContextBoundSourceVault.Guard(g, 0, 0)
+            ) {
+                revert("a bad minDeposit was accepted");
+            } catch {}
+        }
+        require(vault.minDeposit() == 10 * U && vault.l2MinBurn() == 10 * U, "getters");
+        bytes32 dep = _deposit(10 * U, _pq(ALICE));
+        require(dep != bytes32(0), "minDeposit itself is accepted");
+    }
+
     function testC1_depositAboveBucketRefused() public {
         vm.prank(ALICE);
         (bool ok,) = address(vault).call(abi.encodeCall(ContextBoundSourceVault.deposit, (WINDOW + 1, _pq(ALICE))));

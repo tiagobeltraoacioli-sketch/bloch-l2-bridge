@@ -103,7 +103,7 @@ forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVaul
 forge create --rpc-url "$ETH_RPC" --ledger --broadcast contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
 ```
 
-`windowLimit` must equal the token's `bucketCapacity`, and the cap its `supplyCap` (`validate --token-config`). The first is the dry run. Note the address (`VAULT`) and the block. A creation that does not land as
+`windowLimit` must equal the token's `bucketCapacity`, `l2MinBurn` its `minBurn`, and the cap its `supplyCap` (`validate --token-config`). The first is the dry run. Note the address (`VAULT`) and the block. A creation that does not land as
 planned is not repaired: new deployer key, new review.
 
 ### 4.4 Verify at Ethereum finality (~13 min later)
@@ -231,7 +231,7 @@ been made on real L2 data.
 | 3 L2 guardian operators (addresses are set) | L2 config `guardians.set[].operator` |
 | Vault address, route, code hash, cap | L2 config `ethereum.*` (from 4.4) |
 | L2 gas price cap | L2 config `tx.maxGasPriceWei` |
-| cap, windowLimit, switchThreshold (proposed 6), switchDelay (proposed 14 d) | vault config (proposed values filled) |
+| cap, windowLimit, minDeposit (proposed 10 USDC), switchThreshold (proposed 6), switchDelay (proposed 14 d) | vault config (proposed values filled) |
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | Light-client prover and shadow verifier (after the LC port) | sombra `prover_dir`, `shadow_verifier` |
@@ -254,6 +254,10 @@ Contracts:
 - `ContextBoundSourceVault.deposit` refuses `amount > windowLimit` and a `pqRecipientHash` with non-zero high 12
   bytes. Before, a deposit above the token bucket or with no L2 address was accepted and could never be minted, and
   the vault has no refund.
+- `ContextBoundSourceVault.deposit` refuses `amount < minDeposit` before funds move. `minDeposit` and `l2MinBurn` are immutable
+  constructor values (`Policy`), proposed 10 USDC each. The constructor requires `l2MinBurn <= minDeposit <= windowLimit`.
+  `validate --token-config` requires `l2MinBurn` to equal the token's `minBurn`, because the vault cannot read the L2. The token
+  is unchanged. **UI limit:** a deposit must be between `minDeposit()` and `windowLimit()`, both read from the vault.
 - `BridgedStablecoinV2.burn` refuses `amount > bucketCapacity`. Before, a burn above the vault window was accepted
   and could never be released. A holder above the limit exits with several burns.
 
@@ -278,8 +282,8 @@ Automation (`vigia.py`, `signatario.py`, `eth_half.py`):
 Watchers: a malformed answer is `unverifiable`, never a crash; `liveness-not-final` reports a burn that does not
 become final within the SLA (L1 finality or L2 settlement stalled).
 
-Tooling: `vault_pontes.py validate` requires the cap to equal `supplyCap` and `windowLimit` to equal
-`bucketCapacity`, and the whole cap to fit through the window within `switchDelay`.
+Tooling: `vault_pontes.py validate` requires the cap to equal `supplyCap`, `windowLimit` to equal
+`bucketCapacity`, `l2MinBurn` to equal `minBurn` and `l2MinBurn <= minDeposit <= windowLimit`, and the whole cap to fit through the window within `switchDelay`.
 
 Pin to update: the owner's v2.1 rebuild of `bloch-l2-settled-rpc` replaces `4fc9fa1e`. Until
 `l2_finality.MAINNET_V2['binaries']['settled_rpc']` (and the text of this document) carries the new hash, every

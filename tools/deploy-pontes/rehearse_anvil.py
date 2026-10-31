@@ -152,6 +152,14 @@ def vault_rehearsal(url, work, token_cfg):
     check('[vault] cross-check refuses a windowLimit different from the L2 bucketCapacity', rc == 1
           and 'bucketCapacity' in r.get('reason', ''), r)
 
+    tc = json.loads(json.dumps(token_cfg))
+    tc['ethereum'] = json.loads(json.dumps(be))
+    tc['limits']['minBurn'] = vc['vault']['policy']['l2MinBurn'] + 1
+    tpath2.write_text(json.dumps(tc))
+    rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+    check('[vault] cross-check refuses an l2MinBurn different from the L2 minBurn', rc == 1
+          and 'minBurn' in r.get('reason', ''), r)
+
     def mainnet_refused(name, mutate, needle):
         c = json.loads(json.dumps(vc))
         c['ethereum'] = {'chainId': 1, 'rehearsal': False}
@@ -179,6 +187,10 @@ def vault_rehearsal(url, work, token_cfg):
     mainnet_refused('a guardian that is a signer refused',
                     lambda c: c['vault']['guard']['guardians'][0].update(address=c['vault']['signers']['set'][0]['address']),
                     'release signer')
+    mainnet_refused('minDeposit below l2MinBurn refused',
+                    lambda c: c['vault']['policy'].update(minDeposit=c['vault']['policy']['l2MinBurn'] - 1), 'minDeposit')
+    mainnet_refused('minDeposit above windowLimit refused',
+                    lambda c: c['vault']['policy'].update(minDeposit=c['vault']['policy']['windowLimit'] + 1), 'minDeposit')
     mainnet_refused('windowLimit above the cap refused',
                     lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] + 1), 'windowLimit')
     mainnet_refused('a switchDelay holders cannot exit within refused',
@@ -240,7 +252,7 @@ def source_vault(eth, work):
     guardians = sorted((new_key()[1] for _ in range(2)), key=lambda a: int(a, 16))
     vault = create('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                    k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
-                   '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800)',
+                   '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800,1,1)',
                    f'([{",".join(guardians)}],259200,259200)')
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
     return {'chainId': int(out(CAST, 'chain-id', '--rpc-url', eth)), 'vault': vault,

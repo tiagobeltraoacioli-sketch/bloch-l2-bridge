@@ -153,7 +153,7 @@ def main():
         other_guardian = '0x' + '5b' * 20
         vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), mock, str(1_000_000 * U), '0',
-                       signer_list, '2', f'({100_000 * U},86400,2,604800)',
+                       signer_list, '2', f'({100_000 * U},86400,2,604800,1,1)',
                        f'([{",".join(sorted([vault_guardian, other_guardian]))}],7200,7200)')
         vu = str(int(time.time()) + 3600)
         d = view(eth, vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)

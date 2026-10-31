@@ -159,7 +159,7 @@ def main():
         k = lambda t: out(CAST, 'keccak', t)  # noqa: E731
         vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), token, str(1_000_000 * U), '0', addrs,
-                       '2', f'({100_000 * U},86400,2,604800)', '([],0,0)')
+                       '2', f'({100_000 * U},86400,2,604800,{U},{U})', '([],0,0)')
         vu = str(int(time.time()) + 3600)
         d = out(CAST, 'call', vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu, '--rpc-url', eth)
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in signers[:2]]
@@ -314,15 +314,14 @@ def main():
             vigia(cfgs[i], 'sign')
         check('finished items are retired from the feeds', not published(0), published(0))
 
-        # ── reported, not asserted: a deposit below the token's minBurn ──
-        dust = U // 2
-        send(eth, ALICE_KEY, vault, 'deposit(uint64,bytes32)', str(dust), '0x' + '00' * 12 + BOB[2:])
-        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
-        vigia(cfgs[0], 'sign')
-        vigia(cfgs[1], 'sign')
-        vigia(cfgs[2], 'relay')
-        got = uint(l2, stable, 'balanceOf(address)(uint256)', BOB)
-        print(f'NOTE minBurn: vault accepted a deposit of {dust} with minBurn {U}; minted {got} to the recipient')
+        # ── minDeposit: refused before funds move ──
+        locked = uint(eth, vault, 'totalLocked()(uint64)')
+        below = sh(CAST, 'send', vault, 'deposit(uint64,bytes32)', str(U - 1), '0x' + '00' * 12 + alice[2:],
+                   '--rpc-url', eth, '--private-key', ALICE_KEY, ok=False)
+        check('a deposit below minDeposit (= the token minBurn) is refused',
+              below.returncode != 0 and uint(eth, vault, 'totalLocked()(uint64)') == locked)
+        send(eth, ALICE_KEY, vault, 'deposit(uint64,bytes32)', str(U), '0x' + '00' * 12 + alice[2:])
+        check('a deposit of exactly minDeposit is accepted', uint(eth, vault, 'totalLocked()(uint64)') == locked + U)
     finally:
         for p in procs:
             p.kill()

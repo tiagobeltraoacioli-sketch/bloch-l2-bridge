@@ -208,7 +208,7 @@ def setup():
         args = sh(CAST, 'abi-encode', 'c(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,(uint64,uint64,uint8,'
                   'uint64),(address[],uint64,uint64))',
                   k('ethereum-sepolia'), k(f'bloch-l2-{L2_CHAIN}'), k('USDC'), st['eth_token'], VAULT_CAP, 0,
-                  '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400})',
+                  '[' + ','.join(eth_signers) + ']', 2, f'({WINDOW_LIMIT},{WINDOW},3,{7 * 86400},{MIN_BURN},{MIN_BURN})',
                   f"([{vault_guardians}],{PAUSE_DURATION},{PAUSE_COOLDOWN})")
         tx, r, _, _ = send_raw(ETH_RPC, ETH_CHAIN, ANVIL_KEYS[0], None,
                                bytecode('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault')

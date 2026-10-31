@@ -106,7 +106,7 @@ def main():
         k = lambda t: out(CAST, 'keccak', t)
         vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), token, str(1_000_000 * U), '0', addrs,
-                       '2', f'({100_000 * U},86400,2,604800)', '([],0,0)')
+                       '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)')
         vu = str(int(time.time()) + 3600)
         d = out(CAST, 'call', vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu,
                 '--rpc-url', eth)

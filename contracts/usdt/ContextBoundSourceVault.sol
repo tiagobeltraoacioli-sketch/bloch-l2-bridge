@@ -61,6 +61,11 @@ contract ContextBoundSourceVault {
     /// full refill in `windowSeconds`.
     uint64 public immutable windowLimit;
     uint64 public immutable windowSeconds;
+    /// Smallest deposit, fixed at deployment. No setter. A smaller balance could not be bridged back alone.
+    uint64 public immutable minDeposit;
+    /// The L2 token's `minBurn`, declared at deployment. This contract cannot read the L2, so `vault_pontes.py`
+    /// checks the value against the token's configuration and deployment.
+    uint64 public immutable l2MinBurn;
     uint8 public immutable threshold;
     /// Signatures needed to propose or cancel the light-client switch (>= threshold).
     uint8 public immutable switchThreshold;
@@ -123,6 +128,8 @@ contract ContextBoundSourceVault {
         uint64 windowSeconds;
         uint8 switchThreshold;
         uint64 switchDelay;
+        uint64 minDeposit;
+        uint64 l2MinBurn;
     }
 
     /// Guardian policy fixed at deployment. No guardians: `pauseDuration` and
@@ -192,7 +199,8 @@ contract ContextBoundSourceVault {
                 || transferMode_ > 1 || threshold_ < 2 || threshold_ > signers_.length || signers_.length > 16
                 || policy.windowLimit == 0 || policy.windowLimit > cap_ || policy.windowSeconds == 0
                 || policy.switchThreshold < threshold_ || policy.switchThreshold > signers_.length
-                || policy.switchDelay < MIN_SWITCH_DELAY
+                || policy.switchDelay < MIN_SWITCH_DELAY || policy.l2MinBurn == 0
+                || policy.minDeposit < policy.l2MinBurn || policy.minDeposit > policy.windowLimit
         ) revert InvalidConfiguration();
         (bool ok, bytes memory data) = token_.staticcall(abi.encodeWithSignature("decimals()"));
         if (!ok || data.length != 32 || abi.decode(data, (uint256)) != 6) revert InvalidConfiguration();
@@ -233,6 +241,8 @@ contract ContextBoundSourceVault {
         releaseBucket = policy.windowLimit;
         releaseBucketUpdatedAt = uint64(block.timestamp);
         windowSeconds = policy.windowSeconds;
+        minDeposit = policy.minDeposit;
+        l2MinBurn = policy.l2MinBurn;
         switchThreshold = policy.switchThreshold;
         switchDelay = policy.switchDelay;
     }
@@ -362,7 +372,7 @@ contract ContextBoundSourceVault {
     function deposit(uint64 amount, bytes32 pqRecipientHash) external nonReentrant returns (bytes32 id) {
         if (paused()) revert Paused();
         if (
-            !depositsEnabled || amount == 0 || amount > windowLimit || pqRecipientHash == 0
+            !depositsEnabled || amount < minDeposit || amount > windowLimit || pqRecipientHash == 0
                 || uint256(pqRecipientHash) >> 160 != 0 || uint256(totalLocked) + amount > cap
                 || depositCount == type(uint64).max
         ) revert InvalidTransfer();

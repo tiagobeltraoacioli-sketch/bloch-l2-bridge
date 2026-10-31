@@ -9,6 +9,7 @@
     "switchThreshold": "proposed 6 of 7: one more than the release threshold to propose or cancel the one-way light-client switch (owner decision)",
     "switchDelay": "proposed 14 days (contract minimum 7 days): time for users and guardians to react to a proposed verifier (owner decision)",
     "guard": "two independent pause-only guardians: guardiao.py (fast path) and sombra.py (proof path); 72 h pause, 72 h cooldown, as the L2 token",
+    "minDeposit": "proposed 10 USDC: the smallest deposit, immutable. The constructor requires l2MinBurn <= minDeposit <= windowLimit; validate --token-config requires l2MinBurn == the L2 minBurn",
     "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, recommended distinct from their L2 mint keys); 2 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchThreshold, switchDelay"
   },
   "ethereum": {
@@ -70,7 +71,9 @@
       "windowLimit": 10000000000,
       "windowSeconds": 86400,
       "switchThreshold": 6,
-      "switchDelay": 1209600
+      "switchDelay": 1209600,
+      "minDeposit": 10000000,
+      "l2MinBurn": 10000000
     },
     "guard": {
       "guardians": [

@@ -230,11 +230,10 @@ Cross-system:
   - Vault v4 (`0xe6e340d1…`) holds 10 USDC against 14 bUSDC: a deliberate unbacked release of 4 USDC.
   - Vault v5 (`0x70e0ba84…`) is paused, with 3 USDC released without a burn and deposits never minted.
 
-**Deposits below `minBurn`.** The vault refuses only `amount == 0` at the low end, and it has no `minBurn` (that is an L2
-token parameter). `rehearse_feed.py` shows a deposit of 0.5 USDC accepted and minted with `minBurn` 1 USDC. The recipient
-cannot burn that balance alone until it holds at least `minBurn`, by a further deposit or a transfer, so the funds are stuck
-for the holder, not lost to the bridge. Each such deposit also costs the relayer one L2 mint. The bridge UI refuses these
-deposits; direct callers of the vault are not protected. No contract change has been made for this.
+**`minDeposit` depends on a declared value.** `deposit` refuses `amount < minDeposit`, an immutable with no setter, before funds
+move. The constructor requires `l2MinBurn <= minDeposit <= windowLimit`, but `l2MinBurn` is a declared constructor value, because
+an Ethereum contract cannot read the L2. A wrong declaration is caught off-chain by `vault_pontes.py validate --token-config` and
+`verify`, not by the contract. A balance can still fall below `minBurn` by L2 transfers or partial burns; the holder then tops up.
 
 ## 6. Live evidence index
 

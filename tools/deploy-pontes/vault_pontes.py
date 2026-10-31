@@ -9,7 +9,7 @@ One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, d
 `bloch.bridge.vault-deploy.v1`); `null` = undecided and refused.
   validate  strict schema and mainnet policy: Ethereum chain 1 and the canonical USDC contract, 5-of-7
             release signers of 7 distinct operators, switchThreshold in [threshold, n], switchDelay >= 7 days,
-            0 < windowLimit <= cap, the whole cap able to exit through the window within switchDelay,
+            0 < windowLimit <= cap, 0 < l2MinBurn <= minDeposit <= windowLimit, the whole cap able to exit through the window within switchDelay,
             1..7 pause-only guardians of operators independent of every signer, pause 1 h..14 d with cooldown
             >= duration, a fresh deployer holding no role. With --token-config (busdc-mainnet.config.json): cap
             equal to the L2 supplyCap, windowLimit equal to the L2 bucketCapacity (a deposit or burn outside
@@ -126,11 +126,14 @@ def validate(cfg, rehearsal, token_cfg=None):
         refuse((n, k) == (POLICY_SIGNERS, POLICY_THRESHOLD), f'mainnet policy is 5-of-7 release signers, config has {k}-of-{n}')
 
     pol = v['policy']
-    exact_keys(pol, ['windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay'], 'vault.policy')
+    exact_keys(pol, ['windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay', 'minDeposit', 'l2MinBurn'], 'vault.policy')
     refuse(is_uint(pol['windowLimit'], v['cap'], 1), 'vault.policy.windowLimit is undecided or above the cap')
     refuse(is_uint(pol['windowSeconds'], lo=1), 'vault.policy.windowSeconds is undecided')
     refuse(is_uint(pol['switchThreshold'], n, k), 'vault.policy.switchThreshold is undecided or outside threshold..n')
     refuse(is_uint(pol['switchDelay'], lo=MIN_SWITCH_DELAY), 'vault.policy.switchDelay is undecided or below 7 days')
+    refuse(is_uint(pol['l2MinBurn'], lo=1), 'vault.policy.l2MinBurn is undecided')
+    refuse(is_uint(pol['minDeposit'], pol['windowLimit'], pol['l2MinBurn']),
+           'vault.policy.minDeposit is undecided, below l2MinBurn (a balance that could not be bridged back alone) or above windowLimit')
     windows = -(-v['cap'] // pol['windowLimit'])
     refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
            'switchDelay is too short for holders to exit: the cap needs '
@@ -169,6 +172,8 @@ def validate(cfg, rehearsal, token_cfg=None):
                'vault cap differs from the L2 supplyCap (above it a deposit may never mint; below it mints stop early)')
         refuse(lim.get('bucketCapacity') == pol['windowLimit'],
                'vault windowLimit differs from the L2 bucketCapacity (a deposit or burn outside them can never complete)')
+        refuse(lim.get('minBurn') == pol['l2MinBurn'],
+               'vault l2MinBurn differs from the L2 minBurn (the constructor can only compare minDeposit with this declared value)')
         vg = te.get('vaultGuard') or {}
         refuse([str(a).lower() for a in (vg.get('guardians') or [])] == sorted(guardians, key=lambda a: int(a, 16))
                and vg.get('pauseDuration') == gd['pauseDuration'] and vg.get('pauseCooldown') == gd['pauseCooldown'],
@@ -185,7 +190,7 @@ def constructor_args(cfg, norm):
     return [cast('keccak', v['sourceDomainLabel']), cast('keccak', v['nativeDomainLabel']), cast('keccak', v['assetLabel']),
             v['token'].lower(), str(v['cap']), str(v['transferMode']), '[' + ','.join(norm['signers']) + ']',
             str(v['signers']['threshold']),
-            f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]})',
+            f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
             f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})']
 
 
@@ -217,6 +222,7 @@ def verify(cfg, norm, url, address, block):
         'cap()(uint64)': str(v['cap']), 'transferMode()(uint8)': str(v['transferMode']),
         'threshold()(uint8)': str(v['signers']['threshold']), 'windowLimit()(uint64)': str(v['policy']['windowLimit']),
         'windowSeconds()(uint64)': str(v['policy']['windowSeconds']),
+        'minDeposit()(uint64)': str(v['policy']['minDeposit']), 'l2MinBurn()(uint64)': str(v['policy']['l2MinBurn']),
         'switchThreshold()(uint8)': str(v['policy']['switchThreshold']),
         'switchDelay()(uint64)': str(v['policy']['switchDelay']), 'pauseDuration()(uint64)': str(v['guard']['pauseDuration']),
         'pauseCooldown()(uint64)': str(v['guard']['pauseCooldown']), 'decimals()(uint8)': '6',

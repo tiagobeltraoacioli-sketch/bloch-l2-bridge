@@ -147,7 +147,7 @@ def main():
         def deploy_vault(native):
             v = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k(native), k('USDC'), usdc, str(10**12), '0', signer_list, '2',
-                       f'({10**11},86400,3,604800)', f'([{guardian}],{PAUSE},{COOLDOWN})')
+                       f'({10**11},86400,3,604800,1,1)', f'([{guardian}],{PAUSE},{COOLDOWN})')
             vu = str(2**40)
             d = view(eth, v, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
             send(eth, DEPLOYER, v, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu, sigs(d, 2))

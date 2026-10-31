@@ -67,7 +67,7 @@ contract ContextBoundSourceVaultGuardianTest {
     function deploy(address[] memory g, uint64 duration, uint64 cooldown) private returns (ContextBoundSourceVault) {
         return new ContextBoundSourceVault(
             bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, signers(), 2,
-            ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days), ContextBoundSourceVault.Guard(g, duration, cooldown)
+            ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days, 1, 1), ContextBoundSourceVault.Guard(g, duration, cooldown)
         );
     }
 

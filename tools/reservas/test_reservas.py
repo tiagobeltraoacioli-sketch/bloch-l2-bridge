@@ -106,7 +106,7 @@ def main():
         usdc = create('solidity-tests/BridgedStablecoin.t.sol:MockStable')
         vault = create('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), usdc, str(10**12), '0',
-                       '[' + ','.join(a for a, _ in signers) + ']', '2', f'({10**11},86400,2,604800)', '([],0,0)')
+                       '[' + ','.join(a for a, _ in signers) + ']', '2', f'({10**11},86400,2,604800,1,1)', '([],0,0)')
         sigs = lambda d: '[' + ','.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d)
                                         for _, key in signers[:2]) + ']'
         vu = str(2**40)

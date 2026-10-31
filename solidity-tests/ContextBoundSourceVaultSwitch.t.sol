@@ -96,7 +96,7 @@ contract ContextBoundSourceVaultSwitchTest {
             s[i] = vm.addr(keys[i]);
         }
         v = new ContextBoundSourceVault(
-            bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, switchThreshold, delay), noGuard()
+            bytes32(uint256(1)), bytes32(uint256(2)), bytes32(uint256(3)), address(token), 1_000_000, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, switchThreshold, delay, 1, 1), noGuard()
         );
         bytes32 h = v.controlDigest(true, true, 0, block.timestamp + 100);
         v.setControls(true, true, 0, block.timestamp + 100, sign(h, 2));
@@ -144,11 +144,11 @@ contract ContextBoundSourceVaultSwitchTest {
         bytes32 a = bytes32(uint256(1));
         bytes32 b = bytes32(uint256(2));
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 1, 7 days), noGuard()); // below threshold
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 1, 7 days, 1, 1), noGuard()); // below threshold
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 4, 7 days), noGuard()); // above n
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 4, 7 days, 1, 1), noGuard()); // above n
         vm.expectRevert(ContextBoundSourceVault.InvalidConfiguration.selector);
-        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days - 1), noGuard()); // short delay
+        new ContextBoundSourceVault(a, b, a, address(token), 100, 0, s, 2, ContextBoundSourceVault.Policy(100, 1 days, 3, 7 days - 1, 1, 1), noGuard()); // short delay
         require(vault.switchThreshold() == 3 && vault.switchDelay() == 7 days && vault.verifier() == address(0));
     }
 
