@@ -16,6 +16,13 @@ Layout: `/etc/bloch-guardiao/<bridge>.json` (config), `/etc/bloch-guardiao/<brid
 `systemctl enable --now bloch-ponte-guardiao@<bridge>`. Every line on stdout (journald) is JSON;
 alert on `kind == "alert"` and `kind == "pause"` (e.g. a journald forwarder to the operator's pager).
 
+Health: `bloch-ponte-guardiao-monitor@<bridge>.timer` runs `l2_monitor.py --guardian-health` every minute under the user
+`bloch-guardiao-monitor`, a member of the group `bloch-guardiao`. It reads `/var/lib/bloch-guardiao/<bridge>-health.json`, so
+`health_file` must be that path. The monitor cannot read the keys in `/etc/bloch-guardiao`. Install `l2_monitor.py` at
+`/opt/bloch-guardiao/monitor/`, copy `guardiao-monitor.env.example` to `/etc/bloch-guardiao-monitor/<bridge>.env`, and write
+`/etc/bloch-guardiao-monitor/alert.json` from `alert.json.example` in bloch-l2-evm. The monitor raises alerts even if the guardian
+process is dead, which `alert_command` cannot do, so run both. The units have passed `systemd-analyze verify` only.
+
 The guardian key can only pause, and a pause expires by itself after `pauseDuration`; the cooldown
 bounds a malicious guardian to delaying mints at most half the time. Losing the key costs nothing but
 that guardian's vote; replacing it requires a new token contract (no setters).

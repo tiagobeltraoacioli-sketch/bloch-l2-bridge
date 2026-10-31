@@ -1,0 +1,36 @@
+# Reads one guardian's health_file (instance = bridge name). Runs on the guardian's host, under its own user, with read access
+# through the guardian's group only: no key, no chain write. Alerts go to the operator's own alert config.
+# l2_monitor.py comes from bloch-l2-evm deployment/mainnet, at a commit that has --guardian-health.
+[Unit]
+Description=Bloch bridge guardian monitor (%i): alive, not reporting a problem, still able to verify
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bloch-guardiao-monitor
+Group=bloch-guardiao-monitor
+SupplementaryGroups=bloch-guardiao
+EnvironmentFile=/etc/bloch-guardiao-monitor/%i.env
+StateDirectory=bloch-guardiao-monitor
+# Exit 1/2/3 = WARN/CRIT/UNKNOWN: reported through the alert config, not a unit failure.
+SuccessExitStatus=1 2 3
+ExecStart=/usr/bin/python3 -I /opt/bloch-guardiao/monitor/l2_monitor.py --profile mainnet $MONITOR_ARGS --guardian-health %i=/var/lib/bloch-guardiao/%i-health.json --alert-config /etc/bloch-guardiao-monitor/alert.json
+TimeoutStartSec=120
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/etc/bloch-guardiao
+ReadOnlyPaths=/etc/bloch-guardiao-monitor /opt/bloch-guardiao /var/lib/bloch-guardiao
+MemoryMax=256M
+Nice=10
