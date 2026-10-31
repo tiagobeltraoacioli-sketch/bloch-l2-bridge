@@ -23,7 +23,7 @@ Invariants (README.md has the exact formulas):
                            and finalized under the L1 HF1 claim-finality rule; the v2 settled RPC serves
                            `finalized` only from its follower's native FFG replay.
 
-The v2 L2 build (bloch-l2-settled-rpc 4fc9fa1e) fails closed: until its follower status verifies it
+The L2 settled RPC from the v2 build on fails closed: until its follower status verifies it
 serves `finalized` = null. The guardian then keeps checking RELEASE MATCH, RESERVES and MINT PROVENANCE at
 `latest` and skips only the finality-based checks. Optional `l2_genesis_hash` pins the L2 (block 0 hash;
 mainnet 632e45ae...): another chain is unverifiable, never a reason to pause.
@@ -165,10 +165,13 @@ class Guardian:
                 self.log(kind='resolved', id=pid)
 
     def write_health(self):
+        # `verified_t` is the last round that read everything it needed: a guardian that keeps writing this file while
+        # every round is `unverifiable` is alive but blind, which `t` and `healthy` alone do not show.
         doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'],
-               'problems': self.state['problems']}
+               'verified_t': self.state.get('verified_t'), 'problems': self.state['problems']}
         tmp = self.health_path.with_name(self.health_path.name + '.tmp')
         tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.chmod(0o640)  # l2_monitor.py reads it through the group; the service's UMask would hide it
         tmp.replace(self.health_path)
 
     def save(self):
@@ -748,6 +751,7 @@ def main():
         try:
             now, findings = g.round()
             code = g.act(now, findings)
+            g.state['verified_t'] = int(time.time())
         except (Unverifiable, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             # a malformed or empty answer (no contract at the address, a half-synced node) is no evidence either way
             g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')

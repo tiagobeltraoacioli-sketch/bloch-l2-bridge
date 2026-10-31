@@ -13,10 +13,10 @@
   "vault": "TBD-owner",
   "vault_from_block": "TBD-owner",
   "vault_pause": true,
-  "keystore": "/etc/bloch-busdc-guardian/l2-guardian.keystore",
-  "password_file": "/etc/bloch-busdc-guardian/l2-guardian.password",
-  "eth_keystore": "/etc/bloch-busdc-guardian/eth-guardian.keystore",
-  "eth_password_file": "/etc/bloch-busdc-guardian/eth-guardian.password",
+  "keystore": "/etc/bloch-guardiao/busdc.keystore",
+  "password_file": "/etc/bloch-guardiao/busdc.pw",
+  "eth_keystore": "/etc/bloch-guardiao/busdc-eth.keystore",
+  "eth_password_file": "/etc/bloch-guardiao/busdc-eth.pw",
   "l2_raw_tx": true,
   "reserves_grace_s": 2700,
   "provenance_grace_s": 2700,
@@ -24,9 +24,9 @@
   "pause_attempts": 3,
   "pause_retry_s": 10,
   "pause_confirm_s": 3600,
-  "health_file": "/var/lib/bloch-busdc-guardian/health.json",
+  "health_file": "/var/lib/bloch-guardiao/busdc-health.json",
   "alert_command": "TBD-owner (argv list with {id} and {detail}; without it a critical alert reaches only the log and health_file)",
   "release_before_final": "soft",
-  "state": "/var/lib/bloch-busdc-guardian/state.json",
-  "cast": "/opt/foundry/bin/cast"
+  "state": "/var/lib/bloch-guardiao/busdc-state.json",
+  "cast": "/opt/bloch-guardiao/bin/cast"
 }

@@ -188,6 +188,11 @@ receipt go there. The gateway is not trusted for state: its receipt means "sent"
 `critical` alert, runs `alert_command`, marks `health_file` unhealthy and makes `check` exit 4. The guardian retries every round.
 `vault_pause` goes to Ethereum and does not depend on them.
 
+**Who reads `health_file`.** `deployment/mainnet/l2_monitor.py --guardian-health NAME=PATH[:MAX_AGE_S]` (bloch-l2-evm) raises
+CRIT on `healthy: false`, a missing or malformed file, a stale `t` (the process died or hung), and a stale or empty
+`verified_t` (it runs but every round is `unverifiable`, so it protects nothing). Default ages: WARN at 300 s, CRIT at 900 s.
+It must run on the guardian's host, as a user in the guardian's group: the file is mode 0640, and its directory must be group-readable.
+
 **Grace periods must exceed the settlement delay.** A replica shows settled blocks only, so unsettled mints and burns are not
 visible. One settlement cycle takes 8-14 min, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and
 one round: `SETTLEMENT_DELAY_S` = 2400 s in `guardiao.py`. A shorter grace can pause on a lagging view.
