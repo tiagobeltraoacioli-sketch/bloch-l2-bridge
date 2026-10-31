@@ -365,3 +365,17 @@ every chain a private loopback anvil):
 | `signatario-stable/test_hf1_finality` | 56/56 | |
 | `deploy-pontes/rehearse_anvil` | 78/78 (+3 vault tool), `REHEARSAL OK` | |
 
+Results for `a167b39` (the same branch, with the token bucket, guardian pause chains and proposal expiry), same setup:
+
+| Suite | Fake / default | `ETH_HALF=real` |
+| --- | --- | --- |
+| forge (12 suites) | 153 passed, 0 failed, 1 skipped | |
+| `signatario-stable/test_bridge_review` | 21/21 | |
+| `guardiao/test_guardiao`, `test_sombra`, `test_guardiao_hf1` | 32/32, 19/19, 7/7 | |
+| `reservas/test_reservas` | 16/16 | |
+| `signatario-gnb/test_signatario`, `test_vigia` | 15/15, 16/16 | |
+| `signatario-stable/test_signatario` | 23/23 | 34/34 |
+| `signatario-stable/test_vigia` | 26/26 | 26/26 |
+| `signatario-stable/test_hf1_finality` | 56/56 | |
+| `deploy-pontes/rehearse_anvil` | 78/78, `REHEARSAL OK` | |
+
