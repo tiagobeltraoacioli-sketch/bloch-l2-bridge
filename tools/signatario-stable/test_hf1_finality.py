@@ -79,10 +79,10 @@ def unit():
         s.update(over)
         return s
 
-    check('unit: mainnet-v2 pins are the v2 build and chain 700770',
-          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('4fc9fa1e')
+    check('unit: mainnet-v2 pins are the provisional v2.1 build and chain 700770',
+          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('1e76b99a')
           and lf.MAINNET_V2['binaries']['follower'].startswith('c18752fd')
-          and lf.MAINNET_V2['binaries']['produce'].startswith('7c1cc62b')
+          and lf.MAINNET_V2['binaries']['produce'].startswith('fb0d5313')
           and lf.MAINNET_V2['l2_genesis_hash'].startswith('632e45ae') and lf.MAINNET_V2['hf1_claim_finality_epoch'] == 7180)
     check('unit: pins refuse another L2 chain id',
           refused(lf.pins_from_config, {'l2_pins': 'mainnet-v2', 'l2_chain_id': 700771}) is not None)
@@ -401,10 +401,10 @@ def integration(project):
             check(f'release: refuses ({name})', rc == 1 and word in r.get('reason', ''), r)
         status(burn_block, wall - 3)
         rc, r = release(0, 'x', pins={**past, 'binaries': {**base_pins['binaries'], 'settled_rpc': '00' * 32}})
-        check('release: refuses a settled-RPC binary that is not the pinned v2 build', rc == 1
-              and 'not the pinned v2 build' in r.get('reason', ''), r)
+        check('release: refuses a settled-RPC binary that is not the pinned build', rc == 1
+              and 'not the pinned build' in r.get('reason', ''), r)
         rc, r = release(0, 'x', pins={**past, 'binaries': {**base_pins['binaries'], 'follower': '00' * 32}})
-        check('release: refuses a follower binary that is not the pinned v2 build', rc == 1
+        check('release: refuses a follower binary that is not the pinned build', rc == 1
               and 'follower binary' in r.get('reason', ''), r)
         set_upstream(genesis='00' * 32)
         rc, r = release(0, 'x', pins=past)

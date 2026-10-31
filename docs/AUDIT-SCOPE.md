@@ -9,6 +9,9 @@ The merge changed no behaviour. The integration commit removed the byte-identica
 the SP1 verifier and added the vault's guardian policy to the bUSDC deploy config. Everything here is
 UNAUDITED.
 
+**Update 2026-10-31.** The signer's pins (`l2_finality.MAINNET_V2`) now hold the provisional v2.1 build: settled-rpc
+`1e76b99a`, produce-dev `fb0d5313`, follower `c18752fd` unchanged. They stay marked provisional until the final hashes are recorded.
+
 **Update 2026-10-30, branch `codex/bridge-busdc-mainnet-v2-20261030`.** The off-chain components follow the
 L2 mainnet v2 build (bloch-l2-evm `1aad0a20` against native `78d4921c`: follower `c18752fd`, produce-dev
 `7c1cc62b`, settled-rpc `4fc9fa1e`; chain 700770, L2 genesis `632e45ae`) and the L1 HF1 claim-finality rule

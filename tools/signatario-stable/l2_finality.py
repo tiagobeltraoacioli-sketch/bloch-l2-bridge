@@ -4,10 +4,10 @@ Used by signatario.py (release). Pure functions over the native follower's statu
 read-only helpers (binary pins, an optional L1 RPC cross-check). Guardians do not import this module on
 purpose (independent code); they apply the same rule from their own RPC.
 
-The v2 L2 build (bloch-l2-evm 1aad0a20, native 78d4921c) pins:
+The provisional v2.1 L2 build (bloch-l2-evm 18b9e1d, native 78d4921c) pins:
   follower     bloch-l2-native-follower  c18752fd...  writes status schema bloch.l2.native-follower-status.v2
-  produce      bloch-l2-produce-dev      7c1cc62b...  `reconstruct` rebuilds the L2 from the follower's L1 blocks
-  settled RPC  bloch-l2-settled-rpc      4fc9fa1e...  serves `finalized` only from a verified status
+  produce      bloch-l2-produce-dev      fb0d5313...  `reconstruct` rebuilds the L2 from the follower's L1 blocks
+  settled RPC  bloch-l2-settled-rpc      1e76b99a...  serves `finalized` only from a verified status
   chain 700770, native network f47d3e49..., L2 genesis 632e45ae...
 
 HF1 claim finality (native params HF1_CLAIM_FINALITY_EPOCH = 7180; transition/l2_claim.rs
@@ -37,13 +37,14 @@ SLOTS_PER_EPOCH = 32  # bloch-pos-committee params (mainnet: 30 s slots, 960 s e
 EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
 
-# PROVISIONAL: `binaries.settled_rpc` below is the v2 build. The owner decided on one v2.1 rebuild of settled-rpc (the
-# spool-dos and receipt/latest fixes); replace this hash with the released v2.1 hash and set the flag to False.
-# Nothing else in this table depends on that build. Do not deploy signers while this is True.
+# PROVISIONAL: `binaries` below hold the unsigned, provisional v2.1 release (release SHA256SUMS c2a55ba8..., report 22). When
+# agents/PINS-V21.md closes the hashes, replace them with its values and set the flag to False. v2.1 changed two pins, not
+# one: settled_rpc (spool-dos and receipt/latest fixes) and produce (F2, the flag-day inbox height fix in `reconstruct`).
+# A producer without F2 stops at the first deposit. Do not deploy signers while this is True.
 SETTLED_RPC_PIN_PROVISIONAL = True
 
 MAINNET_V2 = {
-    'name': 'bloch-l2-mainnet-v2 (L2 1aad0a20 / native 78d4921c)',
+    'name': 'bloch-l2-mainnet-v2.1-provisional (L2 18b9e1d / native 78d4921c)',
     'l2_chain_id': 700770,
     'network_pin': 'f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966',
     'l2_genesis_hash': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
@@ -55,9 +56,9 @@ MAINNET_V2 = {
                         '--genesis-time', '1786656679'],
     'binaries': {
         'follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
-        'produce': '7c1cc62bf5fb5aa142dced01156e3a51ddb6239096034400558ef46586025a3c',
         # PROVISIONAL, see SETTLED_RPC_PIN_PROVISIONAL.
-        'settled_rpc': '4fc9fa1ecc2b75dec8c918e77cefb81fe7fc216c5baead133e17c15fc4c54534',
+        'produce': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
+        'settled_rpc': '1e76b99ad2a57dd6cfae1f4086529714d1bf3372cb578a348f4cfe9a37a91d38',
     },
 }
 PIN_KEYS = ('l2_chain_id', 'network_pin', 'l2_genesis_hash', 'l1_genesis_time', 'hf1_claim_finality_epoch',
@@ -112,14 +113,14 @@ def sha256_file(path):
 
 
 def check_binaries(paths, pins):
-    """Every L2 binary the signer runs must be the pinned v2 build (by SHA-256)."""
+    """Every L2 binary the signer runs must be the pinned build (by SHA-256)."""
     for role, want in pins['binaries'].items():
         path = paths.get(role)
         if not path:
             raise NotFinal(f'no path configured for the pinned {role} binary')
         got = sha256_file(path)
         if got != strip0x(want):
-            raise NotFinal(f'the {role} binary is not the pinned v2 build', path=str(path), sha256=got,
+            raise NotFinal(f'the {role} binary is not the pinned build', path=str(path), sha256=got,
                            pinned=strip0x(want))
 
 

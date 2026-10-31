@@ -20,7 +20,7 @@ mint. Hence:
   surplus  (backing > liabilities + tolerance)     soft alert, exit 3: in-flight burns/deposits (or stuck ones)
   ok       otherwise
 
-The v2 L2 settled RPC (bloch-l2-settled-rpc 4fc9fa1e) serves `finalized` only from its follower's native
+The L2 settled RPC, from the v2 build on, serves `finalized` only from its follower's native
 FFG replay and answers null until that status verifies: the bridge is then `unverifiable`, never a deficit.
 Optional per-bridge `l2_genesis_hash` (mainnet 632e45ae...) pins the L2: another chain is unverifiable.
 

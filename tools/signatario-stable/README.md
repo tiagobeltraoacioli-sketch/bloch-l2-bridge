@@ -66,8 +66,8 @@ window, and keeps a database that refuses to sign two different releases for one
 `ETH_HALF=real python3 test_signatario.py <project>` (32 checks) and `ETH_HALF=real python3 test_vigia.py
 <project>` run the suites with it.
 
-**Provisional pin:** `l2_finality.MAINNET_V2` still holds the v2 settled-RPC hash, marked by `SETTLED_RPC_PIN_PROVISIONAL`,
-until the v2.1 rebuild is released.
+**Provisional pin:** `l2_finality.MAINNET_V2` holds the provisional v2.1 settled-RPC and produce-dev hashes, marked by
+`SETTLED_RPC_PIN_PROVISIONAL`, until the final v2.1 hashes are recorded. Do not deploy signers while it is `True`.
 
 ## Config
 
