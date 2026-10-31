@@ -94,7 +94,7 @@ runs both and compares `configSha256` and the arguments.
 ### 4.3 Deploy the vault (deposits and releases start disabled)
 
 Bloch Inc's Safe sends the deployer only the gas (a mainnet-shaped vault creation, 7 signers and 2
-guardians, used 3,318,736 gas on anvil; at 30 gwei that is ~0.100 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
+guardians, used 3,351,987 gas on anvil; at 30 gwei that is ~0.101 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
 
 ```
 forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
@@ -258,6 +258,9 @@ Contracts:
   constructor values (`Policy`), proposed 10 USDC each. The constructor requires `l2MinBurn <= minDeposit <= windowLimit`.
   `validate --token-config` requires `l2MinBurn` to equal the token's `minBurn`, because the vault cannot read the L2. The token
   is unchanged. **UI limit:** a deposit must be between `minDeposit()` and `windowLimit()`, both read from the vault.
+  Measured on the mainnet shape (7 signers, 2 guardians, private anvil): vault creation 3,351,987 gas, first deposit 85,647, next
+  68,547; vault runtime 12,855 bytes, deployed keccak `0x92e361…0dc7` on that rehearsal (immutables differ per deployment); compiled
+  keccak `0x86f74c…d142`. Token runtime unchanged: 7,928 bytes, deployed keccak `0xa1efec…1e48`.
 - `BridgedStablecoinV2.burn` refuses `amount > bucketCapacity`. Before, a burn above the vault window was accepted
   and could never be released. A holder above the limit exits with several burns.
 
