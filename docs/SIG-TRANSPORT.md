@@ -39,6 +39,9 @@ A bridge reader stores a body only if all of these hold:
 - the signature recovers to the path's signer (low-s, v 27/28), a pinned signer checked against `isSigner`;
 - a release certificate is unexpired and within `max_valid_seconds`.
 
+`vigia.py` then checks each partial against the chain again before using it: the signature, `isSigner`, and the digest as
+the token's `mintDigest` or the vault's `releaseDigest` computes it.
+
 Fields outside the signature are dropped before storing, so a relay cannot attach anything to a signature.
 Verified items live in the operator's private `shared_dir` and are re-exported, so each feed also relays
 the others. A server can withhold or delay, but it cannot forge, and it cannot evict what a
@@ -47,7 +50,8 @@ reader holds. Signing checks are unchanged: `signatario.py` still verifies every
 Attestor partials need post-quantum verification, which only the native binary does, and only over a full
 set. `aggregate_attestation.py` keeps every distinct well-formed candidate per signer and lets
 `bloch-pos l2-claim verify-attestation` choose (at most 1024 sets), so a forged partial cannot displace a
-real one. Attestors do not read each other: only the aggregator and the monitor are readers.
+real one. A partial above the claim's 4593-byte signature bound is refused before that, and the agent re-signs until its own
+fits. Attestors do not read each other: only the aggregator and the monitor are readers.
 
 ## Limits
 
@@ -62,15 +66,15 @@ real one. Attestors do not read each other: only the aggregator and the monitor 
 
 ## Rounds without a shared lock
 
-Certificates combine only within one round (same anchor, `validUntil` and digest), and the shared lock is
-gone. A signer stays in its round unless a live round holds more distinct signers, or as many with a higher
+Certificates combine only within one round (same anchor, `validUntil` and digest), and `flock` now protects only the
+operator's own directory. A signer stays in its round unless a live round holds more distinct signers, or as many with a higher
 name (the newest `validUntil`). Concurrent openers therefore converge, and a lone key cannot pull signers away
 from a growing round. `max_release_signs_per_hour` (default 6 per burn) bounds the rebuilds a malicious
 proposer can cause. A round this signer's Ethereum half refused is skipped for `refused_retry` seconds, and if
 every live round was refused, the signer opens its own.
 
-A relayer groups partials by digest and combines only a group with k distinct signers, so one dissenting or
-corrupt partial no longer vetoes the others.
+A relayer groups chain-verified partials by digest and combines only a group with k distinct signers, so one dissenting or
+corrupt partial no longer vetoes the others. Joins come before new rounds, and a pass opens at most `max_new_rounds`.
 
 ## The owner's setting
 

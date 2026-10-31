@@ -63,6 +63,10 @@ Out of scope, but pinned and listed for completeness:
 | Mainnet deploy tool | `tools/deploy-pontes/deploy_pontes.py` | 713 | `07ccb69` | Deployer key, single use. |
 | Vault deploy checks | `tools/deploy-pontes/vault_pontes.py` | 271 | this branch | None (validate, constructor arguments, read-only verify; the owner deploys with forge). |
 
+Signature transport (`tools/signatario-stable/sigfeed.py`, `bridge_feed.py`, `docs/SIG-TRANSPORT.md`): each operator serves
+its signatures from a read-only feed and peers poll it. Signatures are verified on the way in and again against the chain
+before use, so the transport is untrusted.
+
 ## 3. Trust model
 
 1. **Ethereum → L2 (deposit → mint).** A k-of-n committee of L2 keys mints bUSDC for a `Deposited` event that
@@ -225,6 +229,12 @@ Cross-system:
 - **Devnet residues.** These come from the drills; they are not accounting bugs.
   - Vault v4 (`0xe6e340d1…`) holds 10 USDC against 14 bUSDC: a deliberate unbacked release of 4 USDC.
   - Vault v5 (`0x70e0ba84…`) is paused, with 3 USDC released without a burn and deposits never minted.
+
+**Deposits below `minBurn`.** The vault refuses only `amount == 0` at the low end, and it has no `minBurn` (that is an L2
+token parameter). `rehearse_feed.py` shows a deposit of 0.5 USDC accepted and minted with `minBurn` 1 USDC. The recipient
+cannot burn that balance alone until it holds at least `minBurn`, by a further deposit or a transfer, so the funds are stuck
+for the holder, not lost to the bridge. Each such deposit also costs the relayer one L2 mint. The bridge UI refuses these
+deposits; direct callers of the vault are not protected. No contract change has been made for this.
 
 ## 6. Live evidence index
 
