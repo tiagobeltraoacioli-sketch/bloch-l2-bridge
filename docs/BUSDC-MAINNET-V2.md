@@ -9,7 +9,7 @@ named operator), never by an agent.
 
 | Area | Change |
 | --- | --- |
-| Bridge review | Contracts changed (section 9): the vault refuses a deposit above `windowLimit` or without an address-shaped recipient, and bUSDC refuses a burn above `bucketCapacity`, because each could never complete and has no refund. Runtime code hashes differ from 8678454. |
+| Bridge review | Contracts changed (section 9): the vault refuses a deposit above `windowLimit` or without an address-shaped recipient, and bUSDC refuses a burn above `bucketCapacity`, because each could never complete and has no refund. The release limit is a token bucket, guardian renewals are bounded and verifier proposals expire. Runtime code hashes differ from 8678454. |
 | L2 build | The signer and the watchers target the L2 v2 build: bloch-l2-evm `1aad0a20` against native `78d4921c` (HF1+HF2+HF3 armed; correct for the L1 fleet on `fa980367`). Binaries: follower `c18752fd…f29a`, produce-dev `7c1cc62b…3a3c`, settled-rpc `4fc9fa1e…4534`. Chain 700770, native network `f47d3e49…1966`, L2 genesis `632e45ae…f468`. |
 | Signer (release) | `l2_pins: "mainnet-v2"` (`tools/signatario-stable/l2_finality.py`): binary SHA-256 pins, v2 follower status checks, mainnet network rules and timestamp rule for the rebuild and the private settled RPC, rebuild must equal every finalized settlement, HF1 claim-finality rule (section 2), optional L1 RPC cross-check. |
 | `guardiao.py` | Keeps watching when the v2 RPC serves `finalized` = null; new `release-before-final` finding; `l2_genesis_hash` pin. |
@@ -94,7 +94,7 @@ runs both and compares `configSha256` and the arguments.
 ### 4.3 Deploy the vault (deposits and releases start disabled)
 
 Bloch Inc's Safe sends the deployer only the gas (a mainnet-shaped vault creation, 7 signers and 2
-guardians, used 3,088,218 gas on anvil; at 30 gwei that is ~0.093 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
+guardians, used 3,318,736 gas on anvil; at 30 gwei that is ~0.100 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
 
 ```
 forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
