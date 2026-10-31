@@ -34,7 +34,7 @@ non-blank, non-comment lines.
 
 | Contract | File | LOC (total) | Last commit | Chain | Role |
 | --- | --- | --- | --- | --- | --- |
-| `ContextBoundSourceVault` | `contracts/usdt/ContextBoundSourceVault.sol` | 443 (544) | `a5d039a` | Ethereum | USDC custody. Committee-certified releases bound to chain, vault, Ethereum anchor block and Bloch L2 finalized block. Fixed per-window release limit. One-way switch to a proof verifier. Guardian pause. |
+| `ContextBoundSourceVault` | `contracts/usdt/ContextBoundSourceVault.sol` | 443 (544) | `a5d039a` | Ethereum | USDC custody. Committee-certified releases bound to chain, vault, Ethereum anchor block and Bloch L2 finalized block. Fixed release limit (token bucket). One-way switch to a proof verifier. Guardian pause. |
 | `SP1ReleaseVerifier` | `contracts/usdt/SP1ReleaseVerifier.sol` | 36 (60) | `dc1d8fc` | Ethereum | Adapter between the vault's `IReleaseVerifier` and a version-pinned SP1 verifier. Pins `programVKey`, `trustAnchor`, `l2ChainId` and `l2Token`. |
 | `SignerMintedToken` | `contracts/bridged/SignerMintedToken.sol` | 274 (336) | `da4a26c` | Bloch L2 | Shared core of the v1.1 tokens: k-of-n EIP-712 mints, token bucket, queued large mints, supply cap, expiring pause-only guardians, burns. |
 | `BridgedStablecoinV2` | `contracts/stable/BridgedStablecoinV2.sol` | 59 (76) | `da4a26c` | Bloch L2 | bUSDC: one vault route (`sourceVault`, `sourceRoute`). Burns map to vault `Release` items. |
@@ -79,8 +79,8 @@ Out of scope, but pinned and listed for completeness:
      whose finalized checkpoint is its own chain's, and from epoch 7180 a checkpoint of epoch ≥ 7180 must be
      finalized first (own `CHECKPOINT-ROOTS` are recorded only from the gate);
    - `validUntil`.
-   Releases are capped at `windowLimit` per `windowSeconds`. A colluding quorum can drain at most that much
-   per window.
+   Releases are capped by a token bucket: capacity `windowLimit`, full refill in `windowSeconds`. A colluding
+   quorum can drain at most that capacity plus the refill.
 3. **One-way switch to the light client.** `switchThreshold` signers (at least `threshold`; 3-of-3 in the
    rehearsals) propose an `IReleaseVerifier`, pinned to its code hash. Anyone activates it after
    `switchDelay ≥ 7 days`, unless the same quorum cancelled it.
@@ -119,7 +119,8 @@ Vault (`ContextBoundSourceVault`):
 - **V3. Release domain.** A certificate's digest commits to `block.chainid`, the vault, `releaseId`, the
   Ethereum anchor, the L2 block and `validUntil`. Check that it cannot be replayed on another vault, chain
   or fork, or after `validUntil`. Control, switch and unpause digests are separated by their domain tags.
-- **V4. Throughput.** `windowReleased ≤ windowLimit` for each window, on both release paths.
+- **V4. Throughput.** On both release paths, `availableToRelease() ≤ windowLimit`, and releases in any span of T
+  seconds total at most `windowLimit * (1 + T / windowSeconds)`.
 - **V8. Completable deposits.** Every accepted deposit can be minted: `amount ≤ windowLimit = bucketCapacity`, the
   recipient is a left-padded address, `cap = supplyCap`.
 - **V5. Switch.**
@@ -192,9 +193,9 @@ Cross-system:
   over one rebuild is the real fix.
 - **A stale guardian L2 RPC pauses.** A reachable RPC that stopped advancing shows no burn for a real release, and
   `release-unknown` pauses the vault after `provenance_grace_s`. That fails safe; it costs one pause.
-- **Release window.** The per-window limit resets `windowSeconds` after the first release of a window. It is
-  not a token bucket, so up to 2 × `windowLimit` can leave around a window boundary. The L2 tokens use a
-  token bucket.
+- **Release bucket.** A release above what the bucket holds waits, so a release of the full `windowLimit` needs a full
+  bucket. Small releases can delay it (10 USDC of `minBurn` every 86 s at mainnet values, gas paid by the relayer), and
+  nothing orders exits. Large holders should split their burns.
 - **Ethereum side tested only on anvil.**
   - All Ethereum-side rehearsals ran on a local anvil (chain id 11155111, port 18950), not on a public
     testnet.

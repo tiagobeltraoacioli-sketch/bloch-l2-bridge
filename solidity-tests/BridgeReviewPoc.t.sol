@@ -62,7 +62,7 @@ contract BatchBurner {
 
 /// Mainnet-shaped parameters (deployments/mainnet/busdc*.config.json) with a 3-of-3 switch committee.
 /// Bridge review (agents/29). C1-C3 assert the fixes; on 8678454 they were reproduced as accepted, stuck funds.
-/// C4-C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
+/// C6 and C9 document behaviour left to the owner (docs/AUDIT-SCOPE.md section 5).
 contract BridgeReviewPoc {
     ReviewVm constant vm = ReviewVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint64 constant U = 1e6;
@@ -198,16 +198,35 @@ contract BridgeReviewPoc {
         require(!ok, "a recipient with non-zero high bytes is refused");
     }
 
-    /// C4: 2 x windowLimit leave within one second around the window boundary.
-    function testC4_twoWindowsInOneSecond() public {
+    /// C4 (fixed): no boundary lets twice the limit through. Written against behaviour only, so it also runs on the
+    /// tumbling window of 8678454, where the release one second after the window fails this test.
+    function testC4_noDoubleWindowAtBoundary() public {
         _deposit(WINDOW, _pq(ALICE));
         _deposit(WINDOW, _pq(ALICE));
-        require(_release(1, BOB, 1 * U, keccak256("b1")), "opens the window");
+        require(_release(1, BOB, 1 * U, keccak256("b1")), "first");
         vm.warp(block.timestamp + 1 days - 1);
-        require(_release(2, BOB, WINDOW - 1 * U, keccak256("b2")), "fills the window");
+        require(_release(2, BOB, WINDOW - 1 * U, keccak256("b2")), "drains");
         vm.warp(block.timestamp + 1);
-        require(_release(3, BOB, WINDOW, keccak256("b3")), "a whole new window one second later");
-        require(usdc.balanceOf(BOB) == 2 * uint256(WINDOW), "2x in one second");
+        require(!_release(3, BOB, WINDOW, keccak256("b3")), "a whole new limit one second later");
+        vm.warp(block.timestamp + 1 days);
+        require(_release(3, BOB, WINDOW, keccak256("b3")), "the largest release fits after a full refill");
+    }
+
+    /// Whatever the timing, releases in any span stay within limit * (1 + span / windowSeconds).
+    function testFuzzC4_bucketBound(uint32[6] calldata gaps, uint64[6] calldata amounts) public {
+        for (uint256 i; i < 6; ++i) {
+            _deposit(WINDOW, _pq(ALICE));
+        }
+        uint256 start = block.timestamp;
+        uint256 paid;
+        for (uint256 i; i < 6; ++i) {
+            vm.warp(block.timestamp + gaps[i] % 2 days);
+            uint64 amount = amounts[i] % WINDOW + 1;
+            if (_release(uint64(i + 1), BOB, amount, keccak256(abi.encode("fuzz", i)))) {
+                paid += amount;
+            }
+            require(paid <= uint256(WINDOW) + uint256(WINDOW) * (block.timestamp - start) / 1 days, "above the bound");
+        }
     }
 
     /// C5: one guardian holds the vault paused forever by renewing; only 3-of-3 (6-of-7 on mainnet) can interrupt.

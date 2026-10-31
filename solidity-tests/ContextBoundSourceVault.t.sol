@@ -575,10 +575,11 @@ contract ContextBoundSourceVaultTest {
         bytes[] memory sigs = signedFor(small, more, ctx(10_000));
         vm.expectRevert(ContextBoundSourceVault.RateLimited.selector);
         small.release(more, ctx(10_000), sigs);
-        // The next window opens after windowSeconds; the limit itself never moves.
+        // The bucket refills continuously up to the limit; the limit itself never moves.
         vm.warp(block.timestamp + 1 hours);
+        require(small.availableToRelease() == 50);
         small.release(more, ctx(10_000), sigs);
-        require(small.windowReleased() == 20 && small.windowLimit() == 50 && small.totalLocked() == 140);
+        require(small.availableToRelease() == 30 && small.windowLimit() == 50 && small.totalLocked() == 140);
     }
 
     function testWindowLimitsAreValidatedOnce() public {

@@ -21,9 +21,10 @@ interface IReleaseVerifier {
 ///      as finalized (checked here with `blockhash`, so it is only valid on
 ///      that fork and within 256 blocks) and the Bloch L2 block, finalized by
 ///      native FFG, holding the burn. Releases are also capped per time window
-///      by limits fixed at deployment: even a colluding quorum drains at most
-///      `windowLimit` per window. The window starts at the first release after the
-///      previous one ended, so up to twice `windowLimit` can leave around a boundary.
+///      by limits fixed at deployment: a token bucket of capacity `windowLimit`, refilled
+///      continuously at `windowLimit` per `windowSeconds`. In any interval of T seconds
+///      even a colluding quorum drains at most `windowLimit * (1 + T / windowSeconds)`;
+///      no boundary lets twice the limit through.
 ///      A deposit is refused above `windowLimit` and unless `pqRecipientHash` is a
 ///      left-padded address: this vault has no refund, so a deposit the L2 token can
 ///      never mint (above its bucket, or with no L2 recipient) would lock the funds
@@ -49,8 +50,8 @@ contract ContextBoundSourceVault {
     address public immutable token;
     uint8 public constant decimals = 6;
     uint64 public immutable cap;
-    /// Release throughput ceiling, fixed at deployment: at most `windowLimit`
-    /// units per `windowSeconds`.
+    /// Release throughput ceiling, fixed at deployment: bucket capacity `windowLimit`,
+    /// full refill in `windowSeconds`.
     uint64 public immutable windowLimit;
     uint64 public immutable windowSeconds;
     uint8 public immutable threshold;
@@ -71,8 +72,9 @@ contract ContextBoundSourceVault {
     mapping(uint64 => bool) public releasedNonce;
     mapping(bytes32 => bool) public releasedBurn;
     bool private entered;
-    uint64 public windowStart;
-    uint64 public windowReleased;
+    /// Bucket level at `releaseBucketUpdatedAt`; `availableToRelease()` adds the refill.
+    uint64 public releaseBucket;
+    uint64 public releaseBucketUpdatedAt;
     /// Light-client switch state: proposal (verifier, its code hash, earliest
     /// activation), replay nonce, and the active verifier (zero = committee mode).
     address public proposedVerifier;
@@ -209,6 +211,8 @@ contract ContextBoundSourceVault {
         threshold = threshold_;
         transferMode = transferMode_;
         windowLimit = policy.windowLimit;
+        releaseBucket = policy.windowLimit;
+        releaseBucketUpdatedAt = uint64(block.timestamp);
         windowSeconds = policy.windowSeconds;
         switchThreshold = policy.switchThreshold;
         switchDelay = policy.switchDelay;
@@ -234,6 +238,13 @@ contract ContextBoundSourceVault {
     /// @notice True while committee releases and deposits are stopped by a guardian pause.
     function paused() public view returns (bool) {
         return verifier == address(0) && block.timestamp < pausedUntil;
+    }
+
+    /// @notice What the release bucket allows right now.
+    function availableToRelease() public view returns (uint256) {
+        uint256 refilled = uint256(releaseBucket)
+            + (block.timestamp - releaseBucketUpdatedAt) * uint256(windowLimit) / windowSeconds;
+        return refilled > windowLimit ? windowLimit : refilled;
     }
 
     function routeId() public view returns (bytes32) {
@@ -494,12 +505,10 @@ contract ContextBoundSourceVault {
     }
 
     function _pay(Release calldata item) private {
-        if (block.timestamp >= uint256(windowStart) + windowSeconds) {
-            windowStart = uint64(block.timestamp);
-            windowReleased = 0;
-        }
-        if (uint256(windowReleased) + item.amount > windowLimit) revert RateLimited();
-        windowReleased += item.amount;
+        uint256 available = availableToRelease();
+        if (item.amount > available) revert RateLimited();
+        releaseBucket = uint64(available - item.amount);
+        releaseBucketUpdatedAt = uint64(block.timestamp);
         uint256 beforeVault = _balance(address(this));
         if (beforeVault < totalLocked) revert InsufficientBacking();
         uint256 beforeRecipient = _balance(item.recipient);

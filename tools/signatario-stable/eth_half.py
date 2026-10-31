@@ -14,7 +14,7 @@ deposit  the configured chain id; the vault code at `finalized` equals the pin; 
          `depositId(...)` at `finalized` recomputes the id. Signs nothing (the Bloch half signs the mint).
 release  chain id and code pin at `latest`; `route == routeId()`; releases enabled; no guardian pause; nonce and burn not
          released; the vault still in committee mode (no light-client verifier active; a pending
-         proposal is reported as `pending_verifier`); amount <= totalLocked and within what the deployment-fixed window still allows;
+         proposal is reported as `pending_verifier`); amount <= totalLocked and within what the deployment-fixed release bucket allows now;
          recipient not zero nor the vault; `nativeFinalizedHash` non-zero. Anchor: its own `finalized`
          block (refused if the node's finality lags the head by more than `anchor_max_age`), or the
          proposed one when it is a canonical block of this node, <= finalized and at most `anchor_max_age`
@@ -257,12 +257,10 @@ def cmd_release(eth, args):
     if eth.cfg.get('eth_clock') == 'chain':  # the vault checks validUntil against block.timestamp
         now = chain_now
     limit, seconds = eth.word(eth.call('windowLimit()')), eth.word(eth.call('windowSeconds()'))
-    start, used = eth.word(eth.call('windowStart()')), eth.word(eth.call('windowReleased()'))
-    if chain_now >= start + seconds:
-        used = 0
-    if used + rel['amount'] > limit:
-        refuse('release window is full; retry after it resets', window_limit=limit, window_released=used,
-               window_resets_at=start + seconds)
+    available = eth.word(eth.call('availableToRelease()'))
+    if rel['amount'] > available:
+        refuse('release window is full; retry after it refills', window_limit=limit, available=available,
+               retry_after_s=-((available - rel['amount']) * seconds // limit))
 
     finalized = int(eth.block('finalized')['number'], 16)
     prop = intent.get('proposed_context')
