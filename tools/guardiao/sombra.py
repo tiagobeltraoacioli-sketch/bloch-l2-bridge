@@ -19,8 +19,9 @@ vault's `pauseDuration`; the switch and proofs never stop). A proof that does no
 the finding. While the vault is paused nothing is sent. Each guardian may start one pause per chain of
 consecutive pauses (ContextBoundSourceVault.guardianCanPause): when a pause expires and the finding is
 still open this guardian pauses again if it did not start the last one, or else after the vault's cooldown;
-another guardian can renew in between. After a committee unpause (switchThreshold signers) it waits out the
-cooldown. Once the vault has switched to its verifier the shadow phase is over and the guardian does nothing.
+another guardian can renew in between. A committee unpause (switchThreshold signers) settles what was known: a finding
+first seen no later than it stays open and alerted but starts no further pause, and a new finding waits out the cooldown and
+pauses. A live verifier proposal is a soft `verifier-proposed` alert. Once the vault has switched to its verifier the shadow phase is over and the guardian does nothing.
 
 Soft alerts (never pause): the prover's status file is older than `prover_stale_s`, read errors.
 
@@ -192,6 +193,10 @@ class Sombra:
         proofs, age = self.proofs()
         epoch = self.l1_epoch() if self.grace_epochs or self.lc_max_epoch is not None else None
         findings = []
+        if self.call(self.vault, 'verifierProposalLive()(bool)', ok=False) == 'true':
+            proposed = self.call(self.vault, 'proposedVerifier()(address)')
+            findings.append(('soft', f'verifier-proposed:{proposed}', {'reason': 'a light-client verifier proposal is live',
+                                                                       'activates_at': self.num('verifierActivatesAt()(uint64)')}))
         if age is None or age > self.stale_s:
             findings.append(('soft', 'prover-stale', {'status_age_s': None if age is None else int(age)}))
         for rid, rel in sorted(self.state['releases'].items(), key=lambda kv: kv[1]['block']):
@@ -241,8 +246,23 @@ class Sombra:
             del open_[fid]
         due = [fid for fid, f in open_.items() if f['severity'] == 'hard']
         if due:
-            self.pause(now, due)
+            live = self.not_settled(due)
+            if live:
+                self.pause(now, live)
         return 2 if due else 3 if open_ else 0
+
+    def not_settled(self, due):
+        """Drop what a committee unpause already settled: first seen no later than that unpause."""
+        blocked = self.num('guardianBlockedUntil()(uint64)')
+        at = blocked - self.num('pauseCooldown()(uint64)') if blocked else 0
+        open_, left = self.state['open'], []
+        for fid in due:
+            if not at or open_[fid]['first_seen'] > at:
+                left.append(fid)
+            elif not open_[fid].get('settled'):
+                open_[fid]['settled'] = True
+                self.log(kind='settled-by-unpause', id=fid, unpaused_at=at)
+        return left
 
     def pause(self, now, reasons):
         paused_until = self.num('pausedUntil()(uint64)')

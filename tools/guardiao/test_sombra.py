@@ -10,7 +10,7 @@ over MockSP1. The light-client prover is simulated by writing its state.json/sta
 RPC serves `getchaininfo` for the epoch grace.
 Scenarios: a proven committee release -> no pause; an unproven one -> pending, then a rejected proof does
 not close it, then after the grace -> guardianPause (committee releases revert Paused), no second tx while
-paused, a 3-of-3 unpause -> cooldown skip, re-pause after the cooldown, a valid proof -> resolved and no
+paused, a 3-of-3 unpause settles the finding (no further pause, still open), a valid proof -> resolved and no
 pause after expiry; stale prover -> soft only; epoch grace holds the pause until L1 finalizes N epochs;
 release first seen at or after `lc_max_epoch` (programs built before an L1 fork) -> soft only;
 not a guardian -> unverifiable; after the light-client switch -> retired, no action.
@@ -247,19 +247,19 @@ def main():
         check('next round: pause-skip, no second tx', code == 2 and kinds(lines, 'pause-skip')
               and not kinds(lines, 'pause') and nonce_of() == n0, lines)
 
-        # 4. a 3-of-3 committee unpause -> the guardian waits out the cooldown, then pauses again
+        # 4. a 3-of-3 committee unpause settles this finding: it stays open, and starts no further pause
         until = str(2**40)
         d = view(eth, vault, 'unpauseDigest(uint64,uint256)(bytes32)', '1', until)
         bad = send(eth, DEPLOYER, vault, 'unpause(uint64,uint256,bytes[])', '1', until, sigs(d, 2), ok=False)
         check('2-of-3 cannot unpause', not isinstance(bad, dict))
         send(eth, DEPLOYER, vault, 'unpause(uint64,uint256,bytes[])', '1', until, sigs(d, 3))
         code, lines, _ = run(cfg)
-        check('after a committee unpause: cooldown skip, no tx', kinds(lines, 'pause-skip')
-              and kinds(lines, 'pause-skip')[0]['reason'].startswith('cooldown') and nonce_of() == n0, lines)
+        check('after a committee unpause: settled, still open, no tx', code == 2 and kinds(lines, 'settled-by-unpause')
+              and nonce_of() == n0, lines)
         warp(eth, COOLDOWN)
         code, lines, _ = run(cfg)
-        check('after the cooldown, still unproven: paused again', kinds(lines, 'pause') and kinds(lines, 'pause')[0]['ok']
-              and view(eth, vault, 'pauseCount()(uint64)') == '2', lines)
+        check('after the cooldown, still unproven: the old finding does not undo the unpause', code == 2
+              and not kinds(lines, 'pause') and nonce_of() == n0 and view(eth, vault, 'pauseCount()(uint64)') == '1', lines)
 
         # 5. the (simulated) prover finally proves it: resolved, no pause after expiry
         burns[k('burn-2')] = dict(proof(2, 7 * 10**6), burn_id=k('burn-2'))

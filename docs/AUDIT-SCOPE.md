@@ -192,14 +192,16 @@ Cross-system:
 - **No signer rotation.** Three lost release keys of seven stop releases for good; two stop `unpause` and the switch
   at the proposed 6-of-7. There is no rescue path, by design.
 - **USDC itself.** A blacklisted recipient's release reverts until Circle lifts it, and its burn cannot be redirected
-  (`testC9`). A USDC pause or a fee upgrade stops releases (exact-delta checks).
+  (`testC9`). Signers park such a burn, checked again each pass, so it costs no rebuild and no feed slot. A USDC pause
+  or a fee upgrade stops releases (exact-delta checks).
 - **No exit fairness.** Any holder can fill the release window. Relayers pay Ethereum gas for each burn of at least
   `minBurn` (10 USDC): an attacker gets the USDC back and costs the relayer gas.
 - **Cost of a certificate.** Each one rebuilds the L2 from L1: 41 s measured on the v2 binaries at 186,671 L1 blocks
   on a loaded host, growing with L1. `max_new_rounds` keeps a backlog from starving rounds; batching certificates
   over one rebuild is the real fix.
-- **A stale guardian L2 RPC pauses.** A reachable RPC that stopped advancing shows no burn for a real release, and
-  `release-unknown` pauses the vault after `provenance_grace_s`. That fails safe; it costs one pause.
+- **A stale guardian L2 RPC pauses.** The settled RPC keeps answering with its old head when frozen. A real release beyond that
+  view shows as `release-unknown`, and the vault pauses after `provenance_grace_s` on the wall clock: one 72 h pause.
+  `l2-view-stalled` alerts first (`tools/guardiao/README.md`, "A frozen L2 view").
 - **Release bucket.** A release above what the bucket holds waits, so a release of the full `windowLimit` needs a full
   bucket. Small releases can delay it (10 USDC of `minBurn` every 86 s at mainnet values, gas paid by the relayer), and
   nothing orders exits. Large holders should split their burns.
@@ -209,8 +211,8 @@ Cross-system:
   - The shared anvil's clock was moved about 14 days ahead by switch drills. Signers then need
     `eth_clock: chain`, because `validUntil` is compared with `block.timestamp`.
 - **Guardian grace windows.**
-  - `guardiao.py` measures its grace in L2 block time, and L2 blocks are about 10 min apart, so a release
-    without a burn is paused after about 30–40 min.
+  - `guardiao.py` measures its grace on max(L2 head time, wall clock), so a release without a burn is paused
+    after `provenance_grace_s` (45 min on chain 700770), frozen L2 view or not.
   - `sombra.py` waits for its grace (2 h in the rehearsal) because a proof takes about 30–35 min on one host.
   - Losses before a pause are bounded by `windowLimit`.
 - **L2 RPC.** The settled devnet4 RPC has no `pending` level. L2 transactions from tools are offline-signed

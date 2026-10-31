@@ -188,6 +188,30 @@ receipt go there. The gateway is not trusted for state: its receipt means "sent"
 `critical` alert, runs `alert_command`, marks `health_file` unhealthy and makes `check` exit 4. The guardian retries every round.
 `vault_pause` goes to Ethereum and does not depend on them.
 
+### A frozen L2 view
+
+Grace runs on `max(L2 head time, wall clock)`. Before this, it ran on the L2 head alone, so a frozen head stopped every grace
+period and a forged release never paused the vault. The real `bloch-l2-settled-rpc` does not fail when frozen: it keeps answering
+with its old head and reports no staleness (`agents/57-bridge-review2.md`), so the guardian must judge this itself.
+
+- A head still for `l2_stall_alert_s` (2700 s on chain 700770) raises `critical` `l2-view-stalled`, which clears when it moves.
+- **Cost, for the owner to tune.** A frozen view alone never pauses. With a frozen view, a real release of a burn beyond that view
+  shows as `release-unknown`, and a pause follows `provenance_grace_s` later: 72 h of stopped releases and deposits, unless 6 of 7
+  signers end it. In an L2-wide stall this needs a burn settled just before the stall and released after it. If only this
+  guardian's replica froze, any release does it, so **watch `l2-view-stalled` and fix the replica within the grace.**
+- `l2_frozen_extra_grace_s` (default 0) adds to grace only while the head has been still for over 2400 s. It trades a later real
+  pause for fewer false ones. While it runs, a forged release can take the bucket and its refill.
+
+The host clock now matters: a clock far ahead brings grace forward. Keep NTP on.
+
+### After a committee unpause
+
+A finding first seen no later than the last committee unpause on that contract (`guardianBlockedUntil - pauseCooldown` on the vault,
+the last `Unpaused` log on the token) starts no further pause there. It stays open and alerted, with one `settled-by-unpause` line. A
+new finding pauses as usual, and `reserves` pauses again if the shortfall grows. The cost: a quorum able to unpause can also settle
+an old finding, but it already holds that power over the pause itself. With no committee unpause, an open finding pauses again after
+every cooldown.
+
 **Grace periods must exceed the settlement delay.** A replica shows settled blocks only, so unsettled mints and burns are not
 visible. One settlement cycle takes 8-14 min, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and
 one round: `SETTLEMENT_DELAY_S` = 2400 s in `guardiao.py`. A shorter grace can pause on a lagging view.
