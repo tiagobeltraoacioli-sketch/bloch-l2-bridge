@@ -10,7 +10,7 @@ the SP1 verifier and added the vault's guardian policy to the bUSDC deploy confi
 UNAUDITED.
 
 **Update 2026-10-31.** The signer's pins (`l2_finality.MAINNET_V2`) now hold the v2.1 build, unsigned: settled-rpc
-`e24ea5f1`, produce-dev `fb0d5313`, follower `c18752fd` unchanged. They stay marked provisional until the owner signs that release.
+`1e76b99a`, produce-dev `fb0d5313`, follower `c18752fd` unchanged. They stay marked provisional until the owner signs that release.
 
 **Update 2026-10-30, branch `codex/bridge-busdc-mainnet-v2-20261030`.** The off-chain components follow the
 L2 mainnet v2 build (bloch-l2-evm `1aad0a20` against native `78d4921c`: follower `c18752fd`, produce-dev
