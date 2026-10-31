@@ -247,6 +247,10 @@ large-mint delay and replay key. Unlike the vault, a guardian pause also stops t
 are never paused. A mint queued before the switch stays executable. No verifier exists yet: the switch closes finding C6 only once an
 audited Ethereum light-client verifier is activated. A quorum that activates a bad verifier gains no limit it did not have, but a
 verifier that refuses everything stops new mints for good, with burns unaffected. See `solidity-tests/MintSwitch.t.sol`.
+**Token guardian chains (optional commit).** `SignerMintedToken.pause` follows the vault's rule: each guardian starts one pause per chain
+of pauses less than `pauseCooldown` apart. One bad guardian no longer locks out the others (review 2, F7), including after a pause
+and an immediate k-of-n unpause; unlike the vault there is no guardian block after an unpause, because k is the mint quorum itself.
+The cost is that g colluding guardians hold mints g/(g+1) of the time, not 1/2. Burns are never paused.
 
 ## 6. Live evidence index
 

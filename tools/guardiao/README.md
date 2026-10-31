@@ -87,7 +87,7 @@ can be executed. A verified mint is cached and not re-checked (a later source re
 
 - A hard finding is alerted once (JSON line, `kind: alert`), and once more when it becomes due.
 - When something is due: read `pausedUntil`, `pauseCount`, `pauseCooldown`. Already paused, or
-  `pauseCount > 0 and now < pausedUntil + pauseCooldown` → no transaction (`pause-skip`, logged once per
+  `pauseCount > 0 and now < pausedUntil + pauseCooldown` and this guardian already paused in the chain (`guardianCanPause`) → no transaction (`pause-skip`, logged once per
   pause). Otherwise `cast send <token> 'pause()' --keystore … --password-file …` (no key in argv), logged
   as `kind: pause`. If the violation is still open after the cooldown, the guardian pauses again.
 - Read errors (node down, truncated answer, wrong chain id, not a guardian) are `severity: soft,

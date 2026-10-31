@@ -776,6 +776,13 @@ class Guardian:
         return (uint(self.call(url, self.token, 'pausedUntil()')[0]), uint(self.call(url, self.token, 'pauseCount()')[0]),
                 uint(self.call(url, self.token, 'pauseCooldown()')[0]))
 
+    def can_renew(self):
+        """Inside the cooldown a token with pause chains still lets a guardian that has not paused in this chain."""
+        try:
+            return bool(uint(self.call(self.l2, self.token, 'guardianCanPause(address)', self.me())[0]))
+        except (Unverifiable, IndexError, ValueError):
+            return False
+
     def pause(self, now, reasons):
         try:
             paused_until, count, cooldown = self.pause_view(self.l2)
@@ -787,7 +794,7 @@ class Guardian:
                 return
         if now < paused_until:
             why, until = 'already paused', paused_until
-        elif count and now < paused_until + cooldown:
+        elif count and now < paused_until + cooldown and not self.can_renew():
             why, until = 'pause cooldown', paused_until + cooldown
         else:
             why = None

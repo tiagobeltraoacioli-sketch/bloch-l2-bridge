@@ -10,8 +10,11 @@ pragma solidity ^0.8.24;
 ///         - delay for large mints (as Wormhole's governor): above `largeMintThreshold` the mint is
 ///           queued and executable by anyone only after `largeMintDelay`;
 ///         - pause-only guardians: any guardian may stop mints for `pauseDuration`; the pause expires
-///           by itself, a new pause needs `pauseCooldown` after the last one ended (a malicious
-///           guardian can delay at most half the time, never steal), and k signers can end it early.
+///           by itself and k signers can end it early. Pauses less than `pauseCooldown` apart form a
+///           chain, and each guardian starts one pause per chain, as on the vault: another guardian can
+///           renew or re-pause at once, so one bad guardian cannot disarm the others. With g guardians
+///           a chain lasts at most g * `pauseDuration`, then at least `pauseCooldown` stays open: one
+///           bad key delays at most half the time, g colluding keys g/(g+1), and none can steal.
 ///           Guardians cannot move funds or change parameters; burns are never paused.
 ///         No owner, no setter, no upgrade. A change of any parameter is a new contract.
 /// STATUS: UNAUDITED.
@@ -79,6 +82,9 @@ abstract contract SignerMintedToken {
     uint64 public burnNonce;
     uint256 public pausedUntil;
     uint64 public pauseCount;
+    /// Current chain of consecutive pauses, and the last chain each guardian started a pause in.
+    uint64 public pauseChain;
+    mapping(address => uint64) public guardianLastChain;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -195,11 +201,23 @@ abstract contract SignerMintedToken {
     }
 
     // ── guardians ──────────────────────────────────────────────────────────────
-    /// @notice Stop mints for `pauseDuration`. Allowed again only `pauseCooldown` after the last pause ended.
+    /// @notice True if `guardian` could pause right now: not paused, and it has not started a pause in the current chain.
+    function guardianCanPause(address guardian) public view returns (bool) {
+        return isGuardian[guardian] && !paused() && (_chainEnded() || guardianLastChain[guardian] != pauseChain);
+    }
+
+    function _chainEnded() private view returns (bool) {
+        return pauseCount == 0 || block.timestamp >= pausedUntil + pauseCooldown;
+    }
+
+    /// @notice Stop mints for `pauseDuration`, once per guardian in a chain of consecutive pauses.
     function pause() external {
         if (!isGuardian[msg.sender]) revert NotGuardian();
         if (paused()) revert IsPaused();
-        if (pauseCount != 0 && block.timestamp < pausedUntil + pauseCooldown) revert PauseCooldown();
+        bool ended = _chainEnded();
+        if (!ended && guardianLastChain[msg.sender] == pauseChain) revert PauseCooldown();
+        if (ended) ++pauseChain;
+        guardianLastChain[msg.sender] = pauseChain;
         pausedUntil = block.timestamp + pauseDuration;
         ++pauseCount;
         emit Paused(msg.sender, pausedUntil, pauseCount);

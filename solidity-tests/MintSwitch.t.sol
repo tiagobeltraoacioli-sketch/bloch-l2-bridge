@@ -636,20 +636,21 @@ contract MintSwitchTest {
         eq(token.balanceOf(ALICE), U, "the proof still works after the pause");
     }
 
-    function testGuardianCannotHoldProofMintsMoreThanHalfTheTimeAfterTheSwitch() public {
+    function testGuardiansCannotHoldProofMintsBeyondTheirChainAfterTheSwitch() public {
         activate(address(good));
         uint256 start = block.timestamp;
-        uint256 closed;
-        for (uint256 i; i < 6; ++i) {
-            guardianPause(i % 2 == 0 ? G1_KEY : G2_KEY);
-            closed += PAUSE;
+        for (uint256 i; i < 3; ++i) {
+            guardianPause(G1_KEY);
+            vm.warp(token.pausedUntil());
+            guardianPause(G2_KEY);
             vm.warp(token.pausedUntil());
             vm.prank(vm.addr(G2_KEY));
             vm.expectRevert(SignerMintedToken.PauseCooldown.selector);
             token.pause();
+            proofMint(dep(i), uint64(U), ALICE); // open in the gap
             vm.warp(token.pausedUntil() + PAUSE);
         }
-        eq(closed * 2, block.timestamp - start, "half the time at most, with two guardians");
+        eq(block.timestamp - start, 3 * 3 * PAUSE, "two guardians close at most two thirds of the time");
     }
 
     function testPauseReservesBurnsAfterTheSwitch() public {
