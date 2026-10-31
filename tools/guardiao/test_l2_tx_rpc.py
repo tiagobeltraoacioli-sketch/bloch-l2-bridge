@@ -68,7 +68,7 @@ class Replica:
     def __init__(self, upstream):
         self.frozen, self.refused, self.down = None, 0, False
         self.closed, self.age = False, None  # stub finality; with REAL_SETTLED_RPC the real binary answers instead
-        self.real = os.environ.get('REAL_SETTLED_RPC')
+        self.real = None
         me = self
 
         class H(BaseHTTPRequestHandler):
@@ -241,6 +241,7 @@ def main():
 
         # ── the settled RPC's finality levels close, or its follower stops (stub, or the real binary with REAL_SETTLED_RPC) ──
         status_file = os.environ.get('REAL_STATUS_FILE')
+        stub.real = os.environ.get('REAL_SETTLED_RPC')
         saved = Path(status_file).read_bytes() if status_file else None
 
         def finality(state):
