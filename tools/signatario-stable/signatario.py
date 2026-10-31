@@ -568,6 +568,8 @@ def cmd_release(ctx, args):
     burn_id = option(args, '--burn-id', '')
     burn_id = hex32(burn_id, 'burn id') if burn_id else ''
     source = ctx.cfg.get('l2_source', 'rebuild')
+    if ctx.pins is not None and source != 'rebuild':
+        refuse(f'l2_source "{source}" trusts an RPC for finality: tests only, refused with l2_pins')
     work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
     try:
         release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id)
