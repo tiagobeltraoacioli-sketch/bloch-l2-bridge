@@ -32,6 +32,7 @@ class Base(unittest.TestCase):
         self.g = guardiao.Guardian(path)
         self.g.log = lambda **kw: None
         self.g.pause = lambda now, reasons: None
+        self.g.token_unpaused_at = lambda: 0
 
 
 class G1FrozenClock(Base):
@@ -41,6 +42,7 @@ class G1FrozenClock(Base):
         paused = []
         self.g.pause_vault = paused.append
         self.g.setup = lambda: None
+        self.g.call = lambda url, to, sig, *a, block='latest': ['00' * 32]
         self.g.finalized_l2 = lambda: None
         self.g.read_l2 = lambda b: (0, 0, [], [])
         self.g.eth_source = lambda burns, fin: (0, {}, [FORGED])
@@ -59,12 +61,60 @@ class G1FrozenClock(Base):
         self.assertTrue(self.rounds([T0, T0, T0], walls),
                         'no vault pause 7 days after a forged release: the L2 head stopped, and with it the grace')
 
+    def test_a_stalled_view_raises_a_critical_alert_and_clears_when_it_moves(self):
+        self.rounds([T0, T0], [T0, T0 + GRACE + 1])
+        self.assertIn('l2-view-stalled', self.g.state['problems'])
+        self.rounds([T0 + GRACE + 2], [T0 + GRACE + 3])
+        self.assertNotIn('l2-view-stalled', self.g.state['problems'])
+
+    def test_a_frozen_view_with_nothing_wrong_alerts_but_never_pauses(self):
+        self.g.pause_vault = paused = mock.Mock()
+        self.g.setup = lambda: None
+        self.g.call = lambda url, to, sig, *a, block='latest': ['00' * 32]
+        self.g.finalized_l2 = lambda: None
+        self.g.read_l2 = lambda b: (0, 0, [], [])
+        self.g.eth_source = lambda burns, fin: (0, {}, [])
+        self.g.block = lambda url, tag: (100, T0, '0x')
+        for wall in (T0, T0 + 7 * 86_400):
+            with mock.patch.object(guardiao.time, 'time', lambda wall=wall: wall):
+                self.g.act(*self.g.round())
+        paused.assert_not_called()
+        self.assertIn('l2-view-stalled', self.g.state['problems'])
+
+    def test_the_owner_can_lengthen_grace_only_while_frozen(self):
+        self.g.frozen_extra_grace = 7 * 86_400
+        self.assertFalse(self.rounds([T0, T0], [T0, T0 + 86_400]))
+        self.g.state['open'].clear()
+        self.g.state.pop('l2_head')
+        self.g.frozen = False
+        self.assertTrue(self.rounds([T0 + 86_400, T0 + 86_400 + GRACE + 1], [T0 + 86_400, T0 + 86_400 + GRACE + 1]))
+
+
+class G3Switch(Base):
+    """A live verifier proposal is critical, once, and clears when it is no longer live."""
+
+    def test_a_live_proposal_alerts_once_and_clears(self):
+        proposed = 'ab' * 20
+        view = {'proposedVerifier()': '00' * 12 + proposed, 'verifierProposalLive()': '00' * 31 + '01',
+                'verifierActivatesAt()': f'{T0:064x}'}
+        self.g.call = lambda url, to, sig, *a, block='latest': [view[sig]]
+        alerts = []
+        real = self.g.problem
+        self.g.problem = lambda pid, detail: (alerts.append(pid), real(pid, detail))
+        self.g.watch_switch()
+        self.g.watch_switch()
+        self.assertEqual(alerts, ['verifier-proposed:0x' + proposed])
+        self.assertEqual(self.g.act(T0, []), 4)
+        view['verifierProposalLive()'] = '00' * 32
+        self.g.watch_switch()
+        self.assertEqual(self.g.state['problems'], {})
+
 
 class G2OpenForever(Base):
     """A finding from the log history never closes, so one event pauses again after every cooldown."""
 
     def test_a_committee_unpause_is_not_undone_by_the_same_old_finding(self):
-        vault = {'pausedUntil': 0, 'guardianBlockedUntil': 0, 'pauseCount': 0}
+        vault = {'pausedUntil': 0, 'guardianBlockedUntil': 0, 'pauseCount': 0, 'pauseCooldown': 259200}
         now = [T0]
         sent = []
 
@@ -98,6 +148,20 @@ class G2OpenForever(Base):
             if vault['pausedUntil'] > now[0]:
                 now[0] = vault['pausedUntil'] + 259200 + 1
         self.assertEqual(len(sent), 1, f'the same finding paused the vault {len(sent)} times')
+        self.assertIn(FORGED[1], self.g.state['open'], 'it stays open and alerted')
+        self.g.act(now[0], [FORGED, ('hard', 'release-unknown:0xf1', 0, {'reason': 'a new forged release'})])
+        self.assertEqual(len(sent), 2, 'a new finding after the unpause still pauses')
+
+    def test_a_growing_shortfall_after_a_committee_unpause_pauses_again(self):
+        seen = []
+        self.g.pause_vault = seen.append
+        self.g.vault_unpaused_at = lambda: T0 + 10
+        reserves = lambda n: ('hard', 'reserves', 0, {'reason': 'short', 'shortfall': n})  # noqa: E731
+        self.g.act(T0, [reserves(5)])
+        self.g.act(T0 + 20, [reserves(5)])
+        self.assertEqual(len(seen), 0, 'first seen before the unpause, same size: settled')
+        self.g.act(T0 + 30, [reserves(6)])
+        self.assertEqual(len(seen), 1, 'it grew')
 
 
 if __name__ == '__main__':

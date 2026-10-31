@@ -9,7 +9,8 @@ tests pass and show that the same harness behaves when the attack is absent. Eve
 
 Modelled, not measured: a certificate costs 41 s of L2 rebuild (the figure in vigia.py) and a fetch costs 200 ms
 (two round trips at 100 ms). The clock in the Vigia tests is a fake. Vigia's round logic and the BridgeFeed verifier are
-the real code; signatario.py is replaced by a stub that refuses what the real one refuses.
+the real code; signatario.py and the chain reads are stubs that answer as the real ones do. rehearse_feed.py runs S2 and S8
+again with the real signatario.py, real feeds and real contracts on anvil.
 """
 import json
 import os
@@ -19,6 +20,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -42,22 +44,59 @@ class FakeClock:
         return self.t
 
 
-def stub_vigia(shared, me='a'):
+HEAD = 5000
+HONEST_ANCHOR = HEAD - 100
+
+
+def block_hash(n):
+    return '0x' + f'{n:064x}'
+
+
+def burn_item(i, recipient=None):
+    return {'burn_id': '0x' + f'{i + 1:064x}', 'nonce': i + 1, 'tx': '0x' + 'aa' * 32, 'amount': 10 * 10**6,
+            'recipient': recipient or '0x' + 'ab' * 20, 'block': 7, 'block_hash': '0x' + '55' * 32}
+
+
+def certificate(b, signer, valid, anchor, digest, recipient=None):
+    return {'signer': signer, 'digest': digest,
+            'release': {'route': ts.ROUTE, 'nonce': b['nonce'], 'recipient': recipient or b['recipient'], 'amount': b['amount'],
+                        'nativeBurn': b['burn_id']},
+            'context': {'validUntil': valid, 'sourceAnchorNumber': anchor, 'sourceAnchorHash': block_hash(anchor),
+                        'nativeFinalizedNumber': b['block'], 'nativeFinalizedHash': b['block_hash']}}
+
+
+def stub_vigia(shared, me='a', blocked=()):
     v = vigia_mod.Vigia.__new__(vigia_mod.Vigia)
-    v.cfg, v.shared, v.me, v.feed = {}, Path(shared), me, None
+    v.cfg, v.shared, v.me, v.feed = {'eth_rpc': 'http://eth'}, Path(shared), me, None
+    v.vault, v.route, v.anchor_max_age = ts.VAULT, ts.ROUTE, 160
     v.margin, v.max_valid, v.refused_retry = 600, 3600, 300
     v.signs_per_hour, v.max_new_rounds, v.opened = 6, 4, 0
+    v.parked_now, v.parked_logged, v.chain_cache = {}, set(), {}
     v.release_partial = lambda path, burn, rnd: bf.load(path)
     v.burn_done = lambda d, burn: None
+    v.call = lambda url, to, sig, *a: '0x' + '00' * 12 + 'cc' * 20
+    v.blocked = set(blocked)
+
+    def rpc(url, method, params):
+        if method == 'eth_getBlockByNumber':
+            n = HEAD if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(n), 'hash': block_hash(n)}
+        if method == 'eth_call':
+            if '0x' + params[0]['data'][10:74][-40:] in v.blocked:
+                raise RuntimeError('eth_call: {"code": 3, "message": "execution reverted: blacklisted"}')
+            return '0x' + '00' * 31 + '01'
+        raise AssertionError(method)
+
+    v.rpc = rpc
     return v
 
 
 class Model:
-    """One signer's sign_round over a fake clock, with a signatario stub that signs only honest rounds."""
+    """One signer's sign_round over a fake clock, with a signatario stub that signs only rounds it could really join."""
 
-    def __init__(self, shared, burns, is_junk=lambda rnd: False):
+    def __init__(self, shared, burns, is_junk=lambda rnd: False, blocked=()):
         self.clock = FakeClock(1_800_000_000)
-        self.v = stub_vigia(shared)
+        self.v = stub_vigia(shared, blocked=blocked)
         self.burns, self.is_junk = burns, is_junk
         self.attempts, self.signed, self.seen = {}, {}, set()
         self.v.signatario = self.signatario
@@ -70,18 +109,15 @@ class Model:
     def signatario(self, *args):
         self.clock.t += REBUILD_S
         burn = args[args.index('--burn-id') + 1]
+        item = next(b for b in self.burns if b['burn_id'] == burn)
         self.attempts[burn] = self.attempts.get(burn, 0) + 1
         out = Path(args[args.index('--out') + 1])
         if '--context' in args:
             if self.is_junk(out.parent):
-                return 1, {'reason': 'the proposed context certifies another release'}
-            doc = {'signer': 'a', 'digest': out.parent.name.split('-')[3]}
-            out.write_text(json.dumps(doc))
-            self.signed[burn] = self.signed.get(burn, 0) + 1
-            return 0, doc
-        valid = int(self.clock.t) + 1800
-        digest = f'{self.attempts[burn]:064x}'
-        doc = {'signer': 'a', 'digest': '0x' + digest, 'context': {'validUntil': valid, 'sourceAnchorNumber': 1}}
+                return 1, {'reason': 'proposed anchor is not a recent finalized block of this node'}
+            doc = bf.load(args[args.index('--context') + 1]) | {'signer': 'a'}
+        else:
+            doc = certificate(item, 'a', int(self.clock.t) + 1800, HONEST_ANCHOR, '0x' + f'{self.attempts[burn]:064x}')
         out.write_text(json.dumps(doc))
         self.signed[burn] = self.signed.get(burn, 0) + 1
         return 0, doc
@@ -94,16 +130,13 @@ class Model:
                 os.utime(f, (self.clock.t, self.clock.t))
 
     def one_pass(self):
+        self.v.new_pass()
         self.v.opened = 0
         for join_only in (True, False):
             for b in self.burns:
                 self.v.sign_release(b, join_only=join_only)
                 self.sweep_refused()
         self.clock.t += PASS_INTERVAL_S
-
-
-def burn_item(i):
-    return {'burn_id': '0x' + f'{i + 1:064x}', 'nonce': i + 1, 'tx': '0x' + 'aa' * 32}
 
 
 class Base(unittest.TestCase):
@@ -131,7 +164,7 @@ class S1RoundSlots(Base):
 
     def test_one_signer_cannot_fill_the_round_slots_of_a_burn(self):
         f = self.feed()
-        junk = [ts.cert(3, valid=ts.NOW + 3000 + i, anchor=1000 + i) for i in range(bf.MAX_ROUNDS_PER_BURN)]
+        junk = [ts.cert(3, valid=ts.NOW + 3000 + i, anchor=1000 + i) for i in range(32)]
         for i in range(0, len(junk), bf.MAX_CERTS):
             f.accept(self.rel(3), json.dumps({'certs': junk[i:i + bf.MAX_CERTS]}).encode(), 'http://rogue')
         honest = json.dumps({'certs': [ts.cert(0, valid=ts.NOW + 1800, anchor=7)]}).encode()
@@ -144,7 +177,7 @@ class S2SigningBudget(Base):
 
     HOURS = 6
 
-    def run_model(self, attack):
+    def run_model(self, attack=None):
         burn = burn_item(0)
         d = self.d / 'shared' / 'release' / burn['burn_id'][2:]
         d.mkdir(parents=True)
@@ -155,50 +188,80 @@ class S2SigningBudget(Base):
         end = m.clock.t + self.HOURS * 3600
         while m.clock.t < end:
             if attack:  # what one key can publish for free: valid signatures over rounds nobody can join
-                for _ in range(8 if not serial else 2):  # a pass tries at most two, and the store keeps 32
+                for _ in range(8 if not serial else 2):  # a pass tries at most two
                     serial += 1
-                    name = f'r-{int(m.clock.t) + 3500}-{serial}-{serial:064x}'
-                    (d / name).mkdir()
-                    (d / name / 'rogue.json').write_text(json.dumps({'signer': 'rogue'}))
-                    junk_names.add(name)
-                for old in sorted(d.glob('r-*'), key=lambda r: int(r.name.split('-')[2]))[:-bf.MAX_ROUNDS_PER_BURN]:
+                    valid = int(m.clock.t) + 3500
+                    digest = '0x' + f'{serial:064x}'
+                    anchor = HONEST_ANCHOR + serial % 50
+                    rnd = d / f'r-{valid}-{anchor}-{digest[2:]}'
+                    rnd.mkdir()
+                    wrong = '0x' + 'ee' * 20 if attack == 'other-recipient' else None
+                    (rnd / 'rogue.json').write_text(json.dumps(certificate(burn, 'rogue', valid, anchor, digest, wrong)))
+                    junk_names.add(rnd.name)
+                for old in sorted(d.glob('r-*'), key=lambda r: int(r.name.split('-')[3], 16))[:-bf.MAX_ROUNDS_PER_SIGNER]:
+                    junk_names.discard(old.name)
                     shutil.rmtree(old)
             m.one_pass()
         return m, burn['burn_id']
 
     def test_control_without_junk_rounds_the_signer_signs(self):
-        m, burn = self.run_model(attack=False)
+        m, burn = self.run_model()
         self.assertGreater(m.signed.get(burn, 0), 0)
 
     def test_one_signer_cannot_stop_honest_signing_with_junk_rounds(self):
-        m, burn = self.run_model(attack=True)
+        m, burn = self.run_model(attack='other-recipient')
         self.assertGreater(m.signed.get(burn, 0), 0,
                            f'0 honest certificates in {self.HOURS} modelled hours; '
                            f'{m.attempts.get(burn, 0)} refused joins, each one a full L2 rebuild')
+        self.assertEqual(m.attempts[burn], m.signed[burn], 'rounds for another release must cost no rebuild')
+
+    def test_rounds_that_pass_every_cheap_check_cost_a_bounded_rebuild_and_do_not_stop_signing(self):
+        m, burn = self.run_model(attack='refused-after-rebuild')
+        self.assertGreater(m.signed.get(burn, 0), 0, f'0 honest certificates; {m.attempts.get(burn, 0)} refused joins')
+        refused = m.attempts[burn] - m.signed[burn]
+        self.assertLessEqual(refused, 6 * (self.HOURS + 1), f'{refused} rebuilds spent on refused joins')
 
 
 class S3ReaderBudget(Base):
     """The honest polling load of a modest backlog exceeds the server's own per-IP budget."""
 
-    def test_a_reader_with_90_open_burns_stays_within_the_default_server_budget(self):
-        signers = ['%040x' % (i + 1) for i in range(7)]
-        burns = ['%064x' % (i + 1) for i in range(90)]
-        root = self.d / 'pub'
+    def backlog(self, root):
         paths = []
-        for b in burns:
-            for s in signers:
+        for b in ['%064x' % (i + 1) for i in range(90)]:
+            for s in ['%040x' % (i + 1) for i in range(7)]:
                 rel = f'bridge/{ts.TOKEN[2:]}/release/{b}/{s}.json'
                 sigfeed.atomic_write(root / rel, b'{"certs": []}')
                 paths.append(rel)
-        server = sigfeed.FeedServer(root, port=PORT + 1).start()
+        return paths
+
+    def test_a_reader_with_90_open_burns_stays_within_the_default_server_budget(self):
+        paths = self.backlog(self.d / 'pub')
+        server = sigfeed.FeedServer(self.d / 'pub', port=PORT + 1).start()
         self.addCleanup(server.stop)
         peers = sigfeed.Peers([f'http://127.0.0.1:{server.port}'])
         got = set()
-        sigfeed.pull(peers, paths, lambda p, b, u: got.add(p) or True, first_wins=False, peer_budget=60)
+        for cycle in range(6):  # six passes: 720 asks, each pass well under the 600 a minute
+            before = server.budget.get('127.0.0.1', (0, 0))[1]
+            sigfeed.pull(peers, paths, lambda p, b, u: got.add(p) or True, first_wins=False, peer_budget=60)
+            used = server.budget['127.0.0.1'][1] - before if cycle == 0 else None
+            if used is not None:
+                self.assertLessEqual(used, 300, 'one pull stays well inside the budget')
+            server.budget.clear()  # a minute passes between passes
         state = next(iter(peers.state.values()))
         self.assertEqual(state['failures'], 0, f'an honest peer was marked failed: {state["last_error"]}, '
                                                f'{len(got)} of {len(paths)} delivered')
-        self.assertEqual(len(got), len(paths))
+        self.assertEqual(len(got), len(paths), 'the whole backlog is covered across cycles')
+
+    def test_a_server_at_its_budget_is_busy_not_down(self):
+        paths = self.backlog(self.d / 'pub')
+        server = sigfeed.FeedServer(self.d / 'pub', port=PORT + 4, per_ip_requests=50).start()
+        self.addCleanup(server.stop)
+        url = f'http://127.0.0.1:{server.port}'
+        peers = sigfeed.Peers([url])
+        sigfeed.pull(peers, paths, lambda *a: True, first_wins=False)
+        self.assertEqual(peers.state[url]['failures'], 0)
+        self.assertEqual(peers.state[url]['last_error'], 'busy')
+        self.assertEqual(peers.available(), [url], 'no backoff')
 
 
 class S4PeerBudget(Base):
@@ -219,32 +282,84 @@ class S4PeerBudget(Base):
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'needs 127.0.0.0/8 source addresses')
 class S5Slots(Base):
-    """Eight source addresses hold all 64 slots with idle connections, so an honest reader is refused and backs off."""
+    """Idle connections from many addresses take every slot, so an honest reader is refused and backs off."""
 
-    def test_idle_connections_from_eight_addresses_do_not_lock_out_a_reader(self):
-        rel = f'bridge/{ts.TOKEN[2:]}/release/{"ab" * 32}/{"cd" * 20}.json'
-        sigfeed.atomic_write(self.d / 'pub' / rel, b'{"certs": []}')
-        server = sigfeed.FeedServer(self.d / 'pub', port=PORT + 2).start()
+    def serve(self, port):
+        self.rel = f'bridge/{ts.TOKEN[2:]}/release/{"ab" * 32}/{"cd" * 20}.json'
+        sigfeed.atomic_write(self.d / 'pub' / self.rel, b'{"certs": []}')
+        server = sigfeed.FeedServer(self.d / 'pub', port=port).start()
         self.addCleanup(server.stop)
+        return server
+
+    def hold(self, server, addresses, each):
         held = []
-        for i in range(8):
-            for _ in range(8):
+        for i in range(addresses):
+            for _ in range(each):
                 s = socket.socket()
                 s.bind((f'127.0.1.{i + 1}', 0))
                 s.connect(('127.0.0.1', server.port))
                 held.append(s)
         self.addCleanup(lambda: [s.close() for s in held])
+        return held
+
+    def test_idle_connections_from_eight_addresses_do_not_lock_out_a_reader(self):
+        server = self.serve(PORT + 2)
+        self.hold(server, 8, 8)
         time.sleep(0.5)
         url = f'http://127.0.0.1:{server.port}'
         peers = sigfeed.Peers([url])
-        sigfeed.pull(peers, [rel], lambda *a: True)
+        got = []
+        sigfeed.pull(peers, [self.rel], lambda p, b, u: got.append(p) or True)
         state = peers.state[url]
         self.assertEqual(state['failures'], 0, f'the reader was refused ({state["last_error"]}) and backs off 30 s, '
                                                f'then doubling to 600 s')
+        self.assertEqual(got, [self.rel])
+
+    def test_every_slot_idle_a_reader_still_gets_in(self):
+        server = self.serve(PORT + 5)
+        self.hold(server, 20, 4)  # 80 tries at 64 slots
+        time.sleep(0.3)
+        self.assertEqual(server.slots._value, 0, 'every slot is taken')
+        self.assertEqual(sigfeed.fetch(f'http://127.0.0.1:{server.port}/{self.rel}'), b'{"certs": []}')
+
+    def test_a_reader_gets_through_a_reconnecting_attack(self):
+        server = self.serve(PORT + 6)
+        stop = threading.Event()
+
+        def attacker(i):
+            while not stop.is_set():
+                held = []
+                for _ in range(4):
+                    s = socket.socket()
+                    try:
+                        s.bind((f'127.0.1.{i + 1}', 0))
+                        s.connect(('127.0.0.1', server.port))
+                    except OSError:
+                        s.close()
+                        continue
+                    held.append(s)
+                stop.wait(1.9)  # just inside the idle deadline
+                for s in held:
+                    s.close()
+
+        threads = [threading.Thread(target=attacker, args=(i,), daemon=True) for i in range(20)]
+        for t in threads:
+            t.start()
+        self.addCleanup(stop.set)
+        time.sleep(1)
+        ok = 0
+        for _ in range(30):
+            try:
+                ok += sigfeed.fetch(f'http://127.0.0.1:{server.port}/{self.rel}', deadline=3) is not None
+            except sigfeed.FetchError:
+                pass
+            time.sleep(0.1)
+        stop.set()
+        self.assertGreaterEqual(ok, 27, f'{ok} of 30 fetches got through')
 
 
-class S6TimerLeak(Base):
-    """A failed thread start leaks a connection slot: the Timer start sits outside the try."""
+class S6Threads(Base):
+    """A failed thread start must not leak a slot or kill the server."""
 
     def test_a_thread_limit_does_not_leak_a_slot(self):
         server = sigfeed.FeedServer(self.d, port=PORT + 3, max_conns=4)
@@ -258,6 +373,16 @@ class S6TimerLeak(Base):
             except RuntimeError:
                 pass
         self.assertEqual(server.slots._value, 4, 'the slot was not returned')
+
+    def test_a_failed_connection_thread_loses_that_connection_only(self):
+        server = sigfeed.FeedServer(self.d, port=PORT + 7, max_conns=4).start()
+        self.addCleanup(server.stop)
+        time.sleep(0.2)
+        with mock.patch.object(sigfeed.threading.Thread, 'start', side_effect=RuntimeError("can't start new thread")):
+            with socket.create_connection(('127.0.0.1', server.port)):
+                time.sleep(0.3)
+        self.assertEqual(server.slots._value, 4, 'the slot was not returned')
+        self.assertEqual(sigfeed.fetch(f'http://127.0.0.1:{server.port}/healthz'), b'ok\n', 'the server still serves')
 
 
 class S7Version(Base):
@@ -285,12 +410,14 @@ class S7Version(Base):
 class S8StuckBurns(Base):
     """A burn the vault can never pay (USDC-blacklisted recipient) stays open for good and costs work on every pass."""
 
+    BAD = '0x' + 'bb' * 20
+
     def run_model(self, stuck):
-        burns = [burn_item(i) for i in range(stuck + 1)]
+        burns = [burn_item(i, self.BAD) for i in range(stuck)] + [burn_item(stuck)]
         fresh = burns[-1]['burn_id']
         for b in burns:
             (self.d / 'shared' / 'release' / b['burn_id'][2:]).mkdir(parents=True, exist_ok=True)
-        m = Model(self.d / 'shared', burns)
+        m = Model(self.d / 'shared', burns, blocked=[self.BAD])
         self.addCleanup(m.stop)
         end = m.clock.t + 6 * 3600
         while m.clock.t < end and not m.signed.get(fresh):
@@ -306,6 +433,34 @@ class S8StuckBurns(Base):
         self.assertGreater(m.signed.get(fresh, 0), 0,
                            'a fresh burn got no certificate in 6 modelled hours behind 30 unpayable burns '
                            f'({sum(m.attempts.values())} rebuilds spent on them)')
+        self.assertEqual(sum(m.attempts.values()), m.signed[fresh], 'an unpayable burn costs no rebuild')
+
+    def test_a_parked_burn_resumes_when_the_token_would_pay(self):
+        m, fresh = self.run_model(1)
+        stuck = m.burns[0]['burn_id']
+        self.assertNotIn(stuck, m.attempts)
+        m.v.blocked.clear()
+        m.one_pass()
+        self.assertGreater(m.signed.get(stuck, 0), 0)
+
+    def test_a_failed_read_is_not_taken_for_an_unpayable_burn(self):
+        v = stub_vigia(self.d)
+
+        def down(url, method, params):
+            raise RuntimeError('eth_call: {"code": -32005, "message": "rate limited"}')
+
+        v.rpc = down
+        with self.assertRaises(RuntimeError):
+            v.parked(burn_item(0))
+
+    def test_parked_burns_take_no_slot_in_the_feed(self):
+        v = stub_vigia(self.d, blocked=[self.BAD])
+        v.feed = mock.Mock()
+        v.signers_checked = True
+        v.minted = v.released = lambda item: False
+        burns = [burn_item(i, self.BAD) for i in range(3)] + [burn_item(3)]
+        v.sync([], burns)
+        v.feed.sync.assert_called_once_with([], [burns[3]['burn_id']])
 
     def test_512_stuck_burns_do_not_hide_later_burns_from_the_feed(self):
         f = self.feed()

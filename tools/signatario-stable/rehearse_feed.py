@@ -155,7 +155,7 @@ def main():
             sh(CAST, 'rpc', 'anvil_setBalance', alice, hex(10**21), '--rpc-url', url)
         signers = sorted((out(CAST, 'wallet', 'address', '--private-key', k).lower(), k) for k in SIGNER_KEYS)
         addrs = '[' + ','.join(a for a, _ in signers) + ']'
-        token = create(project, eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
+        token = create(project, eth, 'solidity-tests/BridgeReviewPoc.t.sol:ReviewUsdc')  # a token with a blacklist
         k = lambda t: out(CAST, 'keccak', t)  # noqa: E731
         vault = create(project, eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
                        k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), token, str(1_000_000 * U), '0', addrs,
@@ -165,7 +165,7 @@ def main():
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in signers[:2]]
         send(eth, DEPLOYER, vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu, '[' + ','.join(sigs) + ']')
         route = out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth).lower()
-        send(eth, DEPLOYER, token, 'mintTo(address,uint256)', alice, str(1000 * U))
+        send(eth, DEPLOYER, token, 'mint(address,uint256)', alice, str(1000 * U))
         send(eth, ALICE_KEY, token, 'approve(address,uint256)', vault, MAX)
         cap = 100_000 * U
         stable = create(project, l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
@@ -308,6 +308,62 @@ def main():
         over = sh(CAST, 'send', vault, 'deposit(uint64,bytes32)', str(100_000 * U + 1), '0x' + '00' * 12 + alice[2:],
                   '--rpc-url', eth, '--private-key', ALICE_KEY, ok=False)
         check('reviewed limit: a deposit above windowLimit is refused', over.returncode != 0)
+
+        # ── one pinned signer publishes rounds nobody can join: valid signatures, another recipient ──
+        paid = uint(eth, token, 'balanceOf(address)(uint256)', BOB)
+        send(l2, ALICE_KEY, stable, 'burn(uint64,address)', str(U), BOB)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', l2)
+        nonce = uint(l2, stable, 'burnNonce()(uint64)')
+        burn_id = out(CAST, 'call', stable, 'burnIdOf(uint64)(bytes32)', str(nonce), '--rpc-url', l2).lower()
+        rogue_addr, rogue_key = signers[2]
+        burn_block = json.loads(out(CAST, 'block', 'finalized', '--json', '--rpc-url', l2))
+        junk = []
+        for i in range(bridge_feed.MAX_CERTS):
+            valid = int(time.time()) + 3000 + i
+            rel = {'route': route, 'nonce': nonce, 'recipient': '0x' + 'e0' * 20, 'amount': U, 'nativeBurn': burn_id}
+            ctx = {'validUntil': valid, 'sourceAnchorNumber': 1 + i, 'sourceAnchorHash': '0x' + '77' * 32,
+                   'nativeFinalizedNumber': int(burn_block['number'], 16), 'nativeFinalizedHash': burn_block['hash'].lower()}
+            digest = out(CAST, 'call', vault, 'releaseDigest((bytes32,uint64,address,uint64,bytes32),'
+                         '(uint256,uint256,bytes32,uint64,bytes32))(bytes32)',
+                         '(' + ','.join(str(rel[f]) for f in ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')) + ')',
+                         '(' + ','.join(str(ctx[f]) for f in ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash',
+                                                              'nativeFinalizedNumber', 'nativeFinalizedHash')) + ')',
+                         '--rpc-url', eth).lower()
+            junk.append({'signed': True, 'kind': 'stable-release', 'signer': rogue_addr, 'source_chain_id': ETH_CHAIN,
+                         'source_vault': vault, 'release': rel, 'context': ctx, 'digest': digest,
+                         'signature': out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', rogue_key, digest).lower()})
+        rogue_file = work / 's2' / 'pub' / 'bridge' / stable[2:] / 'release' / burn_id[2:] / f'{rogue_addr[2:]}.json'
+        rogue_file.parent.mkdir(parents=True, exist_ok=True)
+        rogue_file.write_text(json.dumps({'certs': junk}))
+        first = vigia(cfgs[0], 'sign')
+        check('junk rounds: the feed delivered them to an honest signer',
+              sum(1 for _ in (shared(0) / 'release' / burn_id[2:]).glob(f'r-*/{rogue_addr[2:]}.json')) == len(junk),
+              list((shared(0) / 'release' / burn_id[2:]).glob('r-*')))
+        check('junk rounds: no join attempted, so no rebuild spent on them',
+              not any(e.get('kind') == 'release' and e.get('joined') for e in first), first)
+        check('junk rounds: the honest signer opens its own round', any(e.get('opened') and e.get('signed') for e in first), first)
+        joined = vigia(cfgs[1], 'sign')
+        check('junk rounds: a second honest signer joins the real round',
+              any(e.get('joined') and e.get('signed') for e in joined), joined)
+        relay = vigia(cfgs[2], 'relay')
+        check('junk rounds: the burn is paid to its real recipient, on the real vault',
+              uint(eth, token, 'balanceOf(address)(uint256)', BOB) == paid + U
+              and uint(eth, token, 'balanceOf(address)(uint256)', '0x' + 'e0' * 20) == 0, relay)
+
+        # ── a burn the token will never pay does not hold up the next one ──
+        carol = '0x' + 'c0' * 20
+        send(eth, DEPLOYER, token, 'block_(address)', carol)
+        send(l2, ALICE_KEY, stable, 'burn(uint64,address)', str(U), carol)
+        send(l2, ALICE_KEY, stable, 'burn(uint64,address)', str(U), BOB)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', l2)
+        first = vigia(cfgs[0], 'sign')
+        check('blacklisted recipient: parked, with no certificate and so no rebuild',
+              any(e.get('parked') and e.get('recipient') == carol for e in first)
+              and sum(bool(e.get('opened')) for e in first) == 1, first)
+        vigia(cfgs[1], 'sign')
+        vigia(cfgs[2], 'relay')
+        check('blacklisted recipient: the next burn is paid', uint(eth, token, 'balanceOf(address)(uint256)', BOB) == paid + 2 * U)
+        check('blacklisted recipient: nothing reached that address', uint(eth, token, 'balanceOf(address)(uint256)', carol) == 0)
 
         # ── finished items leave the feeds ──
         for i in (0, 1):
