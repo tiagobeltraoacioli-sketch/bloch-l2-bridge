@@ -20,7 +20,7 @@ Health: `bloch-ponte-guardiao-monitor@<bridge>.timer` runs `l2_monitor.py --guar
 `bloch-guardiao-monitor`, a member of the group `bloch-guardiao`. It reads `/var/lib/bloch-guardiao/<bridge>-health.json`, so
 `health_file` must be that path. The monitor cannot read the keys in `/etc/bloch-guardiao`. Install `l2_monitor.py` at
 `/opt/bloch-guardiao/monitor/`, copy `guardiao-monitor.env.example` to `/etc/bloch-guardiao-monitor/<bridge>.env`, and write
-`/etc/bloch-guardiao-monitor/alert.json` from `alert.json.example` in bloch-l2-evm. The monitor raises alerts even if the guardian
+`/etc/bloch-guardiao-monitor/alert.json` from `alert.json.example` in bloch-l2-evm, with `state_file` under `/var/lib/bloch-guardiao-monitor/`. The monitor raises alerts even if the guardian
 process is dead, which `alert_command` cannot do, so run both. The units have passed `systemd-analyze verify` only.
 
 The guardian key can only pause, and a pause expires by itself after `pauseDuration`; the cooldown
