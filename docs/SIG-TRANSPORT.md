@@ -60,18 +60,21 @@ fits. Attestors do not read each other: only the aggregator and the monitor are 
 | Oversized reply | 64 KiB per fetch; the declared length is refused unread, endless or chunked bodies stop at the cap, compressed replies are refused |
 | Slow server | Wall-clock deadline per fetch (default 5 s), budget per peer per cycle (default 20 s), one thread per peer |
 | Redirects, proxies, other schemes | Not followed, not used, refused |
-| Disk filling | `max_store_bytes` over open items (default 256 MiB), `min_free_bytes` (default 1 GiB), 4 certificates per signer per burn, 32 rounds per burn, 512 open items per cycle. A full store refuses ingest and logs `feed-store-full`; signing carries on |
-| Operator down | Backoff per peer, 30 s doubling to 600 s; the others are unaffected. `feed.status_file` reports each peer |
-| Server abuse | GET and HEAD only, allow-listed paths, regular files only (no symlinks), 64 connections, 8 per IP, 600 connections per IP per minute, 10 s per connection, 4 KiB request head |
+| Disk filling | `max_store_bytes` over open items (default 256 MiB), `min_free_bytes` (default 1 GiB), 4 certificates per signer per file, 8 rounds per signer per burn, 512 open items per cycle (half the oldest, half the newest). A full store refuses ingest and logs `feed-store-full`; signing carries on |
+| Operator down | Backoff per peer, 30 s doubling to 600 s; the others are unaffected. `feed.status_file` reports each peer. A peer that accepts and then drops a connection, answers 503 or runs out of cycle budget is busy, not down: no backoff |
+| Long backlog | At most 120 paths per peer per pull, resumed on the next cycle, so a large backlog is covered over several passes |
+| Server abuse | GET and HEAD only, allow-listed paths, regular files only (no symlinks), 64 connections, 4 per IP (per /64 on IPv6), 600 connections per IP per minute, 2 s to send the request and 10 s per connection, 4 KiB request head. When all slots are taken, the longest-idle connection makes room. **Owner item:** a firewall allow-list of operator and relayer IPs is the stronger control; code cannot tell a peer from a stranger |
 
 ## Rounds without a shared lock
 
 Certificates combine only within one round (same anchor, `validUntil` and digest), and `flock` now protects only the
 operator's own directory. A signer stays in its round unless a live round holds more distinct signers, or as many with a higher
 name (the newest `validUntil`). Concurrent openers therefore converge, and a lone key cannot pull signers away
-from a growing round. `max_release_signs_per_hour` (default 6 per burn) bounds the rebuilds a malicious
-proposer can cause. A round this signer's Ethereum half refused is skipped for `refused_retry` seconds, and if
-every live round was refused, the signer opens its own.
+from a growing round. Before any rebuild, a round must name the burn's fields as the signer's own log shows them and an anchor
+its Ethereum node knows, so junk rounds from a real key cost a read. `max_release_signs_per_hour` (default 6 per burn)
+bounds a signer's certificates and own rounds. Joins refused after a rebuild have a separate budget of the same size, and
+once it is spent, rounds with a single signer are not tried. A round this signer's Ethereum half refused is skipped for
+`refused_retry` seconds, and if every live round was refused, the signer opens its own.
 
 A relayer groups chain-verified partials by digest and combines only a group with k distinct signers, so one dissenting or
 corrupt partial no longer vetoes the others. Joins come before new rounds, and a pass opens at most `max_new_rounds`.

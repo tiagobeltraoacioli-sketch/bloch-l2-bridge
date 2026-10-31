@@ -22,7 +22,7 @@ import time
 import sigfeed
 
 MAX_CERTS = 4
-MAX_ROUNDS_PER_BURN = 32
+MAX_ROUNDS_PER_SIGNER = 8  # per burn. Per signer, so one signer's rounds never displace another's
 MAX_OPEN_ITEMS = 512
 SECP_P = 2**256 - 2**32 - 977
 SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -188,7 +188,10 @@ class Verifier:
             raise Bad('for another bridge')
         recipient = _hex(doc.get('recipient'), 20, 'recipient')
         got = _hex(doc.get('digest'), 32, 'digest')
-        want = mint_digest(self.version(), _uint(self.l2_chain, 256, 'chain'), _word(bytes.fromhex(self.token[2:])),
+        version = self.version()
+        if version is None:  # the L2 RPC could not say: no verdict on this partial, ask again next cycle
+            raise Bad('the token version cannot be read now')
+        want = mint_digest(version, _uint(self.l2_chain, 256, 'chain'), _word(bytes.fromhex(self.token[2:])),
                            _uint(self.source_chain, 256, 'source chain'), _word(bytes.fromhex(self.vault[2:])),
                            bytes.fromhex(self.route[2:]), _hex(deposit, 32, 'deposit'),
                            _uint(doc.get('deposit_nonce'), 64, 'nonce'), _uint(doc.get('amount'), 64, 'amount'),
@@ -249,6 +252,12 @@ def parse_json(body):
         raise Bad('not JSON') from None
 
 
+def open_window(items):
+    """At most MAX_OPEN_ITEMS, half the oldest and half the newest: a pile of old items never hides a new one."""
+    half = MAX_OPEN_ITEMS // 2
+    return items if len(items) <= MAX_OPEN_ITEMS else items[:half] + items[-half:]
+
+
 class BridgeFeed:
     """A signer's or relayer's view: pulls into `shared_dir` (private, verified) and exports to `publish_dir`."""
 
@@ -269,6 +278,7 @@ class BridgeFeed:
         self.ca_file = f.get('ca_file')
         self.status_file = Path(f['status_file']) if f.get('status_file') else None
         self.lock = threading.Lock()
+        self.round_lock = threading.Lock()
         self.used = 0
         self.full_logged = False
 
@@ -309,10 +319,11 @@ class BridgeFeed:
             for cert in doc['certs']:
                 try:  # one stale or forged entry does not cost the signer's live certificates
                     clean = self.verify.release(cert, item, signer)
-                    rnd = d / round_name(clean)
-                    if not rnd.exists() and sum(1 for _ in d.glob('r-*')) >= MAX_ROUNDS_PER_BURN:
-                        raise Bad('too many rounds for this burn')
-                    taken += self.store(rnd / f'{signer[2:]}.json', clean)
+                    target = d / round_name(clean) / f'{signer[2:]}.json'
+                    with self.round_lock:
+                        if not target.exists() and sum(1 for _ in d.glob(f'r-*/{signer[2:]}.json')) >= MAX_ROUNDS_PER_SIGNER:
+                            raise Bad('too many rounds from this signer for this burn')
+                        taken += self.store(target, clean)
                 except Bad as e:
                     problems.append(str(e))
             if problems:
@@ -324,7 +335,7 @@ class BridgeFeed:
 
     def sync(self, deposits, burns):
         """Pull what these open items still lack, then export. Items come from the caller's own chain view."""
-        deposits, burns = deposits[:MAX_OPEN_ITEMS], burns[:MAX_OPEN_ITEMS]
+        deposits, burns = open_window(deposits), open_window(burns)
         # The quota covers open items, so finished history can never stall a later deposit.
         self.used = sigfeed.tree_bytes(*[self.shared / 'mint' / d[2:] for d in deposits],
                                        *[self.shared / 'release' / b[2:] for b in burns])

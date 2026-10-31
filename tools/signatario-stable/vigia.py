@@ -9,7 +9,8 @@ Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatar
 `l2_relayer_key`, `eth_relayer_key` (gas keys with no authority), optional `signer_name`,
 `round_margin` (seconds, default 600), `max_valid_seconds` (default 3600), `resend_after_s` (default 1800: a
 relayed transaction with no receipt after this long is sent again), `log_chunk` (blocks per eth_getLogs, default
-10000), `max_new_rounds` (release rounds opened per pass, default 4), `l2_tx_rpc` (L2 sends: required to relay on
+10000), `max_new_rounds` (release rounds opened per pass, default 4), `anchor_max_age` (blocks, default 160, as the Ethereum half),
+`l2_tx_rpc` (L2 sends: required to relay on
 chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction, its nonce and its receipt use it, and every
 read that decides anything stays on `l2_rpc`), `relayer_state` (the relayer's nonce record, default
 SHARED/relayer-nonces.json), `max_inflight` (unconfirmed transactions per gas key and side, default 16, the settled RPC's
@@ -45,9 +46,15 @@ cannot forge anything, but deleting partials delays the bridge. See docs/SIG-TRA
 
 Round choice, with no shared lock: a signer stays in its round unless a live round holds more distinct real signers,
 or as many with a higher name (the newest validUntil). Concurrent openers converge, and a lone key cannot pull the
-others away from a growing round. `max_release_signs_per_hour` (per burn, default 6) bounds the rebuilds a malicious
-proposer can cause. A refused round is skipped for `refused_retry` seconds (default 300), and when every live round
-was refused the signer may open its own.
+others away from a growing round. Before any rebuild, a round must name the burn's fields as this signer's own log shows
+them and an anchor its Ethereum node knows, so a key signing rounds nobody can join costs a read, not a rebuild.
+`max_release_signs_per_hour` (per burn, default 6) bounds this signer's certificates and own rounds. Joins refused after a
+rebuild have a separate budget of the same size: once spent, rounds with one signer are not tried, and the signer may
+open its own, so no other key can spend its way to a stopped signer. A refused round is skipped for `refused_retry`
+seconds (default 300), and when every live round was refused the signer may open its own.
+
+A burn the token itself would refuse to pay (a transfer from the vault that reverts in `eth_call`, such as a blacklisted
+recipient) is parked: no rebuild, no slot, not asked of the feeds. It is checked again every pass and resumes if that changes.
 
 In both modes every reader verifies what it uses, against the chain. A partial counts only if its signature recovers to a current signer on the chain and the token or vault recomputes
 its digest from its fields; a round counts only with such a certificate and a validUntil the Ethereum half could
@@ -81,6 +88,11 @@ ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}')
 SIGNATURE = re.compile(r'0x[0-9a-fA-F]{130}')
 
 
+def is_revert(error):
+    """A contract's answer, as opposed to a node or transport failure (rate limit, not synced)."""
+    return 'revert' in str(error).lower()
+
+
 def log(**kv):
     print(json.dumps({'t': int(time.time()), **kv}), flush=True)
 
@@ -111,6 +123,8 @@ class Vigia:
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
         self.max_inflight = int(self.cfg.get('max_inflight', 16))
         self.nonce_path = Path(self.cfg.get('relayer_state', self.shared / 'relayer-nonces.json'))
+        self.anchor_max_age = int(self.cfg.get('anchor_max_age', 160))
+        self.parked_now, self.parked_logged, self.chain_cache = {}, set(), {}
         self.l2_tx = self.cfg.get('l2_tx_rpc') or self.cfg.get('l2_rpc')
         self.mainnet = int(self.cfg.get('l2_chain_id', 0)) == 700770 or bool(self.cfg.get('l2_pins'))
         self.opened = 0
@@ -132,13 +146,17 @@ class Vigia:
         return int(time.time())
 
     def token_version(self):
-        """The EIP-712 version, as signatario.py derives it: '2' for the tokens with availableToMint."""
+        """The EIP-712 version, as signatario.py derives it: '2' for the tokens with availableToMint. Only an answer from
+        the contract is kept: after a failed read (rate limit, node down) this is None, and the caller asks again."""
         if self._version is None:
             try:
                 out = self.call(self.cfg['l2_rpc'], self.token, 'availableToMint()')
                 self._version = '2' if len(out) == 66 else '1'
-            except RuntimeError:
-                self._version = '1'
+            except RuntimeError as e:
+                if is_revert(e):
+                    self._version = '1'
+            except OSError:
+                pass
         return self._version
 
     def check_signer_sets(self):
@@ -165,24 +183,96 @@ class Vigia:
                 self.feed.retire(kind, item)
             else:
                 bucket.append(item)
+
+        def classify_burn(b):
+            if self.released(b['burn_id']):
+                self.feed.retire('release', b['burn_id'])
+            elif not self.parked(b):  # asked again when it can be paid
+                self.open_burns.append(b['burn_id'])
         for dep in deposits:
             self.isolated('feed', dep, lambda dep=dep: classify(dep, self.minted, 'mint', self.open_deps))
         for b in burns:
-            self.isolated('feed', b['burn_id'],
-                          lambda b=b: classify(b['burn_id'], self.released, 'release', self.open_burns))
+            self.isolated('feed', b['burn_id'], lambda b=b: classify_burn(b))
         self.feed.sync(self.open_deps, self.open_burns)
 
-    def over_budget(self, d):
-        """At most `max_release_signs_per_hour` certificates per burn: each one costs a full L2 rebuild."""
-        path, now = d / '.signs', time.time()
+    def recent(self, path):
+        now = time.time()
         try:
-            recent = [t for t in json.loads(path.read_text()) if now - t < 3600]
+            return [t for t in json.loads(path.read_text()) if now - t < 3600]
         except (OSError, ValueError, TypeError):
-            recent = []
-        if len(recent) >= self.signs_per_hour:
+            return []
+
+    def charge(self, path):
+        path.write_text(json.dumps(self.recent(path) + [time.time()]))
+
+    def over_budget(self, d, charge=True):
+        """At most `max_release_signs_per_hour` certificates and own rounds per burn: each one costs a full L2 rebuild.
+        Refused joins have their own budget (`joins_spent`), so another signer's rounds cannot spend this one."""
+        if len(self.recent(d / '.signs')) >= self.signs_per_hour:
             return True
-        path.write_text(json.dumps(recent + [now]))
+        if charge:
+            self.charge(d / '.signs')
         return False
+
+    def joins_spent(self, d):
+        """Joins refused after a rebuild this hour. Spent: rounds with no other support are no longer tried."""
+        return len(self.recent(d / '.join-refusals')) >= self.signs_per_hour
+
+    # ── what can be decided before a rebuild ──────────────────────────────────
+    def chain_read(self, key, read):
+        if key not in self.chain_cache:
+            self.chain_cache[key] = read()
+        return self.chain_cache[key]
+
+    def eth_block(self, tag):
+        return self.chain_read(('block', tag), lambda: self.rpc(self.cfg['eth_rpc'], 'eth_getBlockByNumber', [tag, False]))
+
+    def round_fits(self, b, rec):
+        """Could this certificate be joined? The burn's fields from this signer's own log, and an anchor its Ethereum node
+        knows. Discovery-level checks, to save a rebuild; signatario.py and the Ethereum half still decide."""
+        try:
+            rel, ctx = rec['release'], rec['context']
+            if 'amount' in b and ((int(rel['nonce']), str(rel['recipient']).lower(), int(rel['amount']),
+                                   str(rel['route']).lower()) != (b['nonce'], b['recipient'], b['amount'], self.route)
+                                  or int(ctx['nativeFinalizedNumber']) != b['block']
+                                  or str(ctx['nativeFinalizedHash']).lower() != b['block_hash']):
+                return False
+            number = int(ctx['sourceAnchorNumber'])
+            head = int(self.eth_block('latest')['number'], 16)
+            if not 0 <= head - number <= self.anchor_max_age:
+                return False
+            block = self.eth_block(hex(number))
+            return block is not None and block['hash'].lower() == str(ctx['sourceAnchorHash']).lower()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            return False
+
+    def parked(self, b):
+        """A burn the vault could not pay now, whatever is signed: the token itself refuses the transfer (a blacklisted
+        recipient, a token pause). It costs no rebuild and no slot in the feed, and is checked again every pass."""
+        burn = b['burn_id']
+        if burn not in self.parked_now:
+            self.parked_now[burn] = self.unpayable(b)
+            if self.parked_now[burn] and burn not in self.parked_logged:
+                self.parked_logged.add(burn)
+                log(kind='release', burn=burn, nonce=b.get('nonce'), signed=False, parked=True,
+                    reason='the token refuses this transfer from the vault now', recipient=b.get('recipient'))
+            elif not self.parked_now[burn]:
+                self.parked_logged.discard(burn)
+        return self.parked_now[burn]
+
+    def unpayable(self, b):
+        if 'recipient' not in b:
+            return False
+        url = self.cfg['eth_rpc']
+        token = self.chain_read('token', lambda: '0x' + self.call(url, self.vault, 'token()')[-40:])
+        data = '0xa9059cbb' + b['recipient'][2:].rjust(64, '0') + f"{b['amount']:064x}"
+        try:
+            out = self.rpc(url, 'eth_call', [{'from': self.vault, 'to': token, 'data': data}, 'latest'])
+        except RuntimeError as e:
+            if is_revert(e):
+                return True
+            raise
+        return out not in ('0x', '') and int(out, 16) == 0
 
     def round_rank(self, rnd, burn_id):
         """(distinct real signers, name): what signers converge on. Forged files add nothing."""
@@ -269,7 +359,9 @@ class Vigia:
     def burns(self):
         """Burned logs of the token up to the L2 `finalized` head (discovery only)."""
         topic = self.cast_out('keccak', BURNED).lower()
-        return [{'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash']}
+        return [{'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash'],
+                 'amount': int(l['data'][2:66], 16), 'recipient': '0x' + l['data'][-40:].lower(),
+                 'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()}
                 for l in self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0))]
 
     @staticmethod
@@ -374,7 +466,11 @@ class Vigia:
             log(kind=kind, item=item, error=f'{type(e).__name__}: {e}')
 
     # ── sign ─────────────────────────────────────────────────────────────────
+    def new_pass(self):
+        self.parked_now, self.chain_cache = {}, {}
+
     def sign_round(self):
+        self.new_pass()
         deposits, burns = self.deposits(), self.burns()
         self.sync(deposits, burns)
         for dep in deposits:
@@ -400,28 +496,35 @@ class Vigia:
             out.unlink(missing_ok=True)
         log(kind='mint', deposit=dep, signed=rc == 0, reason=res.get('reason'))
 
-    def live_rounds(self, d, burn_id):
-        """Live rounds holding at least one real certificate, newest first: (validUntil, dir, a certificate)."""
-        out = []
+    def live_rounds(self, d, b):
+        """Live rounds this signer could join, newest first: (validUntil, dir, a certificate)."""
+        burn_id, out = b['burn_id'], []
         for valid_until, rnd in self.rounds(d, self.margin):
-            cert = next((p for p in sorted(rnd.glob('*.json')) if self.release_partial(p, burn_id, rnd)), None)
-            if cert is not None:
-                out.append((valid_until, rnd, cert))
+            for p in sorted(rnd.glob('*.json')):
+                rec = self.release_partial(p, burn_id, rnd)
+                if rec:
+                    if self.round_fits(b, rec):
+                        out.append((valid_until, rnd, p))
+                    break
         return out
 
     def sign_release(self, b, join_only=False):
         burn_id = b['burn_id']
         d = self.shared / 'release' / burn_id[2:]
-        if self.burn_done(d, burn_id):
+        if self.burn_done(d, burn_id) or self.parked(b):
             return
         with self.locked(d):
-            target = self.join_target(self.live_rounds(d, burn_id), burn_id)
+            live = self.live_rounds(d, b)
+            target = self.join_target(live, burn_id)
+            if target not in (None, 'open') and self.joins_spent(d) and self.round_rank(target[0], burn_id)[0] <= 1:
+                mine = any((rnd / f'{self.me}.json').exists() for _, rnd, _ in live)
+                target = None if mine else 'open'
             if target is None:
                 return
             if target != 'open':
                 rnd, proposal = target
                 mine = rnd / f'{self.me}.json'
-                if self.over_budget(d):
+                if self.over_budget(d, charge=False):
                     log(kind='release', burn=burn_id, nonce=b['nonce'], signed=False, reason='hourly signing budget')
                     return
                 rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--context', proposal,
@@ -429,6 +532,9 @@ class Vigia:
                 if rc:
                     mine.unlink(missing_ok=True)
                     (rnd / f'.refused-{self.me}').write_text('')
+                    self.charge(d / '.join-refusals')
+                else:
+                    self.charge(d / '.signs')
                 log(kind='release', burn=burn_id, nonce=b['nonce'], round=rnd.name, joined=True,
                     signed=rc == 0, reason=res.get('reason'))
                 return
@@ -452,6 +558,7 @@ class Vigia:
 
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
+        self.new_pass()
         if self.mainnet and not self.cfg.get('l2_tx_rpc'):
             raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
         if self.feed:

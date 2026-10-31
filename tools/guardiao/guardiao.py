@@ -35,7 +35,7 @@ guardian sends `pause()` with its cast keystore (password from a file, never a k
 token is already paused or in its cooldown (no reverting transactions). Every finding is one JSON line
 on stdout. The state file makes rounds idempotent: a finding is alerted once, a pause sent once.
 `check` runs one round; exit 0 = no open violation, 2 = hard violation open, 3 = soft only, 1 = error,
-4 = a due pause failed or never became visible.
+4 = a critical problem: a due pause failed or never became visible, the L2 view stalled, or a verifier proposal is live.
 
 Reads and sends are separate on purpose. `l2_rpc` (reads) may be a read-only replica, which refuses transactions and
 shows settled blocks only. `l2_tx_rpc` (required on chain 700770) takes the transaction, its nonce and its receipt. It is
@@ -44,6 +44,19 @@ retried (`pause_attempts`, default 3, `pause_retry_s` apart, then every round), 
 `alert_command` (argv with {id} and {detail}) and marks `health_file` (default <state>.health.json) unhealthy until it lands.
 A pause not visible on `l2_rpc` within `pause_confirm_s` (default 3600) is alerted too, and sent again.
 On chain 700770 the grace periods default to 2700 s; see README "Reads on a replica".
+
+Clock. Grace runs on max(L2 head time, wall clock), so an L2 view that stops advancing cannot freeze it: a violation still
+falls due, which means a stale view can pause (README "A frozen L2 view"). A head that has not moved for `l2_stall_alert_s`
+(default 2700 on chain 700770, otherwise off) raises a critical `l2-view-stalled` alert. `l2_frozen_extra_grace_s` (default 0)
+lengthens grace only while the head is frozen, for an owner who weighs a false pause above a late one.
+
+A committee unpause settles what was known. A finding first seen no later than the last committee unpause no longer starts a
+pause on that contract; it stays open and alerted, and a new finding still pauses. `reserves` keeps one id, so it pauses
+again if the shortfall grows past what it was when acknowledged. Without a committee unpause an open finding pauses again
+after every cooldown, as before.
+
+Light-client switch (stablecoin): a live verifier proposal on the vault raises a critical `verifier-proposed:<address>` alert
+for as long as it is live. It never pauses: guardians have no power over the switch.
 Development tool; UNAUDITED.
 """
 import hashlib
@@ -124,6 +137,9 @@ class Guardian:
         self.pause_confirm = int(c.get('pause_confirm_s', 3600))
         self.health_path = Path(c.get('health_file', f'{c["state"]}.health.json'))
         self.pause_margin = int(c.get('pause_margin_s', 3600))
+        self.stall_alert = int(c.get('l2_stall_alert_s', MAINNET_GRACE_S if mainnet else 0))
+        self.frozen_extra_grace = int(c.get('l2_frozen_extra_grace_s', 0))
+        self.frozen = False
         self.release_sla = int(c.get('release_sla_s', 6 * 3600))
         self.release_before_final = c.get('release_before_final', 'soft')
         if self.release_before_final not in ('soft', 'hard'):
@@ -513,9 +529,43 @@ class Guardian:
                                                        self.eth_me())[0]):
                 raise Unverifiable(f'{self.eth_me()} is not a guardian of the vault {self.cfg["vault"]}')
 
+    def track_head(self, head_time, wall):
+        """Note whether the L2 view still advances. Returns nothing: the clock is max(head, wall) either way."""
+        last = self.state.get('l2_head')
+        if not last or head_time > last['time']:
+            self.state['l2_head'] = {'time': head_time, 'seen': wall}
+            self.frozen = False
+            self.clear_problem('l2-view-stalled')
+            return
+        still = wall - last['seen']
+        self.frozen = still > SETTLEMENT_DELAY_S
+        if self.stall_alert and still > self.stall_alert and 'l2-view-stalled' not in self.state['problems']:
+            self.problem('l2-view-stalled', f'the L2 head on l2_rpc has not advanced for {still} s; grace now runs on the wall '
+                                            'clock, and a real release beyond this view will pause the vault')
+
+    def watch_switch(self):
+        """A live verifier proposal is critical: holders and guardians have only its delay to react."""
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        try:
+            proposed = addr(self.call(eth, vault, 'proposedVerifier()')[0])
+            live = bool(uint(self.call(eth, vault, 'verifierProposalLive()')[0]))
+            activates = uint(self.call(eth, vault, 'verifierActivatesAt()')[0]) if live else None
+        except (Unverifiable, ValueError, IndexError) as e:
+            self.log(kind='alert', severity='soft', id='switch-unreadable', reason=str(e)[-200:])
+            return
+        pid = f'verifier-proposed:{proposed}'
+        for old in [k for k in self.state['problems'] if k.startswith('verifier-proposed:') and (k != pid or not live)]:
+            self.clear_problem(old)
+        if live and pid not in self.state['problems']:
+            self.problem(pid, f'the vault has a live light-client verifier proposal {proposed}, activating from {activates}: '
+                              'one way, and guardians cannot stop it')
+
     def round(self):
         self.setup()
-        b, now, _ = self.block(self.l2, 'latest')
+        b, head_time, _ = self.block(self.l2, 'latest')
+        wall = int(time.time())
+        now = max(head_time, wall)
+        self.track_head(head_time, wall)
         fin = self.finalized_l2()
         findings = []
         # The L2 at the pinned height b first, then the source (backing before release status). Reads
@@ -528,6 +578,8 @@ class Guardian:
         else:
             backing, released, rel_findings = self.eth_source(burns, fin)
             provenance = self.eth_provenance
+            if self.vault_pause or self.cfg.get('vault'):
+                self.watch_switch()
         findings += rel_findings
 
         in_flight = sum(x['amount'] for x in burns if x['burn_id'] not in released)
@@ -563,7 +615,7 @@ class Guardian:
         for x in burns:
             if x['burn_id'] in released:
                 continue
-            age = max(now, int(time.time())) - self.burn_time(x)
+            age = now - self.burn_time(x)
             if age > self.release_sla:
                 final = fin is not None and x['block'] <= fin
                 fid = 'liveness' if final else 'liveness-not-final'
@@ -584,7 +636,7 @@ class Guardian:
                 st = self.state['open'][fid] = {'first_seen': now, 'severity': severity}
                 self.log(kind='alert', severity=severity, id=fid, deadline=now + grace if severity == 'hard' else None,
                          **detail)
-            if severity == 'hard' and now >= st['first_seen'] + grace:
+            if severity == 'hard' and now >= st['first_seen'] + grace + (self.frozen_extra_grace if self.frozen else 0):
                 due.append(fid)
                 if not st.get('due'):
                     st['due'] = now
@@ -596,13 +648,44 @@ class Guardian:
             # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
             vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:',
                                                                              'release-before-final:'))]
-            if self.vault_pause and vault_due:
+            shortfall = next((d.get('shortfall', 0) for _, f, _, d in findings if f == 'reserves'), 0)
+            vault_due = self.not_settled(vault_due, self.vault_unpaused_at, shortfall, 'vault') if self.vault_pause else []
+            if vault_due:
                 self.pause_vault(vault_due)
-            self.pause(now, due)
+            due = self.not_settled(due, self.token_unpaused_at, shortfall, 'token')
+            if due:
+                self.pause(now, due)
         if self.state['problems']:
             return 4
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
         return 2 if hard else 3 if self.state['open'] else 0
+
+    def vault_unpaused_at(self):
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        blocked = uint(self.call(eth, vault, 'guardianBlockedUntil()')[0])
+        return blocked - uint(self.call(eth, vault, 'pauseCooldown()')[0]) if blocked else 0
+
+    def token_unpaused_at(self):
+        head = self.block(self.l2, 'latest')[0]
+        found = self.logs(self.l2, self.token, self.topic('Unpaused(uint64)'), int(self.cfg.get('token_from_block', 0)), head)
+        return self.block(self.l2, int(found[-1]['blockNumber'], 16))[1] if found else 0
+
+    def not_settled(self, due, read_time, shortfall, side):
+        """Drop what a committee unpause on this contract already settled. A failed read settles nothing."""
+        try:
+            at = read_time()
+        except (Unverifiable, ValueError, IndexError, KeyError):
+            return due
+        left = []
+        for fid in due:
+            st = self.state['open'][fid]
+            acks = st.setdefault('settled', {})
+            if not at or st['first_seen'] > at or (fid == 'reserves' and side in acks and shortfall > acks[side]):
+                left.append(fid)
+            elif side not in acks:
+                acks[side] = shortfall if fid == 'reserves' else True
+                self.log(kind='settled-by-unpause', id=fid, contract=side, unpaused_at=at)
+        return left
 
     def pause_view(self, url):
         return (uint(self.call(url, self.token, 'pausedUntil()')[0]), uint(self.call(url, self.token, 'pauseCount()')[0]),

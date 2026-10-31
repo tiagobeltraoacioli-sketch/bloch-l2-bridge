@@ -612,11 +612,12 @@ class Feed(Base):
         urls = {self.rel_path(0): {'certs': [cert(0, anchor=i) for i in range(4)]}}
         f = self.feed([self.host(urls)], 'rounds')
         d = f.shared / 'release' / BURN[2:]
-        for i in range(bf.MAX_ROUNDS_PER_BURN):
+        for i in range(bf.MAX_ROUNDS_PER_SIGNER):  # this signer's slots are full
             (d / f'r-{NOW + 900}-{i}-x').mkdir(parents=True)
+            (d / f'r-{NOW + 900}-{i}-x' / f'{ADDR[0][2:]}.json').write_text('{}')
         f.sync([], [BURN])
-        self.assertEqual(self.certs(f), [])
-        self.assertEqual(sum(1 for _ in d.glob('r-*')), bf.MAX_ROUNDS_PER_BURN)
+        self.assertEqual(len(self.certs(f)), bf.MAX_ROUNDS_PER_SIGNER, 'nothing added')
+        self.assertEqual(sum(1 for _ in d.glob('r-*')), bf.MAX_ROUNDS_PER_SIGNER)
 
     def test_export_shape_is_bounded_and_retire_removes(self):
         f = self.feed([])
