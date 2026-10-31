@@ -435,7 +435,9 @@ def own_l2(ctx, work):
         # the L2 timestamp rule switch (as atestador.py): devnet4 /etc/bloch-l2-devnet4/public/timestamp-rule.txt
         rule_file = Path(c.get('timestamp_rule_file', Path(c['genesis']).parent / 'timestamp-rule.txt'))
         rule = ['--timestamp-rule', rule_file.read_text().strip()] if rule_file.exists() else []
-        net_args = []
+        # A private chain with mainnet rules (`--rules mainnet --domain .. --genesis-time ..`) has no pins to take them
+        # from. With `l2_pins` the pinned arguments above are the only ones used.
+        net_args = [str(a) for a in c.get('network_args', [])]
     target = work / 'l2'
     for _ in range(3):  # the follower may be rewriting its index
         done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),

@@ -37,6 +37,11 @@ SLOTS_PER_EPOCH = 32  # bloch-pos-committee params (mainnet: 30 s slots, 960 s e
 EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
 
+# PROVISIONAL: `binaries.settled_rpc` below is the v2 build. The owner decided on one v2.1 rebuild of settled-rpc (the
+# spool-dos and receipt/latest fixes); replace this hash with the released v2.1 hash and set the flag to False.
+# Nothing else in this table depends on that build. Do not deploy signers while this is True.
+SETTLED_RPC_PIN_PROVISIONAL = True
+
 MAINNET_V2 = {
     'name': 'bloch-l2-mainnet-v2 (L2 1aad0a20 / native 78d4921c)',
     'l2_chain_id': 700770,
@@ -51,6 +56,7 @@ MAINNET_V2 = {
     'binaries': {
         'follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
         'produce': '7c1cc62bf5fb5aa142dced01156e3a51ddb6239096034400558ef46586025a3c',
+        # PROVISIONAL, see SETTLED_RPC_PIN_PROVISIONAL.
         'settled_rpc': '4fc9fa1ecc2b75dec8c918e77cefb81fe7fc216c5baead133e17c15fc4c54534',
     },
 }

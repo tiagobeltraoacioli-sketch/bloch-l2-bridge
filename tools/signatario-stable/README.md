@@ -66,6 +66,9 @@ window, and keeps a database that refuses to sign two different releases for one
 `ETH_HALF=real python3 test_signatario.py <project>` (32 checks) and `ETH_HALF=real python3 test_vigia.py
 <project>` run the suites with it.
 
+**Provisional pin:** `l2_finality.MAINNET_V2` still holds the v2 settled-RPC hash, marked by `SETTLED_RPC_PIN_PROVISIONAL`,
+until the v2.1 rebuild is released.
+
 ## Config
 
 One JSON per signer, written once at deploy: `l2_rpc`, `l2_chain_id`, `token`, `token_code_keccak`,
@@ -74,6 +77,7 @@ One JSON per signer, written once at deploy: `l2_rpc`, `l2_chain_id`, `token`, `
 when one key serves both chains), `max_valid_seconds` (default 3600), `db`, `eth_half_deposit` /
 `eth_half_release`, and for release `follower`, `genesis`, `produce`, `settled_rpc`, `work_dir`,
 `timestamp_rule_file` (default `timestamp-rule.txt` next to the genesis, as `atestador.py`).
+`network_args` (argv list for a private chain with mainnet rules; ignored with `l2_pins`, which pins its own).
 `l2_source: "rpc"` trusts `l2_rpc` for finality and exists only for tests.
 
 Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 11155111 with the vault (contracts/usdt) and a
