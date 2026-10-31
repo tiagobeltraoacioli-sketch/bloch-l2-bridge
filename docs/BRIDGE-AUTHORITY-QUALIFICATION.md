@@ -1,5 +1,9 @@
 # External bridge authority qualification
 
+> **Legacy line, not the mainnet path.** This describes the earlier three-of-five custody and authority line for a Bloch L1
+> bUSDC asset. The bridge on the path to mainnet is the 5-of-7 committee vault: see
+> [the activation handoff](MAINNET-USDC-ACTIVATION-HANDOFF.md) and [BUSDC-MAINNET-V2](BUSDC-MAINNET-V2.md).
+
 `scripts/check-bridge-authority-qualification.py` is a fail-closed observation
 checker
 after the public authority-ceremony preflight. It accepts four separate

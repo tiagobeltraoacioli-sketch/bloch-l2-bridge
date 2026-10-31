@@ -10,7 +10,7 @@ named operator), never by an agent.
 | Area | Change |
 | --- | --- |
 | Bridge review | Contracts changed (section 9): the vault refuses a deposit above `windowLimit` or without an address-shaped recipient, and bUSDC refuses a burn above `bucketCapacity`, because each could never complete and has no refund. The release limit is a token bucket, guardian renewals are bounded and verifier proposals expire. Runtime code hashes differ from 8678454. |
-| L2 build | The signer and the watchers target the L2 v2 build: bloch-l2-evm `1aad0a20` against native `78d4921c` (HF1+HF2+HF3 armed; correct for the L1 fleet on `fa980367`). Binaries: follower `c18752fd…f29a`, produce-dev `7c1cc62b…3a3c`, settled-rpc `4fc9fa1e…4534`. Chain 700770, native network `f47d3e49…1966`, L2 genesis `632e45ae…f468`. |
+| L2 build | The signer and the watchers target the L2 v2 build: bloch-l2-evm `1aad0a20` against native `78d4921c` (HF1+HF2+HF3 armed; correct for the L1 fleet on `fa980367`). Binaries of that v2 build: follower `c18752fd…f29a`, produce-dev `7c1cc62b…3a3c`, settled-rpc `4fc9fa1e…4534`; the signer now pins the provisional v2.1 build, see section 9. Chain 700770, native network `f47d3e49…1966`, L2 genesis `632e45ae…f468`. |
 | Signer (release) | `l2_pins: "mainnet-v2"` (`tools/signatario-stable/l2_finality.py`): binary SHA-256 pins, v2 follower status checks, mainnet network rules and timestamp rule for the rebuild and the private settled RPC, rebuild must equal every finalized settlement, HF1 claim-finality rule (section 2), optional L1 RPC cross-check. |
 | `guardiao.py` | Keeps watching when the v2 RPC serves `finalized` = null; new `release-before-final` finding; `l2_genesis_hash` pin. |
 | `sombra.py` | `lc_max_epoch`: releases the deployed light-client programs cannot prove (programs built before an L1 fork) are soft alerts, never pauses. |
@@ -293,6 +293,7 @@ become final within the SLA (L1 finality or L2 settlement stalled).
 Tooling: `vault_pontes.py validate` requires the cap to equal `supplyCap`, `windowLimit` to equal
 `bucketCapacity`, `l2MinBurn` to equal `minBurn` and `l2MinBurn <= minDeposit <= windowLimit`, and the whole cap to fit through the window within `switchDelay`.
 
-Pin to update: the owner's v2.1 rebuild of `bloch-l2-settled-rpc` replaces `4fc9fa1e`. Until
-`l2_finality.MAINNET_V2['binaries']['settled_rpc']` (and the text of this document) carries the new hash, every
-signer on v2.1 refuses with "the settled_rpc binary is not the pinned v2 build".
+Pins: `l2_finality.MAINNET_V2` holds the **provisional** v2.1 release (build commit `2782f5a`): settled-rpc
+`e24ea5f1…7f0e`, produce-dev `fb0d5313…0be9`, follower unchanged. `SETTLED_RPC_PIN_PROVISIONAL` stays `True`, and signers
+must not be deployed, until the owner signs that release. A signer on any other build refuses with
+"the <role> binary is not the pinned build".

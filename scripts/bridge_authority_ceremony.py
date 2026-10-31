@@ -1,4 +1,4 @@
-"""Strict public-input preflight for bridge authority ceremonies.
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Strict public-input preflight for bridge authority ceremonies.
 
 This module binds eight public authority appointments and three ceremony
 records to one already-qualified custody manifest and authority policy.  It

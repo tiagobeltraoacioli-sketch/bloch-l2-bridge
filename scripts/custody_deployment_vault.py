@@ -1,4 +1,4 @@
-"""Fixed-build vault configuration and initial storage proofs, never activation."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Fixed-build vault configuration and initial storage proofs, never activation."""
 import hashlib
 import importlib.util
 import json

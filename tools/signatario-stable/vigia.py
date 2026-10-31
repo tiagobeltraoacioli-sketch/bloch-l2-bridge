@@ -12,7 +12,15 @@ relayed transaction with no receipt after this long is sent again), `log_chunk` 
 10000), `max_new_rounds` (release rounds opened per pass, default 4), `anchor_max_age` (blocks, default 160, as the Ethereum half),
 `l2_tx_rpc` (L2 sends: required to relay on
 chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction, its nonce and its receipt use it, and every
-read that decides anything stays on `l2_rpc`).
+read that decides anything stays on `l2_rpc`), `relayer_state` (the relayer's nonce record, default
+SHARED/relayer-nonces.json), `max_inflight` (unconfirmed transactions per gas key and side, default 16, the settled RPC's
+limit per sender).
+
+Relay nonces. An L2 block lands only every 8-14 min, so `latest` stands still across many passes, and several relayed
+transactions share it. One relayer per gas key keeps its own record of the next nonce, and sends at the highest of `latest`,
+`pending` (where the endpoint has it) and that record. A nonce the chain has not reached for `resend_after_s` is a gap, so the
+record restarts from `latest`. A transaction that replaces an earlier one at its nonce pays 25% more, because a same-nonce
+replacement needs a 10% bump on the settled RPC and on Ethereum.
 
 `sign` (one per signer, on the signer's machine) discovers work and calls signatario.py, which keeps
 doing every check before it signs (nothing here weakens them):
@@ -115,6 +123,8 @@ class Vigia:
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
         self.anchor_max_age = int(self.cfg.get('anchor_max_age', 160))
         self.parked_now, self.parked_logged, self.chain_cache = {}, set(), {}
+        self.max_inflight = int(self.cfg.get('max_inflight', 16))
+        self.nonce_path = Path(self.cfg.get('relayer_state', self.shared / 'relayer-nonces.json'))
         self.l2_tx = self.cfg.get('l2_tx_rpc') or self.cfg.get('l2_rpc')
         self.mainnet = int(self.cfg.get('l2_chain_id', 0)) == 700770 or bool(self.cfg.get('l2_pins'))
         self.opened = 0
@@ -644,19 +654,73 @@ class Vigia:
             return True
         return False
 
+    def load_nonces(self):
+        """The relayer's own record. Unreadable means empty: the chain's count still bounds the nonce from below."""
+        try:
+            doc = json.loads(self.nonce_path.read_text())
+            return doc if isinstance(doc, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_nonces(self, doc):
+        self.nonce_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.nonce_path.with_name(self.nonce_path.name + '.tmp')
+        tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.replace(self.nonce_path)
+
+    def tx_count(self, url, frm, level):
+        return int(self.rpc(url, 'eth_getTransactionCount', [frm, level]), 16)
+
+    def next_nonce(self, url, frm, rec):
+        """(nonce, updated record) for one key on one side; raises when `max_inflight` transactions are unconfirmed."""
+        now = time.time()
+        latest = self.tx_count(url, frm, 'latest')
+        try:
+            pending = self.tx_count(url, frm, 'pending')
+        except RuntimeError:  # an endpoint with no `pending` level
+            pending = latest
+        try:
+            local, moved = int(rec.get('next', 0)), float(rec.get('moved', now))
+            base = int(rec.get('latest', latest))
+            prices = {int(n): int(p) for n, p in dict(rec.get('prices', {})).items()}
+        except (TypeError, ValueError, AttributeError):
+            local, moved, base, prices = 0, now, latest, {}
+        if latest != base:
+            moved = now
+        nonce = max(latest, pending, local)
+        if nonce > latest + self.max_inflight:  # no relayer of ours wrote this: it would be refused forever
+            log(kind='relay-nonce', bad_record=local, latest=latest, pending=pending)
+            nonce, prices = latest, {}
+        elif nonce > latest and now - moved > self.resend_after:
+            log(kind='relay-nonce', gap=latest, had=nonce, stalled_s=int(now - moved))
+            nonce, moved = latest, now
+        elif nonce >= latest + self.max_inflight:
+            raise RuntimeError(f'{self.max_inflight} unconfirmed transactions from {frm}; waiting for a block')
+        prices = {n: p for n, p in prices.items() if n >= latest}
+        return nonce, {'next': nonce, 'latest': latest, 'moved': moved, 'prices': prices}
+
     def send(self, side, to, call):
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         key = Path(self.cfg[f'{side}_relayer_key']).read_text().strip()
         frm = self.cast_out('wallet', 'address', '--private-key', key)
-        # `latest`: the settled L2 RPC has no "pending" level; one relayer per gas key.
-        nonce = int(self.rpc(url, 'eth_getTransactionCount', [frm, 'latest']), 16)
+        records = self.load_nonces()
+        slot = f'{side}:{frm.lower()}'
+        nonce, rec = self.next_nonce(url, frm, records.get(slot) or {})
         price = int(self.rpc(url, 'eth_gasPrice', []), 16) * 2
+        if nonce in rec['prices']:  # replacing a transaction that never landed
+            price = max(price, rec['prices'][nonce] * 125 // 100)
         data = self.cast_out('calldata', *call)
         gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
         raw = self.cast_out('mktx', '--private-key', key, '--chain', str(chain), '--nonce', str(nonce),
                             '--gas-limit', str(gas), '--gas-price', str(price), '--legacy', to, data)
-        return self.rpc(url, 'eth_sendRawTransaction', [raw])
+        tx = self.rpc(url, 'eth_sendRawTransaction', [raw])
+        # Only an accepted transaction moves the record: a refused one leaves its nonce free for the next item.
+        rec['prices'][nonce] = price
+        records[slot] = {**rec, 'next': nonce + 1,
+                         'prices': {str(n): p for n, p in rec['prices'].items()}}
+        self.save_nonces(records)
+        return tx
 
 
 def main():

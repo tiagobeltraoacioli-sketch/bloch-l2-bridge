@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the exact compiled vault and its initial storage proofs offline."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Verify the exact compiled vault and its initial storage proofs offline."""
 import argparse
 import json
 import sys

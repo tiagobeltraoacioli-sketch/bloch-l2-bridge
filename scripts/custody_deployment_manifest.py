@@ -1,4 +1,4 @@
-"""Strict offline qualification for an inert Ethereum USDC/Bloch bUSDC plan.
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Strict offline qualification for an inert Ethereum USDC/Bloch bUSDC plan.
 
 This module validates public configuration only. It has no network, key,
 signing, deployment, funding, broadcast, or activation capability.

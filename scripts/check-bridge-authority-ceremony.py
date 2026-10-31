@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight public bridge authority ceremony inputs without authorizing them."""
+"""LEGACY three-of-five line, not the 5-of-7 mainnet vault (docs/MAINNET-USDC-ACTIVATION-HANDOFF.md). Preflight public bridge authority ceremony inputs without authorizing them."""
 import argparse
 import json
 import sys

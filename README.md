@@ -1,6 +1,13 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-bridge
 
+**The bridge on the path to mainnet is the bUSDC 5-of-7 committee vault:** see
+[the activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md) and
+[BUSDC-MAINNET-V2](docs/BUSDC-MAINNET-V2.md). The custody preflight, deployment evidence, authority ceremony,
+qualification, trust intake and activation readiness paragraphs below describe the earlier three-of-five line, which
+is legacy and does not apply to that vault. Its tools remain for reference and still enforce three-of-five on purpose.
+The 3-of-5 Bloch Inc Safe (it only funds deployer gas) and the L2's 3-of-5 attestors are separate and current.
+
 **Reference components, unaudited, no live bridge deployment.** The historical
 v1 BLCH vault design is custodial. The new
 [Color-Changing Chameleon v1](docs/CHAMELEON-V1.md) implements a separate
@@ -18,7 +25,7 @@ catalog with distinct token, native asset and custody-route identities. It
 supports USDC source evidence on Ethereum while preserving the legacy USDT
 routes and refusing cross-asset observation reassignment. It remains read-only.
 
-The [custody deployment preflight](docs/CUSTODY-DEPLOYMENT-PREFLIGHT.md) validates
+The legacy [custody deployment preflight](docs/CUSTODY-DEPLOYMENT-PREFLIGHT.md) validates
 an inert public plan for Ethereum USDC and Bloch mainnet bUSDC. It requires
 three-of-five custody, separate issuer and sponsor authorities, explicit caps,
 runtime pins and paused/disabled controls. It never authorizes deployment,
@@ -34,7 +41,7 @@ deployment block and all captured checkpoints with bounded, hash-checked Ethereu
 RLP headers. Collection and offline verification remain separate from consensus
 finality and activation approval.
 
-The [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
+The legacy [authority ceremony preflight](docs/BRIDGE-AUTHORITY-CEREMONY.md) and
 [external qualification checker](docs/BRIDGE-AUTHORITY-QUALIFICATION.md) bind
 the selected custody and native authorities to public evidence and inspect a
 three-of-five reviewer quorum. Caller-supplied pins are not treated as

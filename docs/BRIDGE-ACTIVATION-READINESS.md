@@ -1,5 +1,9 @@
 # Bridge activation readiness composition
 
+> **Legacy line, not the mainnet path.** This describes the earlier three-of-five custody and authority line for a Bloch L1
+> bUSDC asset. The bridge on the path to mainnet is the 5-of-7 committee vault: see
+> [the activation handoff](MAINNET-USDC-ACTIVATION-HANDOFF.md) and [BUSDC-MAINNET-V2](BUSDC-MAINNET-V2.md).
+
 `scripts/check-bridge-activation-readiness.py` is the final, read-only
 composition boundary for the Ethereum USDC/Bloch bUSDC bridge. It does not
 deploy, sign, broadcast, unpause, mint or release anything. A successful result
