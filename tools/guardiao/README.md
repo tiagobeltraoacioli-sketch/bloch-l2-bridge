@@ -209,6 +209,14 @@ with its old head and reports no staleness (`agents/57-bridge-review2.md`), so t
 
 The host clock now matters: a clock far ahead brings grace forward. Keep NTP on.
 
+### Lost or stale follower status
+
+From settled-rpc `18be911a…`, a missing or invalid follower status makes `safe` and `finalized` answer -32001. The guardian reads that
+as unavailable: `critical` `l2-finality-closed`, exit 4, finality checks skipped, and every check at `latest` still runs, so it can still
+pause. A stopped follower keeps old levels open with `bloch_finality.status.age_s` growing. Above `l2_stall_alert_s` that raises `critical`
+`l2-status-stale`, and above 2400 s it counts as a frozen view for `l2_frozen_extra_grace_s`. Pauses set `--gas-limit` (`eth_pause_gas`,
+`l2_pause_gas`, default 200,000), because `cast send` otherwise uses the bare estimate.
+
 ### After a committee unpause
 
 A finding first seen no later than the last committee unpause on that contract (`guardianBlockedUntil - pauseCooldown` on the vault,
