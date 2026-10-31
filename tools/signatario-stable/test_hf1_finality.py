@@ -256,7 +256,7 @@ def integration(project):
         limits = f'({1_000_000 * U},{100_000 * U},{100_000 * U // 86400},{10_000 * U},3600,{U})'
         stable = create(project, l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
                         'Bloch Bridged USDC', 'bUSDC', str(ETH_CHAIN), vault, route, addrs, '2', limits,
-                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)')
+                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)', '(2,1209600)')
         code_keccak = out(CAST, 'keccak', out(CAST, 'code', stable, '--rpc-url', l2))
         # bUSDC for alice: a direct 2-of-3 mint (the mint path is covered by test_signatario/test_vigia)
         dep_id = '0x' + 'd1' * 32

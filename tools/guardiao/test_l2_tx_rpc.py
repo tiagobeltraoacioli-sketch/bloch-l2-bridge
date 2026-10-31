@@ -149,7 +149,7 @@ def main():
         route = view(eth, vault, 'routeId()(bytes32)').lower()
         limits = f'({1_000_000 * U},{100_000 * U},{100_000 * U // 86400},{50 * U},43200,{U})'
         stable = create(l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch Bridged USDC', 'bUSDC',
-                        str(ETH_CHAIN), vault, route, addrs, '2', limits, f'([{guardian}],7200,7200)')
+                        str(ETH_CHAIN), vault, route, addrs, '2', limits, f'([{guardian}],7200,7200)', '(2,1209600)')
         sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)  # the vault is below the Ethereum `finalized` head
         fake = '0x' + 'fa' * 32
         who = '0x' + 'ab' * 20

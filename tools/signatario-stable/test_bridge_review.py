@@ -93,7 +93,7 @@ class World:
         limits = f'({1_000_000 * U},{cap},{cap // 86400},{cap - 1},43200,{U})'
         self.token = self.create(l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
                                  'Bloch Bridged USDC', 'bUSDC', str(ETH_CHAIN), self.vault, self.route, addrs, '2', limits,
-                                 f'([{self.guard}],259200,259200)')
+                                 f'([{self.guard}],259200,259200)', '(2,1209600)')
         code = out(CAST, 'keccak', out(CAST, 'code', self.token, '--rpc-url', l2))
         vault_code = out(CAST, 'keccak', out(CAST, 'code', self.vault, '--rpc-url', eth))
         (self.work / 'pw').write_text('test-password\n')

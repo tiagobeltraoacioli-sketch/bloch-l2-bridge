@@ -691,12 +691,27 @@ class Guardian:
                     'burn not final within the release SLA: L1 finality or L2 settlement is stalled'
                 findings.append(('soft', f'{fid}:{x["burn_id"]}', 0, {'reason': why, 'burn': x, 'age_s': age,
                                                                       'sla_s': self.release_sla, 'l2_finalized': fin}))
+        if self.kind == 'stable':
+            findings += self.mint_switch_findings()
         self.state.pop('l2_down', None)
         self.clear_problem('l2-read-failed')
         self.state['l2_view'] = {'burns': burns, 'finalized': fin, 'route': getattr(self, 'route', None), 'head_time': head_time}
         self.log(kind='round', l2_block=b, l2_finalized=fin, total_supply=supply, pending_supply=pending,
                  in_flight=in_flight, backing=backing, mints=len(mints), burns=len(burns), released=len(released))
         return now, findings
+
+    def mint_switch_findings(self):
+        """A proposed mint verifier retires the committee after its delay: people must hear of it. Never a pause: the
+        token gives guardians no power over the switch. A token without the switch has nothing to report."""
+        try:
+            proposed = addr(self.call(self.l2, self.token, 'proposedVerifier()')[0])
+            active_at = uint(self.call(self.l2, self.token, 'verifierActivatesAt()')[0])
+        except (Unverifiable, IndexError):
+            return []
+        if not int(proposed, 16):
+            return []
+        return [('soft', f'mint-verifier-proposed:{proposed}', 0, {
+            'reason': 'a one-way mint switch is pending', 'verifier': proposed, 'activates_at': active_at})]
 
     def act(self, now, findings):
         seen, due = set(), []

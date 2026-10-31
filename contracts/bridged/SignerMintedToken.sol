@@ -207,8 +207,9 @@ abstract contract SignerMintedToken {
 
     /// @notice k signers end the current pause early (they could stop mints anyway by not signing).
     function unpause(bytes calldata signatures) external {
+        _requireCommittee();
         if (!paused()) revert NotPaused();
-        _checkSignatures(unpauseDigest(), signatures);
+        _checkSignatures(unpauseDigest(), signatures, threshold);
         pausedUntil = block.timestamp;
         emit Unpaused(pauseCount);
     }
@@ -219,12 +220,25 @@ abstract contract SignerMintedToken {
         internal
         returns (bool executed)
     {
+        _requireCommittee();
+        _checkMintable(replayKey, amount, recipient);
+        _checkSignatures(_typedDigest(structHash), signatures, threshold);
+        return _admitMint(replayKey, amount, recipient);
+    }
+
+    /// @dev Tokens with a way to retire the committee revert here once it is retired.
+    function _requireCommittee() internal view virtual {}
+
+    /// @dev What every mint path checks before its authorization.
+    function _checkMintable(bytes32 replayKey, uint64 amount, address recipient) internal view {
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroRecipient();
         if (paused()) revert IsPaused();
         if (minted[replayKey]) revert AlreadyMinted();
-        _checkSignatures(_typedDigest(structHash), signatures);
+    }
 
+    /// @dev Bucket, supply cap, replay key and large-mint queue: the same limits on every mint path.
+    function _admitMint(bytes32 replayKey, uint64 amount, address recipient) internal returns (bool executed) {
         uint256 available = availableToMint();
         if (amount > available) revert RateLimited();
         if (totalSupply + pendingSupply + amount > supplyCap) revert SupplyCapExceeded();
@@ -316,8 +330,7 @@ abstract contract SignerMintedToken {
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
     }
 
-    function _checkSignatures(bytes32 digest, bytes calldata signatures) private view {
-        uint256 k = threshold;
+    function _checkSignatures(bytes32 digest, bytes calldata signatures, uint256 k) internal view {
         if (signatures.length != k * 65) revert BadSignatureCount();
         address previous;
         for (uint256 i; i < k; ++i) {

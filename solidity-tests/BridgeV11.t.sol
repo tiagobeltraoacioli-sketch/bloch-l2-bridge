@@ -337,7 +337,7 @@ contract BridgeV11Test {
         SignerMintedToken.Limits memory l = SignerMintedToken.Limits({supplyCap: 100_000e6, bucketCapacity: 10_000e6,
             refillPerSecond: uint256(10_000e6) / 1 days, largeMintThreshold: 1_000e6, largeMintDelay: DELAY, minBurn: 1e6});
         BridgedStablecoinV2 s = new BridgedStablecoinV2("Bloch Bridged USDC", "bUSDC", 11155111, address(vault),
-            vault.routeId(), _signers(), 2, l, _guard());
+            vault.routeId(), _signers(), 2, l, _guard(), BridgedStablecoinV2.MintSwitch(2, 14 days));
         bytes32 md = s.mintDigest(dep, 0, 20e6, alice);
         s.mint(dep, 0, 20e6, alice, bytes.concat(_sig(keys[0], md), _sig(keys[2], md)));
         _eq(s.balanceOf(alice), 20e6, "minted");

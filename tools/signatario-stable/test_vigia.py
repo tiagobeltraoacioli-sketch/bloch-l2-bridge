@@ -122,7 +122,7 @@ def main():
         limits = f'({1_000_000 * U},{cap},{cap // 86400},{LARGE},{DELAY},{U})'
         stable = create(project, l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
                         'Bloch Bridged USDC', 'bUSDC', str(ETH_CHAIN), vault, route, addrs, '2', limits,
-                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)')
+                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)', '(2,1209600)')
         code_keccak = out(CAST, 'keccak', out(CAST, 'code', stable, '--rpc-url', l2))
 
         (work / 'pw').write_text('test-password\n')

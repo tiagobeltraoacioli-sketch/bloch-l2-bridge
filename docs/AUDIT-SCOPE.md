@@ -240,6 +240,14 @@ move. The constructor requires `l2MinBurn <= minDeposit <= windowLimit`, but `l2
 an Ethereum contract cannot read the L2. A wrong declaration is caught off-chain by `vault_pontes.py validate --token-config` and
 `verify`, not by the contract. A balance can still fall below `minBurn` by L2 transfers or partial burns; the holder then tops up.
 
+**One-way mint switch (optional commit).** `BridgedStablecoinV2` can retire its mint committee once, as the vault can retire its
+release committee: `switchThreshold` signers propose an `IMintVerifier` pinned to its code hash, anyone activates it after
+`switchDelay` and within 30 days, and from then on `mint` and `unpause` revert for good. `mintWithProof` keeps the bucket, supply cap,
+large-mint delay and replay key. Unlike the vault, a guardian pause also stops the proof path, because it delays entry only and burns
+are never paused. A mint queued before the switch stays executable. No verifier exists yet: the switch closes finding C6 only once an
+audited Ethereum light-client verifier is activated. A quorum that activates a bad verifier gains no limit it did not have, but a
+verifier that refuses everything stops new mints for good, with burns unaffected. See `solidity-tests/MintSwitch.t.sol`.
+
 ## 6. Live evidence index
 
 Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB-SMH = GnB-SMH mainnet.

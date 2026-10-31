@@ -335,6 +335,13 @@ class Vigia:
     def flag(self, url, to, sig, *args):
         return int(self.call(url, to, sig, *args), 16) != 0
 
+    def committee_retired(self):
+        """The token's one-way mint switch is active: `mint` reverts for good, and only proofs mint."""
+        try:
+            return self.flag(self.cfg['l2_rpc'], self.token, 'verifier()')
+        except RuntimeError:
+            return False  # a token without the switch, or a failed read: a retired `mint` only reverts
+
     def minted(self, deposit_id):
         return self.flag(self.cfg['l2_rpc'], self.token, 'minted(bytes32)', deposit_id)
 
@@ -500,8 +507,9 @@ class Vigia:
         self.new_pass()
         deposits, burns = self.deposits(), self.burns()
         self.sync(deposits, burns)
-        for dep in deposits:
-            self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
+        if not self.committee_retired():
+            for dep in deposits:
+                self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
         self.opened = 0
         # Every certificate rebuilds the L2 from L1 (41 s measured on the v2 binaries with 186,671 L1 blocks, and
         # growing), while a round can be joined for only ~15 min. Rounds other signers opened come first, and a pass
@@ -603,6 +611,8 @@ class Vigia:
             return
         if self.minted(dep):
             self.execute_if_queued(d, dep)
+            return
+        if self.committee_retired():
             return
         if (d / 'sent').exists() and not self.failed(self.l2_tx, d / 'sent'):
             return

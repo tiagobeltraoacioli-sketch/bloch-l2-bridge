@@ -316,7 +316,7 @@ def main():
             unit = 10**6
             limits = f'({1000 * unit},{100 * unit},{100 * unit // 86400},{50 * unit},{DELAY},{unit})'
             return create(project, l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch USDC',
-                          'bUSDC', str(ETH_CHAIN), vault, route, signer_list, '2', limits, guard)
+                          'bUSDC', str(ETH_CHAIN), vault, route, signer_list, '2', limits, guard, '(2,1209600)')
 
         def mint_stable(token, deposit_id, nonce, amount):
             d = view(l2, token, 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', deposit_id, str(nonce),
