@@ -87,7 +87,7 @@ def create(project, url, target, *ctor):
 
 
 def send(url, key, to, *call, ok=True):
-    done = sh(CAST, 'send', to, *call, '--rpc-url', url, '--private-key', key, '--json', ok=ok)
+    done = sh(CAST, 'send', to, *call, '--rpc-url', url, '--private-key', key, '--json', *(['--gas-limit', '2000000'] if ok else []), ok=ok)
     return json.loads(done.stdout) if done.returncode == 0 else done
 
 
