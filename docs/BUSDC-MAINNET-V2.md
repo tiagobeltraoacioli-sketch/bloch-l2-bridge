@@ -247,6 +247,8 @@ been made on real L2 data.
 5. `release_before_final` soft (default) or hard on the fast-path guardian.
 6. Items from the bridge review (2026-10-30), `docs/AUDIT-SCOPE.md` section 5: who pays relayer gas (`minBurn`) and
    the mint leg after the switch.
+7. The optional one-way mint switch on the token (`mintSwitch` in `busdc-mainnet.config.json`: proposed 6 of 7, 14 days, the vault's
+   values). The token has no upgrade, so this is decided before the token deploys. `docs/AUDIT-SCOPE.md` section 5.
 
 ## 9. Bridge review, 2026-10-30 (`codex/bridge-review-20261030`)
 

@@ -237,10 +237,10 @@ def setup():
         dev = L2_KEY.read_text().strip()
         args = sh(CAST, 'abi-encode',
                   'c(string,string,uint256,address,bytes32,address[],uint256,(uint256,uint256,uint256,uint256,uint256,'
-                  'uint256),(address[],uint256,uint256))', os.environ.get('BUSDC_NAME', 'Bloch Bridged USDC (devnet4)'), 'bUSDC', ETH_CHAIN,
+                  'uint256),(address[],uint256,uint256),(uint256,uint64))', os.environ.get('BUSDC_NAME', 'Bloch Bridged USDC (devnet4)'), 'bUSDC', ETH_CHAIN,
                   st['vault'], st['route'], '[' + ','.join(l2_signers) + ']', 2,
                   f'({SUPPLY_CAP},{BUCKET},{BUCKET // 86400},{LARGE},{DELAY},{MIN_BURN})',
-                  f"([{keys['guardiao-l2']}],259200,259200)")
+                  f"([{keys['guardiao-l2']}],259200,259200)", '(2,1209600)')
         print('deploying BridgedStablecoinV2 on devnet4 (waits for the L2 block)...', flush=True)
         tx, r, frm, nonce = send_raw(L2_RPC, L2_CHAIN, dev, None,
                                      bytecode('contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2') + args[2:],

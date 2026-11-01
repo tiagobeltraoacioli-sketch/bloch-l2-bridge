@@ -171,7 +171,7 @@ def main():
         stable = create(project, l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
                         'Bloch Bridged USDC', 'bUSDC', str(ETH_CHAIN), vault, route, addrs, '2',
                         f'({1_000_000 * U},{cap},{cap // 86400},{50 * U},43200,{U})',
-                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)')
+                        '([0x000000000000000000000000000000000000Ba5E],259200,259200)', '(2,1209600)')
         code_keccak = out(CAST, 'keccak', out(CAST, 'code', stable, '--rpc-url', l2))
         (work / 'pw').write_text('test-password\n')
         (work / 'relayer.key').write_text(DEPLOYER + '\n')

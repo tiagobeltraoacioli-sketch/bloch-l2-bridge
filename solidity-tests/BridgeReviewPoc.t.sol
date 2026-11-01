@@ -116,7 +116,7 @@ contract BridgeReviewPoc {
             largeMintDelay: 43200, minBurn: 10 * U
         });
         busdc = new BridgedStablecoinV2("Bloch Bridged USDC", "bUSDC", ETH, address(vault), vault.routeId(), signers, 2,
-            l, SignerMintedToken.Guard(new address[](0), 0, 0));
+            l, SignerMintedToken.Guard(new address[](0), 0, 0), BridgedStablecoinV2.MintSwitch(2, 14 days));
         vm.chainId(ETH);
     }
 

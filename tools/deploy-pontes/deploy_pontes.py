@@ -60,6 +60,8 @@ CONTRACTS = {
 }
 LIMITS_T = '(uint256,uint256,uint256,uint256,uint256,uint256)'
 GUARD_T = '(address[],uint256,uint256)'
+MINT_SWITCH_T = '(uint256,uint64)'
+MIN_SWITCH_DELAY = 7 * 86400
 LIMIT_KEYS = ('supplyCap', 'bucketCapacity', 'refillPerSecond', 'largeMintThreshold', 'largeMintDelay', 'minBurn')
 
 HERE = Path(__file__).resolve().parent
@@ -155,7 +157,7 @@ def validate(cfg, rehearsal):
     refuse(isinstance(cfg, dict), 'config must be a JSON object')
     bridge = cfg.get('bridge')
     refuse(bridge in CONTRACTS, 'bridge must be "wgnb" or "stable"')
-    specific = ['gnb'] if bridge == 'wgnb' else ['ethereum']
+    specific = ['gnb'] if bridge == 'wgnb' else ['ethereum', 'mintSwitch']
     exact_keys(cfg, ['domain', 'bridge', 'notes', 'network', 'source', 'deployer', 'token', 'signers',
                      'guardians', 'limits', 'tx', *specific], 'config')
     refuse(cfg['domain'] == DOMAIN, f'domain must be {DOMAIN}')
@@ -280,6 +282,14 @@ def validate(cfg, rehearsal):
     else:
         eth = cfg['ethereum']
         exact_keys(eth, ['chainId', 'vault', 'route', 'vaultCodeHash', 'vaultCap', 'vaultGuard'], 'ethereum')
+        ms = cfg.get('mintSwitch')
+        refuse(isinstance(ms, dict), 'stable: mintSwitch is undecided')
+        exact_keys(ms, ['threshold', 'delay'], 'mintSwitch')
+        refuse(is_uint(ms['threshold']) and k <= ms['threshold'] <= len(signers),
+               'mintSwitch.threshold must be within the mint threshold .. the signer count')
+        refuse(is_uint(ms['delay']) and ms['delay'] >= MIN_SWITCH_DELAY and ms['delay'] > lim['largeMintDelay'],
+               'mintSwitch.delay must be at least 7 days and above largeMintDelay')
+        params['switchThreshold'], params['switchDelay'] = ms['threshold'], ms['delay']
         refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId is undecided')
         refuse(rehearsal or eth['chainId'] == ETH_MAINNET, 'mainnet policy: ethereum.chainId must be 1')
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
@@ -357,7 +367,8 @@ def immutable_values(p):
     if p['bridge'] == 'wgnb':
         v['gnbChainId'] = p['gnbChainId']
     else:
-        v.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'])
+        v.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'],
+                 switchThreshold=p['switchThreshold'], switchDelay=p['switchDelay'])
     return v
 
 
@@ -370,9 +381,9 @@ def constructor_args(p):
         sig = f'constructor(uint32,address[],uint256,{LIMITS_T},{GUARD_T})'
         args = [str(p['gnbChainId']), signers, str(p['threshold']), limits, guard]
     else:
-        sig = f'constructor(string,string,uint256,address,bytes32,address[],uint256,{LIMITS_T},{GUARD_T})'
+        sig = f'constructor(string,string,uint256,address,bytes32,address[],uint256,{LIMITS_T},{GUARD_T},{MINT_SWITCH_T})'
         args = [p['name'], p['symbol'], str(p['sourceChainId']), p['sourceVault'], p['sourceRoute'], signers,
-                str(p['threshold']), limits, guard]
+                str(p['threshold']), limits, guard, f'({p["switchThreshold"]},{p["switchDelay"]})']
     return sig, args
 
 
@@ -405,7 +416,8 @@ def make_plan(cfg, rehearsal, build=True):
     if p['bridge'] == 'wgnb':
         expected['gnbChainId'] = p['gnbChainId']
     else:
-        expected.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'])
+        expected.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'],
+                        switchThreshold=p['switchThreshold'], switchDelay=p['switchDelay'])
     plan = {'domain': DOMAIN, 'bridge': p['bridge'], 'configSha256': config_sha256(cfg),
             'chain': {'id': p['chainId'], 'genesisHash': cfg['network']['genesisHash'].lower(),
                       'rehearsal': cfg['network']['rehearsal']},
@@ -581,7 +593,8 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
         scalar.append(('gnbChainId', 'gnbChainId()', '(uint32)'))
     else:
         scalar += [('sourceChainId', 'sourceChainId()', '(uint256)'), ('sourceVault', 'sourceVault()', '(address)'),
-                   ('sourceRoute', 'sourceRoute()', '(bytes32)')]
+                   ('sourceRoute', 'sourceRoute()', '(bytes32)'),
+                   ('switchThreshold', 'switchThreshold()', '(uint256)'), ('switchDelay', 'switchDelay()', '(uint64)')]
     for key, sig, ret in scalar:
         got = get(sig, ret)
         got = got.lower() if isinstance(got, str) and got.startswith('0x') else int(str(got).split()[0])

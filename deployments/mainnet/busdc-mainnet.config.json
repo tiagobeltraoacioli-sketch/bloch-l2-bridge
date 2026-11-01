@@ -27,6 +27,10 @@
       "safe": null
     }
   },
+  "mintSwitch": {
+    "threshold": 6,
+    "delay": 1209600
+  },
   "token": {
     "contract": "BridgedStablecoinV2",
     "name": "Bloch Bridged USDC",

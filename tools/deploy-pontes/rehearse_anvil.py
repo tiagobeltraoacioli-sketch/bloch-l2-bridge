@@ -224,6 +224,8 @@ def fill(template, url, work, label, n_signers, threshold, n_guardians, rehearsa
     if rehearsal:
         cfg['network']['name'] = 'bloch-l2-devnet4-rehearsal'
     cfg['source']['revision'] = out('git', 'rev-parse', 'HEAD')
+    if 'mintSwitch' in cfg:
+        cfg['mintSwitch']['threshold'] = min(cfg['mintSwitch']['threshold'], n_signers)
     dkey, daddr = new_key()
     cfg['deployer']['address'] = daddr
     cfg['deployer']['fundedBy']['safe'] = new_key()[1]

@@ -171,7 +171,7 @@ def main():
         limits = f'({1000 * U},{100 * U},{100 * U // 86400},{50 * U},3600,{U})'
         stable = create(project, l2_raw, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2',
                         'Bloch Bridged USDC', 'bUSDC', str(ETH_CHAIN), vault, route, signer_list, '2', limits,
-                        f'([{guardian}],7200,7200)')
+                        f'([{guardian}],7200,7200)', '(2,1209600)')
         d = view(l2_raw, stable, 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', dep_id, '0', str(10 * U), user)
         blob = '0x' + ''.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d)[2:]
                               for _, key in signers[:2])

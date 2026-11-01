@@ -691,12 +691,27 @@ class Guardian:
                     'burn not final within the release SLA: L1 finality or L2 settlement is stalled'
                 findings.append(('soft', f'{fid}:{x["burn_id"]}', 0, {'reason': why, 'burn': x, 'age_s': age,
                                                                       'sla_s': self.release_sla, 'l2_finalized': fin}))
+        if self.kind == 'stable':
+            findings += self.mint_switch_findings()
         self.state.pop('l2_down', None)
         self.clear_problem('l2-read-failed')
         self.state['l2_view'] = {'burns': burns, 'finalized': fin, 'route': getattr(self, 'route', None), 'head_time': head_time}
         self.log(kind='round', l2_block=b, l2_finalized=fin, total_supply=supply, pending_supply=pending,
                  in_flight=in_flight, backing=backing, mints=len(mints), burns=len(burns), released=len(released))
         return now, findings
+
+    def mint_switch_findings(self):
+        """A proposed mint verifier retires the committee after its delay: people must hear of it. Never a pause: the
+        token gives guardians no power over the switch. A token without the switch has nothing to report."""
+        try:
+            proposed = addr(self.call(self.l2, self.token, 'proposedVerifier()')[0])
+            active_at = uint(self.call(self.l2, self.token, 'verifierActivatesAt()')[0])
+        except (Unverifiable, IndexError):
+            return []
+        if not int(proposed, 16):
+            return []
+        return [('soft', f'mint-verifier-proposed:{proposed}', 0, {
+            'reason': 'a one-way mint switch is pending', 'verifier': proposed, 'activates_at': active_at})]
 
     def act(self, now, findings):
         seen, due = set(), []
@@ -761,6 +776,13 @@ class Guardian:
         return (uint(self.call(url, self.token, 'pausedUntil()')[0]), uint(self.call(url, self.token, 'pauseCount()')[0]),
                 uint(self.call(url, self.token, 'pauseCooldown()')[0]))
 
+    def can_renew(self):
+        """Inside the cooldown a token with pause chains still lets a guardian that has not paused in this chain."""
+        try:
+            return bool(uint(self.call(self.l2, self.token, 'guardianCanPause(address)', self.me())[0]))
+        except (Unverifiable, IndexError, ValueError):
+            return False
+
     def pause(self, now, reasons):
         try:
             paused_until, count, cooldown = self.pause_view(self.l2)
@@ -772,7 +794,7 @@ class Guardian:
                 return
         if now < paused_until:
             why, until = 'already paused', paused_until
-        elif count and now < paused_until + cooldown:
+        elif count and now < paused_until + cooldown and not self.can_renew():
             why, until = 'pause cooldown', paused_until + cooldown
         else:
             why = None
