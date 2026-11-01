@@ -117,42 +117,7 @@ def main():
         def paused(url, addr_):
             return view(url, addr_, 'paused()(bool)') == 'true'
 
-        # ── a committee unpause must not silence a finding the same quorum could have caused ──
-        vault, route, token = bridge('settle')
-        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
-        cfg = config('settle', vault, token)
-        dep = forge_mint(token, 'fe', 60 * U)
-        rc, lines, err = run(cfg)
-        ids = [x.get('id') for x in lines if x.get('kind') == 'alert']
-        check('a forged queued mint: reserves and mint findings open', 'reserves' in ids and f'mint:{dep}' in ids, (rc, ids, err))
-        send(l2, token, 'pause()', key=BAD)
-        send(l2, token, 'unpause(bytes)', sigs_blob(view(l2, token, 'unpauseDigest()(bytes32)')))
-        send(eth, vault, 'guardianPause()', key=BAD)
-        valid = 2**40
-        d = view(eth, vault, 'unpauseDigest(uint64,uint256)(bytes32)', '1', str(valid))
-        send(eth, vault, 'unpause(uint64,uint256,bytes[])', '1', str(valid), sigs_list(d))
-        check('the bad guardian paused and the quorum unpaused both', not paused(l2, token) and not paused(eth, vault))
-        warp(7300)
-        rc, lines, err = run(cfg)
-        settled = [(x.get('contract'), x.get('id')) for x in lines if x.get('kind') == 'settled-by-unpause']
-        check('token: an unpause settles nothing', not [s for s in settled if s[0] == 'token'], settled)
-        check('token: the honest guardian pauses after the cooldown, the forged mint cannot execute', paused(l2, token), (rc, lines, err))
-        check('vault: reserves is not settled by an unpause', ('vault', 'reserves') not in settled, settled)
-        check('vault: the honest guardian pauses on reserves', paused(eth, vault), (rc, lines, err))
-
-        # ── a pause already in place is a success, also when this guardian lost the race ──
-        vault2, route2, token2 = bridge('race')
-        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
-        cfg2 = config('race', vault2, token2, reserves_grace_s=0, provenance_grace_s=0, eth_pause_gas=30_000)
-        forge_mint(token2, 'fd', 60 * U)
-        rc, lines, err = run(cfg2)
-        check('a failed vault pause is critical', 'vault-pause-failed' in health('race')['problems'], (rc, lines, err))
-        send(eth, vault2, 'guardianPause()', key=BAD)
-        rc, lines, err = run(cfg2)
-        check('race: another guardian paused, this one is healthy again', 'vault-pause-failed' not in health('race')['problems'], health('race'))
-        check('race: it skips, with no new send', any(x.get('kind') == 'vault-pause-skip' for x in lines)
-              or not any(x.get('kind') == 'vault-pause' for x in lines), lines)
-
+        # First, before any warp: its grace runs on the wall clock.
         # ── failed L2 reads ──
         vault3, route3, token3 = bridge('blind')
         fund(vault3, 200 * U)
@@ -189,6 +154,42 @@ def main():
         check('blind: no earlier view: critical, and nothing to compare against', 'l2-read-failed' in health('blind-new')['problems']
               and not paused(eth, vault4), (rc, lines, err))
         stub.down = False
+
+        # ── a committee unpause must not silence a finding the same quorum could have caused ──
+        vault, route, token = bridge('settle')
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        cfg = config('settle', vault, token)
+        dep = forge_mint(token, 'fe', 60 * U)
+        rc, lines, err = run(cfg)
+        ids = [x.get('id') for x in lines if x.get('kind') == 'alert']
+        check('a forged queued mint: reserves and mint findings open', 'reserves' in ids and f'mint:{dep}' in ids, (rc, ids, err))
+        send(l2, token, 'pause()', key=BAD)
+        send(l2, token, 'unpause(bytes)', sigs_blob(view(l2, token, 'unpauseDigest()(bytes32)')))
+        send(eth, vault, 'guardianPause()', key=BAD)
+        valid = 2**40
+        d = view(eth, vault, 'unpauseDigest(uint64,uint256)(bytes32)', '1', str(valid))
+        send(eth, vault, 'unpause(uint64,uint256,bytes[])', '1', str(valid), sigs_list(d))
+        check('the bad guardian paused and the quorum unpaused both', not paused(l2, token) and not paused(eth, vault))
+        warp(7300)
+        rc, lines, err = run(cfg)
+        settled = [(x.get('contract'), x.get('id')) for x in lines if x.get('kind') == 'settled-by-unpause']
+        check('token: an unpause settles nothing', not [s for s in settled if s[0] == 'token'], settled)
+        check('token: the honest guardian pauses after the cooldown, the forged mint cannot execute', paused(l2, token), (rc, lines, err))
+        check('vault: reserves is not settled by an unpause', ('vault', 'reserves') not in settled, settled)
+        check('vault: the honest guardian pauses on reserves', paused(eth, vault), (rc, lines, err))
+
+        # ── a pause already in place is a success, also when this guardian lost the race ──
+        vault2, route2, token2 = bridge('race')
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        cfg2 = config('race', vault2, token2, reserves_grace_s=0, provenance_grace_s=0, eth_pause_gas=30_000)
+        forge_mint(token2, 'fd', 60 * U)
+        rc, lines, err = run(cfg2)
+        check('a failed vault pause is critical', 'vault-pause-failed' in health('race')['problems'], (rc, lines, err))
+        send(eth, vault2, 'guardianPause()', key=BAD)
+        rc, lines, err = run(cfg2)
+        check('race: another guardian paused, this one is healthy again', 'vault-pause-failed' not in health('race')['problems'], health('race'))
+        check('race: it skips, with no new send', any(x.get('kind') == 'vault-pause-skip' for x in lines)
+              or not any(x.get('kind') == 'vault-pause' for x in lines), lines)
     finally:
         for p in procs:
             p.kill()
