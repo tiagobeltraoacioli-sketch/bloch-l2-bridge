@@ -430,7 +430,9 @@ def own_l2(ctx, work):
         except l2_finality.NotFinal as e:
             refuse(e.reason, **e.detail)
     try:
-        status = json.loads((follower / 'status.json').read_text())
+        status = l2_finality.load_status(follower / 'status.json')
+    except l2_finality.NotFinal as e:
+        refuse(e.reason, **e.detail)
     except (OSError, ValueError) as e:
         refuse('the follower status is unreadable', error=str(e))
     if pins is not None:

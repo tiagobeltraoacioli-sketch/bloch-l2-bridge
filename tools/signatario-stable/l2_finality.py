@@ -36,6 +36,7 @@ import urllib.request
 SLOTS_PER_EPOCH = 32  # bloch-pos-committee params (mainnet: 30 s slots, 960 s epochs)
 EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
+STATUS_SCHEMA_V3 = 'bloch.l2.native-follower-status.v3'
 
 # PROVISIONAL: `binaries` below hold the v2.1 release of agents/PINS-V21.md (unsigned). Set the
 # flag to False once the owner has signed that release and its suites have passed. v2.1 changed two pins, not
@@ -122,6 +123,38 @@ def check_binaries(paths, pins):
         if got != strip0x(want):
             raise NotFinal(f'the {role} binary is not the pinned build', path=str(path), sha256=got,
                            pinned=strip0x(want))
+
+
+def load_status(path):
+    """The follower status at `path`, always in the v2 shape the checks here read. A v3 status names a log beside it with
+    every settlement; the log must hold exactly what the status names. It is not a trust anchor: check_rebuild still
+    compares each entry with the L2 rebuilt from L1. Raises NotFinal if the log and the status differ, and OSError or
+    ValueError if the file cannot be read."""
+    path = Path(path)
+    status = json.loads(path.read_text())
+    if status.get('schema') != STATUS_SCHEMA_V3:
+        return status
+    log = status.get('settlement_log') or {}
+    name, entries, size = log.get('file'), log.get('entries'), log.get('bytes')
+    if not isinstance(name, str) or not name or '/' in name or name in ('.', '..') or not isinstance(entries, int) \
+            or not isinstance(size, int):
+        raise NotFinal('the follower status names a bad settlement log', settlement_log=log)
+    data = b''
+    if entries:
+        with open(path.with_name(name), 'rb') as f:
+            data = f.read(size)
+    lines = data.splitlines()
+    if len(data) != size or len(lines) != entries or (data and not data.endswith(b'\n')):
+        raise NotFinal('the follower settlement log does not match its status', entries=entries, read=len(lines))
+    settlements = [json.loads(line) for line in lines]
+    recent = status.get('finalized_settlements_recent') or []
+    if status.get('finalized_settlements_count') != entries or (entries and (not recent or settlements[-len(recent):] != recent)):
+        raise NotFinal('the follower settlement log differs from its status', entries=entries)
+    for name in ('finalized_settlements_count', 'finalized_settlements_recent', 'settlement_log'):
+        status.pop(name)
+    status['schema'] = STATUS_SCHEMA_V2
+    status['finalized_settlements'] = settlements
+    return status
 
 
 def check_status(status, pins, now, max_age):
