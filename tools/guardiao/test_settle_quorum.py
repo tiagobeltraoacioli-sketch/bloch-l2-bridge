@@ -65,7 +65,7 @@ def main():
             route = view(eth, vault, 'routeId()(bytes32)').lower()
             limits = f'({1_000_000 * U},{100_000 * U},{100_000 * U // 86400},{50 * U},43200,{U})'
             token = create(l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch Bridged USDC', 'bUSDC',
-                           str(ETH_CHAIN), vault, route, addrs, '2', limits, f'({guards},7200,7200)')
+                           str(ETH_CHAIN), vault, route, addrs, '2', limits, f'({guards},7200,7200)', '(2,1209600)')
             return vault, route, token
 
         def sigs_list(d):
