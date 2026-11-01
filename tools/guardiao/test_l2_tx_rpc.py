@@ -77,6 +77,11 @@ class Replica:
 
             def do_POST(self):
                 req = json.loads(self.rfile.read(int(self.headers['content-length'])))
+                if me.down:
+                    self.send_response(503)
+                    self.send_header('content-length', '0')
+                    self.end_headers()
+                    return
                 if req.get('method') == 'eth_sendRawTransaction':
                     me.refused += 1
                     return self.reply({'jsonrpc': '2.0', 'id': req.get('id'),

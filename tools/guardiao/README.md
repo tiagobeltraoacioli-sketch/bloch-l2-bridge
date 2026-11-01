@@ -217,13 +217,22 @@ pause. A stopped follower keeps old levels open with `bloch_finality.status.age_
 `l2-status-stale`, and above 2400 s it counts as a frozen view for `l2_frozen_extra_grace_s`. Pauses set `--gas-limit` (`eth_pause_gas`,
 `l2_pause_gas`, default 200,000), because `cast send` otherwise uses the bare estimate.
 
+### Failed L2 reads
+
+An `l2_rpc` that stops answering (a transport or HTTP error) raises `critical` `l2-read-failed` after `l2_read_fail_rounds` (3) rounds, exit 4, and
+`verified_t` stops. Ethereum is still read: releases are compared with the last burns seen, as on a frozen view, with the same cost. A real release of
+a burn beyond that view pauses after `provenance_grace_s`. Open findings keep their grace, and one already due stays due. `reserves` and mint provenance
+need the L2, so they wait. With no earlier view there is nothing to compare, so only the alert fires.
+
 ### After a committee unpause
 
-A finding first seen no later than the last committee unpause on that contract (`guardianBlockedUntil - pauseCooldown` on the vault,
-the last `Unpaused` log on the token) starts no further pause there. It stays open and alerted, with one `settled-by-unpause` line. A
-new finding pauses as usual, and `reserves` pauses again if the shortfall grows. The cost: a quorum able to unpause can also settle
-an old finding, but it already holds that power over the pause itself. With no committee unpause, an open finding pauses again after
-every cooldown.
+A past-release finding (`release-unknown`, `release-mismatch`, `release-before-final`) first seen no later than the last committee unpause of the vault
+(`guardianBlockedUntil - pauseCooldown`) starts no further vault pause. It stays open and alerted, with one `settled-by-unpause` line. A new release is a new finding, and `reserves` still
+sees any loss.
+
+**`reserves` and every token finding are never settled.** The token's `unpause` needs only the mint quorum, so a forged queued mint, one bad guardian's pause and an unpause would
+otherwise silence the honest guardian, and the mint would execute. The same pause and unpause on the vault would leave a real shortfall unwatched. The cost: a false token or `reserves`
+finding keeps pausing about half the time until the finding itself clears. On the token a guardian must also be able to pause within the large-mint delay. Without the token guardian chains the 72 h cooldown still blocks that (report 54), and only the vault pause on `reserves` remains.
 
 **Grace periods must exceed the settlement delay.** A replica shows settled blocks only, so unsettled mints and burns are not
 visible. One settlement cycle takes 8-14 min, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and

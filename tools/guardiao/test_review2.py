@@ -32,7 +32,6 @@ class Base(unittest.TestCase):
         self.g = guardiao.Guardian(path)
         self.g.log = lambda **kw: None
         self.g.pause = lambda now, reasons: None
-        self.g.token_unpaused_at = lambda: 0
 
 
 class G1FrozenClock(Base):
@@ -152,16 +151,14 @@ class G2OpenForever(Base):
         self.g.act(now[0], [FORGED, ('hard', 'release-unknown:0xf1', 0, {'reason': 'a new forged release'})])
         self.assertEqual(len(sent), 2, 'a new finding after the unpause still pauses')
 
-    def test_a_growing_shortfall_after_a_committee_unpause_pauses_again(self):
+    def test_reserves_is_never_settled_by_a_committee_unpause(self):
         seen = []
         self.g.pause_vault = seen.append
         self.g.vault_unpaused_at = lambda: T0 + 10
-        reserves = lambda n: ('hard', 'reserves', 0, {'reason': 'short', 'shortfall': n})  # noqa: E731
-        self.g.act(T0, [reserves(5)])
-        self.g.act(T0 + 20, [reserves(5)])
-        self.assertEqual(len(seen), 0, 'first seen before the unpause, same size: settled')
-        self.g.act(T0 + 30, [reserves(6)])
-        self.assertEqual(len(seen), 1, 'it grew')
+        reserves = ('hard', 'reserves', 0, {'reason': 'short', 'shortfall': 5})
+        self.g.act(T0, [reserves])
+        self.g.act(T0 + 20, [reserves])
+        self.assertEqual(len(seen), 2, 'a shortfall keeps pausing after an unpause')
 
 
 if __name__ == '__main__':

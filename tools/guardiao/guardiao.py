@@ -144,8 +144,11 @@ class Guardian:
         self.health_path = Path(c.get('health_file', f'{c["state"]}.health.json'))
         self.pause_margin = int(c.get('pause_margin_s', 3600))
         self.stall_alert = int(c.get('l2_stall_alert_s', MAINNET_GRACE_S if mainnet else 0))
+        self.read_fail_alert = int(c.get('l2_read_fail_rounds', 3))
         self.frozen_extra_grace = int(c.get('l2_frozen_extra_grace_s', 0))
         self.frozen = False
+        self.l2_read_failed = False
+        self.blind = False
         self.release_sla = int(c.get('release_sla_s', 6 * 3600))
         self.release_before_final = c.get('release_before_final', 'soft')
         if self.release_before_final not in ('soft', 'hard'):
@@ -227,6 +230,7 @@ class Guardian:
             with urllib.request.urlopen(req, timeout=60) as r:
                 out = json.loads(r.read())
         except (OSError, ValueError) as e:
+            self.l2_read_failed = self.l2_read_failed or url == self.l2
             raise Unverifiable(f'{method} on {url}: {e}') from e
         if 'error' in out:
             if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
@@ -596,6 +600,35 @@ class Guardian:
                               'one way, and guardians cannot stop it')
 
     def round(self):
+        self.l2_read_failed = self.blind = False
+        try:
+            return self.full_round()
+        except Unverifiable as e:
+            if not self.l2_read_failed:
+                raise
+            return self.blind_round(e)
+
+    def blind_round(self, error):
+        """The L2 RPC does not answer. Ethereum still does, and a forged release must not wait for it: this runs as a frozen view would, on
+        the last burns seen, with the same cost: a real release of a burn beyond that view pauses after its grace. The alert comes first."""
+        self.blind = True
+        wall = int(time.time())
+        down = self.state.setdefault('l2_down', {'since': wall, 'rounds': 0})
+        down['rounds'] += 1
+        self.frozen = wall - down['since'] > SETTLEMENT_DELAY_S
+        if down['rounds'] >= self.read_fail_alert:
+            self.problem_once('l2-read-failed', f'{down["rounds"]} rounds without an answer from l2_rpc: {str(error)[-160:]}; '
+                                                'grace runs on the wall clock, and a real release beyond the last view will pause the vault')
+        view = self.state.get('l2_view')
+        if not view or self.kind != 'stable':  # wGSMH's source check also needs the L2; the alert still fires
+            raise Unverifiable(f'no earlier L2 view to compare with: {error}')
+        self.route = view['route']
+        _, released, findings = self.eth_source(view['burns'], view['finalized'])
+        findings = [f for f in findings if not f[1].startswith('release-before-final:')]  # the view is old, not the release early
+        self.log(kind='round', blind=True, down_s=wall - down['since'], burns_known=len(view['burns']), released=len(released))
+        return max(view['head_time'], wall), findings
+
+    def full_round(self):
         self.setup()
         b, head_time, _ = self.block(self.l2, 'latest')
         wall = int(time.time())
@@ -658,6 +691,9 @@ class Guardian:
                     'burn not final within the release SLA: L1 finality or L2 settlement is stalled'
                 findings.append(('soft', f'{fid}:{x["burn_id"]}', 0, {'reason': why, 'burn': x, 'age_s': age,
                                                                       'sla_s': self.release_sla, 'l2_finalized': fin}))
+        self.state.pop('l2_down', None)
+        self.clear_problem('l2-read-failed')
+        self.state['l2_view'] = {'burns': burns, 'finalized': fin, 'route': getattr(self, 'route', None), 'head_time': head_time}
         self.log(kind='round', l2_block=b, l2_finalized=fin, total_supply=supply, pending_supply=pending,
                  in_flight=in_flight, backing=backing, mints=len(mints), burns=len(burns), released=len(released))
         return now, findings
@@ -677,19 +713,22 @@ class Guardian:
                     st['due'] = now
                     self.log(kind='alert', severity='hard', id=fid, due=True, reason=detail.get('reason'))
         for fid in [f for f in self.state['open'] if f not in seen]:
+            st = self.state['open'][fid]
+            if self.blind:  # unseen is not resolved: a round without the L2 cannot tell, and an open grace keeps running
+                if st['severity'] == 'hard' and st.get('due'):
+                    due.append(fid)
+                continue
             self.log(kind='resolved', id=fid)
             del self.state['open'][fid]
         if due:
             # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
             vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:',
                                                                              'release-before-final:'))]
-            shortfall = next((d.get('shortfall', 0) for _, f, _, d in findings if f == 'reserves'), 0)
-            vault_due = self.not_settled(vault_due, self.vault_unpaused_at, shortfall, 'vault') if self.vault_pause else []
+            vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
                 self.pause_vault(vault_due)
-            due = self.not_settled(due, self.token_unpaused_at, shortfall, 'token')
-            if due:
-                self.pause(now, due)
+            # A token finding is never settled: the token's unpause needs only the mint quorum, the very keys that could forge a mint.
+            self.pause(now, due)
         if self.state['problems']:
             return 4
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
@@ -700,26 +739,22 @@ class Guardian:
         blocked = uint(self.call(eth, vault, 'guardianBlockedUntil()')[0])
         return blocked - uint(self.call(eth, vault, 'pauseCooldown()')[0]) if blocked else 0
 
-    def token_unpaused_at(self):
-        head = self.block(self.l2, 'latest')[0]
-        found = self.logs(self.l2, self.token, self.topic('Unpaused(uint64)'), int(self.cfg.get('token_from_block', 0)), head)
-        return self.block(self.l2, int(found[-1]['blockNumber'], 16))[1] if found else 0
-
-    def not_settled(self, due, read_time, shortfall, side):
-        """Drop what a committee unpause on this contract already settled. A failed read settles nothing."""
+    def not_settled(self, due):
+        """Drop the past-release findings a committee unpause of the vault settled, so a reviewed false positive stops pausing it.
+        Only those: the funds have moved, a new release is a new finding, and `reserves` still sees any loss. `reserves` itself is
+        never settled, because a quorum could otherwise pause, unpause, and leave a real shortfall unwatched. A failed read settles nothing."""
         try:
-            at = read_time()
+            at = self.vault_unpaused_at()
         except (Unverifiable, ValueError, IndexError, KeyError):
             return due
         left = []
         for fid in due:
             st = self.state['open'][fid]
-            acks = st.setdefault('settled', {})
-            if not at or st['first_seen'] > at or (fid == 'reserves' and side in acks and shortfall > acks[side]):
+            if fid == 'reserves' or not at or st['first_seen'] > at:
                 left.append(fid)
-            elif side not in acks:
-                acks[side] = shortfall if fid == 'reserves' else True
-                self.log(kind='settled-by-unpause', id=fid, contract=side, unpaused_at=at)
+            elif not st.get('settled'):
+                st['settled'] = True
+                self.log(kind='settled-by-unpause', id=fid, contract='vault', unpaused_at=at)
         return left
 
     def pause_view(self, url):
@@ -791,6 +826,13 @@ class Guardian:
             if ok:
                 self.clear_problem('pause-failed')
                 return
+            try:  # another guardian won the race: the send side shows it before a replica can
+                if self.block(self.l2_tx, 'latest')[1] < self.pause_view(self.l2_tx)[0]:
+                    self.log(kind='pause-skip', reason='another guardian paused first', violations=reasons)
+                    self.clear_problem('pause-failed')
+                    return
+            except (Unverifiable, ValueError, IndexError):
+                pass
             if attempt < self.pause_attempts:
                 time.sleep(self.pause_retry)
         self.problem('pause-failed', f'{self.pause_attempts} attempts through l2_tx_rpc: {(err or out).strip()[-200:]}')
@@ -834,6 +876,7 @@ class Guardian:
         if why is None and not uint(self.call(eth, vault, 'guardianCanPause(address)', self.eth_me())[0]):
             why = 'this guardian already paused in this chain'
         if why:
+            self.clear_problem('vault-pause-failed')  # a pause in place, or a state this guardian cannot pause in, is no failure
             note = f'{why}:{count}'
             if self.state.get('vault_skip') != note:
                 self.state['vault_skip'] = note
@@ -858,8 +901,18 @@ class Guardian:
         self.log(kind='vault-pause', **entry, error=None if ok else (err or out).strip()[-300:])
         if ok:
             self.clear_problem('vault-pause-failed')
+        elif self.vault_paused_now():  # another guardian won the race in this block
+            self.log(kind='vault-pause-skip', reason='another guardian paused first', violations=reasons)
+            self.clear_problem('vault-pause-failed')
         else:
             self.problem('vault-pause-failed', (err or out).strip()[-200:])
+
+    def vault_paused_now(self):
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        try:
+            return self.block(eth, 'latest')[1] < uint(self.call(eth, vault, 'pausedUntil()')[0])
+        except (Unverifiable, ValueError, IndexError):
+            return False
 
 
 def main():
@@ -872,7 +925,8 @@ def main():
         try:
             now, findings = g.round()
             code = g.act(now, findings)
-            g.state['verified_t'] = int(time.time())
+            if not g.blind:
+                g.state['verified_t'] = int(time.time())
         except (Unverifiable, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             # a malformed or empty answer (no contract at the address, a half-synced node) is no evidence either way
             g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')
