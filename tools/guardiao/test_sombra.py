@@ -98,6 +98,8 @@ def create(project, url, target, *ctor):
 
 
 def send(url, key, to, *call, ok=True):
+    # An explicit limit: cast sends the bare estimate. Estimated in the second a vault was updated, a release costs a few gas less, so mined a second
+    # later it ran out at its reentrancy guard. An expected revert keeps the estimate, which is what refuses it.
     done = sh(CAST, 'send', to, *call, '--rpc-url', url, '--private-key', key, '--json', *(['--gas-limit', '2000000'] if ok else []), ok=ok)
     return json.loads(done.stdout) if done.returncode == 0 else done
 
@@ -171,10 +173,8 @@ def main():
             ctx = f'({2**40},{n},{h},7,{k("l2-block-7")})'
             d = view(eth, v, 'releaseDigest((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,uint64,'
                      'bytes32))(bytes32)', item(nonce, amount, v), ctx)
-            # An explicit limit: cast sends the bare estimate. Estimated in the second the vault was deployed, the bucket's elapsed
-            # time is 0 and the call costs a few gas less, so a release mined a second later ran out at its reentrancy guard.
             return send(eth, DEPLOYER, v, 'release((bytes32,uint64,address,uint64,bytes32),(uint256,uint256,bytes32,'
-                        'uint64,bytes32),bytes[])', item(nonce, amount, v), ctx, sigs(d, 2), *(['--gas-limit', '400000'] if ok else []), ok=ok)
+                        'uint64,bytes32),bytes[])', item(nonce, amount, v), ctx, sigs(d, 2), ok=ok)
 
         def proof(nonce, amount, v=None, valid=True):
             pv = view(eth, shadow, 'expectedPublicValues(address,bytes32)(bytes)', v or vault, rid(nonce, amount, v))
