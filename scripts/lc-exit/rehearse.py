@@ -2,6 +2,7 @@
 """Private anvil rehearsal of the light-client exit path, with real SP1 Groth16 proofs.
 
   rehearse.py WORK vault-route      deploy token + vault, print the vault address and route, stop
+  rehearse.py WORK vault            release and recovery through the vault only (no step proof needed)
   rehearse.py WORK full             the whole rehearsal; writes WORK/rehearsal.json
 
 WORK holds bin/{anvil,forge,cast} and out/<tag>/ from the proof jobs. Loopback only, chain id 31337,
@@ -157,9 +158,9 @@ def full():
     k = keys()
     res = {'ran': 'real SP1 6.8.0 Groth16 proofs on a private anvil, real SP1VerifierGroth16 v6.1.0', 'gas': {}, 'refusals': {}}
     # Deployment time: before the real mainnet checkpoint, so the delay ends just after it.
-    real = load('real-step', 'step')
-    real_pv = bytes.fromhex(real['public_values'])
-    real_epoch = int.from_bytes(real_pv[80:88], 'little')
+    life = sys.argv[2] == 'full'
+    real = load('real-step', 'step') if life else None
+    real_epoch = int.from_bytes(bytes.fromhex(real['public_values'])[80:88], 'little') if life else 7108
     real_time = GENESIS + real_epoch * EPOCH
     start = real_time - DELAY + WINDOW - 7 * 86400 - 3600
     net = Net(start)
@@ -201,6 +202,7 @@ def full():
         sel = call(lc, 'verifyRelease(address,bytes32,bytes)(bytes4)', vault, release_id, p1)
         res['verify_release_a0'] = sel
         res['gas']['verifyRelease_estimate_a0'] = int(sh(CAST, 'estimate', '--rpc-url', RPC, lc, 'verifyRelease(address,bytes32,bytes)(bytes4)', vault, release_id, p1))
+        res['gas']['releaseWithProof_direct_estimate'] = int(sh(CAST, 'estimate', '--rpc-url', RPC, '--from', addr(k['stranger']), vault, 'releaseWithProof((bytes32,uint64,address,uint64,bytes32),bytes)', item_t, p1))
         res['refusals']['tampered_proof'] = refused(k['stranger'], vault, 'releaseWithProof((bytes32,uint64,address,uint64,bytes32),bytes)', item_t,
                                                     sh(CAST, 'abi-encode', 'f(bytes,bytes)', '0x' + r1['public_values'], r1['proof_bytes'][:-2] + ('00' if r1['proof_bytes'][-2:] != '00' else '01')))
         res['refusals']['new_anchor_proof_before_recovery'] = refused(k['stranger'], vault, 'releaseWithProof((bytes32,uint64,address,uint64,bytes32),bytes)', item_t, p2)
@@ -223,6 +225,9 @@ def full():
         res['refusals']['replay'] = refused(k['stranger'], vault, 'releaseWithProof((bytes32,uint64,address,uint64,bytes32),bytes)', item_t, p2)
     finally:
         net.stop()
+    if not life:
+        print(json.dumps(res, indent=1))
+        return
     # Second net: a real mainnet step proof stops a proposal. Fresh time so the proposal's window holds it.
     net = Net(start)
     try:
@@ -263,4 +268,4 @@ def vault_route():
         net.stop()
 
 
-{'full': full, 'vault-route': vault_route}[sys.argv[2]]()
+{'full': full, 'vault': full, 'vault-route': vault_route}[sys.argv[2]]()
