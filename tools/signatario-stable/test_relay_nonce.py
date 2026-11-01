@@ -10,6 +10,7 @@ an address with no code, because nonces are the subject. Throwaway keys. Not a s
 `max_inflight`, and the real admission code was not run here.
 """
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -174,6 +175,25 @@ def main():
         v.send('eth', TO, call)
         rpc(url, 'evm_mine', [])
         check('sides keep separate records', set(json.loads(v.nonce_path.read_text())) == {f'l2:{FROM}', f'eth:{FROM}'})
+        # A reorg drops a confirmed Ethereum transaction: the next send fills its nonce at once, and what the node lost is forgotten.
+        rpc(url, 'anvil_mine', ['0x1'])
+        before = count()
+        lost = v.send('eth', TO, call)
+        rpc(url, 'anvil_mine', ['0x1'])
+        check('reorg: the transaction landed first', count() == before + 1)
+        rpc(url, 'anvil_reorg', [1, []])
+        check('reorg: the chain took it back', count() == before and rpc(url, 'eth_getTransactionReceipt', [lost]) is None, count())
+        mark = work / 'sent'
+        mark.write_text(lost + '\n')
+        os.utime(mark, (time.time() - 1000, time.time() - 1000))
+        check('reorg: a lost transaction is forgotten before resend_after_s', v.failed(url, mark) and not mark.exists())
+        again = v.send('eth', TO, call)
+        tx = rpc(url, 'eth_getTransactionByHash', [again])
+        check('reorg: the next send fills the lost nonce', int(tx['nonce'], 16) == before, tx['nonce'])
+        rpc(url, 'anvil_mine', ['0x1'])
+        check('reorg: it lands', rpc(url, 'eth_getTransactionReceipt', [again]) is not None)
+        queued = v.send('l2', TO, call)
+        check('reorg: the L2 side is not rewound by it', rpc(url, 'eth_getTransactionByHash', [queued]) is not None)
     finally:
         anvil.terminate()
         shutil.rmtree(work, ignore_errors=True)

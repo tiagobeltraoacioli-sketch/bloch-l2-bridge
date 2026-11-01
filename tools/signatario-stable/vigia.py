@@ -8,7 +8,8 @@ Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatar
 `shared_dir`, `eth_rpc`, `vault_from_block`, `token_from_block`, and for `relay` `eth_chain_id`,
 `l2_relayer_key`, `eth_relayer_key` (gas keys with no authority), optional `signer_name`,
 `round_margin` (seconds, default 600), `max_valid_seconds` (default 3600), `resend_after_s` (default 1800: a
-relayed transaction with no receipt after this long is sent again), `log_chunk` (blocks per eth_getLogs, default
+relayed transaction with no receipt after this long is sent again), `lost_after_s` (default 120: an Ethereum transaction the
+node no longer knows at all is sent again after this long), `log_chunk` (blocks per eth_getLogs, default
 10000), `max_new_rounds` (release rounds opened per pass, default 4), `anchor_max_age` (blocks, default 160, as the Ethereum half),
 `l2_tx_rpc` (L2 sends: required to relay on
 chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction, its nonce and its receipt use it, and every
@@ -126,6 +127,7 @@ class Vigia:
         self.log_chunk = int(self.cfg.get('log_chunk', 10000))
         self.max_new_rounds = int(self.cfg.get('max_new_rounds', 4))
         self.max_inflight = int(self.cfg.get('max_inflight', 16))
+        self.lost_after = int(self.cfg.get('lost_after_s', 120))
         self.status_stale = int(self.cfg.get('l2_status_stale_s', 2700))
         self.last_burns = []
         self.nonce_path = Path(self.cfg.get('relayer_state', self.shared / 'relayer-nonces.json'))
@@ -675,6 +677,13 @@ class Vigia:
             sent_file.unlink()
             log(kind='relay', dropped=tx)
             return True
+        # Ethereum only: the settled L2 RPC does not know a spooled transaction by hash. A transaction the node has lost, for
+        # instance to a reorg, cannot land, and a round lives for less than `resend_after_s`. The vault refuses a second payment.
+        if receipt is None and url == self.cfg.get('eth_rpc') and time.time() - sent_file.stat().st_mtime > self.lost_after \
+                and self.rpc(url, 'eth_getTransactionByHash', [tx]) is None:
+            sent_file.unlink()
+            log(kind='relay', lost=tx)
+            return True
         if receipt is not None and int(receipt['status'], 16) == 0:
             sent_file.unlink()
             log(kind='relay', reverted=receipt['transactionHash'])
@@ -698,14 +707,15 @@ class Vigia:
     def tx_count(self, url, frm, level):
         return int(self.rpc(url, 'eth_getTransactionCount', [frm, level]), 16)
 
-    def next_nonce(self, url, frm, rec):
+    def next_nonce(self, url, frm, rec, side='l2'):
         """(nonce, updated record) for one key on one side; raises when `max_inflight` transactions are unconfirmed."""
         now = time.time()
         latest = self.tx_count(url, frm, 'latest')
+        counted = True
         try:
             pending = self.tx_count(url, frm, 'pending')
         except RuntimeError:  # an endpoint with no `pending` level
-            pending = latest
+            pending, counted = latest, False
         try:
             local, moved = int(rec.get('next', 0)), float(rec.get('moved', now))
             base = int(rec.get('latest', latest))
@@ -715,7 +725,12 @@ class Vigia:
         if latest != base:
             moved = now
         nonce = max(latest, pending, local)
-        if nonce > latest + self.max_inflight:  # no relayer of ours wrote this: it would be refused forever
+        # An Ethereum node's `pending` stops at a gap. If it shows nothing of ours past `latest`, what the record holds is lost, or
+        # waits behind a lost nonce: a reorg that dropped a transaction, for instance. Waiting for `resend_after_s` outlives the round.
+        if latest < base or (side == 'eth' and counted and pending == latest and local > latest):
+            log(kind='relay-nonce', rewound=latest, had=nonce, confirmed_before=base)
+            nonce = latest
+        elif nonce > latest + self.max_inflight:  # no relayer of ours wrote this: it would be refused forever
             log(kind='relay-nonce', bad_record=local, latest=latest, pending=pending)
             nonce, prices = latest, {}
         elif nonce > latest and now - moved > self.resend_after:
@@ -733,7 +748,7 @@ class Vigia:
         frm = self.cast_out('wallet', 'address', '--private-key', key)
         records = self.load_nonces()
         slot = f'{side}:{frm.lower()}'
-        nonce, rec = self.next_nonce(url, frm, records.get(slot) or {})
+        nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
         price = int(self.rpc(url, 'eth_gasPrice', []), 16) * 2
         if nonce in rec['prices']:  # replacing a transaction that never landed
             price = max(price, rec['prices'][nonce] * 125 // 100)
