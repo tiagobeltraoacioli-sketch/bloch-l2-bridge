@@ -91,6 +91,8 @@ def main():
                  item, ctx, sigs_list(d))
 
         def fund(vault, amount):
+            d = view(eth, vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', str(2**40))
+            send(eth, vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', str(2**40), sigs_list(d))
             send(eth, usdc, 'mintTo(address,uint256)', out(CAST, 'wallet', 'address', '--private-key', DEPLOYER), str(amount))
             send(eth, usdc, 'approve(address,uint256)', vault, str(amount))
             send(eth, vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + 'ab' * 20)
