@@ -1,5 +1,5 @@
 {
-  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying.",
+  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying. `db` is required: `signatario.py combine` opens it.",
   "token": "TBD-owner",
   "source_vault": "TBD-owner",
   "source_route": "TBD-owner",
@@ -12,6 +12,7 @@
   "eth_chain_id": 1,
   "source_chain_id": 1,
   "shared_dir": "/var/lib/bloch-busdc-relayer/signatures",
+  "db": "/var/lib/bloch-busdc-relayer/relayer-db.json",
   "feed": {
     "_about": "docs/SIG-TRANSPORT.md. A relayer only reads: no publish_dir.",
     "status_file": "/var/lib/bloch-busdc-relayer/feed-status.json",

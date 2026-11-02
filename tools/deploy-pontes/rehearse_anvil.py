@@ -77,7 +77,7 @@ def vtool(*args):
 
 def vault_rehearsal(url, work, token_cfg):
     """Section 3: the Ethereum vault deployment tool on the rehearsal chain 31337."""
-    tpath = ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json'
+    tpath = work / 'busdc-vault-mainnet.config.json'  # the committed template, copied from git by main()
     rc, r = vtool('validate', '--config', tpath)
     check('[vault template] the committed vault config is refused while decisions are null',
           rc == 1 and 'undecided' in r.get('reason', ''), r)
@@ -280,12 +280,15 @@ def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=No
     if source_rpc:
         rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
         check(f'{tag} run refused without --source-rpc', rc == 1 and '--source-rpc' in r.get('reason', ''), r)
-        # A vault that answers 1 to depositCount(), on a snapshot: one vault, one token.
+        # The same vault with depositCount set to 1, on a snapshot: one vault, one token.
+        layout = json.loads(out(FORGE, 'inspect', '--root', ROOT, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+                                'storageLayout', '--json'))
+        slot = next(x for x in layout['storage'] if x['label'] == 'depositCount')
         snap = out(CAST, 'rpc', 'evm_snapshot', '--rpc-url', source_rpc).strip('"')
-        sh(CAST, 'rpc', 'anvil_setCode', p['sourceVault']['address'], '0x600160005260206000f3', '--rpc-url', source_rpc)
-        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', source_rpc)
+        word = int(out(CAST, 'storage', p['sourceVault']['address'], slot['slot'], '--rpc-url', source_rpc), 16) | (1 << (8 * slot['offset']))
+        sh(CAST, 'rpc', 'anvil_setStorageAt', p['sourceVault']['address'], hex(int(slot['slot'])), '0x' + format(word, '064x'), '--rpc-url', source_rpc)
         rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src)
-        check(f'{tag} a used vault is refused', rc == 1 and 'new vault' in r.get('reason', ''), r)
+        check(f'{tag} a used vault is refused', rc == 1 and 'has been used' in r.get('reason', ''), r)
         sh(CAST, 'rpc', 'evm_revert', snap, '--rpc-url', source_rpc)
     bfile = work / f'{name}.broadcast.json'
     rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast', '--write', bfile,
@@ -338,10 +341,14 @@ def main():
         if dirty:
             raise SystemExit('run from a clean checkout')
         sh(FORGE, 'build', '--root', ROOT, '--ast')
-        templates = {b: json.loads((ROOT / f'deployments/mainnet/{f}').read_text())
+        # The committed templates, read from git: the owner runs this after filling the configs in the working tree
+        # (BRIDGES-MAINNET.md section 4, step 4), and the filled files must not change what is rehearsed.
+        for f in ('wgnb-mainnet.config.json', 'busdc-mainnet.config.json', 'busdc-vault-mainnet.config.json'):
+            (work / f).write_text(out('git', '-C', ROOT, 'show', f'HEAD:deployments/mainnet/{f}'))
+        templates = {b: json.loads((work / f).read_text())
                      for b, f in (('wgnb', 'wgnb-mainnet.config.json'), ('stable', 'busdc-mainnet.config.json'))}
         for b, f in (('wgnb', 'wgnb-mainnet.config.json'), ('stable', 'busdc-mainnet.config.json')):
-            rc, r = tool('validate', '--config', ROOT / 'deployments/mainnet' / f)
+            rc, r = tool('validate', '--config', work / f)
             check(f'[template {b}] the committed config is refused while decisions are null',
                   rc == 1 and 'undecided' in r.get('reason', ''), r)
 
