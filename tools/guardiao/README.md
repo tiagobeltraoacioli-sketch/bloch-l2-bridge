@@ -259,7 +259,7 @@ A past-release finding (`release-unknown`, `release-mismatch`, `release-before-f
 (`guardianBlockedUntil - pauseCooldown`) starts no further vault pause. It stays open and alerted, with one `settled-by-unpause` line. A new release is a new finding, and `reserves` still
 sees any loss.
 
-**`reserves` and every token finding are never settled.** The token's `unpause` needs only the mint quorum, so a forged queued mint, one bad guardian's pause and an unpause would
+**`reserves` and every token finding are never settled.** On the base `SignerMintedToken` the token's `unpause` needs only the mint quorum; on BridgedStablecoinV2/V3 it needs `switchThreshold` (6 of 7 at launch, agent 171 F171-1), one more. Either way a forged queued mint, one bad guardian's pause and an unpause would
 otherwise silence the honest guardian, and the mint would execute. The same pause and unpause on the vault would leave a real shortfall unwatched. The cost: a false token or `reserves`
 finding keeps pausing about half the time until the finding itself clears. On the token a guardian must also be able to pause within the large-mint delay. Without the token guardian chains the 72 h cooldown still blocks that (report 54), and only the vault pause on `reserves` remains.
 

@@ -76,14 +76,14 @@ with Foundry installed (the suites ran with forge 1.7.1). `ETH_RPC` is the owner
 
 Fill every `null` in `deployments/mainnet/busdc-vault-mainnet.config.json` and every `TBD-owner` in
 `deployments/mainnet/busdc-mainnet.config.json` (section 7). Fill `ethereum.vaultGuard` of the L2 config
-with the two Ethereum guardian addresses (sorted ascending) before the vault exists; the rest of
-`ethereum` comes from step 4.4. Review both as a pull request.
+with the three Ethereum vault guardian addresses (sorted ascending) before the vault exists; the rest of
+`ethereum` comes from step 4.4. Review both as a pull request. The launch decisions these configs encode are in 4.11.
 
-The committed `busdc-mainnet.config.json` already carries seven L2 signer addresses and a deployer address. Keep
-them only if the operators who generated those keys confirm they still hold them; otherwise replace every one with
-addresses the chosen operators generated on their own hosts. The deployer, in both configs, must be a key the owner
-generated for this deployment alone (nonce 0, `validate` checks it); never use a committed address whose key you did
-not create.
+Every key address in the templates is `TBD-owner`. The 22 addresses committed on 2026-10-14 (the deployer
+`0x703a…`, 7+7 signers, 3+3 guardians, the wGSMH deployer) had no recorded holder; the owner had them removed
+(2026-11-02), and `deploy_pontes.py` and `vault_pontes.py` refuse them in every role. Fill every role from
+`docs/BRIDGE-V3-KEY-CEREMONY.md` (agent 174) with keys the chosen operators generated on their own hosts. The deployer,
+in both configs, must be a key the owner generated for this deployment alone (nonce 0, `validate` checks it).
 
 **Where the tools run.** `plan` refuses unless `git HEAD` equals `source.revision` and `contracts/` is clean, so the
 filled configs cannot be committed at the pinned revision. Check out `source.revision` (the reviewed commit, which
@@ -209,7 +209,7 @@ change in the hour around any later L1 fork activation (HF2 at e7270, HF3 at e73
 | Pause the token (mints only; burns never pause) | one L2 guardian | `cast send "$TOKEN" "pause()" --rpc-url "$L2_RPC" <guardian wallet>` |
 | Renew a vault pause | a **second** guardian, when the first pause ends | `guardianPause()` again; each guardian starts one pause per chain (section 9) |
 | End a vault pause early | `switchThreshold` (6 of 7) release signers | `COUNT=$(cast call "$VAULT" "pauseCount()(uint64)")`, `DIGEST=$(cast call "$VAULT" "unpauseDigest(uint64,uint256)(bytes32)" "$COUNT" "$VALID_UNTIL")`, six `cast wallet sign --no-hash "$DIGEST"`, then `cast send "$VAULT" "unpause(uint64,uint256,bytes[])" "$COUNT" "$VALID_UNTIL" "[$S1,...,$S6]"` ordered by signer address |
-| End a token pause early | `threshold` (5 of 7) mint signers | `DIGEST=$(cast call "$TOKEN" "unpauseDigest()(bytes32)")`, five `cast wallet sign --no-hash`, then `cast send "$TOKEN" "unpause(bytes)" 0x<sig1><sig2>...` with the five 65-byte signatures **concatenated** (one `bytes`, not a list), ordered by signer address |
+| End a token pause early | `unpauseThreshold()` = `switchThreshold` (6 of 7) mint signers; five signatures revert with `BadSignatureCount` (agent 171, F171-1) | `DIGEST=$(cast call "$TOKEN" "unpauseDigest()(bytes32)")`, six `cast wallet sign --no-hash`, then `cast send "$TOKEN" "unpause(bytes)" 0x<sig1><sig2>...<sig6>` with the six 65-byte signatures **concatenated** (one `bytes`, not a list), ordered by signer address |
 | Reserves | anyone | `python3 tools/reservas/reservas.py --config reservas.json check`: exit 0 `ok`, 2 deficit, 3 surplus, 1 unverifiable. By hand: `totalLocked()` on the vault equals `totalSupply()` plus `pendingSupply()` of the token at finalized blocks |
 
 **Before a committee unpause:** it blocks every vault guardian for `pauseCooldown` (72 h) afterwards
@@ -227,9 +227,10 @@ There is no signer rotation, in the vault or the token (`docs/AUDIT-SCOPE.md` V7
 | 2 | Releases and mints go on (5 of 7), but nobody can end a vault pause early or propose or cancel the switch (6 of 7) |
 | 3 or more | Releases stop for good; deposits already locked can leave only through a light-client switch that 6 keys must propose, so in practice never |
 
-L2 mint keys: mints and the token's unpause both need 5 of 7, so mints go on with two lost keys and stop for good
-at three (the token's optional switch, where deployed, needs its own `mintSwitch.threshold`). Losing a guardian key
-costs that guardian's vote only.
+L2 mint keys: mints need 5 of 7; the token's unpause, its locked remint and its one-way mint switch need
+`mintSwitch.threshold`, 6 of 7 (agent 171, F171-1). So with one lost key everything goes on; with two lost keys mints
+go on but nobody can end a token pause early, sign a locked remint or propose the switch; at three mints stop for
+good. Losing a guardian key costs that guardian's vote only.
 
 Replacing a signer, a guardian or a limit is a **new vault and a new token**, deployed with this whole section 4 and
 new fresh deployer keys, never a new token over the old vault (4.5). Migration: disable deposits on the old vault
@@ -237,6 +238,25 @@ new fresh deployer keys, never a new token over the old vault (4.5). Migration: 
 deposit into the new vault, and keep the old signers, relayer, guardians and reserves monitor running until the old
 token's supply is zero. Start at the first lost key: at two lost keys the old vault can no longer be unpaused early.
 
+
+### 4.11 Launch decisions (owner, 2026-11-02)
+
+The owner approved agent 175's parameter memo and agent 171's corrections. Each row says where the rule is enforced, so
+a config typo cannot undo it.
+
+| Decision | Value | Enforced by |
+| --- | --- | --- |
+| T (`largeMintThreshold`) | **0**: every mint queues `largeMintDelay` (12 h) and stays cancellable by 2 of 3 guardians. At T > 0 one wrong instant mint, forged or from a bug of honest signers, credits with no cancel window and holds every later exit for good (111 F3, 175 P1) | `BridgedStablecoinV3` constructor (`BadConfig` on T != 0); `deploy_pontes.py validate` (V3 on every network, any stable token on mainnet) |
+| Instant cap | **0** (10 x T) | follows from T = 0; `validate` also refuses a non-zero derived `instantCapacity` |
+| Unpause, locked remint, verifier switch | **6 of 7** on the token (`mintSwitch.threshold`) and on the vault (`switchThreshold`). 5 would let a forger with the mint quorum end the pause meant to stop it; 7 loses all three powers with one key | contract (the token's unpause needs `switchThreshold`); `validate` on mainnet (both tools) |
+| Guardians | **3 L2 token guardians and 3 Ethereum vault guardians** (BR-6): one key per chain per guardian operator, independent of every signer | `validate` on mainnet (both tools) |
+| `vault_pause_on_mint` (guardiao) | **on**: an evidenced forged `mint:` finding also pauses the vault 72 h, so new deposits stay out of a token a coming forgery could hold; burns made before a credit stay payable. Cost: a false finding closes the vault 72 h, 6 of 7 end it early | `guardiao.template.json`; `deploy_pontes.py validate` refuses a mainnet config while the template says otherwise |
+| `release_hold` (eth_half) | **off**: with V3 over a mode-1 vault the vault already refuses every burn after a credited forgery; the hold would also stop honest releases and need a signed `accepted_unbacked_mints` list | `eth-half.template.json`; `validate` as above |
+| Vault values (BR-10) | `windowLimit` 10,000 USDC / 24 h, cap 100,000, `minDeposit` 10, `switchDelay` 14 d, mode 1, `releaseDelay` 0, no `mintVerifier` | vault constructor and `vault_pontes.py validate` |
+| Committed keys | the 22 addresses of 2026-10-14 (deployer `0x703a…` and the rest) are removed; fresh keys from the key ceremony | both tools refuse them in every role |
+
+Operators keep `vault_pause_on_mint` and `release_hold` in their own configs and may change them at any time; the
+templates and `validate` only make the launch default explicit. Revisit both after the external audit.
 
 ## 5. Host specifications
 
@@ -293,12 +313,12 @@ been made on real L2 data.
 | Fresh deployer keys (Ethereum vault, L2 token), nonce 0 | `deployer.address` (both) |
 | Bloch Inc Safe address | `deployer.fundedBy.safe` (both) |
 | 7 release signer operators and Ethereum addresses | vault config `vault.signers.set` |
-| 7 L2 mint signer operators (addresses are set) | L2 config `signers.set[].operator` |
-| 2 Ethereum guardian operators and addresses (guardiao, sombra), independent of every signer | vault config `vault.guard.guardians`; L2 config `ethereum.vaultGuard.guardians` |
-| 3 L2 guardian operators (addresses are set) | L2 config `guardians.set[].operator` |
+| 7 L2 mint signer operators and fresh addresses | L2 config `signers.set[]` |
+| 3 Ethereum vault guardian operators and addresses (BR-6: the 3 guardian operators, one Ethereum key each; guardiao on each, sombra beside it once ported), independent of every signer | vault config `vault.guard.guardians`; L2 config `ethereum.vaultGuard.guardians` |
+| 3 L2 guardian operators and fresh addresses | L2 config `guardians.set[]` |
 | Vault address, route, code hash, cap | L2 config `ethereum.*` (from 4.4) |
 | L2 gas price cap | L2 config `tx.maxGasPriceWei` |
-| cap, windowLimit, minDeposit (proposed 10 USDC), switchThreshold (proposed 6), switchDelay (proposed 14 d) | vault config (proposed values filled) |
+| cap, windowLimit, minDeposit (proposed 10 USDC), switchDelay (proposed 14 d); switchThreshold 6 is decided (4.11) | vault config (proposed values filled) |
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |

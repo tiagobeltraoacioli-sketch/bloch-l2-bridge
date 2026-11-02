@@ -1034,7 +1034,8 @@ class Guardian:
             if vault_due:
                 self.pause_vault(vault_due)
             self.cancel_votes(now, due)
-            # A token finding is never settled: the token's unpause needs only the mint quorum, the very keys that could forge a mint.
+            # A token finding is never settled by an unpause. The token's unpause needs switchThreshold (6 of 7 at launch), one more than
+            # the mint quorum (agent 171, F171-1: an older comment here said the mint quorum); not settling stays the conservative choice.
             # `mint-chain` is alert-only: the forged mint behind it has its own `mint:` finding, and the vault refuses its burns.
             token_due = [f for f in due if f != 'mint-chain']
             if token_due:
