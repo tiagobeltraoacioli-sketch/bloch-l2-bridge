@@ -8,7 +8,8 @@
     "l2Build": "L2 mainnet v2.1 build: bloch-l2-evm (build commit `a39b04e`) against native 78d4921c (follower c18752fd, produce-dev fb0d5313, settled-rpc 18be911a; release unsigned); network.genesisHash = the pinned L2 genesis 632e45ae",
     "vault": "deploy the Ethereum vault first (busdc-vault-mainnet.config.json, tools/deploy-pontes/vault_pontes.py); its verify output fills ethereum.vault/route/vaultCodeHash/vaultCap/vaultGuard",
     "sequence": "docs/BUSDC-MAINNET-V2.md",
-    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator (the 7 signer addresses are set, operators are not); guardians.set[0..2].operator; ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 2 Ethereum guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)"
+    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator (the 7 signer addresses are set, operators are not); guardians.set[0..2].operator; ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 2 Ethereum guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)",
+    "launchDesign": "BridgedStablecoinV3 over ProvenanceSourceVault mode 1 (agents 87, 108, 109): mint chain, guardian cancel, 6-of-7 unpause. largeMintThreshold 0 (T = 0): every mint waits largeMintDelay (12 h) and stays cancellable by a guardian majority, so a forged mint never credits while 2 of 3 guardians live and exits are never held"
   },
   "network": {
     "name": "bloch-l2-mainnet",
@@ -32,7 +33,7 @@
     "delay": 1209600
   },
   "token": {
-    "contract": "BridgedStablecoinV2",
+    "contract": "BridgedStablecoinV3",
     "name": "Bloch Bridged USDC",
     "symbol": "bUSDC"
   },
@@ -103,7 +104,7 @@
     "supplyCap": 100000000000,
     "bucketCapacity": 10000000000,
     "refillPerSecond": 115740,
-    "largeMintThreshold": 100000000,
+    "largeMintThreshold": 0,
     "largeMintDelay": 43200,
     "minBurn": 10000000
   },

@@ -14,5 +14,6 @@
   "keystore": "/etc/bloch-busdc-sombra/eth-guardian.keystore",
   "password_file": "/etc/bloch-busdc-sombra/eth-guardian.password",
   "state": "/var/lib/bloch-busdc-sombra/state.json",
-  "cast": "/opt/foundry/bin/cast"
+  "cast": "/opt/foundry/bin/cast",
+  "provenance": true
 }

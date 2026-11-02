@@ -28,5 +28,7 @@
   "alert_command": "TBD-owner (argv list with {id} and {detail}; without it a critical alert reaches only the log and health_file)",
   "release_before_final": "soft",
   "state": "/var/lib/bloch-guardiao/busdc-state.json",
-  "cast": "/opt/bloch-guardiao/bin/cast"
+  "cast": "/opt/bloch-guardiao/bin/cast",
+  "provenance": true,
+  "vault_pause_on_mint": true
 }

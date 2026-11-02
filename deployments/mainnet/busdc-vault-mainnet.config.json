@@ -10,7 +10,8 @@
     "switchDelay": "proposed 14 days (contract minimum 7 days): time for users and guardians to react to a proposed verifier (owner decision)",
     "guard": "two independent pause-only guardians: guardiao.py (fast path) and sombra.py (proof path); 72 h pause, 72 h cooldown, as the L2 token",
     "minDeposit": "proposed 10 USDC: the smallest deposit, immutable. The constructor requires l2MinBurn <= minDeposit <= windowLimit; validate --token-config requires l2MinBurn == the L2 minBurn",
-    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, recommended distinct from their L2 mint keys); 2 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchThreshold, switchDelay"
+    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, recommended distinct from their L2 mint keys); 2 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchThreshold, switchDelay",
+    "provenance": "mode 1: the vault keeps a hash chain over its deposits and pays a burn only if the burn states the same chain (BridgedStablecoinV3). Deposit ids carry the vault nonce in their top 8 bytes. releaseDelay 0 and no mintVerifier: options 2 and 3 are not the launch design"
   },
   "ethereum": {
     "chainId": 1,
@@ -27,7 +28,7 @@
     }
   },
   "vault": {
-    "contract": "contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault",
+    "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
     "sourceDomainLabel": "ethereum-mainnet",
     "nativeDomainLabel": "bloch-l2-700770",
     "assetLabel": "USDC",
@@ -88,6 +89,11 @@
       ],
       "pauseDuration": 259200,
       "pauseCooldown": 259200
+    },
+    "provenance": {
+      "mode": 1,
+      "releaseDelay": 0,
+      "mintVerifier": null
     }
   }
 }

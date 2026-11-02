@@ -11,5 +11,6 @@
   "cast": "/opt/foundry/bin/cast",
   "anchor_max_age": 160,
   "valid_seconds": 1800,
-  "max_valid_seconds": 3600
+  "max_valid_seconds": 3600,
+  "provenance": true
 }

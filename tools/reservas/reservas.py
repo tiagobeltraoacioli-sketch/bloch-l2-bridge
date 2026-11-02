@@ -24,6 +24,12 @@ The L2 settled RPC, from the v2 build on, serves `finalized` only from its follo
 FFG replay and answers null until that status verifies: the bridge is then `unverifiable`, never a deficit.
 Optional per-bridge `l2_genesis_hash` (mainnet 632e45ae...) pins the L2: another chain is unverifiable.
 
+Mint chain (stable, `"provenance": true`: BridgedStablecoinV3 over ProvenanceSourceVault, agents/108-d6-design.md): the
+token's `mintHead()` after `mintCount()` credits, at the L2 `finalized` block, must equal the vault's `chainHeadAt(mintCount)`
+at the Ethereum `finalized` block. Otherwise a credited mint has no deposit behind it, and the vault refuses every burn made
+from then on: status `held`, hard alert, exit 2. Value is not lost, it waits for the owner's settlement; the supply check
+alone cannot see this while unminted deposits leave slack. A token ahead of the vault's finalized deposits is unverifiable.
+
 `tolerance` (base units, default 0) absorbs routine in-flight amounts. Every bridge yields one line
 `kind: reserves` with the numbers; alerts are separate lines. Read errors are `unverifiable` (exit 1), never
 a deficit. This tool only reports: pausing is the guardians' job (tools/guardiao). UNAUDITED dev tool.
@@ -133,6 +139,26 @@ class Monitor:
             return {'utxos': len(r['utxos'])}, total
         raise Unverifiable(f'unknown kind {b["kind"]}')
 
+    def chain(self, b, l2_block, eth_block):
+        """(clean, detail) of the V3 mint chain against the vault's deposit chain, both at finality."""
+        url, token = b['l2_rpc'], b['token']
+        count = self.uint(url, token, 'mintCount()', l2_block)
+        deposits = self.uint(b['eth_rpc'], b['vault'], 'depositCount()', eth_block)
+        if count > deposits:
+            # Honest signers mint only finalized deposits, so the token can be ahead of the vault only by a lagging view of
+            # finality. Ahead of the vault's latest count too, it is a credited mint with no deposit at all.
+            latest = int(rpc(b['eth_rpc'], 'eth_call', [{'to': b['vault'], 'data': self.calldata('depositCount()')}, 'latest']), 16)
+            if count <= latest:
+                raise Unverifiable(f'the token credited {count} mints, the vault shows {deposits} finalized deposits: a lagging Ethereum view')
+            return False, {'mint_count': count, 'mint_head': None, 'vault_head': None, 'deposit_count': latest,
+                           'why': 'more credited mints than vault deposits, even at latest'}
+        head = rpc(url, 'eth_call', [{'to': token, 'data': self.calldata('mintHead()')}, hex(l2_block)])
+        want = rpc(b['eth_rpc'], 'eth_call', [{'to': b['vault'], 'data': self.calldata('chainHeadAt(uint64)', count)}, hex(eth_block)])
+        if len(head) != 66 or len(want) != 66:
+            raise Unverifiable('mintHead/chainHeadAt: empty answer (not a V3 token over a ProvenanceSourceVault?)')
+        return head.lower() == want.lower(), {'mint_count': count, 'mint_head': head.lower(), 'vault_head': want.lower(),
+                                              'deposit_count': deposits}
+
     def check(self, b):
         # liabilities first, then backing: a release landing in between can only make the check more lenient
         l2_block, supply, pending = self.liabilities(b)
@@ -141,6 +167,14 @@ class Monitor:
         diff = backing - owed
         tol = int(b.get('tolerance', 0))
         status = 'deficit' if diff < 0 else 'surplus' if diff > tol else 'ok'
+        if b['kind'] == 'stable' and b.get('provenance'):
+            clean, detail = self.chain(b, l2_block, extra['source_block'])
+            extra['mint_chain'] = detail
+            if not clean:
+                self.log(kind='alert', severity='hard', bridge=b['name'], id='held', reason='a credited L2 mint has no '
+                         'deposit behind it: the vault refuses every burn made from now on (held, not lost)', **detail)
+                if status != 'deficit':
+                    status = 'held'
         self.log(kind='reserves', bridge=b['name'], status=status, backing=backing, total_supply=supply,
                  pending_supply=pending, liabilities=owed, difference=diff, l2_finalized=l2_block, **extra)
         if status == 'deficit':
@@ -167,7 +201,7 @@ class Monitor:
         """One call when a condition starts to matter and one when it clears: never a call per round."""
         mem = self.__dict__.setdefault('_mem', {}).setdefault(name, {'since': {}, 'sent': set(), 'errors': 0})
         mem['errors'] = mem['errors'] + 1 if status == 'error' else 0
-        for k in ('deficit', 'surplus'):
+        for k in ('deficit', 'surplus', 'held'):
             if status == k:
                 mem['since'].setdefault(k, now)
             else:
@@ -175,14 +209,17 @@ class Monitor:
         due = set()
         if 'deficit' in mem['since']:
             due.add('deficit')
+        if 'held' in mem['since']:
+            due.add('held')
         if 'surplus' in mem['since'] and now - mem['since']['surplus'] >= int(self.cfg.get('surplus_alert_s', 3600)):
             due.add('surplus-stuck')
         if mem['errors'] >= int(self.cfg.get('unverifiable_alert_rounds', 3)):
             due.add('unverifiable')
         if status == 'error' and mem['errors'] < int(self.cfg.get('unverifiable_alert_rounds', 3)):
-            due |= mem['sent'] & {'deficit', 'surplus-stuck'}  # a read error is no evidence that a deficit cleared
+            due |= mem['sent'] & {'deficit', 'surplus-stuck', 'held'}  # a read error is no evidence that a deficit cleared
         for k in sorted(due - mem['sent']):
             self.notify(f'{name}:{k}', {'deficit': 'source backing below the L2 token liabilities',
+                                        'held': 'the L2 mint chain differs from the vault deposit chain: exits of new burns are held',
                                         'surplus-stuck': 'backing above liabilities for too long: deposits not minted or '
                                                          'burns not released (signers or relay down?)',
                                         'unverifiable': f'{mem["errors"]} rounds without a reading'}[k])
@@ -220,7 +257,7 @@ class Monitor:
             seen.add(status)
             self.escalate(str(b.get('name')), status, now)
         self.write_health(now)
-        return next((c for k, c in (('deficit', 2), ('error', 1), ('surplus', 3)) if k in seen), 0)
+        return next((c for k, c in (('deficit', 2), ('held', 2), ('error', 1), ('surplus', 3)) if k in seen), 0)
 
 def main():
     args = sys.argv[1:]

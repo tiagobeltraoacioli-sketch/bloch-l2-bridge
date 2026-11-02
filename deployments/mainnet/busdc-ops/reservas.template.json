@@ -10,7 +10,8 @@
       "token": "TBD-owner",
       "eth_rpc": "http://127.0.0.1:8545",
       "vault": "TBD-owner",
-      "tolerance": 0
+      "tolerance": 0,
+      "provenance": true
     }
   ]
 }

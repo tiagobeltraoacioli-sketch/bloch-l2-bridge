@@ -81,6 +81,7 @@ MARKER_VALUE = 546  # GnB-SMH marker output (lock destination / release burn mar
 MAX_RELEASE_FEE = 1_000_000  # GnB-SMH: largest fee a release may take out of the burned amount
 RELEASE_DS = b'GNB-RELEASE-v1'
 DEPOSIT_DS = b'BLOCH-USDT-DEPOSIT-v1'
+DEPOSIT_DS_V2 = b'BLOCH-USDT-DEPOSIT-v2'
 MAINNET_L2_CHAIN = 700770
 # Settlement delay of the L2 as a replica shows it: up to two 8-14 min cycles (a transaction waits for the current proof
 # and its own), plus the replica's refresh and one guardian round. Grace periods below this can pause on a lagging view.
@@ -97,6 +98,7 @@ MINT_QUEUED = 'MintQueued(bytes32,address,uint64,uint256)'
 MINT_CANCELLED = 'MintCancelled(bytes32,address,uint64,uint64)'
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
+BURNED_V3 = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
 
 
 class LevelClosed(Exception):
@@ -177,6 +179,11 @@ class Guardian:
         # stablecoin only: also pause the Ethereum vault (ContextBoundSourceVault.guardianPause, committee mode)
         # on a release or reserves violation, with this guardian's own Ethereum key
         self.vault_pause = self.kind == 'stable' and bool(c.get('vault_pause'))
+        # BridgedStablecoinV3 over ProvenanceSourceVault (agents/108-d6-design.md): the V3 Burned log, the v2 deposit id
+        # (nonce in the top 8 bytes), and the mint-chain check (`mint-chain`, hard, alert only: the vault already refuses
+        # every burn made under an unbacked chain, so pausing would only stop the honest exits that still match).
+        self.provenance = self.kind == 'stable' and bool(c.get('provenance'))
+        self.design_checked = False
         self.state.setdefault('problems', {})
         if mainnet and min(self.reserves_grace, self.provenance_grace) < SETTLEMENT_DELAY_S:
             self.log(kind='alert', severity='soft', id='grace-below-settlement-delay', settlement_delay_s=SETTLEMENT_DELAY_S,
@@ -357,7 +364,7 @@ class Guardian:
             queued[l['topics'][1].lower()] = {'amount': uint(w[0]), 'ready_at': uint(w[1]),
                                               'recipient': addr(l['topics'][2])}
         burns = []
-        for l in self.logs(self.l2, self.token, self.topic(ev['Burned']), start, b):
+        for l in self.logs(self.l2, self.token, self.topic(BURNED_V3 if self.provenance else ev['Burned']), start, b):
             w = words(l['data'])
             item = {'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'amount': uint(w[0]),
                     'block': int(l['blockNumber'], 16), 'tx': l['transactionHash']}
@@ -366,6 +373,8 @@ class Guardian:
                 item['spk'] = ''.join(w[3:])[:2 * n]
             else:
                 item['eth_recipient'] = addr(w[1])
+                if self.provenance:
+                    item.update(mint_count=uint(w[2]), minted_total=uint(w[3]), mint_head=b32(w[4]))
             burns.append(item)
         supply = uint(self.call(self.l2, self.token, 'totalSupply()', block=b)[0])
         pending = uint(self.call(self.l2, self.token, 'pendingSupply()', block=b)[0])
@@ -571,10 +580,13 @@ class Guardian:
             return 'deposit nonce/amount differ from the mint'
         if d['pq'] != '0x' + '00' * 12 + m['recipient'][2:]:
             return 'deposit recipient differs from the mint'
-        enc = (DEPOSIT_DS.ljust(32, b'\0') + bytes.fromhex(self.route[2:]) + d['nonce'].to_bytes(32, 'big')
-               + bytes.fromhex(d['sender'][2:]).rjust(32, b'\0') + d['amount'].to_bytes(32, 'big')
+        enc = ((DEPOSIT_DS_V2 if self.provenance else DEPOSIT_DS).ljust(32, b'\0') + bytes.fromhex(self.route[2:])
+               + d['nonce'].to_bytes(32, 'big') + bytes.fromhex(d['sender'][2:]).rjust(32, b'\0') + d['amount'].to_bytes(32, 'big')
                + bytes.fromhex(d['pq'][2:]))
-        if '0x' + hashlib.sha256(enc).hexdigest() != m['key']:
+        want = '0x' + hashlib.sha256(enc).hexdigest()
+        if self.provenance:  # ProvenanceSourceVault: the nonce in the top 8 bytes, the hash's low 24 bytes below it
+            want = '0x%064x' % ((d['nonce'] << 192) | (int(want, 16) & ((1 << 192) - 1)))
+        if want != m['key']:
             return 'depositId does not hash from the deposit fields'
         return 'ok'
 
@@ -604,6 +616,56 @@ class Guardian:
             if self.vault_pause and not uint(self.call(self.cfg['eth_rpc'], self.cfg['vault'], 'isGuardian(address)',
                                                        self.eth_me())[0]):
                 raise Unverifiable(f'{self.eth_me()} is not a guardian of the vault {self.cfg["vault"]}')
+            if not self.design_checked:
+                self.check_design()
+
+    def check_design(self):
+        """`provenance` must match the contracts, or every burn and deposit id is read wrong. Only answers decide."""
+        try:
+            v3 = len(self.call(self.l2, self.token, 'mintHead()')) == 1
+        except Unverifiable as e:
+            if 'revert' not in str(e).lower():
+                raise
+            v3 = False
+        except IndexError:
+            v3 = False
+        try:
+            mode = uint(self.call(self.cfg['eth_rpc'], self.cfg['vault'], 'provenanceMode()')[0])
+        except Unverifiable as e:
+            if 'revert' not in str(e).lower():
+                raise
+            mode = 0
+        except IndexError:
+            mode = 0
+        if self.provenance and not (v3 and mode == 1):
+            raise SystemExit(f'`provenance: true` needs BridgedStablecoinV3 over a ProvenanceSourceVault in mode 1 '
+                             f'(token mintHead: {v3}, vault provenanceMode: {mode})')
+        if not self.provenance and (v3 or mode):
+            raise SystemExit(f'the token or vault uses the mint chain (token mintHead: {v3}, vault provenanceMode: {mode}): '
+                             'set `provenance: true`')
+        self.design_checked = True
+
+    def chain_findings(self, b):
+        """BridgedStablecoinV3: the credited mint chain at L2 block b against the vault's deposit chain at Ethereum finalized."""
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        e = self.block(eth, 'finalized')[0]
+        count = uint(self.call(self.l2, self.token, 'mintCount()', block=b)[0])
+        head = b32(self.call(self.l2, self.token, 'mintHead()', block=b)[0])
+        deposits = uint(self.call(eth, vault, 'depositCount()', block=e)[0])
+        detail = {'mint_count': count, 'mint_head': head, 'deposit_count': deposits, 'l2_block': b, 'eth_finalized': e}
+        if count > deposits:
+            latest = uint(self.call(eth, vault, 'depositCount()', block='latest')[0])
+            ahead = count > latest  # ahead of the vault's latest count too: no lag explains it
+            return [('hard', 'mint-chain', 0 if ahead else self.provenance_grace, {
+                'reason': 'the token credited more mints than the vault has deposits, even at latest: credited forgeries'
+                          if ahead else 'the token credited more mints than the vault has finalized deposits (a lagging '
+                          'Ethereum view, or credited forgeries)', 'deposit_count_latest': latest, **detail})]
+        want = b32(self.call(eth, vault, 'chainHeadAt(uint64)', str(count), block=e)[0])
+        if want != head:
+            return [('hard', 'mint-chain', self.provenance_grace, {
+                'reason': 'a credited L2 mint has no deposit behind it: the vault refuses every burn made from now on '
+                          '(held, not lost) until the owner settles', 'vault_head': want, **detail})]
+        return []
 
     def track_head(self, head_time, wall):
         """Note whether the L2 view still advances. Returns nothing: the clock is max(head, wall) either way."""
@@ -746,6 +808,8 @@ class Guardian:
                                                                       'sla_s': self.release_sla, 'l2_finalized': fin}))
         if self.kind == 'stable':
             findings += self.mint_switch_findings()
+            if self.provenance:
+                findings += self.chain_findings(b)
         self.state.pop('l2_down', None)
         self.clear_problem('l2-read-failed')
         self.state['l2_view'] = {'burns': burns, 'finalized': fin, 'route': getattr(self, 'route', None), 'head_time': head_time}
@@ -921,7 +985,10 @@ class Guardian:
                 self.pause_vault(vault_due)
             self.cancel_votes(now, due)
             # A token finding is never settled: the token's unpause needs only the mint quorum, the very keys that could forge a mint.
-            self.pause(now, due)
+            # `mint-chain` is alert-only: the forged mint behind it has its own `mint:` finding, and the vault refuses its burns.
+            token_due = [f for f in due if f != 'mint-chain']
+            if token_due:
+                self.pause(now, token_due)
         if self.state['problems']:
             return 4
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())

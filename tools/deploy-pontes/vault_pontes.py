@@ -43,6 +43,10 @@ MIN_SWITCH_DELAY = 7 * 86400
 MIN_PAUSE, MAX_PAUSE = 3600, 14 * 86400
 UINT64_MAX = 2**64 - 1
 CONTRACT = 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault'
+# The V3 launch design (agents/108-d6-design.md, 109): the vault keeps a deposit chain and pays a burn only if the token's
+# mint chain at the burn matches it. Config `vault.provenance` = {"mode": 1, "releaseDelay": 0, "mintVerifier": null}.
+PROVENANCE_CONTRACT = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'
+ZERO = '0x' + '00' * 20
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
 CAST = str(FOUNDRY / 'cast')
 
@@ -96,9 +100,15 @@ def validate(cfg, rehearsal, token_cfg=None):
            'source.revision is undecided (full git commit hash)')
 
     v = cfg['vault']
+    provenance = v.get('contract') == PROVENANCE_CONTRACT
     exact_keys(v, ['contract', 'sourceDomainLabel', 'nativeDomainLabel', 'assetLabel', 'token', 'cap',
-                   'transferMode', 'signers', 'policy', 'guard'], 'vault')
-    refuse(v['contract'] == CONTRACT, f'vault.contract must be {CONTRACT}')
+                   'transferMode', 'signers', 'policy', 'guard'] + (['provenance'] if provenance else []), 'vault')
+    refuse(v['contract'] in (CONTRACT, PROVENANCE_CONTRACT), f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
+    if provenance:
+        pv = v['provenance']
+        exact_keys(pv, ['mode', 'releaseDelay', 'mintVerifier'], 'vault.provenance')
+        refuse(pv['mode'] == 1 and pv['releaseDelay'] == 0 and pv['mintVerifier'] is None,
+               'vault.provenance must be mode 1 (mint chain), releaseDelay 0, no mintVerifier (options 2 and 3 are not the launch design)')
     labels = (v['sourceDomainLabel'], v['nativeDomainLabel'], v['assetLabel'])
     refuse(all(isinstance(x, str) and x for x in labels), 'a vault domain label is undecided')
     refuse(v['sourceDomainLabel'] != v['nativeDomainLabel'], 'source and native domains must differ')
@@ -169,6 +179,9 @@ def validate(cfg, rehearsal, token_cfg=None):
 
     if token_cfg is not None:
         lim, te = token_cfg.get('limits', {}), token_cfg.get('ethereum', {})
+        tc = (token_cfg.get('token') or {}).get('contract')
+        refuse((tc == 'BridgedStablecoinV3') == provenance,
+               f'token {tc} and vault {v["contract"]} do not pair: BridgedStablecoinV3 needs a ProvenanceSourceVault and only it')
         refuse(is_uint(lim.get('supplyCap')) and v['cap'] == lim['supplyCap'],
                'vault cap differs from the L2 supplyCap (above it a deposit may never mint; below it mints stop early)')
         refuse(lim.get('bucketCapacity') == pol['windowLimit'],
@@ -192,7 +205,8 @@ def constructor_args(cfg, norm):
             v['token'].lower(), str(v['cap']), str(v['transferMode']), '[' + ','.join(norm['signers']) + ']',
             str(v['signers']['threshold']),
             f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
-            f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})']
+            f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})'] + (
+                [f'({v["provenance"]["mode"]},{v["provenance"]["releaseDelay"]},{ZERO})'] if v['contract'] == PROVENANCE_CONTRACT else [])
 
 
 def rpc(url, method, params):
@@ -231,6 +245,9 @@ def verify(cfg, norm, url, address, block, unused=False):
         'verifier()(address)': '0x' + '00' * 20, 'proposedVerifier()(address)': '0x' + '00' * 20,
         'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
+    if v['contract'] == PROVENANCE_CONTRACT:
+        expect.update({'provenanceMode()(uint8)': str(v['provenance']['mode']), 'releaseDelay()(uint64)': '0',
+                       'mintVerifier()(address)': ZERO, 'forgeryProvenAt()(uint64)': '0'})
     checked, state = {}, {}
     for sig, want in expect.items():
         got = get(sig).lower()
@@ -249,6 +266,7 @@ def verify(cfg, norm, url, address, block, unused=False):
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
     code_hash = cast('keccak', code).lower()
+    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] == PROVENANCE_CONTRACT else None
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
             'busdcEthereum': {'chainId': cfg['ethereum']['chainId'], 'vault': address.lower(), 'route': route,
@@ -256,7 +274,8 @@ def verify(cfg, norm, url, address, block, unused=False):
                               'vaultGuard': {'guardians': norm['guardians'], 'pauseDuration': v['guard']['pauseDuration'],
                                              'pauseCooldown': v['guard']['pauseCooldown']}},
             'ethHalf': {'eth_chain_id': cfg['ethereum']['chainId'], 'vault': address.lower(),
-                        'vault_code_keccak': code_hash}}
+                        'vault_code_keccak': code_hash, **({'provenance': True} if genesis else {})},
+            **({'mintChainGenesis': genesis} if genesis else {})}
 
 
 def main():
@@ -278,7 +297,7 @@ def main():
             result = {'decision': 'constructor-args', 'configSha256': sha, 'constructorArgs': ctor,
                       # Dry run first (no --broadcast). The broadcast is the same line with --broadcast added by hand:
                       # it is one-way, and a creation that lands wrong is not repaired (docs/BUSDC-MAINNET-V2.md 4.3).
-                      'forge': ['forge', 'create', '--rpc-url', '<OWN_ETHEREUM_RPC>', CONTRACT,
+                      'forge': ['forge', 'create', '--rpc-url', '<OWN_ETHEREUM_RPC>', cfg['vault']['contract'],
                                 '--constructor-args', *ctor],
                       'next': 'run the forge line as printed (a dry run); only then add --broadcast and the wallet'}
         else:

@@ -101,8 +101,9 @@ def vault_rehearsal(url, work, token_cfg):
     rc, r = vtool('validate', '--config', vpath)
     check('[vault] refused without --rehearsal', rc == 1 and 'disagree' in r.get('reason', ''), r)
     rc, a = vtool('args', '--config', vpath, '--rehearsal')
-    check('[vault] args: ten constructor arguments, sorted signers and guardians', rc == 0
-          and len(a.get('constructorArgs', [])) == 10
+    n_args = 11 if vc['vault'].get('provenance') else 10  # ProvenanceSourceVault adds its Provenance policy
+    check(f'[vault] args: {n_args} constructor arguments, sorted signers and guardians', rc == 0
+          and len(a.get('constructorArgs', [])) == n_args
           and a['constructorArgs'][6] == '[' + ','.join(v['signers']) + ']', a)
     dep = out(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', url, '--private-key', dkey,
               vc['vault']['contract'], '--constructor-args', *a['constructorArgs'])
@@ -196,6 +197,14 @@ def vault_rehearsal(url, work, token_cfg):
     mainnet_refused('a switchDelay holders cannot exit within refused',
                     lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] // 100), 'exit')
     mainnet_refused('no guardian refused', lambda c: c['vault']['guard'].update(guardians=[]), '1..7')
+    if vc['vault'].get('provenance'):
+        mainnet_refused('a provenance vault outside mode 1 refused', lambda c: c['vault']['provenance'].update(mode=2), 'mode 1')
+        tc = json.loads(json.dumps(token_cfg))
+        tc['ethereum'] = json.loads(json.dumps(be))
+        tc['token']['contract'] = 'BridgedStablecoinV2'
+        tpath2.write_text(json.dumps(tc))
+        rc, r = vtool('validate', '--config', vpath, '--rehearsal', '--token-config', tpath2)
+        check('[vault] cross-check refuses a V2 token over a ProvenanceSourceVault', rc == 1 and 'pair' in r.get('reason', ''), r)
 
 
 def start_anvil(chain_id):
@@ -241,8 +250,13 @@ def fill(template, url, work, label, n_signers, threshold, n_guardians, rehearsa
     return cfg, ['--keystore', str(work / f'{label}-deployer'), '--password-file', str(work / 'pw')]
 
 
-def source_vault(eth, work):
-    """MockStable + ContextBoundSourceVault on the 'Ethereum' anvil; returns the config's ethereum block."""
+VAULTS = {False: 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+          True: 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'}
+
+
+def source_vault(eth, work, provenance=False):
+    """MockStable + the template's vault (ProvenanceSourceVault mode 1 for BridgedStablecoinV3, else ContextBoundSourceVault)
+    on the 'Ethereum' anvil; returns the config's ethereum block."""
     def create(target, *ctor):
         args = ['--constructor-args', *ctor] if ctor else []
         dep = out(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', eth, '--private-key', ANVIL_KEY,
@@ -252,10 +266,10 @@ def source_vault(eth, work):
     token = create('solidity-tests/BridgedStablecoin.t.sol:MockStable')
     signers = sorted(new_key()[1] for _ in range(3))
     guardians = sorted((new_key()[1] for _ in range(2)), key=lambda a: int(a, 16))
-    vault = create('contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+    vault = create(VAULTS[provenance],
                    k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
                    '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800,1,1)',
-                   f'([{",".join(guardians)}],259200,259200)')
+                   f'([{",".join(guardians)}],259200,259200)', *(['(1,0,0x' + '00' * 20 + ')'] if provenance else []))
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
     return {'chainId': int(out(CAST, 'chain-id', '--rpc-url', eth)), 'vault': vault,
             'route': out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth).lower(),
@@ -283,7 +297,7 @@ def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=No
         rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
         check(f'{tag} run refused without --source-rpc', rc == 1 and '--source-rpc' in r.get('reason', ''), r)
         # The same vault with depositCount set to 1, on a snapshot: one vault, one token.
-        layout = json.loads(out(FORGE, 'inspect', '--root', ROOT, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+        layout = json.loads(out(FORGE, 'inspect', '--root', ROOT, VAULTS[cfg['token']['contract'] == 'BridgedStablecoinV3'],
                                 'storageLayout', '--json'))
         slot = next(x for x in layout['storage'] if x['label'] == 'depositCount')
         snap = out(CAST, 'rpc', 'evm_snapshot', '--rpc-url', source_rpc).strip('"')
@@ -364,7 +378,7 @@ def main():
         cfg, wallet = fill(templates['wgnb'], main_url, work, 'wgnb', 7, 5, 3, False)
         full_flow('wgnb-700770', cfg, wallet, main_url, work, [], other_rpc=dev_url)
         cfg, wallet = fill(templates['stable'], main_url, work, 'stable', 7, 5, 3, False)
-        cfg['ethereum'] = source_vault(eth_url, work)
+        cfg['ethereum'] = source_vault(eth_url, work, cfg['token']['contract'] == 'BridgedStablecoinV3')
         full_flow('busdc-700770', cfg, wallet, main_url, work, [], source_rpc=eth_url)
 
         # policy refusals on the mainnet config

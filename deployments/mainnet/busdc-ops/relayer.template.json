@@ -31,5 +31,7 @@
   "l2_relayer_key": "/etc/bloch-busdc-relayer/l2-gas.key",
   "eth_relayer_key": "/etc/bloch-busdc-relayer/eth-gas.key",
   "cast": "/opt/foundry/bin/cast",
-  "round_margin": 600
+  "round_margin": 600,
+  "provenance": true,
+  "mint_gas_limit": 600000
 }

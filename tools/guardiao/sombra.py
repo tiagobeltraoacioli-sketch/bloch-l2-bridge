@@ -23,6 +23,12 @@ another guardian can renew in between. A committee unpause (switchThreshold sign
 first seen no later than it stays open and alerted but starts no further pause, and a new finding waits out the cooldown and
 pauses. A live verifier proposal is a soft `verifier-proposed` alert. Once the vault has switched to its verifier the shadow phase is over and the guardian does nothing.
 
+ProvenanceSourceVault (`"provenance": true`, the V3 launch design): the `Released` id is the v2 release id, which hashes
+the burn's mint-chain fields (mintCount, mintedTotal, mintHead). The prover must run the V3 release program (guest
+`codex/d6-guest-r6-20261102`), whose `release_id` is the same v2 id, and `shadow_verifier` must pin that program's vkey.
+The guardian checks once that the vault is in mode 1 (and refuses a mode-1 vault without the flag). A v1 prover's ids
+never match a v2 vault's, so its releases stay unproven and pause, as they should.
+
 Soft alerts (never pause): the prover's status file is older than `prover_stale_s`, read errors.
 
 Light-client build range (`lc_max_epoch`, optional, needs `l1_rpc`): the deployed step/release programs
@@ -215,6 +221,13 @@ class Sombra:
                 self.state['switched'] = verifier
                 self.log(kind='switched', verifier=verifier, note='light-client verifier active: guardian retired')
             return now, []
+        if self.cfg.get('provenance') and not self.state.get('provenance_checked'):
+            mode = self.call(self.vault, 'provenanceMode()(uint8)', ok=False)
+            if mode != '1':
+                raise Unverifiable(f'`provenance: true` but the vault answers provenanceMode {mode}')
+            self.state['provenance_checked'] = True
+        elif not self.cfg.get('provenance') and self.call(self.vault, 'provenanceMode()(uint8)', ok=False) not in (None, '0'):
+            raise Unverifiable('the vault uses the mint chain: set `provenance: true` and run the V3 release program')
         self.me = self.cast_out('wallet', 'address', '--keystore', self.cfg['keystore'], '--password-file',
                                 self.cfg['password_file']).lower()
         if self.call(self.vault, 'isGuardian(address)(bool)', self.me) != 'true':

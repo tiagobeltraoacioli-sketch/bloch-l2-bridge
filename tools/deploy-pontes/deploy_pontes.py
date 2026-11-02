@@ -60,6 +60,14 @@ CONTRACTS = {
     'stable': {'contract': 'BridgedStablecoinV2', 'source': 'contracts/stable/BridgedStablecoinV2.sol',
                'domain_name': 'Bloch Bridged Stablecoin', 'decimals': 6},
 }
+# The V3 launch design (agents/108-d6-design.md, 109): same constructor and immutables as V2, plus the credit-ordered mint
+# chain. It must sit over a ProvenanceSourceVault in mode 1 (checked by verify --source-rpc).
+STABLE_V3 = {'contract': 'BridgedStablecoinV3', 'source': 'contracts/stable/BridgedStablecoinV3.sol',
+             'domain_name': 'Bloch Bridged Stablecoin', 'decimals': 6}
+
+
+def spec_of(p):
+    return STABLE_V3 if p.get('contract') == STABLE_V3['contract'] else CONTRACTS[p['bridge']]
 LIMITS_T = '(uint256,uint256,uint256,uint256,uint256,uint256)'
 GUARD_T = '(address[],uint256,uint256)'
 MINT_SWITCH_T = '(uint256,uint64)'
@@ -211,7 +219,8 @@ def validate(cfg, rehearsal):
         name, symbol = tok['name'], tok['symbol']
         refuse(isinstance(name, str) and 0 < len(name) <= 64, 'token.name is undecided')
         refuse(isinstance(symbol, str) and re.fullmatch(r'[A-Za-z0-9.]{1,11}', symbol), 'token.symbol is undecided')
-    refuse(tok['contract'] == spec['contract'], f'token.contract must be {spec["contract"]}')
+    allowed = [spec['contract']] + ([STABLE_V3['contract']] if bridge == 'stable' else [])
+    refuse(tok['contract'] in allowed, f'token.contract must be one of {allowed}')
 
     sg = cfg['signers']
     exact_keys(sg, ['threshold', 'set'], 'signers')
@@ -270,7 +279,7 @@ def validate(cfg, rehearsal):
                'mainnet policy: mints above a threshold below the bucket capacity are delayed')
         refuse(lim['minBurn'] < lim['bucketCapacity'], 'minBurn must be below the bucket capacity')
 
-    params = {'bridge': bridge, 'chainId': chain, 'name': name, 'symbol': symbol, 'signers': signers,
+    params = {'bridge': bridge, 'contract': tok['contract'], 'chainId': chain, 'name': name, 'symbol': symbol, 'signers': signers,
               'threshold': k, 'guardians': guardians, 'pauseDuration': pd, 'pauseCooldown': pc,
               'limits': {key: lim[key] for key in LIMIT_KEYS}}
     if bridge == 'wgnb':
@@ -335,16 +344,19 @@ def git_revision_check(revision):
     refuse(dirty == '', f'contracts/ or foundry.toml differ from the pinned revision:\n{dirty}')
 
 
-def load_artifacts(bridge, build):
+def load_artifacts(p, build):
     if build:
         sh([FORGE, 'build', '--root', ROOT, '--ast'], 'forge build')
-    spec = CONTRACTS[bridge]
+    spec = spec_of(p)
     out = ROOT / 'out'
     art = json.loads((out / Path(spec['source']).name / f'{spec["contract"]}.json').read_text())
     base = json.loads((out / 'SignerMintedToken.sol' / 'SignerMintedToken.json').read_text())
-    refuse('ast' in art and 'ast' in base, 'artifacts carry no AST: run forge build --ast')
+    asts = [art, base]
+    if spec is STABLE_V3:  # V3's immutables are V2's, declared in V2's source file
+        asts.append(json.loads((out / 'BridgedStablecoinV2.sol' / 'BridgedStablecoinV2.json').read_text()))
+    refuse(all('ast' in a for a in asts), 'artifacts carry no AST: run forge build --ast')
     names = {}
-    for a in (art, base):
+    for a in asts:
         stack = [a['ast']]
         while stack:
             node = stack.pop()
@@ -397,7 +409,7 @@ def constructor_args(p):
 def make_plan(cfg, rehearsal, build=True):
     p = validate(cfg, rehearsal)
     git_revision_check(cfg['source']['revision'])
-    art = load_artifacts(p['bridge'], build)
+    art = load_artifacts(p, build)
     sig, args = constructor_args(p)
     encoded = sh([CAST, 'abi-encode', sig, *args], 'cast abi-encode').lower()
     init_code = art['bytecode'] + encoded[2:]
@@ -432,7 +444,7 @@ def make_plan(cfg, rehearsal, build=True):
             'source': {'revision': cfg['source']['revision'], 'compiler': art['compiler']},
             'deployer': {'address': deployer, 'nonce': nonce, 'fundedBy': {
                 'entity': cfg['deployer']['fundedBy']['entity'], 'safe': cfg['deployer']['fundedBy']['safe'].lower()}},
-            'contract': {'name': CONTRACTS[p['bridge']]['contract'], 'source': CONTRACTS[p['bridge']]['source'],
+            'contract': {'name': spec_of(p)['contract'], 'source': spec_of(p)['source'],
                          'address': address, 'constructor': {'signature': sig, 'args': args},
                          'constructorArgs': encoded, 'initCodeHash': keccak_hex(init_code),
                          'runtimeCodeHash': keccak_hex('0x' + runtime.hex()), 'immutables': linked},
@@ -675,6 +687,18 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
         refuse(guard == sv['guard'], f'vault guardians/pause policy {guard} differ from the config {sv["guard"]}')
         result['sourceVault'] = {'address': sv['address'], 'codeHash': sv['codeHash'], 'routeId': route, 'cap': cap,
                                  'guard': guard}
+        if plan['contract']['name'] == STABLE_V3['contract']:
+            # The mint chain only means something over a mode-1 ProvenanceSourceVault whose deposit chain starts where the
+            # token's does: the token's head after mintCount credits must equal the vault's head after as many deposits.
+            mode = uint('provenanceMode()')
+            refuse(mode == 1, f'a BridgedStablecoinV3 needs a ProvenanceSourceVault in mode 1, the vault answers {mode}')
+            count = int(str(get('mintCount()', '(uint64)')).split()[0])
+            head = get('mintHead()', '(bytes32)').lower()
+            want = json.loads(eth.call(sv['address'], 'chainHeadAt(uint64)', count, block='finalized',
+                                       returns='(bytes32)'))[0].lower()
+            refuse(head == want, f'token mintHead {head} after {count} credits differs from the vault chain {want}')
+            result['sourceVault']['provenanceMode'] = mode
+            result['mintChain'] = {'mintCount': count, 'mintHead': head, 'clean': True}
     return result
 
 

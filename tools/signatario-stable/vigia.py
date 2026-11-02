@@ -84,6 +84,11 @@ CONTEXT_TUPLE = '(uint256,uint256,bytes32,uint64,bytes32)'
 RELEASE_FIELDS = ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')
 CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativeFinalizedNumber',
                   'nativeFinalizedHash')
+# BridgedStablecoinV3 over ProvenanceSourceVault (`"provenance": true`, agents/108-d6-design.md): the Burned log states the
+# token's mint chain, and the release (and its id, v2) carries it. Mints credit in deposit-nonce (slot) order.
+BURNED_V3 = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
+RELEASE_TUPLE_V3 = '(bytes32,uint64,address,uint64,bytes32,uint64,uint64,bytes32)'
+RELEASE_FIELDS_V3 = RELEASE_FIELDS + ('mintCount', 'mintedTotal', 'mintHead')
 WORD = re.compile(r'0x[0-9a-fA-F]{64}')
 ADDRESS = re.compile(r'0x[0-9a-fA-F]{40}')
 SIGNATURE = re.compile(r'0x[0-9a-fA-F]{130}')
@@ -139,6 +144,12 @@ class Vigia:
         self.me = self.cfg.get('signer_name', f"s{self.cfg.get('signer')}")
         self.signs_per_hour = int(self.cfg.get('max_release_signs_per_hour', 6))
         self.refused_retry = int(self.cfg.get('refused_retry', 300))
+        self.provenance = bool(self.cfg.get('provenance'))
+        self.burned_sig = BURNED_V3 if self.provenance else BURNED
+        self.release_tuple = RELEASE_TUPLE_V3 if self.provenance else RELEASE_TUPLE
+        self.release_fields = RELEASE_FIELDS_V3 if self.provenance else RELEASE_FIELDS
+        self.mint_gas = int(self.cfg.get('mint_gas_limit', 600_000))
+        self.design_checked = False
         if self.cfg.get('l2_pins') and not self.cfg.get('feed'):
             raise SystemExit('a mainnet config needs a `feed` block: shared_dir alone is a local rehearsal mode')
         self.feed = None
@@ -167,6 +178,35 @@ class Vigia:
             except OSError:
                 pass
         return self._version
+
+    def check_design(self):
+        """`provenance` must match the contracts: a V3 token answers mintHead(), a ProvenanceSourceVault provenanceMode() = 1.
+        A mismatch would sign digests the vault refuses, or relay mints out of order; refuse to run instead. Asked until both
+        contracts answer."""
+        if self.design_checked:
+            return
+        try:
+            head = self.call(self.cfg['l2_rpc'], self.token, 'mintHead()')
+            v3 = head not in ('0x', '') and len(head) == 66
+        except RuntimeError as e:
+            if not is_revert(e):
+                raise
+            v3 = False
+        try:
+            mode = int(self.call(self.cfg['eth_rpc'], self.vault, 'provenanceMode()'), 16)
+        except RuntimeError as e:
+            if not is_revert(e):
+                raise
+            mode = 0
+        except ValueError:
+            mode = 0
+        if self.provenance and not (v3 and mode == 1):
+            raise SystemExit(f'`provenance: true` needs BridgedStablecoinV3 over a ProvenanceSourceVault in mode 1 '
+                             f'(token mintHead: {v3}, vault provenanceMode: {mode})')
+        if not self.provenance and (v3 or mode):
+            raise SystemExit(f'this token or vault uses the mint chain (token mintHead: {v3}, vault provenanceMode: {mode}): '
+                             'set `provenance: true`')
+        self.design_checked = True
 
     def check_signer_sets(self):
         """The feed's pinned signers must be the contracts' own (set-once) signers."""
@@ -246,6 +286,9 @@ class Vigia:
                                   or int(ctx['nativeFinalizedNumber']) != b['block']
                                   or str(ctx['nativeFinalizedHash']).lower() != b['block_hash']):
                 return False
+            if 'mint_head' in b and (int(rel['mintCount']), int(rel['mintedTotal']), str(rel['mintHead']).lower()) != \
+                    (b['mint_count'], b['minted_total'], b['mint_head']):
+                return False
             number = int(ctx['sourceAnchorNumber'])
             head = int(self.eth_block('latest')['number'], 16)
             if not 0 <= head - number <= self.anchor_max_age:
@@ -273,6 +316,14 @@ class Vigia:
         if 'recipient' not in b:
             return False
         url = self.cfg['eth_rpc']
+        if 'mint_head' in b and not self.flag(url, self.vault, 'provenanceMatches(uint64,uint64,bytes32)', b['mint_count'],
+                                              b['minted_total'], b['mint_head']):
+            # Made under a mint chain the vault's deposits do not back: a credited mint with no deposit precedes it (D6).
+            # Never paid by this vault; held until the owner settles. No rebuild, no certificate.
+            if b['burn_id'] not in self.parked_logged:
+                log(kind='alert', severity='critical', id='release-held-provenance', burn=b['burn_id'], mint_count=b['mint_count'],
+                    mint_head=b['mint_head'], reason='the burn was made under a mint chain the vault deposits do not back')
+            return True
         token = self.chain_read('token', lambda: '0x' + self.call(url, self.vault, 'token()')[-40:])
         data = '0xa9059cbb' + b['recipient'][2:].rjust(64, '0') + f"{b['amount']:064x}"
         try:
@@ -376,7 +427,7 @@ class Vigia:
 
     def burns(self):
         """Burned logs of the token up to the L2 `finalized` head (discovery only)."""
-        topic = self.cast_out('keccak', BURNED).lower()
+        topic = self.cast_out('keccak', self.burned_sig).lower()
         self.log_status_age()
         try:
             logs = self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0))
@@ -386,9 +437,18 @@ class Vigia:
             # is on disk still relays.
             log(kind='alert', severity='critical', id='l2-finality-closed', detail=str(e)[-200:], burns_kept=len(self.last_burns))
             return self.last_burns
-        self.last_burns = [{'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash'],
-                            'amount': int(l['data'][2:66], 16), 'recipient': '0x' + l['data'][-40:].lower(),
-                            'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()} for l in logs]
+        burns = []
+        for l in logs:
+            words = [l['data'][2 + 64 * i:2 + 64 * (i + 1)] for i in range((len(l['data']) - 2) // 64)]
+            if len(words) != (5 if self.provenance else 2):
+                continue  # not this token's Burned shape; signatario.py refuses it anyway
+            b = {'burn_id': l['topics'][1].lower(), 'nonce': int(l['topics'][2], 16), 'tx': l['transactionHash'],
+                 'amount': int(words[0], 16), 'recipient': '0x' + words[1][-40:].lower(),
+                 'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()}
+            if self.provenance:
+                b.update(mint_count=int(words[2], 16), minted_total=int(words[3], 16), mint_head='0x' + words[4].lower())
+            burns.append(b)
+        self.last_burns = burns
         return self.last_burns
 
     def log_status_age(self):
@@ -459,8 +519,8 @@ class Vigia:
             rel, c = rec['release'], rec['context']
             if str(rel['nativeBurn']).lower() != burn_id or rnd.name != bridge_feed.round_name(rec):
                 return None
-            want = self.call(url, self.vault, f'releaseDigest({RELEASE_TUPLE},{CONTEXT_TUPLE})',
-                             '(' + ','.join(str(rel[k]) for k in RELEASE_FIELDS) + ')',
+            want = self.call(url, self.vault, f'releaseDigest({self.release_tuple},{CONTEXT_TUPLE})',
+                             '(' + ','.join(str(rel[k]) for k in self.release_fields) + ')',
                              '(' + ','.join(str(c[k]) for k in CONTEXT_FIELDS) + ')')
         except (KeyError, ValueError, TypeError, RuntimeError):
             return None
@@ -508,6 +568,7 @@ class Vigia:
 
     def sign_round(self):
         self.new_pass()
+        self.check_design()
         deposits, burns = self.deposits(), self.burns()
         self.sync(deposits, burns)
         if not self.committee_retired():
@@ -597,13 +658,18 @@ class Vigia:
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
         self.new_pass()
+        self.check_design()
         if self.mainnet and not self.cfg.get('l2_tx_rpc'):
             raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
         if self.feed:
             self.sync(self.deposits(), self.burns())
         mint_dir = self.shared / 'mint'
-        for d in sorted(mint_dir.glob('*')) if mint_dir.exists() else []:
-            self.isolated('relay-mint', d.name, lambda d=d: self.relay_mint(d))
+        dirs = sorted(mint_dir.glob('*')) if mint_dir.exists() else []
+        if self.provenance:
+            self.isolated('relay-mint', 'slots', lambda: self.relay_mints_in_order(dirs))
+        else:
+            for d in dirs:
+                self.isolated('relay-mint', d.name, lambda d=d: self.relay_mint(d))
         rel_dir = self.shared / 'release'
         for d in sorted(rel_dir.glob('*')) if rel_dir.exists() else []:
             self.isolated('relay-release', d.name, lambda d=d: self.relay_release(d))
@@ -629,6 +695,71 @@ class Vigia:
         tx = self.send('l2', self.token, comb['call'])
         (d / 'sent').write_text(tx + '\n')
         log(kind='relay-mint', deposit=dep, tx=tx)
+
+    def relay_mints_in_order(self, dirs):
+        """BridgedStablecoinV3 opens slot k only for deposit nonce k at `nextSlot` (or a slot a guardian cancel freed), so mints
+        are sent in nonce order: one run of consecutive nonces from `nextSlot` per pass, with consecutive relayer nonces, so they
+        land in order in one L2 block. Only the first is gas-estimated (the next ones would revert on the current state);
+        the rest use `mint_gas_limit`. A missing nonce stops the run until its partials agree. Queued mints execute only
+        at the credit head (`mintCount`); the token then drains up to 8 due mints behind it."""
+        url = self.cfg['l2_rpc']
+        todo = []
+        for d in dirs:
+            dep = '0x' + d.name
+            if not WORD.fullmatch(dep):
+                continue
+            if self.minted(dep):
+                self.isolated('relay-execute', dep, lambda d=d, dep=dep: self.execute_if_queued(d, dep))
+                continue
+            if self.committee_retired():
+                continue
+            live = (d / 'sent').exists() and not self.failed(self.l2_tx, d / 'sent')
+            if live:
+                try:
+                    todo.append((int((d / 'slot').read_text()), d, dep, None))
+                except (OSError, ValueError):
+                    pass  # sent by an older relayer: it lands or fails, and the next pass sees which
+                continue
+            sigs = self.agreeing(sorted(d.glob('*.json')), lambda f, dep=dep: self.mint_partial(f, dep), self.k)
+            if len(sigs) < self.k:
+                continue
+            todo.append((int(json.loads(Path(sigs[0]).read_text())['deposit_nonce']), d, dep, sigs))
+        if not todo:
+            return
+        next_slot = int(self.call(url, self.token, 'nextSlot()'), 16)
+        expected, chained = next_slot, 0
+        for nonce, d, dep, sigs in sorted(todo, key=lambda x: x[0]):
+            if nonce < next_slot:  # a slot below the head of slots: only a free one (a cancelled mint) can be refilled
+                if sigs is None:
+                    continue
+                holder = '0x' + self.call(url, self.token, 'slotKey(uint64)', nonce)[2:].rjust(64, '0')[-64:]
+                if int(holder, 16):  # a contested slot keeps slotKey 0 until it credits: candidates are sent
+                    log(kind='relay-mint', deposit=dep, slot=nonce, waiting=True, held_by=holder,
+                        reason='another mint holds or credited this slot; it frees only if the guardians cancel it')
+                    continue
+            else:
+                if nonce != expected:
+                    log(kind='relay-mint', deposit=dep, slot=nonce, waiting_for_slot=expected,
+                        reason='the deposit with the earlier nonce has no agreeing partials yet')
+                    break
+                expected += 1
+                if sigs is None:
+                    chained += 1
+                    continue
+            self.isolated('relay-mint', dep, lambda d=d, dep=dep, sigs=sigs, nonce=nonce, g=chained > 0:
+                          self.send_mint(d, dep, sigs, nonce, g))
+            if nonce >= next_slot:
+                chained += 1
+
+    def send_mint(self, d, dep, sigs, nonce, fixed_gas):
+        rc, comb = self.signatario('combine', *sum((['--sig', s] for s in sigs), []), '--out', d / 'mint.call')
+        if rc:
+            log(kind='relay-mint', deposit=dep, error=comb.get('reason'))
+            raise RuntimeError('combine refused')
+        tx = self.send('l2', self.token, comb['call'], gas=self.mint_gas if fixed_gas else None)
+        (d / 'slot').write_text(f'{nonce}\n')
+        (d / 'sent').write_text(tx + '\n')
+        log(kind='relay-mint', deposit=dep, slot=nonce, tx=tx)
 
     def relay_release(self, d):
         burn_id = '0x' + d.name
@@ -674,6 +805,17 @@ class Vigia:
         now = int(self.rpc(url, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
         if now < words[2] or self.flag(url, self.token, 'paused()'):
             log(kind='relay-execute', deposit=dep, waiting_until=words[2])
+            return
+        if self.provenance and not self.flag(url, self.token, 'isCreditHead(bytes32)', dep):
+            slot, head = int(dep[2:18], 16), int(self.call(url, self.token, 'mintCount()'), 16)
+            if slot < head:  # another id credited this deposit's slot: a held state, for the owner
+                log(kind='alert', severity='critical', id='mint-slot-lost', deposit=dep, slot=slot,
+                    reason='another mint credited this deposit\'s slot; the vault holds later exits until the owner settles')
+            else:  # credit order: the head's execution drains this one
+                holder = int(self.call(url, self.token, 'slotKey(uint64)', head), 16)
+                log(kind='relay-execute', deposit=dep, slot=slot, waiting_for_slot=head,
+                    reason='an earlier slot has not credited' if holder or self.flag(url, self.token, 'contested(uint64)', head)
+                    else 'the head slot is empty: a cancelled mint waits for its remint')
             return
         tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
         (d / 'execute-sent').write_text(tx + '\n')
@@ -764,7 +906,7 @@ class Vigia:
         prices = {n: p for n, p in prices.items() if n >= latest}
         return nonce, {'next': nonce, 'latest': latest, 'moved': moved, 'prices': prices}
 
-    def send(self, side, to, call):
+    def send(self, side, to, call, gas=None):
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         key = Path(self.cfg[f'{side}_relayer_key']).read_text().strip()
@@ -776,7 +918,8 @@ class Vigia:
         if nonce in rec['prices']:  # replacing a transaction that never landed
             price = max(price, rec['prices'][nonce] * 125 // 100)
         data = self.cast_out('calldata', *call)
-        gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
+        if gas is None:
+            gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
         raw = self.cast_out('mktx', '--private-key', key, '--chain', str(chain), '--nonce', str(nonce),
                             '--gas-limit', str(gas), '--gas-price', str(price), '--legacy', to, data)
         tx = self.rpc(url, 'eth_sendRawTransaction', [raw])

@@ -79,8 +79,11 @@ MINT_TYPEHASH_STR = ('Mint(uint256 sourceChainId,address sourceVault,bytes32 sou
 DOMAIN_TYPEHASH_STR = 'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
 DOMAIN_NAME = 'Bloch Bridged Stablecoin'
 BURNED_TOPIC_STR = 'Burned(bytes32,uint64,address,uint64,address)'
+BURNED_V2_TOPIC_STR = BURNED_TOPIC_STR
+BURNED_V3_TOPIC_STR = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
 MINTED_TOPIC_STR = 'Minted(bytes32,uint64,address,uint64)'
 MINT_QUEUED_TOPIC_STR = 'MintQueued(bytes32,address,uint64,uint256)'
+MINT_CANCELLED_TOPIC_STR = 'MintCancelled(bytes32,address,uint64,uint64)'
 RELEASE_TUPLE = '(bytes32,uint64,address,uint64,bytes32)'
 CONTEXT_TUPLE = '(uint256,uint256,bytes32,uint64,bytes32)'
 CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativeFinalizedNumber',
@@ -101,7 +104,7 @@ def use_provenance():
     RELEASE_TUPLE, RELEASE_FIELDS = RELEASE_TUPLE_V2, RELEASE_FIELDS_V2
     RELEASE_ID_SIG, RELEASE_TAG = RELEASE_ID_SIG_V2, 'BLOCH-USDT-RELEASE-v2'
     global BURNED_TOPIC_STR
-    BURNED_TOPIC_STR = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
+    BURNED_TOPIC_STR = BURNED_V3_TOPIC_STR
 
 
 def tag(text):
@@ -297,9 +300,13 @@ class Ctx:
         return self.keccak('0x1901' + domain[2:] + struct[2:])
 
     def deposit_id(self, route, nonce, sender, amount, pq):
-        """ContextBoundSourceVault.depositId."""
-        return self.sha256_abi('f(bytes32,bytes32,uint256,address,uint256,bytes32)', tag('BLOCH-USDT-DEPOSIT-v1'),
-                               route, nonce, sender, amount, pq)
+        """ContextBoundSourceVault.depositId; ProvenanceSourceVault's (provenance) puts the nonce in the top 8 bytes."""
+        if not self.provenance:
+            return self.sha256_abi('f(bytes32,bytes32,uint256,address,uint256,bytes32)', tag('BLOCH-USDT-DEPOSIT-v1'),
+                                   route, nonce, sender, amount, pq)
+        h = int(self.sha256_abi('f(bytes32,bytes32,uint256,address,uint256,bytes32)', tag('BLOCH-USDT-DEPOSIT-v2'),
+                                route, nonce, sender, amount, pq), 16)
+        return '0x%064x' % ((int(nonce) << 192) | (h & ((1 << 192) - 1)))
 
     def release_digest(self, rel, context):
         """ContextBoundSourceVault.releaseDigest on the configured source chain and vault."""
@@ -599,16 +606,21 @@ def token_mints(ctx, url, fin_number):
     """Every mint of the token up to the finalized block, executed or queued. The Ethereum half holds the release if one has no deposit."""
     start, chunk = int(ctx.cfg.get('token_from_block', 0)), int(ctx.cfg.get('log_chunk', 10000))
     minted, queued = ctx.keccak_text(MINTED_TOPIC_STR), ctx.keccak_text(MINT_QUEUED_TOPIC_STR)
-    found = {}
+    cancelled = ctx.keccak_text(MINT_CANCELLED_TOPIC_STR)
+    found, dead = {}, set()
     for lo in range(start, fin_number + 1, chunk):
-        for l in ctx.rpc(url, 'eth_getLogs', [{'address': ctx.token, 'topics': [[minted, queued]], 'fromBlock': hex(lo),
+        for l in ctx.rpc(url, 'eth_getLogs', [{'address': ctx.token, 'topics': [[minted, queued, cancelled]], 'fromBlock': hex(lo),
                                                'toBlock': hex(min(lo + chunk - 1, fin_number))}]):
-            key, recipient = l['topics'][1].lower(), '0x' + l['topics'][2][-40:].lower()
-            if l['topics'][0].lower() == minted:
+            key, recipient, t0 = l['topics'][1].lower(), '0x' + l['topics'][2][-40:].lower(), l['topics'][0].lower()
+            if t0 == cancelled:
+                dead.add(key)  # a guardian cancel never credits; a remint names the key again below
+            elif t0 == minted:
+                dead.discard(key)
                 found[key] = {'deposit_id': key, 'recipient': recipient, 'nonce': ctx.word(l['data'], 0), 'amount': ctx.word(l['data'], 1)}
             else:
+                dead.discard(key)
                 found.setdefault(key, {'deposit_id': key, 'recipient': recipient, 'nonce': None, 'amount': ctx.word(l['data'], 0)})
-    return list(found.values())
+    return [m for k, m in found.items() if k not in dead]
 
 
 def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
@@ -649,6 +661,11 @@ def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
     logs = [l for l in receipt['logs'] if l['address'].lower() == ctx.token and l['topics'][0].lower() == topic0]
     if burn_id_wanted:
         logs = [l for l in logs if len(l['topics']) > 1 and l['topics'][1].lower() == burn_id_wanted]
+    if not logs:
+        other = BURNED_V3_TOPIC_STR if not ctx.provenance else BURNED_V2_TOPIC_STR
+        if any(l['address'].lower() == ctx.token and l['topics'][0].lower() == ctx.keccak_text(other) for l in receipt['logs']):
+            refuse('this token emits the other Burned log: `provenance` must be true for BridgedStablecoinV3 over a '
+                   'ProvenanceSourceVault, and false for the RC token', provenance=ctx.provenance)
     if len(logs) != 1:
         refuse(f'expected exactly one Burned log of the BridgedStablecoin (use --burn-id when the transaction '
                f'holds several), found {len(logs)}', burn_id=burn_id_wanted or None)

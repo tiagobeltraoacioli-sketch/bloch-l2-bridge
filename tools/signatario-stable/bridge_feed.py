@@ -151,9 +151,15 @@ def mint_digest(version, chain_id, token, source_chain, vault, route, deposit, n
     return keccak256(b'\x19\x01' + domain + struct)
 
 
-def release_digest(chain_id, vault, route, nonce, recipient, amount, burn, valid, anchor_n, anchor_h, native_n, native_h):
-    """ContextBoundSourceVault.releaseDigest, as eth_half.py computes it (all arguments are 32-byte words)."""
-    release_id = hashlib.sha256(_tag('BLOCH-USDT-RELEASE-v1') + route + nonce + recipient + amount + burn).digest()
+def release_digest(chain_id, vault, route, nonce, recipient, amount, burn, valid, anchor_n, anchor_h, native_n, native_h,
+                   chain=None):
+    """ContextBoundSourceVault.releaseDigest, as eth_half.py computes it (all arguments are 32-byte words). With `chain`
+    (mintCount, mintedTotal, mintHead words: BridgedStablecoinV3 over ProvenanceSourceVault) the release id is v2."""
+    if chain is None:
+        release_id = hashlib.sha256(_tag('BLOCH-USDT-RELEASE-v1') + route + nonce + recipient + amount + burn).digest()
+    else:
+        release_id = hashlib.sha256(_tag('BLOCH-USDT-RELEASE-v2') + route + nonce + recipient + amount + burn
+                                    + b''.join(chain)).digest()
     auth = keccak256(_tag('BLOCH-USDT-RELEASE-AUTH-v2') + chain_id + vault + release_id + valid + anchor_n + anchor_h
                      + native_n + native_h)
     return keccak256(b'\x19Ethereum Signed Message:\n32' + auth)
@@ -171,6 +177,7 @@ class Verifier:
         self.version = version  # callable: the token's EIP-712 version
         self.now = now          # callable: the Ethereum clock ("chain" or the wall clock)
         self.max_valid = int(cfg.get('max_valid_seconds', 3600))
+        self.provenance = bool(cfg.get('provenance'))
 
     def _signature(self, doc, digest, signer):
         raw = _hex(doc.get('signature'), 65, 'signature')
@@ -222,6 +229,10 @@ class Verifier:
         if not now < valid <= now + self.max_valid:
             raise Bad('expired, or validUntil beyond the policy')
         got = _hex(doc.get('digest'), 32, 'digest')
+        chain = None
+        if self.provenance:
+            chain = (_uint(rel.get('mintCount'), 64, 'mintCount'), _uint(rel.get('mintedTotal'), 64, 'mintedTotal'),
+                     _hex(rel.get('mintHead'), 32, 'mintHead'))
         want = release_digest(_uint(self.source_chain, 256, 'chain'), _word(bytes.fromhex(self.vault[2:])),
                               bytes.fromhex(self.route[2:]), _uint(rel.get('nonce'), 64, 'nonce'),
                               _word(_hex(rel.get('recipient'), 20, 'recipient')), _uint(rel.get('amount'), 64, 'amount'),
@@ -229,13 +240,14 @@ class Verifier:
                               _uint(ctx.get('sourceAnchorNumber'), 256, 'anchor'),
                               _hex(ctx.get('sourceAnchorHash'), 32, 'anchor hash'),
                               _uint(ctx.get('nativeFinalizedNumber'), 64, 'native number'),
-                              _hex(ctx.get('nativeFinalizedHash'), 32, 'native hash'))
+                              _hex(ctx.get('nativeFinalizedHash'), 32, 'native hash'), chain)
         if got != want:
             raise Bad('the digest does not match the fields')
         self._signature(doc, want, signer)
         return {k: doc[k] for k in ('kind', 'signer', 'source_chain_id', 'source_vault', 'digest', 'signature')} \
             | {'signed': True,
-               'release': {k: rel[k] for k in ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')},
+               'release': {k: rel[k] for k in ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')
+                           + (('mintCount', 'mintedTotal', 'mintHead') if self.provenance else ())},
                'context': {k: ctx[k] for k in ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash',
                                                'nativeFinalizedNumber', 'nativeFinalizedHash')}}
 

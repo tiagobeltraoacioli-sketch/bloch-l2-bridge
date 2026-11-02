@@ -70,5 +70,6 @@
   },
   "max_release_signs_per_hour": 6,
   "refused_retry": 300,
-  "round_margin": 600
+  "round_margin": 600,
+  "provenance": true
 }
