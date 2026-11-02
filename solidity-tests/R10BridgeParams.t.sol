@@ -5,6 +5,7 @@ import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
 import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
 import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
+import {V3Deploy} from "./harness/BridgedStablecoinV3AnyT.sol";
 
 interface R10Vm {
     function addr(uint256 privateKey) external pure returns (address);
@@ -38,9 +39,12 @@ contract R10Usdc {
 
 /// Launch-parameter claims of the bridge V3 decision memo (agents/175-bridge-params.md), on the mainnet shape of
 /// deployments/mainnet/busdc-*.config.json: 5-of-7 mint and release, mintSwitch 6-of-7 / 14 d, bucket and windowLimit
-/// 10,000 USDC a day, cap 100,000, minDeposit = minBurn = 10 USDC, largeMintDelay 12 h, 3 token guardians and 2 vault
+/// 10,000 USDC a day, cap 100,000, minDeposit = minBurn = 10 USDC, largeMintDelay 12 h, 3 token guardians and 3 vault
 /// guardians with 72 h pause and 72 h cooldown, provenance mode 1, releaseDelay 0. Each test deploys its own token, so the
 /// parameter under decision (T = largeMintThreshold, mintSwitch threshold, largeMintDelay) varies per test.
+/// Agent 200 (release candidate): the shared vault keeps a zero fee so the amounts below stay 1:1; the decided vault
+/// (3 guardians, minDeposit 11 USDC, 5/5 bps fee) is checked in test_BR10_proposedVaultValues. The real V3 refuses T != 0
+/// (53da88c), so the T > 0 scenarios run on the test-only harness and each first asserts that refusal.
 contract R10BridgeParamsTest {
     R10Vm constant vm = R10Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint256 constant U = 1e6;
@@ -67,13 +71,13 @@ contract R10BridgeParamsTest {
         vm.roll(1000);
         mintKeys = sorted(0x1000, 7);
         ethKeys = sorted(0x2000, 7);
-        vaultGuardKeys = sorted(0x7a00, 2);
+        vaultGuardKeys = sorted(0x7a00, 3);
         usdc = new R10Usdc();
         vault = new ProvenanceSourceVault(
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 0, addrs(ethKeys), 5,
             ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
             ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
-            ProvenanceSourceVault.Provenance(1, 0, address(0))
+            ProvenanceSourceVault.Provenance(1, 0, address(0), ProvenanceSourceVault.Fees(address(0), 0, 0))
         );
         uint256 until = block.timestamp + 100;
         vault.setControls(true, true, 0, until, cert(vault.controlDigest(true, true, 0, until), 5));
@@ -83,12 +87,25 @@ contract R10BridgeParamsTest {
     function deployToken(uint256 large, uint256 delay, uint256 switchK) internal returns (BridgedStablecoinV3 t) {
         address[] memory g = new address[](3);
         for (uint256 i; i < 3; ++i) g[i] = vm.addr(guardKeys[i]);
-        t = new BridgedStablecoinV3(
+        if (large != 0) {
+            // The real V3 refuses every T != 0 (owner decision, 53da88c); only the test-only harness deploys at T > 0.
+            (bool ok, bytes memory data) = address(this).call(abi.encodeCall(this.deployReal, (large, delay, switchK, g)));
+            require(!ok && errOf(data) == SignerMintedToken.BadConfig.selector, "the real V3 refuses T != 0");
+        }
+        t = V3Deploy.make(
             "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
             SignerMintedToken.Limits(CAP, BUCKET, REFILL, large, delay, uint64(10 * U)),
             SignerMintedToken.Guard(g, PAUSE, PAUSE), BridgedStablecoinV2.MintSwitch(switchK, 14 days)
         );
         token = t;
+    }
+
+    function deployReal(uint256 large, uint256 delay, uint256 switchK, address[] memory g) external returns (address) {
+        return address(new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
+            SignerMintedToken.Limits(CAP, BUCKET, REFILL, large, delay, uint64(10 * U)),
+            SignerMintedToken.Guard(g, PAUSE, PAUSE), BridgedStablecoinV2.MintSwitch(switchK, 14 days)
+        ));
     }
 
     function sorted(uint256 base, uint256 n) internal view returns (uint256[] memory k) {
@@ -445,7 +462,7 @@ contract R10BridgeParamsTest {
     function test_BR10_proposedVaultValues() public {
         require(vault.windowLimit() == BUCKET && vault.cap() == CAP && vault.minDeposit() == 10 * U, "values");
         require(vault.switchThreshold() == 6 && vault.switchDelay() == 14 days && vault.threshold() == 5, "quorums");
-        require(vault.releaseDelay() == 0 && vault.provenanceMode() == 1 && vault.guardianCount() == 2, "launch design");
+        require(vault.releaseDelay() == 0 && vault.provenanceMode() == 1 && vault.guardianCount() == 3, "launch design");
         usdc.mint(address(this), 20_000 * U);
         (bool ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.deposit, (BUCKET + 1, bytes32(uint256(uint160(ALICE))))));
         require(!ok, "a deposit above windowLimit is refused");
@@ -460,7 +477,7 @@ contract R10BridgeParamsTest {
                 keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, uint8(0), addrs(ethKeys),
                 uint8(5), ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
                 ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
-                ProvenanceSourceVault.Provenance(1, 15 days, address(0))
+                ProvenanceSourceVault.Provenance(1, 15 days, address(0), ProvenanceSourceVault.Fees(address(0), 0, 0))
             )
         );
         address made;
@@ -468,5 +485,51 @@ contract R10BridgeParamsTest {
             made := create(0, add(code, 0x20), mload(code))
         }
         require(made == address(0), "releaseDelay above 14 days is refused");
+    }
+
+    /// The decided vault (owner, 2026-11-02, agents 175/194/197): 3 vault guardians, minDeposit 11 USDC, protocol fee 5 bps
+    /// on deposit and 5 bps on release to an immutable recipient. 11 USDC nets 10.9945, above minBurn (10); 10 USDC is
+    /// refused; the constructor refuses minDeposit 10 with the fee (its net is below minBurn) and a rate above 30 bps.
+    function test_BR10_decidedVaultWithFee() public {
+        address treasury = address(0x7EA5);
+        ProvenanceSourceVault v = new ProvenanceSourceVault(
+            keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 0, addrs(ethKeys), 5,
+            ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(11 * U), uint64(10 * U)),
+            ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
+            ProvenanceSourceVault.Provenance(1, 0, address(0), ProvenanceSourceVault.Fees(treasury, 5, 5))
+        );
+        require(v.guardianCount() == 3 && v.minDeposit() == 11 * U && v.switchThreshold() == 6, "decided values");
+        require(v.feeRecipient() == treasury && v.depositFeeBps() == 5 && v.releaseFeeBps() == 5, "fee immutables");
+        uint256 until = block.timestamp + 100;
+        v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));
+        usdc.mint(address(this), 30 * U);
+        (bool ok,) = address(v).call(abi.encodeCall(ProvenanceSourceVault.deposit, (uint64(10 * U), bytes32(uint256(uint160(ALICE))))));
+        require(!ok, "10 USDC is below the decided minDeposit");
+        v.deposit(uint64(11 * U), bytes32(uint256(uint160(ALICE))));
+        require(v.totalLocked() == 11 * U - 5_500 && v.feesAccrued() == 5_500, "the chain records the net; the fee is not backing");
+        require(v.totalLocked() >= 10 * U, "the net of the minimum deposit is burnable on L2");
+        bytes[5] memory refused;
+        refused[0] = abi.encode(uint64(10 * U), ProvenanceSourceVault.Fees(treasury, 5, 5)); // net below minBurn
+        refused[1] = abi.encode(uint64(11 * U), ProvenanceSourceVault.Fees(treasury, 31, 5)); // above 30 bps
+        refused[2] = abi.encode(uint64(11 * U), ProvenanceSourceVault.Fees(treasury, 5, 31));
+        refused[3] = abi.encode(uint64(11 * U), ProvenanceSourceVault.Fees(address(0), 5, 5)); // fee without recipient
+        refused[4] = abi.encode(uint64(11 * U), ProvenanceSourceVault.Fees(treasury, 0, 0)); // recipient without fee
+        for (uint256 i; i < refused.length; ++i) {
+            (uint64 minDep, ProvenanceSourceVault.Fees memory f) = abi.decode(refused[i], (uint64, ProvenanceSourceVault.Fees));
+            bytes memory code = bytes.concat(
+                type(ProvenanceSourceVault).creationCode,
+                abi.encode(
+                    keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, uint8(0), addrs(ethKeys),
+                    uint8(5), ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, minDep, uint64(10 * U)),
+                    ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
+                    ProvenanceSourceVault.Provenance(1, 0, address(0), f)
+                )
+            );
+            address made;
+            assembly {
+                made := create(0, add(code, 0x20), mload(code))
+            }
+            require(made == address(0), "the constructor refuses this fee configuration");
+        }
     }
 }

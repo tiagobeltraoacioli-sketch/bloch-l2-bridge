@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {BridgedStablecoinV2, IMintVerifier} from "../contracts/stable/BridgedStablecoinV2.sol";
 import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {V3Deploy} from "./harness/BridgedStablecoinV3AnyT.sol";
 
 /// Agent 171 (round 10): independent review of BridgedStablecoinV3 at codex/bridge-v3-r7-20261102 5fb9cf0.
 /// Every suite uses the committed mainnet shape (deployments/mainnet/busdc-mainnet.config.json): 7 mint signers,
@@ -72,6 +73,29 @@ abstract contract R171Base {
             SignerMintedToken.Guard(guards, 72 hours, 72 hours),
             BridgedStablecoinV2.MintSwitch(6, 14 days)
         );
+    }
+
+    /// The real V3 at T = 0; the test-only harness (V3 without the T = 0 constructor rule) at T > 0. Used only to keep
+    /// the F171-5 reproduction after the rule (agent 194, 53da88c); the real contract's refusal is asserted first.
+    function _deployAnyT(uint256 largeMintThreshold) internal returns (BridgedStablecoinV3 t) {
+        address[] memory s = new address[](7);
+        for (uint256 i; i < 7; ++i) s[i] = vm.addr(mintKeys[i]);
+        t = V3Deploy.make(
+            "Bloch Bridged USDC",
+            "bUSDC",
+            SOURCE_CHAIN,
+            VAULT,
+            ROUTE,
+            s,
+            5,
+            SignerMintedToken.Limits(100_000 * U, 10_000 * U, 115_740, largeMintThreshold, DELAY, 10 * U),
+            SignerMintedToken.Guard(guards, 72 hours, 72 hours),
+            BridgedStablecoinV2.MintSwitch(6, 14 days)
+        );
+    }
+
+    function deployReal(uint256 largeMintThreshold) external returns (BridgedStablecoinV3) {
+        return _deploy(largeMintThreshold);
     }
 
     function _blob(bytes32 digest, uint256 k) internal view returns (bytes memory out) {
@@ -361,19 +385,21 @@ contract R171TokenReviewTest is R171Base {
         assertTrue(t.uncancellable(a));
     }
 
-    /// F171-4 (Info): the verifier's code hash is checked only at activation. If the code at that address changes later
-    /// (a metamorphic CREATE2 + SELFDESTRUCT verifier on a pre-Cancun EVM; simulated here with etch), mintWithProof
-    /// follows the new code.
-    function test_F4_verifierCodeHashNotRecheckedAfterActivation() public {
+    /// F171-4 (Info, fixed by 807ac51): the verifier's code hash used to be checked only at activation, so a verifier
+    /// whose code changed later (a metamorphic CREATE2 + SELFDESTRUCT verifier on a pre-Cancun EVM; simulated here with
+    /// etch) was followed by mintWithProof. mintWithProof now re-checks the pinned code hash: the swapped "accept all"
+    /// code is refused and nothing is queued.
+    function test_F4_fixed_verifierCodeHashRecheckedAfterActivation() public {
         R171RefuseAll v = new R171RefuseAll();
         _switch(address(v));
         bytes32 a = _id(0, 1);
         vm.expectRevert(BridgedStablecoinV2.InvalidProof.selector);
         t.mintWithProof(a, 0, uint64(U), MALLORY, "");
         vm.etch(address(v), address(new R171AcceptAll()).code);
+        vm.expectRevert(BridgedStablecoinV2.InvalidProof.selector);
         t.mintWithProof(a, 0, uint64(U), MALLORY, "");
         (, uint64 amt,) = t.pendingMints(a);
-        assertEq(amt, uint64(U));
+        assertEq(amt, 0);
     }
 
     /// After the switch, three colluding guardians keep mints paused 3 x 72 h of every 288 h and nobody can end it.
@@ -399,17 +425,23 @@ contract R171TokenReviewTest is R171Base {
         assertEq(block.timestamp - start, 288 hours);
     }
 
-    /// F171-5: nothing on-chain enforces T = 0. The V3 constructor accepts any largeMintThreshold; with T > 0 one forged
-    /// unit credits at once (no cancel window) and holds every later exit for good (docs: "T > 0 needs a settlement
-    /// path"). Only the config and the deploy tool keep T = 0. The instant refill is also floored at 1 unit/s.
-    function test_F5_v3AcceptsTAboveZeroAndAForgedUnitCreditsAtOnce() public {
-        BridgedStablecoinV3 t2 = _deploy(1_000 * U);
+    /// F171-5 (fixed by 53da88c): the V3 constructor used to accept any largeMintThreshold; with T > 0 one forged unit
+    /// credits at once (no cancel window) and holds every later exit for good. The real V3 now refuses every T != 0.
+    /// The reproduction is kept on the test-only harness (V3 without that rule), so the test still shows what the rule
+    /// prevents. The instant refill is also floored at 1 unit/s (F171-6).
+    function test_F5_fixed_v3RefusesTAboveZero_harnessStillCreditsAForgedUnitAtOnce() public {
+        uint256[3] memory ts = [uint256(1_000 * U), 1, type(uint256).max];
+        for (uint256 i; i < ts.length; ++i) {
+            vm.expectRevert(SignerMintedToken.BadConfig.selector);
+            this.deployReal(ts[i]);
+        }
+        BridgedStablecoinV3 t2 = _deployAnyT(1_000 * U);
         assertEq(t2.instantCapacity(), 10_000 * U); // = bucket: the instant bucket is the main bucket
         bytes32 fake = _id(0, 666);
         _mint(t2, fake, 1, MALLORY);
         assertEq(t2.balanceOf(MALLORY), 1);
         assertEq(t2.mintCount(), 1);
-        BridgedStablecoinV3 t3 = _deploy(1); // capacity 10 units, proportional refill 0 -> floored to 1 unit/s
+        BridgedStablecoinV3 t3 = _deployAnyT(1); // capacity 10 units, proportional refill 0 -> floored to 1 unit/s
         assertEq(t3.instantCapacity(), 10);
         assertEq(t3.instantRefillPerSecond(), 1);
     }

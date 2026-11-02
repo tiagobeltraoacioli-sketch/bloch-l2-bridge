@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
 import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {V3Deploy} from "./harness/BridgedStablecoinV3AnyT.sol";
 import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
 
 interface A172Vm {
@@ -193,7 +194,7 @@ contract A172VaultReviewTest {
             addrs(ethKeys), 5,
             ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, MIN, MIN),
             ProvenanceSourceVault.Guard(guardians(), 72 hours, 72 hours),
-            ProvenanceSourceVault.Provenance(1, 0, address(0))
+            ProvenanceSourceVault.Provenance(1, 0, address(0), ProvenanceSourceVault.Fees(address(0), 0, 0))
         );
         uint256 until = block.timestamp + 100;
         v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));
@@ -547,10 +548,21 @@ contract A172VaultReviewTest {
         require(vault.verifier() == address(settle), "switch spent");
     }
 
-    /// Real token, T > 0 (largeMintThreshold 1,000, so instant mints exist): 5 mint keys credit one forged unit at once,
+    /// V3 token code, T > 0 (largeMintThreshold 1,000, so instant mints exist): 5 mint keys credit one forged unit at once,
     /// no guardian can prevent it, and every holder's later burn is held for good (agent 111 F3, seen from the vault).
+    /// Since 53da88c the real V3 refuses T != 0 (asserted first); the reproduction runs on the test-only harness, which is
+    /// V3 without that constructor rule.
     function test_F3c_realToken_TgtZero_oneInstantUnitHoldsAlice() public {
-        BridgedStablecoinV3 token = new BridgedStablecoinV3(
+        try new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
+            SignerMintedToken.Limits(CAP, BUCKET, BUCKET / 1 days, 1000 * U, 12 hours, MIN),
+            SignerMintedToken.Guard(new address[](0), 0, 0), BridgedStablecoinV2.MintSwitch(6, 14 days)
+        ) returns (BridgedStablecoinV3) {
+            revert("the real V3 accepted T = 1,000 USDC");
+        } catch (bytes memory reason) {
+            require(err(reason) == SignerMintedToken.BadConfig.selector, "the real V3 refuses T != 0 with BadConfig");
+        }
+        BridgedStablecoinV3 token = V3Deploy.make(
             "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
             SignerMintedToken.Limits(CAP, BUCKET, BUCKET / 1 days, 1000 * U, 12 hours, MIN),
             SignerMintedToken.Guard(new address[](0), 0, 0), BridgedStablecoinV2.MintSwitch(6, 14 days)
