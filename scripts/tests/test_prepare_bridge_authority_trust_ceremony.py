@@ -148,9 +148,18 @@ class OfflineAuthorityCeremonyTest(unittest.TestCase):
         subprocess.run([
             "cargo", "build", "--quiet", "--bin", "bridge_ed25519_public_verifier",
         ], cwd=ROOT, capture_output=True, timeout=120, check=True)
-        cls.public_verifier = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug/bridge_ed25519_public_verifier"
+        built = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "debug/bridge_ed25519_public_verifier"
+        # The CLI refuses a verifier with more than one hard link, and cargo on Linux hard-links target/debug to deps/.
+        cls.verifier_dir = tempfile.TemporaryDirectory(prefix="ceremony-verifier-")
+        cls.public_verifier = Path(cls.verifier_dir.name) / "bridge_ed25519_public_verifier"
+        cls.public_verifier.write_bytes(built.read_bytes())
+        cls.public_verifier.chmod(0o755)
         cls.public_verifier_sha256 = (
             "0x" + hashlib.sha256(cls.public_verifier.read_bytes()).hexdigest())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.verifier_dir.cleanup()
 
     def run_cli(self, *arguments):
         return subprocess.run([sys.executable, str(CLI), *map(str, arguments)],
