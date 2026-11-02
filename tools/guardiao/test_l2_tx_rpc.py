@@ -67,6 +67,7 @@ class Replica:
 
     def __init__(self, upstream):
         self.frozen, self.refused, self.down = None, 0, False
+        self.rpc_code = None  # answer everything with this JSON-RPC error, over a healthy HTTP 200
         self.closed, self.age = False, None  # stub finality; with REAL_SETTLED_RPC the real binary answers instead
         self.real = None
         me = self
@@ -82,6 +83,8 @@ class Replica:
                     self.send_header('content-length', '0')
                     self.end_headers()
                     return
+                if me.rpc_code is not None:
+                    return self.reply({'jsonrpc': '2.0', 'id': req.get('id'), 'error': {'code': me.rpc_code, 'message': 'backend error'}})
                 if req.get('method') == 'eth_sendRawTransaction':
                     me.refused += 1
                     return self.reply({'jsonrpc': '2.0', 'id': req.get('id'),
@@ -214,9 +217,10 @@ def main():
         sent = kinds(lines, 'pause')
         check('split: the pause lands through l2_tx_rpc', paused() and sent and sent[0].get('ok') is True, (rc, lines, err))
         check('split: nothing was sent to the replica', stub.refused == before, stub.refused - before)
-        check('split: a violation still open exits 2, healthy', rc == 2, (rc, err))
-        check('split: health file says healthy',
-              healthy('split') is True)
+        check('split: a violation still open exits 2', rc == 2, (rc, err))
+        hdoc = json.loads((work / 'split.state.health.json').read_text())
+        check('split: health file has no problem, but names the open hard finding (an incident until a person resolves it)',
+              healthy('split') is False and not hdoc['problems'] and hdoc.get('findings'), hdoc)
         check('split: the replica does not show the pause yet', int(view(stub.url, stable, 'pauseCount()(uint64)')) == 0)
         rc, lines, err = run(cfg)
         check('split: not sent again while the settled view lags', not kinds(lines, 'pause')
@@ -231,9 +235,10 @@ def main():
               any(x.get('id') == 'pause-not-visible' and x.get('severity') == 'critical' for x in lines), lines)
         stub.frozen = None
         rc, lines, err = run(cfg)
-        check('settled: the replica shows the pause, the guardian skips and is healthy again',
+        hdoc = json.loads((work / 'split.state.health.json').read_text())
+        check('settled: the replica shows the pause, the guardian skips; no problem left, the finding still open',
               kinds(lines, 'pause-skip') and not kinds(lines, 'pause')
-              and healthy('split') is True, lines)
+              and not hdoc['problems'] and hdoc.get('findings') and healthy('split') is False, lines)
         doc = json.loads((work / 'split.state.health.json').read_text())
         check('health: a verified round records verified_t', abs(doc.get('verified_t', 0) - time.time()) < 60, doc)
         check('health: group-readable for the monitor, under any umask',

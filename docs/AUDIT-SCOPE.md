@@ -255,6 +255,18 @@ of pauses less than `pauseCooldown` apart. One bad guardian no longer locks out 
 and an immediate k-of-n unpause; unlike the vault there is no guardian block after an unpause, because k is the mint quorum itself.
 The cost is that g colluding guardians hold mints g/(g+1) of the time, not 1/2. Burns are never paused.
 
+**A used vault is never reused for a new token.** The vault does not know its token, and a new token's constructor accepts any vault. With a fresh
+signer database, a deposit mints again on the new token, with no finding on either token's guardian. The new token's burn nonce restarts at 1, so its burn
+hits `releasedNonce` and cannot exit. Nothing on-chain refuses this: `deploy_pontes.py run` and `vault_pontes.py verify --unused` do.
+
+**Forged mints with honest release keys (D6).** Mint keys alone can credit tokens up to the bucket, and a guardian pause of the token does not stop
+burns. On the V3 launch design (`BridgedStablecoinV3` over `ProvenanceSourceVault` mode 1) a release is paid only if the burn's mint chain
+`(mintCount, mintedTotal, mintHead)` equals the vault's deposit chain at that count, so a forged credit cannot be paid and holds later exits instead
+(`ProvenanceMismatch`). With `largeMintThreshold = 0` every mint queues and a guardian majority can cancel it before it credits, so the chain stays clean.
+Two off-chain holds remain as alert layers: `vault_pause_on_mint` on a guardian (default true on this branch) pauses the vault on an evidenced `mint:`
+finding, and a false one closes the vault for `pauseDuration` (72 h); `release_hold` on a signer's Ethereum half refuses releases while the token shows
+a mint with no matching finalized deposit, until operators list its id in `accepted_unbacked_mints`.
+
 ## 6. Live evidence index
 
 Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB-SMH = GnB-SMH mainnet.

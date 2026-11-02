@@ -37,7 +37,9 @@ CONFIG (JSON): eth_rpc, eth_chain_id, vault, vault_from_block, prover_dir (lc_pr
 status.json), shadow_verifier (SP1ReleaseVerifier address; omit only in tests that trust the prover),
 l1_rpc (needed when grace_l1_epochs > 0 or lc_max_epoch is set), grace_s (7200), grace_l1_epochs (0),
 lc_max_epoch (none), prover_stale_s (3600: above one proof job, during which the prover writes no status),
-keystore, password_file, cast, state, log_chunk (5000).
+keystore, password_file, cast, state, log_chunk (5000), alert_command (argv with {id} and {detail}: run once per new
+finding and per failed pause), alert_burst (5), health_file (<state>.health.json, same shape as guardiao.py's, for
+l2_monitor.py --guardian-health: a dead or blind sombra is noticed there, which alert_command cannot do).
 Development tool; UNAUDITED.
 """
 import json
@@ -49,6 +51,7 @@ import time
 import urllib.request
 
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
+RESCAN_BLOCKS = 128  # Ethereum finality is about 64-96 blocks behind the head
 
 
 class Unverifiable(Exception):
@@ -79,6 +82,31 @@ class Sombra:
     # ── plumbing ──
     def log(self, **kv):
         print(json.dumps({'t': int(time.time()), 'vault': self.vault, **kv}), flush=True)
+
+    def notify(self, pid, detail):
+        command = self.cfg.get('alert_command')
+        if not command:
+            return
+        argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            if done.returncode:
+                self.log(kind='alert-command-failed', rc=done.returncode, error=done.stderr.strip()[-200:])
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(kind='alert-command-failed', error=str(e))
+
+    def write_health(self, verified):
+        if verified:
+            self.state['verified_t'] = int(time.time())
+        findings = {k: v for k, v in self.state.get('open', {}).items() if v.get('severity') == 'hard'}
+        problems = {'pause-failed': self.state['pause_failed']} if self.state.get('pause_failed') else {}
+        doc = {'t': int(time.time()), 'bridge': 'sombra:' + self.vault, 'healthy': not findings and not problems,
+               'verified_t': self.state.get('verified_t'), 'problems': problems, 'findings': findings}
+        path = Path(self.cfg.get('health_file', f'{self.cfg["state"]}.health.json'))
+        tmp = path.with_name(path.name + '.tmp')
+        tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.chmod(0o640)
+        tmp.replace(path)
 
     def save(self):
         tmp = self.state_file.with_suffix('.tmp')
@@ -120,6 +148,8 @@ class Sombra:
     def releases(self, head):
         """New Released logs of the vault up to `head`, kept in the state with their block time."""
         start = self.state.get('scanned', self.cfg.get('vault_from_block', 0) - 1) + 1
+        # The scan runs to `latest`, so a reorg can replace what it passed: read again back past finality. Known ids are skipped.
+        start = max(self.cfg.get('vault_from_block', 0), start - RESCAN_BLOCKS)
         chunk = int(self.cfg.get('log_chunk', 5000))
         times = {}
         while start <= head:
@@ -235,12 +265,18 @@ class Sombra:
 
     def act(self, now, findings):
         open_ = self.state.setdefault('open', {})
-        seen = set()
+        seen, new = set(), []
         for severity, fid, detail in findings:
             seen.add(fid)
             if fid not in open_:
                 open_[fid] = {'first_seen': now, 'severity': severity}
                 self.log(kind='alert', severity=severity, id=fid, **detail)
+                new.append((severity, fid, detail))
+        limit = int(self.cfg.get('alert_burst', 5))
+        for severity, fid, detail in new[:limit]:
+            self.notify(f'{severity}:{fid}', detail.get('reason') or json.dumps(detail, default=str))
+        if len(new) > limit:
+            self.notify('burst', f'{len(new) - limit} more new findings this round; see the journal')
         for fid in [f for f in open_ if f not in seen]:
             self.log(kind='resolved', id=fid)
             del open_[fid]
@@ -294,6 +330,12 @@ class Sombra:
                  'gas_used': int(r['gasUsed'], 16) if r.get('gasUsed') else None}
         self.state['pauses'].append(entry)
         self.log(kind='pause', **entry, error=None if ok else (err or out).strip()[-300:])
+        if ok:
+            self.state.pop('pause_failed', None)
+        else:
+            if not self.state.get('pause_failed'):  # once until a pause lands, then the health file carries it
+                self.notify('pause-failed', (err or out).strip()[-200:])
+            self.state['pause_failed'] = {'t': now, 'detail': (err or out).strip()[-200:]}
 
 
 def main():
@@ -306,10 +348,12 @@ def main():
         try:
             now, findings = g.round()
             code = g.act(now, findings)
+            verified = True
         except (Unverifiable, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             # a malformed answer or a half-written prover file is no evidence either way
             g.log(kind='alert', severity='soft', id='unverifiable', reason=f'{type(e).__name__}: {e}')
-            code = 1
+            code, verified = 1, False
+        g.write_health(verified)
         g.save()
         if 'check' in args:
             sys.exit(code)

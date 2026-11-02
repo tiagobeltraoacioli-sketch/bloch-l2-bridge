@@ -87,6 +87,7 @@ def unit():
     check('unit: pins refuse another L2 chain id',
           refused(lf.pins_from_config, {'l2_pins': 'mainnet-v2', 'l2_chain_id': 700771}) is not None)
     check('unit: no l2_pins = legacy devnet mode', lf.pins_from_config({'l2_chain_id': 700771}) is None)
+    check('unit: chain 700770 refuses no l2_pins', refused(lf.pins_from_config, {'l2_chain_id': 700770}) is not None)
     check('unit: a v2 status passes', refused(lf.check_status, status(), pins, now, 600) is None)
     for name, s, word in [
         ('v1 schema', status(schema='bloch.l2.native-follower-status.v1'), 'v2 schema'),

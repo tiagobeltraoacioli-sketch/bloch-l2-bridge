@@ -5,7 +5,8 @@ deploys anything. Contracts `WrappedGnBV2` and `BridgedStablecoinV2` (shared cor
 are **UNAUDITED**; audits come before any cap is raised (and preferably before launch).
 
 Ground rules: no owner, setter, upgrade or recurring signature; every limit is a constructor immutable;
-a change of any parameter is a new contract plus an assisted migration. Mainnet L2 chain id **700770**
+a change of any parameter is a new contract plus an assisted migration. A new token always gets a new vault: a used vault
+is never reused (`docs/BUSDC-MAINNET-V2.md`, section 4.5). Mainnet L2 chain id **700770**
 (devnet4 700771 and anvil 31337 are rehearsal-only).
 
 ## 1. Roles
@@ -39,7 +40,9 @@ Units: wGSMH 8 decimals (1 GSMH = 1e8), bUSDC 6 decimals (1 USDC = 1e6).
 | `tx.gasLimit` | 4,000,000 | 4,000,000 | Creation estimated at ~2.4 M gas on anvil |
 | `tx.maxGasPriceWei` | **undecided** | **undecided** | Depends on the L2 mainnet fee market; the tool refuses above it |
 
-Raising a limit later = deploy a new contract with a new reviewed config (same tooling), then migrate.
+Raising a limit later = deploy a new contract with a new reviewed config (same tooling), then migrate. For bUSDC
+that is a new Ethereum vault **and** a new token: never a new token over a vault that was ever used
+(`docs/BUSDC-MAINNET-V2.md` 4.5 and 4.10; `run` refuses it).
 Suggested steps after each audit: wGSMH bucket = 1% of circulating GnB-SMH once known, supply cap per the
 vault rotation (new vault every 30 days or at 25% of the supply cap, checklist §6); bUSDC x2–x5 per step.
 
@@ -94,9 +97,11 @@ What the tool enforces:
    Review as a pull request.
 2. `python3 tools/deploy-pontes/deploy_pontes.py validate --config <c>` → note `configSha256`.
 3. `plan --config <c> --write deployments/mainnet/<bridge>.plan.json`; a second reviewer regenerates it.
-4. `python3 tools/deploy-pontes/rehearse_anvil.py` must end with `REHEARSAL OK`.
+4. `python3 tools/deploy-pontes/rehearse_anvil.py` must end with `REHEARSAL OK` (it reads the committed templates
+   from git, so the filled configs in the working tree do not disturb it).
 5. Bloch Inc (Safe) sends gas to the deployer; nothing else is sent from it.
-6. Dry run: `run --config <c> --plan <p> --rpc <own L2 node>`.
+6. Dry run: `run --config <c> --plan <p> --rpc <own L2 node>` (bUSDC: add `--source-rpc <own Ethereum node>`; `run`
+   refuses a vault that was ever used).
 7. Broadcast: `run ... --broadcast --confirm <configSha256> --write <bridge>.broadcast.json -- --ledger`
    (or `--keystore F --password-file P`).
 8. `record ... --broadcast-file <bridge>.broadcast.json --write deployments/mainnet/<bridge>.deployment.json`.

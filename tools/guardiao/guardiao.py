@@ -106,6 +106,7 @@ class LevelClosed(Exception):
 
 class Unverifiable(Exception):
     """A read failed: no evidence either way (never a reason to pause)."""
+    l2_rpc_error = False  # l2_rpc answered with a JSON-RPC error that is not a contract revert
 
 
 def words(data):
@@ -189,6 +190,10 @@ class Guardian:
         """Something that stops this guardian protecting the bridge: never only a log line."""
         self.state['problems'][pid] = {'t': int(time.time()), 'detail': str(detail)[-300:]}
         self.log(kind='alert', severity='critical', id=pid, detail=str(detail)[-300:])
+        self.notify(pid, detail)
+
+    def notify(self, pid, detail):
+        """Runs `alert_command` once. Callers deduplicate: `problems` and `open` hold what was already sent."""
         command = self.cfg.get('alert_command')
         if command:
             argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
@@ -211,8 +216,11 @@ class Guardian:
     def write_health(self):
         # `verified_t` is the last round that read everything it needed: a guardian that keeps writing this file while
         # every round is `unverifiable` is alive but blind, which `t` and `healthy` alone do not show.
-        doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'],
-               'verified_t': self.state.get('verified_t'), 'problems': self.state['problems']}
+        # An open hard finding (forged mint, release without backing, reserves deficit) is an incident even after the pause
+        # landed: the health file says so, so the monitor keeps re-alerting until a person resolves it.
+        findings = {k: v for k, v in self.state.get('open', {}).items() if v.get('severity') == 'hard'}
+        doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'] and not findings,
+               'verified_t': self.state.get('verified_t'), 'problems': self.state['problems'], 'findings': findings}
         tmp = self.health_path.with_name(self.health_path.name + '.tmp')
         tmp.write_text(json.dumps(doc, indent=1) + '\n')
         tmp.chmod(0o640)  # l2_monitor.py reads it through the group; the service's UMask would hide it
@@ -248,10 +256,18 @@ class Guardian:
             self.l2_read_failed = self.l2_read_failed or url == self.l2
             raise Unverifiable(f'{method} on {url}: {e}') from e
         if 'error' in out:
-            if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
+            # Only the settled RPC means "closed level" by this code. On an EIP-1474 node it is "resource not found": a failed read.
+            if url == self.l2 and isinstance(out['error'], dict) and out['error'].get('code') == -32001:
                 raise LevelClosed(f'{method}: {out["error"].get("message")}')
-            raise Unverifiable(f'{method}: {out["error"]}')
+            failure = Unverifiable(f'{method}: {out["error"]}')
+            failure.l2_rpc_error = url == self.l2 and not self.is_revert(out['error'])
+            raise failure
         return out['result']
+
+    @staticmethod
+    def is_revert(error):
+        """A contract's own answer (a wrong address, a token without a method), not a broken backend."""
+        return isinstance(error, dict) and (error.get('code') == 3 or 'revert' in str(error.get('message', '')).lower())
 
     def call(self, url, to, sig, *args, block='latest'):
         key = (sig, *[str(a) for a in args])
@@ -633,7 +649,7 @@ class Guardian:
         try:
             return self.full_round()
         except Unverifiable as e:
-            if not self.l2_read_failed:
+            if not (self.l2_read_failed or e.l2_rpc_error):
                 raise
             return self.blind_round(e)
 
@@ -856,7 +872,7 @@ class Guardian:
                 self.problem_once(f'cancel-vote-failed:{m["key"]}', (err or out).strip()[-200:])
 
     def act(self, now, findings):
-        seen, due = set(), []
+        seen, due, new = set(), [], []
         details = {}
         for severity, fid, grace, detail in findings:
             seen.add(fid)
@@ -866,6 +882,7 @@ class Guardian:
                 st = self.state['open'][fid] = {'first_seen': now, 'severity': severity}
                 self.log(kind='alert', severity=severity, id=fid, deadline=now + grace if severity == 'hard' else None,
                          **detail)
+                new.append((severity, fid, detail))
             if severity == 'hard' and now >= st['first_seen'] + grace + (self.frozen_extra_grace if self.frozen else 0):
                 due.append(fid)
                 if not st.get('due'):
@@ -874,6 +891,13 @@ class Guardian:
         for pid in [p for p in self.state['problems'] if p.startswith(('cancel-deadline:', 'cancel-vote-failed:', 'mint-not-cancellable:'))
                     and f'mint:{p.split(":", 1)[1]}' not in seen and not self.blind]:
             self.clear_problem(pid)
+        # Every new finding reaches the operator once, not only the journal. A flood (many forged mints in one round) is one
+        # call naming the count, so `alert_command` cannot be turned into a storm by the attacker.
+        limit = int(self.cfg.get('alert_burst', 5))
+        for severity, fid, detail in new[:limit]:
+            self.notify(f'{severity}:{fid}', detail.get('reason') or json.dumps(detail, default=str))
+        if len(new) > limit:
+            self.notify('burst', f'{len(new) - limit} more new findings this round; see the journal')
         for fid in [f for f in self.state['open'] if f not in seen]:
             st = self.state['open'][fid]
             if self.blind:  # unseen is not resolved: a round without the L2 cannot tell, and an open grace keeps running
@@ -888,7 +912,9 @@ class Guardian:
                                                                              'release-before-final:'))]
             # A forged balance burns while the token is paused, honest release keys certify the burn, and `reserves` stays quiet while
             # unminted deposits leave slack. So a mint with no deposit also holds the vault, on evidence a lagging node cannot give.
-            if self.vault_pause and self.kind == 'stable':
+            # `vault_pause_on_mint` (default true on the V3 launch design, agents 87 V and 99): false keeps the token-only pause.
+            # The cost: a false `mint:` finding closes the vault for `pauseDuration`.
+            if self.vault_pause and self.kind == 'stable' and self.cfg.get('vault_pause_on_mint', True):
                 vault_due += [f for f in due if f.startswith('mint:') and self.mint_forged(details.get(f))]
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
@@ -932,8 +958,8 @@ class Guardian:
         return blocked - uint(self.call(eth, vault, 'pauseCooldown()')[0]) if blocked else 0
 
     def not_settled(self, due):
-        """Drop the past-release findings a committee unpause of the vault settled, so a reviewed false positive stops pausing it.
-        Only those: the funds have moved, a new release is a new finding, and `reserves` still sees any loss. `reserves` itself is
+        """Drop the findings a committee unpause of the vault settled, so a reviewed false positive stops pausing it. Past releases and
+        `mint:` findings, whose token side stays open: the funds have moved, a new release is a new finding, and `reserves` still sees any loss. `reserves` itself is
         never settled, because a quorum could otherwise pause, unpause, and leave a real shortfall unwatched. A failed read settles nothing."""
         try:
             at = self.vault_unpaused_at()

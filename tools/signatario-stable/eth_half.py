@@ -20,12 +20,14 @@ release  chain id and code pin at `latest`; `route == routeId()`; releases enabl
          proposed one when it is a canonical block of this node, <= finalized and at most `anchor_max_age`
          behind the head. `validUntil` in (now, now + max_valid_seconds]. The digest is computed here and
          must equal the vault's `releaseDigest`. A local database refuses to sign two different releases
-         for one nonce or one burn (equivocation guard), whatever the vault would accept later.
+         for one nonce or one burn (equivocation guard), whatever the vault would accept later. With `release_hold`: the intent's
+         `l2_mints` must each match a `Deposited` log at or below `finalized`, or nothing is signed.
 
 Config (one JSON per signer, written once at deploy): `eth_rpc`, `eth_chain_id`, `vault`,
 `vault_code_keccak`, `vault_from_block`, `keystore`, `password_file`, `db`; optional `cast`,
 `anchor_max_age` (blocks, default 160: the vault's blockhash window is 256), `valid_seconds` (default 1800),
-`max_valid_seconds` (default 3600), `log_chunk` (default 10000 blocks per eth_getLogs).
+`max_valid_seconds` (default 3600), `log_chunk` (default 10000 blocks per eth_getLogs), `release_hold` (default false),
+`accepted_unbacked_mints` (deposit ids reviewed by the operators, default none).
 """
 import fcntl
 import hashlib
@@ -230,6 +232,57 @@ def cmd_deposit(eth, args):
 
 
 # ── release ─────────────────────────────────────────────────────────────────
+def deposits_known(eth):
+    """Every `Deposited` log of the vault up to this node's `finalized`, kept in the database with the height scanned: id -> nonce, amount, pq hash."""
+    db_path = Path(eth.cfg['db'])
+    finalized = int(eth.block('finalized')['number'], 16)
+    with open(db_path.with_suffix('.lock'), 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        db = json.loads(db_path.read_text()) if db_path.exists() else {'releases': {}}
+        seen = db.setdefault('deposits', {})
+        start, chunk = int(db.get('deposits_scanned', int(eth.cfg.get('vault_from_block', 0)) - 1)) + 1, int(eth.cfg.get('log_chunk', 10000))
+        if start > finalized:
+            return seen
+        topic0 = eth.run([eth.cast, 'keccak', DEPOSITED], 'cast keccak').lower()
+        for lo in range(start, finalized + 1, chunk):
+            for l in eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0], 'fromBlock': hex(lo),
+                                              'toBlock': hex(min(lo + chunk - 1, finalized))}]):
+                if len(l['topics']) == 3 and len(l['data']) == 2 + 64 * 4 and not l.get('removed'):
+                    d = l['data']
+                    seen[l['topics'][1].lower()] = [eth.word(d, 0), eth.word(d, 2), '0x' + d[2 + 192:2 + 256].lower()]
+        db['deposits_scanned'] = finalized
+        tmp = db_path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(db, indent=2) + '\n')
+        os.replace(tmp, db_path)
+    return seen
+
+
+def check_mint_backing(eth, intent):
+    """A release is refused while the token shows a mint with no finalized deposit here. Mint keys alone can forge tokens, and burning them
+    takes other people's deposits with honest release keys; `reserves` stays quiet while there is slack. Only with `release_hold: true`, off
+    until the owner decides, because a forged mint then stops all exits until operators list its id in `accepted_unbacked_mints`. A node
+    behind the minting signers refuses until it catches up."""
+    if eth.cfg.get('release_hold') is not True:
+        return
+    mints = intent.get('l2_mints')
+    if not isinstance(mints, list):
+        refuse('the intent lists no L2 mints: nothing shows the tokens are backed')
+    accepted = {str(x).lower() for x in eth.cfg.get('accepted_unbacked_mints', [])}
+    seen, bad = deposits_known(eth), []
+    for m in mints:
+        key = hex32(m['deposit_id'], 'mint deposit id')
+        if key in accepted:
+            continue
+        d = seen.get(key)
+        if d is None:
+            bad.append({'deposit_id': key, 'why': 'no finalized deposit with this id'})
+        elif (m['nonce'] is not None and int(m['nonce']) != d[0]) or int(m['amount']) != d[1] \
+                or d[2] != '0x' + '00' * 12 + address(m['recipient'], 'mint recipient')[2:]:
+            bad.append({'deposit_id': key, 'why': 'the mint differs from its deposit'})
+    if bad:
+        refuse('release hold: the token shows mints with no matching deposit', unbacked=bad[:20], count=len(bad))
+
+
 def cmd_release(eth, args):
     intent = json.loads(Path(args[args.index('--intent') + 1]).read_text())
     if intent.get('kind') != 'stable-release-intent' or int(intent.get('version', 0)) != 1:
@@ -249,6 +302,7 @@ def cmd_release(eth, args):
     if rel['amount'] == 0 or rel['recipient'] in ('0x' + '0' * 40, eth.vault) or int(rel['nativeBurn'], 16) == 0 \
             or int(native['nativeFinalizedHash'], 16) == 0:
         refuse('release the vault would refuse (zero amount, burn or native hash; recipient zero or the vault)')
+    check_mint_backing(eth, intent)
 
     eth.check_code('latest')
     if eth.call('routeId()').lower() != rel['route']:

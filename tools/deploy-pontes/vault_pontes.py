@@ -3,7 +3,7 @@
 
   vault_pontes.py validate --config V [--token-config BUSDC] [--rehearsal]
   vault_pontes.py args     --config V [--rehearsal]
-  vault_pontes.py verify   --config V --rpc ETH_URL --address VAULT [--block finalized] [--rehearsal]
+  vault_pontes.py verify   --config V --rpc ETH_URL --address VAULT [--block finalized] [--unused] [--rehearsal]
 
 One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, domain
 `bloch.bridge.vault-deploy.v1`); `null` = undecided and refused.
@@ -17,7 +17,8 @@ One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, d
             canonical config SHA-256.
   args      the constructor arguments in `forge create --constructor-args` order (domain labels hashed
             with keccak256, signers and guardians sorted ascending as the constructor requires) and the
-            forge command line without wallet options. The owner adds the wallet (e.g. --ledger).
+            forge dry-run command line without wallet options. The owner adds the wallet (e.g. --ledger), and
+            --broadcast only for the one-way creation after the dry run.
   verify    read-only, at --block (default finalized): chain id, code present, every immutable and
             constant, the signer and guardian arrays, committee mode (no verifier, no proposal), no pause.
             Prints the values the L2 token config (`ethereum`) and every eth_half config need: vault,
@@ -204,7 +205,7 @@ def rpc(url, method, params):
     return out['result']
 
 
-def verify(cfg, norm, url, address, block):
+def verify(cfg, norm, url, address, block, unused=False):
     v = cfg['vault']
     refuse(int(rpc(url, 'eth_chainId', []), 16) == cfg['ethereum']['chainId'], 'the RPC serves another chain')
     tag = rpc(url, 'eth_getBlockByNumber', [block, False])
@@ -228,7 +229,7 @@ def verify(cfg, norm, url, address, block):
         'pauseCooldown()(uint64)': str(v['guard']['pauseCooldown']), 'decimals()(uint8)': '6',
         'signerCount()(uint256)': str(len(norm['signers'])), 'guardianCount()(uint256)': str(len(norm['guardians'])),
         'verifier()(address)': '0x' + '00' * 20, 'proposedVerifier()(address)': '0x' + '00' * 20,
-        'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositsEnabled()(bool)': None,
+        'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
     checked, state = {}, {}
     for sig, want in expect.items():
@@ -243,6 +244,10 @@ def verify(cfg, norm, url, address, block):
     for i, a in enumerate(norm['guardians']):
         refuse(get('guardians(uint256)(address)', i).lower() == a, f'guardians({i}) differs from the config')
     route = get('routeId()(bytes32)').lower()
+    if unused:
+        # A new token over a used vault mints its old deposits again, and its burn nonces restart under releases already spent.
+        refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
+               f'{state["totalLocked"]}): a new token needs a new vault')
     code_hash = cast('keccak', code).lower()
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
@@ -271,11 +276,14 @@ def main():
         elif args[0] == 'args':
             ctor = constructor_args(cfg, norm)
             result = {'decision': 'constructor-args', 'configSha256': sha, 'constructorArgs': ctor,
-                      'forge': ['forge', 'create', '--broadcast', '--rpc-url', '<OWN_ETHEREUM_RPC>', CONTRACT,
-                                '--constructor-args', *ctor]}
+                      # Dry run first (no --broadcast). The broadcast is the same line with --broadcast added by hand:
+                      # it is one-way, and a creation that lands wrong is not repaired (docs/BUSDC-MAINNET-V2.md 4.3).
+                      'forge': ['forge', 'create', '--rpc-url', '<OWN_ETHEREUM_RPC>', CONTRACT,
+                                '--constructor-args', *ctor],
+                      'next': 'run the forge line as printed (a dry run); only then add --broadcast and the wallet'}
         else:
             refuse(opt('--rpc') and is_addr(opt('--address')), '--rpc and --address are required')
-            result = {'configSha256': sha, **verify(cfg, norm, opt('--rpc'), opt('--address'), opt('--block', 'finalized'))}
+            result = {'configSha256': sha, **verify(cfg, norm, opt('--rpc'), opt('--address'), opt('--block', 'finalized'), '--unused' in args)}
     except Refused as e:
         print(json.dumps({'decision': 'refused', 'reason': str(e)}, indent=2))
         raise SystemExit(1)

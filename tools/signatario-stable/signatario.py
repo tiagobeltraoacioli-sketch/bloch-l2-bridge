@@ -79,6 +79,8 @@ MINT_TYPEHASH_STR = ('Mint(uint256 sourceChainId,address sourceVault,bytes32 sou
 DOMAIN_TYPEHASH_STR = 'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
 DOMAIN_NAME = 'Bloch Bridged Stablecoin'
 BURNED_TOPIC_STR = 'Burned(bytes32,uint64,address,uint64,address)'
+MINTED_TOPIC_STR = 'Minted(bytes32,uint64,address,uint64)'
+MINT_QUEUED_TOPIC_STR = 'MintQueued(bytes32,address,uint64,uint256)'
 RELEASE_TUPLE = '(bytes32,uint64,address,uint64,bytes32)'
 CONTEXT_TUPLE = '(uint256,uint256,bytes32,uint64,bytes32)'
 CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativeFinalizedNumber',
@@ -317,7 +319,7 @@ class Ctx:
         except ValueError:
             refuse('the Ethereum half returned no JSON', exit=done.returncode, stderr=done.stderr.strip()[-1500:])
         if done.returncode or not out.get('ok'):
-            refuse('the Ethereum half refused', eth=out)
+            refuse(f"the Ethereum half refused: {out.get('reason')}", eth=out)
         return out
 
 
@@ -512,7 +514,9 @@ def own_l2(ctx, work):
         except l2_finality.NotFinal as e:
             refuse(e.reason, **e.detail)
     try:
-        status = json.loads((follower / 'status.json').read_text())
+        status = l2_finality.load_status(follower / 'status.json')
+    except l2_finality.NotFinal as e:
+        refuse(e.reason, **e.detail)
     except (OSError, ValueError) as e:
         refuse('the follower status is unreadable', error=str(e))
     if pins is not None:
@@ -589,6 +593,22 @@ def own_l2(ctx, work):
         proc.wait()
         raise
     return url, proc, status, rebuilt
+
+
+def token_mints(ctx, url, fin_number):
+    """Every mint of the token up to the finalized block, executed or queued. The Ethereum half holds the release if one has no deposit."""
+    start, chunk = int(ctx.cfg.get('token_from_block', 0)), int(ctx.cfg.get('log_chunk', 10000))
+    minted, queued = ctx.keccak_text(MINTED_TOPIC_STR), ctx.keccak_text(MINT_QUEUED_TOPIC_STR)
+    found = {}
+    for lo in range(start, fin_number + 1, chunk):
+        for l in ctx.rpc(url, 'eth_getLogs', [{'address': ctx.token, 'topics': [[minted, queued]], 'fromBlock': hex(lo),
+                                               'toBlock': hex(min(lo + chunk - 1, fin_number))}]):
+            key, recipient = l['topics'][1].lower(), '0x' + l['topics'][2][-40:].lower()
+            if l['topics'][0].lower() == minted:
+                found[key] = {'deposit_id': key, 'recipient': recipient, 'nonce': ctx.word(l['data'], 0), 'amount': ctx.word(l['data'], 1)}
+            else:
+                found.setdefault(key, {'deposit_id': key, 'recipient': recipient, 'nonce': None, 'amount': ctx.word(l['data'], 0)})
+    return list(found.values())
 
 
 def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
@@ -671,6 +691,8 @@ def cmd_release(ctx, args):
     source = ctx.cfg.get('l2_source', 'rebuild')
     if ctx.pins is not None and source != 'rebuild':
         refuse(f'l2_source "{source}" trusts an RPC for finality: tests only, refused with l2_pins')
+    if ctx.cfg.get('work_dir'):
+        Path(ctx.cfg['work_dir']).mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
     try:
         release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id)
@@ -688,6 +710,7 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
         else:
             refuse(f'unknown l2_source {source}')
         release, l2 = finalized_burn(ctx, url, burn_tx, status, burn_id)
+        mints = token_mints(ctx, url, l2['finalized_number'])
     finally:
         if proc is not None:
             proc.kill()
@@ -717,7 +740,7 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
 
     intent = {'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': ctx.source_chain_id,
               'vault': ctx.source_vault, 'release': release, 'native': native, 'l2': l2,
-              'proposed_context': proposed}
+              'proposed_context': proposed, 'l2_mints': mints}
     intent_file = work / 'intent.json'
     intent_file.write_text(json.dumps(intent, indent=2) + '\n')
     eth = ctx.eth_half('release', intent=str(intent_file))
