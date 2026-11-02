@@ -39,13 +39,13 @@ Build settings:
 - **`optimizer_runs = 1`**, which was 200 before `9f91a56` (F129-C);
 - forge 1.7.1.
 
-Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`); the two verifiers' are from agent 138's run of the same build (`agents/138-evidence/suites/summary.txt`), equal for the other four. Runtime keccaks of the verifiers are of the artifact, with the immutables zeroed; a deployed verifier's code hash covers its immutables (agent 138's anvil code hashes are in its report). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
+BridgedStablecoinV3 and V2 hashes are agent 194's (`codex/bridge-v3-decisions-r10-20261102`, forge 1.7.1, `forge inspect`); the others are unchanged. Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`); the two verifiers' are from agent 138's run of the same build (`agents/138-evidence/suites/summary.txt`), equal for the other four. Runtime keccaks of the verifiers are of the artifact, with the immutables zeroed; a deployed verifier's code hash covers its immutables (agent 138's anvil code hashes are in its report). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
 
 | Contract | File (lines, last commit) | Chain | Creation keccak (bytes) | Runtime keccak (bytes) |
 |---|---|---|---|---|
-| **BridgedStablecoinV3** | `contracts/stable/BridgedStablecoinV3.sol` (222, `9f91a56`) | L2 700770 | `0xd3bde07c30294e89d4bfed67acabff601a75d597e3abd382316d411c8f295a95` (22,462) | `0x4516bebfdc30bca7f4fab111cc4ca15c56cefe042da94a4d89afce7cd45f3e1e` (18,698) |
+| **BridgedStablecoinV3** | `contracts/stable/BridgedStablecoinV3.sol` (258, agent 194) | L2 700770 | `0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7` (22,658) | `0x405c2834bea460d321d8a0590ad4189b19238fd0a96c23297667892f51da9ca7` (18,859) |
 | **ProvenanceSourceVault** | `contracts/usdt/ProvenanceSourceVault.sol` (791, `9cbde58`) | Ethereum 1 | `0xc0ff8d98a3bfb0b7dc4a243862ab29b7c99a47ea2a4c940dec75e24f1ec82b8c` (20,194) | `0x3ce7684f3a19716933df175db53e297c718125d5ff6c7a693298470a9fae3188` (17,015) |
-| BridgedStablecoinV2 (V3's base: cancel, remint, unpause, instant cap, switch) | `contracts/stable/BridgedStablecoinV2.sol` (416, `9f91a56`) | - | `0xb3e074f211c00c7499ecfec615bc8890cb8389bc9db1eed2f68bdd3e43cc9205` (19,555) | `0x71fc02742f1545c6dd385325994cf7252857904f9cdcbd964d2f3d1cf00042b1` (15,929) |
+| BridgedStablecoinV2 (V3's base: cancel, remint, unpause, instant cap, switch) | `contracts/stable/BridgedStablecoinV2.sol` (418, agent 194) | - | `0xc6269b357c36f26aac6302f491659b803ca37f180f455c69aef8ee543239665b` (19,580) | `0xe92935e6cd5c40f83ef23e199c3fb6c6118ca178732c1b2e78611deec1bdbbbe` (15,954) |
 | SignerMintedToken (shared core: k-of-n EIP-712 mint, buckets, queue, guardians, burn) | `contracts/bridged/SignerMintedToken.sol` (399, `24150f1`) | - | abstract | abstract |
 | ContextBoundSourceVault (ProvenanceSourceVault's base) | `contracts/usdt/ContextBoundSourceVault.sol` (609, `b281104`) | - | `0x332f195a6ab7ab806c97f308629eedc61d34c0491b9f2f889d56de48e0071ddd` (15,308) | `0x6e1a3508e1eb3c7e47e3e64f2ae0f8bb53eb319329b5b10c96f71a792c87db00` (12,534) |
 | SP1ReleaseVerifier | `contracts/usdt/SP1ReleaseVerifier.sol` (60, `dc1d8fc`) | Ethereum | `0x3571805df5f1af321010c4a34be68c4b142d367521b3c076858c966006dda36b` (1,822) | `0x37e0624f92673e031131e2c31de74dcc056c5a53c2fa019fe73fcb89c9935498` (1,448) |
@@ -200,9 +200,9 @@ It is in scope only for the correctness of what it tells users.
    - It is a deploy rule only. `audit_v3_daemons` D3 fails by design.
    - The related F4 of agent 101: a new token's burn nonces collide with `releasedNonce`.
 4. **Creation gas.**
-   - Token creation for the mainnet shape (7 signers, 3 guardians, the current name) is **4,787,273** gas, against the sequencer's `max_tx_gas` of 5,000,000, a margin of 212,727.
-   - One more guardian costs 4,834,982, one more signer 4,832,760, and a 32-byte name 4,832,052.
-   - The contract maximum (16 signers, 7 guardians), at 5,387,480, **does not fit**.
+   - Token creation for the mainnet shape (7 signers, 3 guardians, the current name) is **4,822,592** gas at agent 194's tip (4,787,273 before: the T = 0 rule +588, the pending cap +29,333, the verifier code-hash re-check +5,398), against the sequencer's `max_tx_gas` of 5,000,000, a margin of 177,408.
+   - One more guardian costs 4,870,301, one more signer 4,868,079, and a 32-byte name 4,867,371.
+   - The contract maximum (16 signers, 7 guardians), at 5,422,799, **does not fit**.
    - `max_tx_gas` caps the gas used by exempt senders too, so the limit cannot be raised. Freeze the shape.
    - Vault creation is 4,253,838.
 5. **`vault_pause_on_mint` trade-off.**
