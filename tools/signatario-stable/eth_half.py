@@ -45,6 +45,20 @@ CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativ
                   'nativeFinalizedHash')
 BLOCKHASH_WINDOW = 256
 
+# D6 prototype (agents/108-d6-design.md): `"provenance": true` in the config selects BridgedStablecoinV3's Burned log
+# and ProvenanceSourceVault's v2 release (the burn's mint-chain fields are part of the release and of its id).
+RELEASE_TUPLE_V2 = '(bytes32,uint64,address,uint64,bytes32,uint64,uint64,bytes32)'
+RELEASE_FIELDS_V2 = ('route', 'nonce', 'recipient', 'amount', 'nativeBurn', 'mintCount', 'mintedTotal', 'mintHead')
+RELEASE_ID_SIG = 'f(bytes32,bytes32,uint256,address,uint256,bytes32)'
+RELEASE_ID_SIG_V2 = 'f(bytes32,bytes32,uint256,address,uint256,bytes32,uint256,uint256,bytes32)'
+RELEASE_TAG = 'BLOCH-USDT-RELEASE-v1'
+
+
+def use_provenance():
+    global RELEASE_TUPLE, RELEASE_FIELDS, RELEASE_ID_SIG, RELEASE_TAG
+    RELEASE_TUPLE, RELEASE_FIELDS = RELEASE_TUPLE_V2, RELEASE_FIELDS_V2
+    RELEASE_ID_SIG, RELEASE_TAG = RELEASE_ID_SIG_V2, 'BLOCH-USDT-RELEASE-v2'
+
 
 def answer(ok, **fields):
     print(json.dumps({'ok': ok, 'signed': ok and 'signature' in fields, **fields}, indent=2))
@@ -103,6 +117,9 @@ class Eth:
         if chain != int(c['eth_chain_id']):
             refuse('this Ethereum node serves another chain', node=chain, config=int(c['eth_chain_id']))
         self.chain_id = chain
+        self.provenance = bool(c.get('provenance'))
+        if self.provenance:
+            use_provenance()
 
     # ── tools ────────────────────────────────────────────────────────────────
     def run(self, argv, what):
@@ -159,8 +176,7 @@ class Eth:
 
     def release_digest(self, rel, context):
         """ContextBoundSourceVault.releaseDigest, computed here."""
-        release_id = self.sha256_abi('f(bytes32,bytes32,uint256,address,uint256,bytes32)',
-                                     tag('BLOCH-USDT-RELEASE-v1'), *[rel[k] for k in RELEASE_FIELDS])
+        release_id = self.sha256_abi(RELEASE_ID_SIG, tag(RELEASE_TAG), *[rel[k] for k in RELEASE_FIELDS])
         auth = self.keccak(self.abi_encode(
             'f(bytes32,uint256,address,bytes32,uint256,uint256,bytes32,uint256,bytes32)',
             tag('BLOCH-USDT-RELEASE-AUTH-v2'), self.chain_id, self.vault, release_id,
@@ -225,6 +241,9 @@ def cmd_release(eth, args):
     rel = {'route': hex32(r['route'], 'route'), 'nonce': uint(r['nonce'], 64, 'nonce'),
            'recipient': address(r['recipient'], 'recipient'), 'amount': uint(r['amount'], 64, 'amount'),
            'nativeBurn': hex32(r['nativeBurn'], 'nativeBurn')}
+    if eth.provenance:
+        rel.update(mintCount=uint(r['mintCount'], 64, 'mintCount'), mintedTotal=uint(r['mintedTotal'], 64, 'mintedTotal'),
+                   mintHead=hex32(r['mintHead'], 'mintHead'))
     native = {'nativeFinalizedNumber': uint(n['nativeFinalizedNumber'], 64, 'nativeFinalizedNumber'),
               'nativeFinalizedHash': hex32(n['nativeFinalizedHash'], 'nativeFinalizedHash')}
     if rel['amount'] == 0 or rel['recipient'] in ('0x' + '0' * 40, eth.vault) or int(rel['nativeBurn'], 16) == 0 \
@@ -247,6 +266,12 @@ def cmd_release(eth, args):
     if eth.word(eth.call('releasedBurn(bytes32)', rel['nativeBurn'])) or \
             eth.word(eth.call('releasedNonce(uint64)', rel['nonce'])):
         refuse('this burn or nonce is already released on Ethereum')
+    if eth.provenance and not eth.word(eth.call('provenanceMatches(uint64,uint64,bytes32)', rel['mintCount'],
+                                                rel['mintedTotal'], rel['mintHead'])):
+        refuse('the burn was made under a mint chain the vault deposits do not back: a mint without a matching '
+               'deposit exists on L2 (D6); not signing', mint_count=rel['mintCount'], mint_head=rel['mintHead'],
+               vault_head=eth.call('chainHeadAt(uint64)', min(rel['mintCount'], eth.word(eth.call('depositCount()')))),
+               deposit_count=eth.word(eth.call('depositCount()')))
     locked = eth.word(eth.call('totalLocked()'))
     if rel['amount'] > locked:
         refuse('amount exceeds the vault totalLocked', total_locked=locked)

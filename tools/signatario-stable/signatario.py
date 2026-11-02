@@ -85,6 +85,22 @@ CONTEXT_FIELDS = ('validUntil', 'sourceAnchorNumber', 'sourceAnchorHash', 'nativ
                   'nativeFinalizedHash')
 RELEASE_FIELDS = ('route', 'nonce', 'recipient', 'amount', 'nativeBurn')
 
+# D6 prototype (agents/108-d6-design.md): `"provenance": true` in the config selects BridgedStablecoinV3's Burned log
+# and ProvenanceSourceVault's v2 release (the burn's mint-chain fields are part of the release and of its id).
+RELEASE_TUPLE_V2 = '(bytes32,uint64,address,uint64,bytes32,uint64,uint64,bytes32)'
+RELEASE_FIELDS_V2 = ('route', 'nonce', 'recipient', 'amount', 'nativeBurn', 'mintCount', 'mintedTotal', 'mintHead')
+RELEASE_ID_SIG = 'f(bytes32,bytes32,uint256,address,uint256,bytes32)'
+RELEASE_ID_SIG_V2 = 'f(bytes32,bytes32,uint256,address,uint256,bytes32,uint256,uint256,bytes32)'
+RELEASE_TAG = 'BLOCH-USDT-RELEASE-v1'
+
+
+def use_provenance():
+    global RELEASE_TUPLE, RELEASE_FIELDS, RELEASE_ID_SIG, RELEASE_TAG
+    RELEASE_TUPLE, RELEASE_FIELDS = RELEASE_TUPLE_V2, RELEASE_FIELDS_V2
+    RELEASE_ID_SIG, RELEASE_TAG = RELEASE_ID_SIG_V2, 'BLOCH-USDT-RELEASE-v2'
+    global BURNED_TOPIC_STR
+    BURNED_TOPIC_STR = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
+
 
 def tag(text):
     """bytes32("...") as Solidity writes it: ASCII, right-padded with zeros."""
@@ -162,6 +178,9 @@ class Ctx:
         self.source_route = c['source_route'].lower()
         self.db_path = Path(c['db'])
         self.db = json.loads(self.db_path.read_text()) if self.db_path.exists() else {'mints': {}, 'releases': {}}
+        self.provenance = bool(c.get('provenance'))
+        if self.provenance:
+            use_provenance()
         try:
             self.pins = l2_finality.pins_from_config(c)
         except l2_finality.NotFinal as e:
@@ -282,8 +301,7 @@ class Ctx:
 
     def release_digest(self, rel, context):
         """ContextBoundSourceVault.releaseDigest on the configured source chain and vault."""
-        release_id = self.sha256_abi('f(bytes32,bytes32,uint256,address,uint256,bytes32)',
-                                     tag('BLOCH-USDT-RELEASE-v1'), *[rel[k] for k in RELEASE_FIELDS])
+        release_id = self.sha256_abi(RELEASE_ID_SIG, tag(RELEASE_TAG), *[rel[k] for k in RELEASE_FIELDS])
         auth = self.keccak(self.abi_encode(
             'f(bytes32,uint256,address,bytes32,uint256,uint256,bytes32,uint256,bytes32)',
             tag('BLOCH-USDT-RELEASE-AUTH-v2'), self.source_chain_id, self.source_vault, release_id,
@@ -615,7 +633,7 @@ def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
         refuse(f'expected exactly one Burned log of the BridgedStablecoin (use --burn-id when the transaction '
                f'holds several), found {len(logs)}', burn_id=burn_id_wanted or None)
     log = logs[0]
-    if len(log['topics']) != 4 or len(log['data']) != 2 + 128:
+    if len(log['topics']) != 4 or len(log['data']) != 2 + (320 if ctx.provenance else 128):
         refuse('malformed Burned log', log=log)
     burn_id, nonce = log['topics'][1].lower(), int(log['topics'][2], 16)
     sender = '0x' + log['topics'][3][-40:].lower()
@@ -633,6 +651,9 @@ def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
 
     release = {'route': ctx.source_route, 'nonce': nonce, 'recipient': recipient, 'amount': amount,
                'nativeBurn': burn_id}
+    if ctx.provenance:
+        release.update(mintCount=ctx.word(log['data'], 2), mintedTotal=ctx.word(log['data'], 3),
+                       mintHead='0x' + log['data'][2 + 256:2 + 320].lower())
     l2 = {'chain_id': ctx.l2_chain_id, 'token': ctx.token, 'burn_tx': burn_tx, 'burn_block': number,
           'burn_block_hash': block['hash'].lower(), 'log_index': int(log['logIndex'], 16), 'from': sender,
           'finalized_number': fin_number, 'finalized_hash': fin_hash}
@@ -707,6 +728,10 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
             'recipient': address(got_rel.get('recipient', ''), 'recipient'),
             'amount': uint(got_rel.get('amount'), 64, 'amount'),
             'nativeBurn': hex32(got_rel.get('nativeBurn', ''), 'nativeBurn')}
+    if ctx.provenance:
+        norm.update(mintCount=uint(got_rel.get('mintCount'), 64, 'mintCount'),
+                    mintedTotal=uint(got_rel.get('mintedTotal'), 64, 'mintedTotal'),
+                    mintHead=hex32(got_rel.get('mintHead', ''), 'mintHead'))
     if norm != release:
         refuse('the Ethereum half signed another release', eth=got_rel, ours=release)
     gc = eth.get('context') or {}
