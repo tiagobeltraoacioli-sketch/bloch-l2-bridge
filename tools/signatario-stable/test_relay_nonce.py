@@ -62,6 +62,7 @@ def main():
             except OSError:
                 time.sleep(0.2)
         (work / 'gas.key').write_text(KEY + '\n')
+        (work / 'gas.key').chmod(0o600)  # vigia refuses a key file others can read
         cfg = {'shared_dir': str(work / 'shared'), 'token': TO, 'source_vault': TO, 'source_route': '0x' + '22' * 32,
                'threshold': 1, 'l2_rpc': url, 'l2_tx_rpc': url, 'l2_chain_id': 700771, 'eth_rpc': url, 'eth_chain_id': 700771,
                'l2_relayer_key': str(work / 'gas.key'), 'eth_relayer_key': str(work / 'gas.key'),

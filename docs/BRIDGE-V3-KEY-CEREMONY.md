@@ -44,17 +44,16 @@ throwaway keys in a temporary directory, which was then deleted (section 9).
 | `l2-token-deployer` | 1 | L2 | Creates the token at nonce 0, then nothing | Owner | Hardware wallet, fresh account | Once |
 | `bloch-inc-safe` + 5 `bloch-inc-safe-owner` | 1 + 5 | Ethereum and L2 | No bridge power; funds the deployers' gas | 5 people, 3 of 5 | Hardware wallets | Cold |
 | `recovery-authority` + its owners | 1 + n | Ethereum | `RecoverableReleaseVerifier`: proposes a successor verifier after the switch to the light client | Owner-chosen people, m of n | Safe of hardware wallets | Cold |
-| `l2-relayer-gas`, `eth-relayer-gas` | 1 each (or one per relayer) | L2, Ethereum | None: pays gas for relayed mints and releases | Relayer operator | Raw key file (what `vigia.py relay` reads) | Hot |
+| `l2-relayer-gas`, `eth-relayer-gas` | 1 each (or one per relayer) | L2, Ethereum | None: pays gas for relayed mints and releases | Relayer operator | Encrypted keystore, password through systemd `LoadCredential=` (what `vigia.py relay` reads) | Hot |
 
-**Guardian mapping (owner decision, section 8).** The committed vault config has 2 Ethereum guardian slots
-(guardiao and sombra). This runbook follows decision BR-6 instead: 3 Ethereum vault guardians, held by the same 3
+**Guardian mapping (owner decision 2026-11-02, BR-6).** The vault config now has 3 Ethereum guardian slots, and
+`vault_pontes.py validate` requires exactly 3 on mainnet: 3 Ethereum vault guardians, held by the same 3
 independent guardian operators as the L2 token guardians, with a separate key per chain. Each operator's
 `guardiao.py` uses its L2 key as `keystore` and its Ethereum key as `eth_keystore`. When `sombra.py` is ported to the
 HF line, it runs at one of the three operators with that operator's Ethereum guardian key: the vault set is
-immutable, so a fourth, independent sombra operator would have to be in the vault from day one. That alternative
-(4 vault guardians) fits too: the vault takes 1 to 7 guardians, and Ethereum creation has no 5 M gas limit.
-`vault_pontes.py validate` accepted 3 vault guardians in the rehearsal. The L2 shape stays frozen at 7 signers and
-3 guardians (token creation 4,787,273 gas against the 5,000,000 `max_tx_gas`).
+immutable, so a fourth, independent sombra operator would have had to be in the vault from day one; the owner chose 3
+(4 would need a change to the mainnet policy in both tools). The L2 shape stays frozen at 7 signers and
+3 guardians (token creation 4,822,592 gas against the 5,000,000 `max_tx_gas`, agent 194 at 8d988ce).
 
 **Hardware choice for hot keys.** The signer and guardian keys sign automatically, so they cannot sit in a hardware
 wallet that needs a button press. The daemons call `cast` with `--keystore` and `--password-file` only. `cast` also
@@ -193,26 +192,33 @@ authority address that the verifier pins stays the same.
 
 ### 3.5 Relayer gas keys
 
-`vigia.py relay` reads `l2_relayer_key` and `eth_relayer_key` as raw hex files. Generate them on the relayer host so
-the key is written straight to the file and never shown:
+`vigia.py relay` takes each gas key as an encrypted keystore (`l2_relayer_keystore`, `eth_relayer_keystore`) and its
+password file (`l2_relayer_password_file`, `eth_relayer_password_file`). On chains 700770 and 1 it refuses a raw hex
+key file, because `cast` would carry a raw key in argv; it refuses any key, keystore or password file that its group or
+other users can read. In the unit (`deploy/signatario/bloch-busdc-relay.service`) the passwords come through systemd
+`LoadCredential=`, written `credential:NAME` in the config. Generate the keys on the relayer host; the key is never shown:
 
 ```
 install -d -m 0700 -o bloch-relayer -g bloch-relayer /etc/bloch-busdc-relayer
 ```
 ```
-sudo -u bloch-relayer sh -c 'umask 077; /opt/foundry/bin/cast wallet new --json | python3 -c "import json,sys; print(json.load(sys.stdin)[0][\"private_key\"])" > /etc/bloch-busdc-relayer/l2-gas.key'
+sudo -u bloch-relayer sh -c 'umask 077; openssl rand -base64 32 > /etc/bloch-busdc-relayer/l2-gas.password'
 ```
 ```
-sudo -u bloch-relayer sh -c 'umask 077; /opt/foundry/bin/cast wallet new --json | python3 -c "import json,sys; print(json.load(sys.stdin)[0][\"private_key\"])" > /etc/bloch-busdc-relayer/eth-gas.key'
+sudo -u bloch-relayer sh -c 'umask 077; CAST_PASSWORD="$(cat /etc/bloch-busdc-relayer/l2-gas.password)" /opt/foundry/bin/cast wallet new /etc/bloch-busdc-relayer l2-gas.keystore'
+```
+```
+sudo -u bloch-relayer sh -c 'umask 077; openssl rand -base64 32 > /etc/bloch-busdc-relayer/eth-gas.password'
+```
+```
+sudo -u bloch-relayer sh -c 'umask 077; CAST_PASSWORD="$(cat /etc/bloch-busdc-relayer/eth-gas.password)" /opt/foundry/bin/cast wallet new /etc/bloch-busdc-relayer eth-gas.keystore'
 ```
 
-Attest with `cast wallet sign --private-key "$(cat …)"` as the relayer user, roles `l2-relayer-gas` and
+Attest with `cast wallet sign --keystore … --password-file …` as the relayer user, roles `l2-relayer-gas` and
 `eth-relayer-gas`. Keep balances small: a few days of gas, topped up by the Safe.
 
-**Known weakness (Low):** `vigia.py` passes this key to `cast` as `--private-key <hex>` (`vigia.py:957`, `:967`), so
-any local user can read it from the process list while `cast` runs. The key has no bridge power, so the loss is the
-gas balance. Run the relayer on its own host with no other users. A fix is to pass a keystore and password file as
-the other daemons do.
+The earlier weakness (agent 174, Low: `vigia.py` passed a raw hex key to `cast` as `--private-key <hex>`, readable in the
+process list) is closed on the public chains by this keystore form. Raw hex files remain for throwaway rehearsal keys only.
 
 ## 4. From key to deploy config
 
@@ -377,7 +383,7 @@ Fill every line before the deploy. Each answer is public data only.
 | 1 | Foundry `cast` 1.7.1 binary SHA-256 that every holder checks (per platform) | TBD-owner |
 | 2 | 7 signer operators: name, host, hosting account, country; each different | TBD-owner |
 | 3 | 3 guardian operators: name, host, hosting account; none runs a signer | TBD-owner |
-| 4 | Vault guardians: 3 (one per guardian operator, recommended) or 4 (plus an independent sombra operator) | TBD-owner |
+| 4 | Vault guardians: 3, one per guardian operator (decided 2026-11-02, enforced by `vault_pontes.py validate`): confirm the mapping | TBD-owner |
 | 5 | Ethereum release keys different from L2 mint keys (required by `key_inventory.py`): confirm | TBD-owner |
 | 6 | Second-channel method for address confirmation, and who calls whom | TBD-owner |
 | 7 | Hardware wallet model and firmware for the deployers; the two derivation indexes | TBD-owner |
@@ -391,6 +397,7 @@ Fill every line before the deploy. Each answer is public data only.
 | 15 | `key_inventory.py check` output with `"signaturesChecked": true`, run by the owner and by a second reviewer | TBD-owner |
 | 16 | Each deployer's balance swept and final nonce 1 recorded after verification | TBD-owner |
 | 17 | Ceremony dates, outside the hour around L1 fork activations (KES at e8620) | TBD-owner |
+| 18 | Bridge fee treasury on Ethereum (`vault.provenance.fees.recipient`, immutable; receives the 5 bps deposit and release fees through `sweepFees()`): an owner-controlled address, not a signer, guardian, deployer, the token or the vault | TBD-owner |
 
 ## 9. Rehearsal (2026-11-02, throwaway keys)
 
@@ -401,7 +408,8 @@ loopback anvil, then deletion of the directory. Result: 24 of 24 checks passed.
 
 - `cast wallet new` with `CAST_PASSWORD` wrote scrypt / AES-128-CTR keystores with mode 600 and printed no private
   key. A wrong password did not open them. Backup copies were identical and opened.
-- Relayer key files were written with mode 600 without the key reaching the terminal.
+- Relayer key files were written with mode 600 without the key reaching the terminal. (Since agent 200 the relayer
+  keys are keystores like the others; the rehearsal predates that change.)
 - `key_inventory.py check` accepted the 34 records and verified 32 attestations against both filled configs.
   `vault_pontes.py validate` accepted 3 vault guardians, and `deploy_pontes.py validate` accepted the L2 config.
 - Refused as expected: the legacy deployer `0x703a…`, a mint key reused as a release key, a guardian operator who

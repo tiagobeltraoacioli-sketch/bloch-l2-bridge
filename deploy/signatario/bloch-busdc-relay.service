@@ -1,0 +1,32 @@
+# bUSDC V3 relayer (vigia.py relay): holds only the L2 and Ethereum gas keys, no bridge authority. Any number may run.
+# Keys: encrypted keystores (mode 0600, owned by bloch-relayer) under /etc/bloch-busdc-relayer; their passwords are
+# passed as systemd credentials, never on a command line. Create them as in docs/BRIDGE-V3-KEY-CEREMONY.md 3.5.
+[Unit]
+Description=Bloch bUSDC V3 relayer: submit what k signers already signed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bloch-relayer
+Group=bloch-relayer
+LoadCredential=l2-gas.password:/etc/bloch-busdc-relayer/l2-gas.password
+LoadCredential=eth-gas.password:/etc/bloch-busdc-relayer/eth-gas.password
+ExecStart=/usr/bin/python3 /opt/bloch-l2-bridge/tools/signatario-stable/vigia.py --config /etc/bloch-busdc-relayer/relayer.json relay --interval 60
+Restart=always
+RestartSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/bloch-busdc-relayer
+ReadOnlyPaths=/etc/bloch-busdc-relayer
+
+[Install]
+WantedBy=multi-user.target

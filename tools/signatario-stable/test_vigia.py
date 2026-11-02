@@ -127,6 +127,7 @@ def main():
 
         (work / 'pw').write_text('test-password\n')
         (work / 'relayer.key').write_text(DEPLOYER + '\n')
+        (work / 'relayer.key').chmod(0o600)  # vigia refuses a key file others can read
         shared = work / 'shared'
         cfgs = []
         for i, (addr, key) in enumerate(signers, 1):

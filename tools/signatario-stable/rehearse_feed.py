@@ -175,6 +175,7 @@ def main():
         code_keccak = out(CAST, 'keccak', out(CAST, 'code', stable, '--rpc-url', l2))
         (work / 'pw').write_text('test-password\n')
         (work / 'relayer.key').write_text(DEPLOYER + '\n')
+        (work / 'relayer.key').chmod(0o600)  # vigia refuses a key file others can read
 
         hostile, hostile_port, replay = hostile_feed(hits)
         servers.append(hostile)

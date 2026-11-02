@@ -98,6 +98,7 @@ class World:
         vault_code = out(CAST, 'keccak', out(CAST, 'code', self.vault, '--rpc-url', eth))
         (self.work / 'pw').write_text('test-password\n')
         (self.work / 'relayer.key').write_text(DEPLOYER + '\n')
+        (self.work / 'relayer.key').chmod(0o600)  # vigia refuses a key file others can read
         self.cfgs = []
         for i, (addr, key) in enumerate(signers, 1):
             sh(CAST, 'wallet', 'import', f's{i}', '--private-key', key, '--keystore-dir', self.work,

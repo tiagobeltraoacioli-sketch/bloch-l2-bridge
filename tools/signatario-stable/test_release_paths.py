@@ -115,6 +115,7 @@ class Net:
         vault_code = out(CAST, 'keccak', out(CAST, 'code', self.vault, '--rpc-url', self.eth))
         (work / 'pw').write_text('test-password\n')
         (work / 'relayer.key').write_text(DEPLOYER + '\n')
+        (work / 'relayer.key').chmod(0o600)  # vigia refuses a key file others can read
         self.cfgs, self.eth_cfgs = [], []
         for i, (addr, key) in enumerate(self.signers, 1):
             sh(CAST, 'wallet', 'import', f's{i}', '--private-key', key, '--keystore-dir', work, '--unsafe-password', 'test-password')

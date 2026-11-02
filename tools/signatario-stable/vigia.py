@@ -6,7 +6,7 @@
 
 Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatario.py config plus
 `shared_dir`, `eth_rpc`, `vault_from_block`, `token_from_block`, and for `relay` `eth_chain_id`,
-`l2_relayer_key`, `eth_relayer_key` (gas keys with no authority), optional `signer_name`,
+the relayer gas keys (no authority; see "Relayer gas keys" below), optional `signer_name`,
 `round_margin` (seconds, default 600), `max_valid_seconds` (default 3600), `resend_after_s` (default 1800: a
 relayed transaction with no receipt after this long is sent again), `lost_after_s` (default 120: an Ethereum transaction the
 node no longer knows at all is sent again after this long), `log_chunk` (blocks per eth_getLogs, default
@@ -16,6 +16,14 @@ chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction
 read that decides anything stays on `l2_rpc`), `relayer_state` (the relayer's nonce record, default
 SHARED/relayer-nonces.json), `max_inflight` (unconfirmed transactions per gas key and side, default 16, the settled RPC's
 limit per sender).
+
+Relayer gas keys. Each side (`l2`, `eth`) takes either `<side>_relayer_keystore` plus `<side>_relayer_password_file`
+(an encrypted keystore, as every other daemon), or, off the public chains only, `<side>_relayer_key` (a raw hex file).
+The key itself is never passed on a command line: `cast` gets `--keystore` and `--password-file` paths. A password file
+written `credential:NAME` is read from `$CREDENTIALS_DIRECTORY/NAME` (systemd `LoadCredential=`). Every key, keystore and
+password file must be private to its owner (no group or other permission bits, e.g. mode 0600 or 0400). A raw hex key
+file is refused when `l2_chain_id` is 700770 or `eth_chain_id` is 1, because `cast` takes a raw key only as
+`--private-key <hex>` on argv, where every local user can read it (agent 174). Throwaway rehearsal keys may still use it.
 
 Relay nonces. An L2 block lands only every 8-14 min, so `latest` stands still across many passes, and several relayed
 transactions share it. One relayer per gas key keeps its own record of the next nonce, and sends at the highest of `latest`,
@@ -101,6 +109,28 @@ def is_revert(error):
 
 def log(**kv):
     print(json.dumps({'t': int(time.time()), **kv}), flush=True)
+
+
+PUBLIC_CHAINS = {'l2': 700770, 'eth': 1}  # L2 mainnet, Ethereum mainnet: raw relayer keys are refused there
+
+
+def private_file(path, what):
+    """`path` exists and has no group or other permission bits (a key must be private to the service user)."""
+    p = Path(path)
+    mode = p.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise SystemExit(f'{what} {p} has mode {mode:04o}: make it private to its owner (chmod 600)')
+    return str(p)
+
+
+def credential(value):
+    """A path, or `credential:NAME` for systemd LoadCredential= (read from $CREDENTIALS_DIRECTORY/NAME)."""
+    if isinstance(value, str) and value.startswith('credential:'):
+        base = os.environ.get('CREDENTIALS_DIRECTORY')
+        if not base:
+            raise SystemExit(f'{value}: $CREDENTIALS_DIRECTORY is not set (LoadCredential= in the unit)')
+        return str(Path(base) / value[len('credential:'):])
+    return value
 
 
 def option(args, name, default=None):
@@ -950,11 +980,30 @@ class Vigia:
         prices = {n: p for n, p in prices.items() if n >= latest}
         return nonce, {'next': nonce, 'latest': latest, 'moved': moved, 'prices': prices}
 
+    def relayer_wallet(self, side):
+        """`cast` wallet options for this side's gas key. A keystore and its password file are passed as paths; a raw hex
+        key (rehearsals only) can only be passed as `--private-key <hex>`, so it is refused on the public chains."""
+        ks = self.cfg.get(f'{side}_relayer_keystore')
+        if ks:
+            pw = credential(self.cfg.get(f'{side}_relayer_password_file'))
+            if not pw:
+                raise SystemExit(f'{side}_relayer_keystore needs {side}_relayer_password_file')
+            return ['--keystore', private_file(ks, 'relayer keystore'),
+                    '--password-file', private_file(pw, 'relayer password file')]
+        raw = self.cfg.get(f'{side}_relayer_key')
+        if not raw:
+            raise SystemExit(f'no relayer gas key for {side}: set {side}_relayer_keystore and {side}_relayer_password_file')
+        chain = int(self.cfg.get(f'{side}_chain_id', 0) or 0)
+        if chain == PUBLIC_CHAINS[side]:
+            raise SystemExit(f'{side}_relayer_key (raw hex) is refused on chain {chain}: cast would carry the key in argv; '
+                             f'use {side}_relayer_keystore and {side}_relayer_password_file')
+        return ['--private-key', Path(private_file(raw, 'relayer key')).read_text().strip()]
+
     def send(self, side, to, call, gas=None):
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
-        key = Path(self.cfg[f'{side}_relayer_key']).read_text().strip()
-        frm = self.cast_out('wallet', 'address', '--private-key', key)
+        wallet = self.relayer_wallet(side)
+        frm = self.cast_out('wallet', 'address', *wallet)
         records = self.load_nonces()
         slot = f'{side}:{frm.lower()}'
         nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
@@ -964,7 +1013,7 @@ class Vigia:
         data = self.cast_out('calldata', *call)
         if gas is None:
             gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
-        raw = self.cast_out('mktx', '--private-key', key, '--chain', str(chain), '--nonce', str(nonce),
+        raw = self.cast_out('mktx', *wallet, '--chain', str(chain), '--nonce', str(nonce),
                             '--gas-limit', str(gas), '--gas-price', str(price), '--legacy', to, data)
         tx = self.rpc(url, 'eth_sendRawTransaction', [raw])
         # Only an accepted transaction moves the record: a refused one leaves its nonce free for the next item.
@@ -982,6 +1031,9 @@ def main():
     if mode is None:
         raise SystemExit(__doc__)
     interval = int(option(args, '--interval', '60'))
+    if mode == 'relay':  # fail at start, not at the first send
+        for side in ('l2', 'eth'):
+            v.relayer_wallet(side)
     while True:
         try:
             v.sign_round() if mode == 'sign' else v.relay_round()

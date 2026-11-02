@@ -205,7 +205,7 @@
       "index": 1,
       "operator": "TBD-owner",
       "address": null,
-      "custody": "hot-file",
+      "custody": "hot-keystore",
       "date": null,
       "attestation": null
     },
@@ -214,7 +214,7 @@
       "index": 1,
       "operator": "TBD-owner",
       "address": null,
-      "custody": "hot-file",
+      "custody": "hot-keystore",
       "date": null,
       "attestation": null
     },

@@ -14,7 +14,7 @@ import key_inventory as ki
 ROLES = [('l2-mint-signer', 7, 'hot-keystore', 'signer-op'), ('eth-release-signer', 7, 'hot-keystore', 'signer-op'),
          ('l2-token-guardian', 3, 'hot-keystore', 'guard-op'), ('eth-vault-guardian', 3, 'hot-keystore', 'guard-op'),
          ('eth-vault-deployer', 1, 'hardware-wallet', 'owner'), ('l2-token-deployer', 1, 'hardware-wallet', 'owner'),
-         ('l2-relayer-gas', 1, 'hot-file', 'relayer'), ('eth-relayer-gas', 1, 'hot-file', 'relayer'),
+         ('l2-relayer-gas', 1, 'hot-keystore', 'relayer'), ('eth-relayer-gas', 1, 'hot-keystore', 'relayer'),
          ('bloch-inc-safe', 1, 'safe', 'bloch-inc')]
 HAVE_CAST = Path(ki.CAST).exists()
 
