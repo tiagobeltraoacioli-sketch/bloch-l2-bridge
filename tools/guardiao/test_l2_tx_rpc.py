@@ -217,9 +217,10 @@ def main():
         sent = kinds(lines, 'pause')
         check('split: the pause lands through l2_tx_rpc', paused() and sent and sent[0].get('ok') is True, (rc, lines, err))
         check('split: nothing was sent to the replica', stub.refused == before, stub.refused - before)
-        check('split: a violation still open exits 2, healthy', rc == 2, (rc, err))
-        check('split: health file says healthy',
-              healthy('split') is True)
+        check('split: a violation still open exits 2', rc == 2, (rc, err))
+        hdoc = json.loads((work / 'split.state.health.json').read_text())
+        check('split: health file has no problem, but names the open hard finding (an incident until a person resolves it)',
+              healthy('split') is False and not hdoc['problems'] and hdoc.get('findings'), hdoc)
         check('split: the replica does not show the pause yet', int(view(stub.url, stable, 'pauseCount()(uint64)')) == 0)
         rc, lines, err = run(cfg)
         check('split: not sent again while the settled view lags', not kinds(lines, 'pause')
@@ -234,9 +235,10 @@ def main():
               any(x.get('id') == 'pause-not-visible' and x.get('severity') == 'critical' for x in lines), lines)
         stub.frozen = None
         rc, lines, err = run(cfg)
-        check('settled: the replica shows the pause, the guardian skips and is healthy again',
+        hdoc = json.loads((work / 'split.state.health.json').read_text())
+        check('settled: the replica shows the pause, the guardian skips; no problem left, the finding still open',
               kinds(lines, 'pause-skip') and not kinds(lines, 'pause')
-              and healthy('split') is True, lines)
+              and not hdoc['problems'] and hdoc.get('findings') and healthy('split') is False, lines)
         doc = json.loads((work / 'split.state.health.json').read_text())
         check('health: a verified round records verified_t', abs(doc.get('verified_t', 0) - time.time()) < 60, doc)
         check('health: group-readable for the monitor, under any umask',

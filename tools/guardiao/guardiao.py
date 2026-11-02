@@ -175,6 +175,10 @@ class Guardian:
         """Something that stops this guardian protecting the bridge: never only a log line."""
         self.state['problems'][pid] = {'t': int(time.time()), 'detail': str(detail)[-300:]}
         self.log(kind='alert', severity='critical', id=pid, detail=str(detail)[-300:])
+        self.notify(pid, detail)
+
+    def notify(self, pid, detail):
+        """Runs `alert_command` once. Callers deduplicate: `problems` and `open` hold what was already sent."""
         command = self.cfg.get('alert_command')
         if command:
             argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
@@ -197,8 +201,11 @@ class Guardian:
     def write_health(self):
         # `verified_t` is the last round that read everything it needed: a guardian that keeps writing this file while
         # every round is `unverifiable` is alive but blind, which `t` and `healthy` alone do not show.
-        doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'],
-               'verified_t': self.state.get('verified_t'), 'problems': self.state['problems']}
+        # An open hard finding (forged mint, release without backing, reserves deficit) is an incident even after the pause
+        # landed: the health file says so, so the monitor keeps re-alerting until a person resolves it.
+        findings = {k: v for k, v in self.state.get('open', {}).items() if v.get('severity') == 'hard'}
+        doc = {'t': int(time.time()), 'bridge': self.name, 'healthy': not self.state['problems'] and not findings,
+               'verified_t': self.state.get('verified_t'), 'problems': self.state['problems'], 'findings': findings}
         tmp = self.health_path.with_name(self.health_path.name + '.tmp')
         tmp.write_text(json.dumps(doc, indent=1) + '\n')
         tmp.chmod(0o640)  # l2_monitor.py reads it through the group; the service's UMask would hide it
@@ -708,7 +715,7 @@ class Guardian:
         return now, findings
 
     def act(self, now, findings):
-        seen, due = set(), []
+        seen, due, new = set(), [], []
         for severity, fid, grace, detail in findings:
             seen.add(fid)
             st = self.state['open'].get(fid)
@@ -716,11 +723,19 @@ class Guardian:
                 st = self.state['open'][fid] = {'first_seen': now, 'severity': severity}
                 self.log(kind='alert', severity=severity, id=fid, deadline=now + grace if severity == 'hard' else None,
                          **detail)
+                new.append((severity, fid, detail))
             if severity == 'hard' and now >= st['first_seen'] + grace + (self.frozen_extra_grace if self.frozen else 0):
                 due.append(fid)
                 if not st.get('due'):
                     st['due'] = now
                     self.log(kind='alert', severity='hard', id=fid, due=True, reason=detail.get('reason'))
+        # Every new finding reaches the operator once, not only the journal. A flood (many forged mints in one round) is one
+        # call naming the count, so `alert_command` cannot be turned into a storm by the attacker.
+        limit = int(self.cfg.get('alert_burst', 5))
+        for severity, fid, detail in new[:limit]:
+            self.notify(f'{severity}:{fid}', detail.get('reason') or json.dumps(detail, default=str))
+        if len(new) > limit:
+            self.notify('burst', f'{len(new) - limit} more new findings this round; see the journal')
         for fid in [f for f in self.state['open'] if f not in seen]:
             st = self.state['open'][fid]
             if self.blind:  # unseen is not resolved: a round without the L2 cannot tell, and an open grace keeps running

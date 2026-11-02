@@ -31,7 +31,13 @@ a deficit. This tool only reports: pausing is the guardians' job (tools/guardiao
 CONFIG (JSON): {"bridges": [
   {"kind": "stable", "name": ..., "l2_rpc": ..., "token": ..., "eth_rpc": ..., "vault": ..., "tolerance": 0},
   {"kind": "wgnb", "name": ..., "l2_rpc": ..., "token": ..., "gnb_rpc": ..., "gnb_vault_address": ...,
-   "gnb_vault_script": optional hex (every UTXO must pay it), "tolerance": 0}]}
+   "gnb_vault_script": optional hex (every UTXO must pay it), "tolerance": 0}],
+ "alert_command": optional argv with {id} and {detail}, "surplus_alert_s": 3600, "unverifiable_alert_rounds": 3,
+ "health_file": optional path for l2_monitor.py --guardian-health}
+
+Alerts that reach a person (`watch` only, kept in memory): a deficit at once; a surplus that has stood `surplus_alert_s`
+(deposits not minted or burns not released for that long: lost signers, a stopped relay); `unverifiable_alert_rounds`
+rounds in a row without a reading. Each is sent once when it starts and once when it clears.
 """
 import json
 import subprocess
@@ -145,15 +151,75 @@ class Monitor:
                      reason='backing above liabilities: burns waiting for release or deposits waiting for mint')
         return status
 
+    def notify(self, pid, detail):
+        command = self.cfg.get('alert_command')
+        if not command:
+            return
+        argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            if done.returncode:
+                self.log(kind='alert-command-failed', rc=done.returncode, error=done.stderr.strip()[-200:])
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(kind='alert-command-failed', error=str(e))
+
+    def escalate(self, name, status, now):
+        """One call when a condition starts to matter and one when it clears: never a call per round."""
+        mem = self.__dict__.setdefault('_mem', {}).setdefault(name, {'since': {}, 'sent': set(), 'errors': 0})
+        mem['errors'] = mem['errors'] + 1 if status == 'error' else 0
+        for k in ('deficit', 'surplus'):
+            if status == k:
+                mem['since'].setdefault(k, now)
+            else:
+                mem['since'].pop(k, None)
+        due = set()
+        if 'deficit' in mem['since']:
+            due.add('deficit')
+        if 'surplus' in mem['since'] and now - mem['since']['surplus'] >= int(self.cfg.get('surplus_alert_s', 3600)):
+            due.add('surplus-stuck')
+        if mem['errors'] >= int(self.cfg.get('unverifiable_alert_rounds', 3)):
+            due.add('unverifiable')
+        if status == 'error' and mem['errors'] < int(self.cfg.get('unverifiable_alert_rounds', 3)):
+            due |= mem['sent'] & {'deficit', 'surplus-stuck'}  # a read error is no evidence that a deficit cleared
+        for k in sorted(due - mem['sent']):
+            self.notify(f'{name}:{k}', {'deficit': 'source backing below the L2 token liabilities',
+                                        'surplus-stuck': 'backing above liabilities for too long: deposits not minted or '
+                                                         'burns not released (signers or relay down?)',
+                                        'unverifiable': f'{mem["errors"]} rounds without a reading'}[k])
+        for k in sorted(mem['sent'] - due):
+            self.notify(f'{name}:{k}:resolved', 'cleared')
+        mem['sent'] = due
+        return due
+
+    def write_health(self, now):
+        path = self.cfg.get('health_file')
+        if not path:
+            return
+        mem = self.__dict__.get('_mem', {})
+        problems = {f'{n}:{k}': {'t': int(now)} for n, m in mem.items() for k in m['sent']}
+        verified = all(m['errors'] == 0 for m in mem.values())
+        if verified:
+            self._verified_t = int(now)
+        doc = {'t': int(now), 'bridge': 'reservas', 'healthy': not problems, 'verified_t': getattr(self, '_verified_t', None),
+               'problems': problems}
+        tmp = Path(path).with_name(Path(path).name + '.tmp')
+        tmp.write_text(json.dumps(doc, indent=1) + '\n')
+        tmp.chmod(0o640)
+        tmp.replace(path)
+
     def round(self):
         """Exit code: 2 if any deficit, else 1 if any read error, else 3 if any surplus, else 0."""
         seen = set()
+        now = time.time()
         for b in self.cfg['bridges']:
             try:
-                seen.add(self.check(b))
+                status = self.check(b)
             except (Unverifiable, KeyError) as e:
                 self.log(kind='alert', severity='soft', bridge=b.get('name'), id='unverifiable', reason=str(e))
-                seen.add('error')
+                status = 'error'
+            seen.add(status)
+            self.escalate(str(b.get('name')), status, now)
+        self.write_health(now)
         return next((c for k, c in (('deficit', 2), ('error', 1), ('surplus', 3)) if k in seen), 0)
 
 def main():
