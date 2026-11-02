@@ -106,7 +106,7 @@ contract RecoverableReleaseVerifierTest {
     }
 
     function cfg(address authority, uint64 delay, uint64 window, uint64 cooldown) private view returns (R.Config memory) {
-        return R.Config(sp1, RELEASE_VKEY, STEP_VKEY, WORDS, DIGEST, 700770, L2_TOKEN, GENESIS, EPOCH, authority, delay, window, cooldown);
+        return R.Config(sp1, RELEASE_VKEY, STEP_VKEY, WORDS, DIGEST, 700770, L2_TOKEN, GENESIS, EPOCH, authority, delay, window, cooldown, 0);
     }
 
     function make() private returns (R) {

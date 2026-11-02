@@ -8,6 +8,7 @@
 WORK holds bin/{anvil,forge,cast} and out/<tag>/ from the proof jobs. Loopback only, chain id 31337,
 throwaway keys generated here and kept in WORK/anvil-keys.json. Nothing here touches a public network.
 """
+import hashlib
 import json
 import os
 import secrets
@@ -20,10 +21,10 @@ from pathlib import Path
 WORK = Path(sys.argv[1])
 BRIDGE = WORK / 'bridge'
 CAST, FORGE, ANVIL = (str(WORK / 'bin' / n) for n in ('cast', 'forge', 'anvil'))
-PORT = 24700
+PORT = int(os.environ.get('LC_EXIT_PORT', '24700'))
 RPC = f'http://127.0.0.1:{PORT}'
 GENESIS, EPOCH = 1786656679, 960
-DELAY, WINDOW, COOLDOWN = 14 * 86400, 3 * 86400, 14 * 86400
+DELAY, WINDOW, COOLDOWN, HANDOFF = 14 * 86400, 3 * 86400, 14 * 86400, 30 * 86400
 L2_CHAIN, L2_TOKEN = 700771, '0x1267d2203aa5956d7b89181472a681e810868920'
 USDT = 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault'
 RECOVERABLE = 'contracts/usdt/RecoverableReleaseVerifier.sol:RecoverableReleaseVerifier'
@@ -141,8 +142,8 @@ def certify(k, digest, n=3):
     return '[' + ','.join(sign_digest(key, digest) for _, key in k['_signers'][:n]) + ']'
 
 
-def recoverable(k, sp1, step_vkey, release_vkey, words, digest):
-    cfg = f"({sp1},{release_vkey},{step_vkey},{words},{digest},{L2_CHAIN},{L2_TOKEN},{GENESIS},{EPOCH},{addr(k['authority'])},{DELAY},{WINDOW},{COOLDOWN})"
+def recoverable(k, sp1, step_vkey, release_vkey, words, digest, handoff=0):
+    cfg = f"({sp1},{release_vkey},{step_vkey},{words},{digest},{L2_CHAIN},{L2_TOKEN},{GENESIS},{EPOCH},{addr(k['authority'])},{DELAY},{WINDOW},{COOLDOWN},{handoff})"
     return create(k['deployer'], RECOVERABLE, cfg)
 
 
@@ -252,6 +253,36 @@ def full():
         assert int(call(lc, 'proposedSuccessor()(address)'), 16) == 0
         warp(at + 1)
         res['refusals']['activate_after_life'] = refused(k['stranger'], lc, 'activateSuccessor()')
+    finally:
+        net.stop()
+    # Third net: a planned key change (handoff). The successor is anchored at the real e7108 checkpoint,
+    # and the real mainnet step proof of the old program endorses it. A proof of life cannot stop it.
+    net = Net(start)
+    try:
+        fund(k['deployer'], k['authority'], k['stranger'])
+        sp1 = create(k['deployer'], SP1)
+        pvb = bytes.fromhex(real['public_values'])
+        new_digest = hashlib.sha256(b'BLOCH-LC-ANCHOR-v1' + pvb[80:152]).hexdigest()
+        lc = recoverable(k, sp1, tr['step_vkey'], tr['release_vkey'], tr['step_vkey_words'], '0x' + tr['anchor_digest'], HANDOFF)
+        nxt = recoverable(k, sp1, tr['step_vkey'], tr['release_vkey'], tr['step_vkey_words'], '0x' + new_digest, HANDOFF)
+        warp(real_time + 3600)
+        h = {'old_verifier': lc, 'successor': nxt, 'successor_anchor_epoch': real_epoch, 'successor_anchor_digest': '0x' + new_digest}
+        res['gas']['proposeHandoff'] = gas(send(k['authority'], lc, 'proposeHandoff(address)', nxt))
+        h['activates_at'] = int(call(lc, 'activatesAt()(uint64)').split()[0])
+        pv = '0x' + real['public_values']
+        bad = real['proof_bytes'][:-2] + ('00' if real['proof_bytes'][-2:] != '00' else '01')
+        res['refusals']['handoff_by_stranger'] = refused(k['stranger'], lc, 'proposeHandoff(address)', nxt)
+        res['refusals']['life_against_handoff'] = refused(k['stranger'], lc, 'proveLife(bytes,bytes)', pv, real['proof_bytes'])
+        res['refusals']['handoff_endorse_tampered'] = refused(k['stranger'], lc, 'endorseHandoff(bytes,bytes)', pv, bad)
+        warp(h['activates_at'] + 1)
+        res['refusals']['handoff_activate_unendorsed'] = refused(k['stranger'], lc, 'activateSuccessor()')
+        r = send(k['stranger'], lc, 'endorseHandoff(bytes,bytes)', pv, real['proof_bytes'])
+        res['gas']['endorseHandoff_real_mainnet_step'] = gas(r)
+        h['endorse_tx'] = r['transactionHash']
+        res['gas']['activateSuccessor_handoff'] = gas(send(k['stranger'], lc, 'activateSuccessor()'))
+        assert call(lc, 'successor()(address)').lower() == nxt.lower()
+        h['new_trust_anchor'] = call(nxt, 'trustAnchor()(bytes32)')
+        res['handoff'] = h
     finally:
         net.stop()
     (WORK / 'rehearsal.json').write_text(json.dumps(res, indent=1))

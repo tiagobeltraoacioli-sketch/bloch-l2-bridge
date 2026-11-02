@@ -42,7 +42,7 @@ contract RecoverableReleaseVerifierGroth16Test {
             R.Config(
                 ISP1Verifier(address(sp1)), releaseVKey, vm.parseJsonBytes32(j, ".step_vkey"),
                 vm.parseJsonBytes32(j, ".step_vkey_words"), vm.parseJsonBytes32(j, ".anchor_digest"), l2ChainId, l2Token,
-                GENESIS, EPOCH, AUTHORITY, DELAY, WINDOW, DELAY
+                GENESIS, EPOCH, AUTHORITY, DELAY, WINDOW, DELAY, 0
             )
         );
     }
@@ -122,5 +122,48 @@ contract RecoverableReleaseVerifierGroth16Test {
         lc.proposeSuccessor(address(sp1));
         vm.expectRevert(R.CheckpointTooOld.selector);
         lc.proveLife(pv, p);
+    }
+
+    /// Handoff with the REAL mainnet step proof (anchor e7107, checkpoint e7108): the successor is
+    /// anchored at e7108, and this proof of the old program is what endorses it.
+    function handoff() private returns (R lc, R next, bytes memory pv, bytes memory p) {
+        string memory j = vm.readFile(STEP);
+        pv = vm.parseJsonBytes(j, ".public_values");
+        p = vm.parseJsonBytes(j, ".proof");
+        R.Config memory c = R.Config(
+            ISP1Verifier(address(sp1)), keccak256("release key"), vm.parseJsonBytes32(j, ".step_vkey"),
+            vm.parseJsonBytes32(j, ".step_vkey_words"), vm.parseJsonBytes32(j, ".anchor_digest"), 700770, address(0xB05C),
+            GENESIS, EPOCH, AUTHORITY, DELAY, WINDOW, DELAY, 30 days
+        );
+        lc = new R(c);
+        c.anchorDigest = E7108_ANCHOR_DIGEST;
+        next = new R(c);
+        vm.warp(uint256(GENESIS) + 7200 * uint256(EPOCH));
+        vm.prank(AUTHORITY);
+        lc.proposeHandoff(address(next));
+    }
+
+    /// sha256("BLOCH-LC-ANCHOR-v1" || checkpoint e7108), the guest's `anchor_digest` for that checkpoint.
+    bytes32 private constant E7108_ANCHOR_DIGEST = 0x799bdddf42047d906b7ca6d9915ca3d225a94dfa16e8aa8a150748c3450fae7f;
+
+    function testRealMainnetStepEndorsesAHandoffToItsCheckpoint() public {
+        (R lc, R next, bytes memory pv, bytes memory p) = handoff();
+        vm.expectRevert(R.InvalidLifeProof.selector);
+        lc.proveLife(pv, p);
+        lc.endorseHandoff(pv, p);
+        require(lc.handoffEndorsed(), "endorsed");
+        vm.warp(lc.activatesAt());
+        lc.activateSuccessor();
+        require(lc.successor() == address(next), "handed off");
+    }
+
+    function testTamperedRealMainnetStepDoesNotEndorse() public {
+        (R lc,, bytes memory pv, bytes memory p) = handoff();
+        p[p.length - 7] ^= 0x01;
+        vm.expectRevert();
+        lc.endorseHandoff(pv, p);
+        vm.warp(lc.activatesAt());
+        vm.expectRevert(R.InvalidActivation.selector);
+        lc.activateSuccessor();
     }
 }

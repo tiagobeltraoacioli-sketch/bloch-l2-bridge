@@ -81,6 +81,58 @@ holders before the 7-day switch delay starts, because they can leave during it.
   about 22.7 days at one block per slot. So anchor the successor at the earliest checkpoint it can trust, and prove
   old burns soon. A burn further down stays stranded unless a guest with a higher limit is deployed.
 
+## 4b. Optional handoff path (prototype, off unless `handoffDelay` != 0)
+
+Option 5 alone has two gaps, both covered by tests in `solidity-tests/LcExitFailurePaths.t.sol`:
+
+- **A planned key change is griefable.** A new step or release program, a raised hop bound or a new SP1
+  verifier can only come through the recovery path, which anyone stops with one step proof per round while
+  steps still work. A release-guest bug with healthy steps leaves funds waiting as long as a griefer pays.
+- **A verifier soundness bug blocks its own fix.** Whoever can forge proofs forges a proof of life each round,
+  while draining at the vault's window rate.
+
+`proposeHandoff(successor)` (authority only, shares the cooldown) names a successor that is itself a
+`RecoverableReleaseVerifier` for the same L2 token and chain, with a new anchor. It activates after
+`handoffDelay` (at least 14 days, suggested 30) and only once anyone calls `endorseHandoff` with a step proof
+of THIS light client whose checkpoint hashes to the successor's anchor
+(`sha256("BLOCH-LC-ANCHOR-v1" || checkpoint)`, the guest's own `anchor_digest`). A proof of life does not stop it.
+
+- The authority chooses the new rules (programs, SP1 verifier), not the new root: the root is a checkpoint
+  the old light client proved. With a broken SP1 verifier that guarantee is gone, and the root is the
+  authority's choice too.
+- **Trust added:** the authority can replace a WORKING light client, with `handoffDelay` notice. The old path
+  works throughout, so holders who distrust the new programs can leave, but only as fast as the vault's
+  window allows. The notice protects every holder only while
+  `totalLocked <= windowLimit * (handoffDelay - L2 settlement time) / windowSeconds`. Size the cap or the
+  delay to that.
+- Rehearsed on anvil with the real mainnet e7108 step proof as the endorsement (report 103).
+
+## 4c. Exit timelines (suggested parameters)
+
+| Event | Option 5 | Option 5 + handoff |
+|---|---|---|
+| Finality stall under the hop bound (68 h) | Not a recovery case; the first step after it stops any proposal | Same |
+| Finality stall of 30 days | Releases resume at about day 45 (day 30 return, a day to anchor and deploy, 14-day delay). About day 30 if the authority proposed by day 16 a successor anchored at the last checkpoint the old client proved, with a guest that knows the recovery | Same |
+| Rule-changing L1 fork, planned | Down from the gate to activation, at least 3 days; must be proposed 11+ days before the gate | No downtime; propose 30+ days before the gate, anchor before it |
+| Release-guest bug, steps healthy | Griefable without end | Fixed after the notice |
+| SP1 verifier soundness bug | Fix blocked by forged proofs of life; drain at the window rate | Fixed after the notice; drain at the window rate until then |
+| Lost authority | A stopped client locks funds for good (same as option 1) | Same |
+
+Burns older than the successor's anchor need `MAX_HEADERS` (65,536 L1 headers, about 22.7 days): after a
+30-day stall in which blocks kept coming, burns from before the stall are stranded unless the successor is
+anchored at the last checkpoint the old client proved, or its release guest has a higher limit.
+
+## 4d. Report 101's D6 after the switch
+
+A burn of forged L2 tokens is a real burn, so its release proof is valid and the vault pays. The light client
+proves finality and settlement, never backing. After the switch it is worse than in committee mode: the
+guardian cannot pause (`CommitteeRetired`), the signers cannot close releases, so report 101's fix (a `mint:`
+finding closes the vault) is impossible. Only the vault window bounds it (test
+`testD6AfterTheSwitchOnlyTheWindowBoundsIt`). Neither option 5 nor the handoff is a pause. An exact fix needs a
+deposit accumulator in the vault, L2 mints bound to it in order, and the release guest committing the L2 mint
+chain head for the verifier to compare: a vault, token and guest change, so it belongs before the mainnet vault
+is deployed.
+
 ## 5. Operations (needed with every option)
 
 - **Two independent provers**, on separate hosts, both on `lc_prover.py`, one step at least every 16 epochs. One
