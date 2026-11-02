@@ -80,7 +80,7 @@ can be executed. A verified mint is cached and not re-checked (a later source re
 A verified mint is cached by its transaction, so a remint under the same id is checked again.
 
 **Queued-mint cancel (a token with `cancelQuorum`).** A due finding on a mint still in the queue also sends this guardian's
-`voteCancelMints`, one transaction per round of up to `cancel_batch` (32) mints, largest first, before the pause. A majority of the guardians cancels. It is the only guardian action that
+`voteCancelMints`, one transaction per round of up to `cancel_batch` (32) mints, earliest `readyAt` first (agent 129, F129-A), before the pause. A majority of the guardians cancels. It is the only guardian action that
 ends a forged queued mint: a pause only delays it.
 
 - A mint with no deposit is voted on only if the guardian's Ethereum `latest` is at least `cancel_fresh_s` (300) past the block that
