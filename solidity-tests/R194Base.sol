@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.24;
+
+import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
+import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
+import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
+
+interface R194Vm {
+    function addr(uint256 privateKey) external pure returns (address);
+    function sign(uint256 privateKey, bytes32 digest) external pure returns (uint8 v, bytes32 r, bytes32 s);
+    function warp(uint256 timestamp) external;
+    function roll(uint256 blockNumber) external;
+    function prank(address sender) external;
+    function etch(address target, bytes calldata code) external;
+    function expectRevert(bytes4 revertData) external;
+    function pauseGasMetering() external;
+}
+
+contract R194Usdc {
+    uint8 public constant decimals = 6;
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// Agent 194 (round 10): shared setup for the owner's bridge V3 launch decisions. The mainnet shape of
+/// deployments/mainnet/busdc-mainnet.config.json and busdc-vault-mainnet.config.json: 5-of-7 mint and release keys,
+/// 6-of-7 switch and unpause, 3 token guardians (cancel quorum 2), 72 h pause and 72 h cooldown, T = 0, 12 h delay,
+/// bucket 10,000 USDC a day, cap 100,000, minBurn = minDeposit = 10 USDC, vault mode 1.
+abstract contract R194Base {
+    R194Vm constant vm = R194Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+    uint256 constant U = 1e6;
+    uint64 constant CAP = uint64(100_000 * U);
+    uint64 constant BUCKET = uint64(10_000 * U);
+    uint64 constant MIN = uint64(10 * U);
+    address constant MALLORY = address(0xBAD);
+    address constant ALICE = address(0xA11CE);
+
+    uint256[] mintKeys;
+    uint256[] ethKeys;
+    uint256[3] guardKeys = [uint256(0x6a01), 0x6a02, 0x6a03];
+    R194Usdc usdc;
+    ProvenanceSourceVault vault;
+    BridgedStablecoinV3 token;
+
+    function setUp() public virtual {
+        vm.warp(1_000_000);
+        vm.roll(1000);
+        mintKeys = sorted(0x1000);
+        ethKeys = sorted(0x2000);
+        usdc = new R194Usdc();
+        vault = new ProvenanceSourceVault(
+            keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 0, addrs(ethKeys), 5,
+            ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, MIN, MIN),
+            ProvenanceSourceVault.Guard(new address[](0), 0, 0), ProvenanceSourceVault.Provenance(1, 0, address(0))
+        );
+        uint256 until = block.timestamp + 100;
+        vault.setControls(true, true, 0, until, cert(vault.controlDigest(true, true, 0, until), 5));
+        token = newToken(0);
+    }
+
+    function limits(uint256 large) internal pure returns (SignerMintedToken.Limits memory) {
+        return SignerMintedToken.Limits(CAP, BUCKET, BUCKET / 1 days, large, 12 hours, MIN);
+    }
+
+    function guard() internal view returns (SignerMintedToken.Guard memory) {
+        address[] memory g = new address[](3);
+        for (uint256 i; i < 3; ++i) g[i] = vm.addr(guardKeys[i]);
+        return SignerMintedToken.Guard(g, 3 days, 3 days);
+    }
+
+    function newToken(uint256 large) internal returns (BridgedStablecoinV3) {
+        return new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5, limits(large),
+            guard(), BridgedStablecoinV2.MintSwitch(6, 14 days)
+        );
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    function sorted(uint256 base) internal pure returns (uint256[] memory k) {
+        k = new uint256[](7);
+        for (uint256 i; i < 7; ++i) k[i] = base + i;
+        for (uint256 i; i < 7; ++i) {
+            for (uint256 j = i + 1; j < 7; ++j) {
+                if (vm.addr(k[j]) < vm.addr(k[i])) (k[i], k[j]) = (k[j], k[i]);
+            }
+        }
+    }
+
+    function addrs(uint256[] memory k) internal pure returns (address[] memory a) {
+        a = new address[](k.length);
+        for (uint256 i; i < k.length; ++i) a[i] = vm.addr(k[i]);
+    }
+
+    function cert(bytes32 digest, uint256 n) internal view returns (bytes[] memory out) {
+        out = new bytes[](n);
+        for (uint256 i; i < n; ++i) {
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(ethKeys[i], digest);
+            out[i] = abi.encodePacked(r, s, v);
+        }
+    }
+
+    function blob(bytes32 digest, uint256 n) internal view returns (bytes memory out) {
+        for (uint256 i; i < n; ++i) {
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintKeys[i], digest);
+            out = bytes.concat(out, abi.encodePacked(r, s, v));
+        }
+    }
+
+    function deposit(uint64 amount, address l2) internal returns (bytes32 id) {
+        usdc.mint(address(this), amount);
+        id = vault.deposit(amount, bytes32(uint256(uint160(l2))));
+    }
+
+    function tryMint(bytes32 id, uint64 nonce, uint64 amount, address to) internal returns (bool ok, bytes memory err) {
+        bytes memory sigs = blob(token.mintDigest(id, nonce, amount, to), 5);
+        (ok, err) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (id, nonce, amount, to, sigs)));
+    }
+
+    function mint(bytes32 id, uint64 nonce, uint64 amount, address to) internal {
+        (bool ok, bytes memory err) = tryMint(id, nonce, amount, to);
+        if (!ok) {
+            assembly {
+                revert(add(err, 32), mload(err))
+            }
+        }
+    }
+
+    function cancel(bytes32 id) internal {
+        (address r, uint64 a, uint64 ready) = token.pendingMints(id);
+        require(a != 0, "nothing to cancel");
+        for (uint256 i; i < 2; ++i) {
+            vm.prank(vm.addr(guardKeys[i]));
+            token.voteCancelMint(id, r, a, ready);
+        }
+    }
+
+    function selectorOf(bytes memory err) internal pure returns (bytes4 sel) {
+        if (err.length < 4) return 0;
+        assembly {
+            sel := mload(add(err, 32))
+        }
+    }
+}
+
+/// A deposit id naming slot `slot` (ProvenanceSourceVault puts the nonce in the top 8 bytes).
+function r194id(bytes32 salt, uint64 slot) pure returns (bytes32) {
+    return bytes32((uint256(slot) << 192) | (uint256(salt) & type(uint192).max));
+}
