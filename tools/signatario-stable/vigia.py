@@ -159,7 +159,8 @@ class Vigia:
         if self._version is None:
             try:
                 out = self.call(self.cfg['l2_rpc'], self.token, 'availableToMint()')
-                self._version = '2' if len(out) == 66 else '1'
+                if out not in ('0x', ''):  # an empty answer is a token this view does not show yet, not a version
+                    self._version = '2' if len(out) == 66 else '1'
             except RuntimeError as e:
                 if is_revert(e):
                     self._version = '1'
