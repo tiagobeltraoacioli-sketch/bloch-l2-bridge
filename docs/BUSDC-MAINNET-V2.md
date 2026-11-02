@@ -105,7 +105,7 @@ runs both and compares `configSha256` and the arguments.
 ### 4.3 Deploy the vault (deposits and releases start disabled)
 
 Bloch Inc's Safe sends the deployer only the gas (a mainnet-shaped vault creation, 7 signers and 2
-guardians, used 3,351,987 gas on anvil; at 30 gwei that is ~0.101 ETH, so send 0.15 ETH). Then, with the eleven arguments from 4.2 in order (`ARG1` … `ARG11`; the eleventh is the Provenance policy `(1,0,0x0000000000000000000000000000000000000000)`). The 3.35 M gas above is the RC vault: a mainnet-shaped ProvenanceSourceVault used 4,313,110 gas on anvil (`tools/deploy-pontes/gas_v3.py`), about 0.129 ETH at 30 gwei, so send 0.2 ETH. The L2 token, BridgedStablecoinV3, used 4,922,634 gas, under the 5,000,000 `tx.gasLimit` of busdc-mainnet.config.json by only 77,366:
+guardians, used 3,351,987 gas on anvil; at 30 gwei that is ~0.101 ETH, so send 0.15 ETH). Then, with the eleven arguments from 4.2 in order (`ARG1` … `ARG11`; the eleventh is the Provenance policy `(1,0,0x0000000000000000000000000000000000000000)`). The 3.35 M gas above is the RC vault: a mainnet-shaped ProvenanceSourceVault used 4,313,110 gas on anvil (`tools/deploy-pontes/gas_v3.py`), about 0.129 ETH at 30 gwei, so send 0.2 ETH. The L2 token, BridgedStablecoinV3, used 4,960,904 gas, under the 5,000,000 `tx.gasLimit` of busdc-mainnet.config.json by only 39,096 (raise the limit or slim the token before deploying):
 
 ```
 forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10" "$ARG11"
