@@ -37,8 +37,8 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] == 'v3')
-if len(sys.argv) > 2 and sys.argv[2] == 'v3':
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint'):
     LARGE = 0  # the launch default T = 0
 results = []
 
@@ -396,9 +396,64 @@ def s_v3(net):
     print('GAS ' + json.dumps(gas), flush=True)
 
 
+def s_v3remint(net):
+    """Agent 112's case 2 with the real daemons (finding 2): the forger mints the real deposit A's id first, with forged fields,
+    so minted(A) is true and no signer ever opens A; the guardian cancels; the committee remints it with the real tools; a later
+    deposit B queues behind it. WANTED: `vigia relay` executes the remint at the credit head and B drains behind it."""
+    view = lambda sig, *a: net.view(net.l2, net.token, sig, *a).split()[0]  # noqa: E731
+    vault = lambda sig, *a: net.view(net.eth, net.vault, sig, *a).split()[0]  # noqa: E731
+    net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(100 * U), '0x' + '00' * 12 + net.alice[2:])
+    a = json.loads(out(CAST, 'logs', '--from-block', '0', '--address', net.vault, '--rpc-url', net.eth, '--json'))
+    topic = out(CAST, 'keccak', 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)').lower()
+    dep_a = [l['topics'][1] for l in a if l['topics'][0].lower() == topic][0].lower()
+    # Before Ethereum finality, so no honest signer has signed: A's real id, forged amount and recipient (queued, T = 0).
+    d = net.view(net.l2, net.token, 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', dep_a, '0', str(900 * U), net.mallory)
+    blob = '0x' + ''.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)[2:] for _, k in net.signers[:2])
+    net.send(net.l2, DEPLOYER, net.token, 'mint(bytes32,uint64,uint64,address,bytes)', dep_a, '0', str(900 * U), net.mallory, blob)
+    net.mine(net.eth)
+    signed = [e for i in (0, 1) for e in net.vigia(i, 'sign') if e.get('kind') == 'mint']
+    check('remint setup: the forged mint makes minted(A) true, so no signer opens A', not any(e.get('signed') for e in signed), signed)
+    (net.work / 'gpw').write_text('test-password\n')
+    sh(CAST, 'wallet', 'import', 'g', '--private-key', GUARD_KEY, '--keystore-dir', net.work, '--unsafe-password', 'test-password')
+    gcfg = net.work / 'g.json'
+    gcfg.write_text(json.dumps({'kind': 'stable', 'name': 'g', 'l2_rpc': net.l2, 'l2_tx_rpc': net.l2, 'l2_chain_id': L2_CHAIN,
+                                'token': net.token, 'eth_rpc': net.eth, 'eth_chain_id': ETH_CHAIN, 'vault': net.vault,
+                                'keystore': str(net.work / 'g'), 'password_file': str(net.work / 'gpw'), 'cast': CAST,
+                                'state': str(net.work / 'g.state'), 'vault_pause': False, 'reserves_grace_s': 0,
+                                'provenance_grace_s': 0, 'cancel_fresh_s': 0, 'release_sla_s': 10**7, 'l2_raw_tx': True,
+                                'pause_retry_s': 0, 'l2_receipt_timeout_s': 20, 'provenance': True}))
+    done = sh(sys.executable, HERE.parent / 'guardiao' / 'guardiao.py', '--config', gcfg, 'check', ok=False)
+    check('remint setup: the guardian cancels the forged mint', view('mintCancels(bytes32)(uint64)', dep_a) == '1', done.stdout[-600:])
+    # The guardian also paused the token on the finding (agent 112 finding 3): the committee waits it out.
+    net.warp(net.l2, 3 * 86400 + 1)
+    parts = []
+    for i in (0, 1):
+        o = net.work / f'rm{i}.json'
+        r = sh(sys.executable, HERE / 'signatario.py', '--config', net.cfgs[i], 'remint', '--deposit-id', dep_a, '--out', o, ok=False)
+        if r.returncode == 0:
+            parts += ['--sig', o]
+    comb = json.loads(sh(sys.executable, HERE / 'signatario.py', '--config', net.cfgs[0], 'combine', *parts, '--out', net.work / 'rm.call').stdout)
+    r = net.send(net.l2, DEPLOYER, net.token, *comb['call'])
+    check('remint setup: the committee remints A with the real tools', r['status'] == '0x1', r.get('status'))
+    net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(50 * U), '0x' + '00' * 12 + net.alice[2:])
+    net.mine(net.eth)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    net.vigia(2, 'relay')
+    check('B is relayed and queued behind A', view('nextSlot()(uint64)') == '2' and view('mintCount()(uint64)') == '0')
+    net.warp(net.l2, DELAY + 1)
+    relay = net.vigia(2, 'relay')
+    head = [e for e in relay if e.get('kind') == 'relay-head']
+    net.mine(net.l2)
+    check('vigia relay executes the remint at the credit head (finding 2)', any(e.get('tx') for e in head), relay[-6:])
+    check('A and then B credit; the chain is clean', view('mintCount()(uint64)') == '2'
+          and int(view('balanceOf(address)(uint256)', net.alice)) == 150 * U and int(view('balanceOf(address)(uint256)', net.mallory)) == 0
+          and view('mintHead()(bytes32)').lower() == vault('chainHeadAt(uint64)(bytes32)', '2').lower())
+
+
 def main():
     project = Path(sys.argv[1]).resolve()
-    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3}[sys.argv[2]]
+    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:

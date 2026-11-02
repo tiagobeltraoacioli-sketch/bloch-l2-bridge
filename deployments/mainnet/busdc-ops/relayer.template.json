@@ -1,5 +1,5 @@
 {
-  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying. `db` is required: `signatario.py combine` opens it.",
+  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying. `db` is required: `signatario.py combine` opens it. `l2_pins` is required on chain 700770: `signatario.py combine` refuses without it (agent 112, finding 1).",
   "token": "TBD-owner",
   "source_vault": "TBD-owner",
   "source_route": "TBD-owner",
@@ -8,6 +8,7 @@
   "l2_rpc": "TBD-owner",
   "l2_tx_rpc": "https://l2rpc.blochl1.com",
   "l2_chain_id": 700770,
+  "l2_pins": "mainnet-v2",
   "eth_rpc": "TBD-owner (an Ethereum RPC)",
   "eth_chain_id": 1,
   "source_chain_id": 1,

@@ -333,6 +333,17 @@ def validate(cfg, rehearsal):
     tx = cfg['tx']
     exact_keys(tx, ['gasLimit', 'maxGasPriceWei'], 'tx')
     refuse(is_uint(tx['gasLimit'], 30_000_000, 100_000), 'tx.gasLimit is undecided or outside 100k..30M')
+    if not rehearsal and bridge == 'stable':
+        # The committed operator templates must be able to run on chain 700770 with this token (agent 112, finding 1).
+        ops = ROOT / 'deployments/mainnet/busdc-ops'
+        for name in ('signer.template.json', 'relayer.template.json'):
+            try:
+                t = json.loads((ops / name).read_text())
+            except (OSError, ValueError) as e:
+                refuse(False, f'{name}: unreadable ({e})')
+            refuse(t.get('l2_pins') == 'mainnet-v2', f'{name}: chain 700770 needs "l2_pins": "mainnet-v2" (signatario.py refuses without it)')
+            refuse(bool(t.get('provenance')) == (tok['contract'] == STABLE_V3['contract']),
+                   f'{name}: "provenance" must be {str(tok["contract"] == STABLE_V3["contract"]).lower()} for {tok["contract"]}')
     if not rehearsal:
         # The L2 sequencer policy caps the gas USED by every transaction, exempt senders included (max_tx_gas, agents 90 and
         # 121): a higher limit here would only make the creation fail at the sequencer (agent 129, F129-C).

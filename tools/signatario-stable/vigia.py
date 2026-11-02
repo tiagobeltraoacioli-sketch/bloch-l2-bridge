@@ -420,10 +420,13 @@ class Vigia:
         return found
 
     def deposits(self):
-        """Deposited logs of the vault route up to the Ethereum `finalized` head (discovery only)."""
+        """Deposited logs of the vault route up to the Ethereum `finalized` head (discovery only). Their fields are kept for
+        the pass: (amount, L2 recipient) by deposit id."""
         topic = self.cast_out('keccak', DEPOSITED).lower()
-        return [l['topics'][1].lower() for l in self.logs(self.cfg['eth_rpc'], self.vault, [topic, None, self.route],
-                                                          self.cfg.get('vault_from_block', 0))]
+        logs = self.logs(self.cfg['eth_rpc'], self.vault, [topic, None, self.route], self.cfg.get('vault_from_block', 0))
+        self.deposit_fields = {l['topics'][1].lower(): (int(l['data'][2 + 128:2 + 192], 16), '0x' + l['data'][-40:].lower())
+                               for l in logs}
+        return [l['topics'][1].lower() for l in logs]
 
     def burns(self):
         """Burned logs of the token up to the L2 `finalized` head (discovery only)."""
@@ -667,6 +670,7 @@ class Vigia:
         dirs = sorted(mint_dir.glob('*')) if mint_dir.exists() else []
         if self.provenance:
             self.isolated('relay-mint', 'slots', lambda: self.relay_mints_in_order(dirs))
+            self.isolated('relay-head', 'head', self.execute_head)
         else:
             for d in dirs:
                 self.isolated('relay-mint', d.name, lambda d=d: self.relay_mint(d))
@@ -750,6 +754,46 @@ class Vigia:
                           self.send_mint(d, dep, sigs, nonce, g))
             if nonce >= next_slot:
                 chained += 1
+
+    def execute_head(self):
+        """The credit head, whatever minted it (agent 112, finding 2). A deposit whose first mint was a forgery is retired by
+        `sync` (minted() is true) and never gets a mint directory here, so after the guardians' cancel and the committee's
+        remint nothing would execute that remint, and credit order would hold every later deposit behind it. So every pass:
+        the real deposit of slot `mintCount` (its id names the slot) is executed when its queued mint is due, matches the
+        finalized deposit's amount and recipient, and is at the credit head. An open cancelled generation with no remint
+        is alerted: only the committee can remint it."""
+        url = self.cfg['l2_rpc']
+        if not self.feed or not getattr(self, 'deposit_fields', None):  # with a feed, sync() read them this pass
+            self.deposits()
+        head = int(self.call(url, self.token, 'mintCount()'), 16)
+        dep = next((d for d in self.deposit_fields if int(d[2:18], 16) == head), None)
+        if dep is None:
+            return  # the head's deposit is not final here yet
+        if not self.minted(dep):
+            return  # the ordinary mint path (relay_mints_in_order) handles it
+        words = self.call(url, self.token, 'pendingMints(bytes32)', dep)
+        recipient, amount, ready = '0x' + words[2 + 24:2 + 64].lower(), int(words[66:130], 16), int(words[130:194], 16)
+        if amount == 0:
+            if self.cancelled_open(dep):
+                log(kind='alert', severity='critical', id='remint-needed', deposit=dep, slot=head,
+                    reason='the credit head is a cancelled mint of a real deposit: every later deposit waits for its remint '
+                           '(signatario.py remint, by the mint quorum or locked by switchThreshold)')
+            return
+        if (amount, recipient) != self.deposit_fields[dep]:
+            log(kind='relay-head', deposit=dep, slot=head, waiting=True,
+                reason='the queued mint at the head differs from the finalized deposit: left to the guardians')
+            return
+        sent, own = self.shared / f'head-{dep[2:]}.sent', self.shared / 'mint' / dep[2:] / 'execute-sent'
+        if (sent.exists() and not self.failed(self.l2_tx, sent)) or (own.exists() and not self.failed(self.l2_tx, own)):
+            return
+        now = int(self.rpc(url, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
+        if now < ready or self.flag(url, self.token, 'paused()') or not self.flag(url, self.token, 'isCreditHead(bytes32)', dep):
+            log(kind='relay-head', deposit=dep, slot=head, waiting_until=ready)
+            return
+        tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
+        self.shared.mkdir(parents=True, exist_ok=True)
+        sent.write_text(tx + '\n')
+        log(kind='relay-head', deposit=dep, slot=head, tx=tx)
 
     def send_mint(self, d, dep, sigs, nonce, fixed_gas):
         rc, comb = self.signatario('combine', *sum((['--sig', s] for s in sigs), []), '--out', d / 'mint.call')
