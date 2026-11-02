@@ -103,7 +103,7 @@
     "supplyCap": 100000000000,
     "bucketCapacity": 10000000000,
     "refillPerSecond": 115740,
-    "largeMintThreshold": 1000000000,
+    "largeMintThreshold": 100000000,
     "largeMintDelay": 43200,
     "minBurn": 10000000
   },
