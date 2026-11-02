@@ -77,7 +77,7 @@ def vtool(*args):
 
 def vault_rehearsal(url, work, token_cfg):
     """Section 3: the Ethereum vault deployment tool on the rehearsal chain 31337."""
-    tpath = ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json'
+    tpath = work / 'busdc-vault-mainnet.config.json'  # the committed template, copied from git by main()
     rc, r = vtool('validate', '--config', tpath)
     check('[vault template] the committed vault config is refused while decisions are null',
           rc == 1 and 'undecided' in r.get('reason', ''), r)
@@ -264,6 +264,7 @@ def source_vault(eth, work):
 
 def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=None):
     tag = f'[{name}]'
+    srun = ['--source-rpc', source_rpc] if source_rpc else []  # stable: run refuses a used vault
     c = work / f'{name}.config.json'
     c.write_text(json.dumps(cfg, indent=2))
     rc, v = tool('validate', '--config', c, *flags)
@@ -273,21 +274,21 @@ def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=No
     rc, p = tool('plan', '--config', c, *flags, '--write', plan)
     rc2, p2 = tool('plan', '--config', c, *flags)
     check(f'{tag} plan is deterministic', rc == 0 and rc2 == 0 and p == p2 and p['configSha256'] == sha, (p, p2))
-    rc, dry = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
+    rc, dry = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun)
     check(f'{tag} dry run: preflight + simulated runtime == planned', rc == 0 and dry.get('decision') == 'dry-run'
           and dry.get('address') == p['contract']['address'], dry)
     bfile = work / f'{name}.broadcast.json'
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--write', bfile,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun, '--broadcast', '--write', bfile,
                  '--', *wallet)
     check(f'{tag} broadcast refused without --confirm', rc == 1 and '--confirm' in r.get('reason', ''), r)
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', '0x' + '0' * 64,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun, '--broadcast', '--confirm', '0x' + '0' * 64,
                  '--write', bfile, '--', *wallet)
     check(f'{tag} broadcast refused with a wrong --confirm', rc == 1 and '--confirm' in r.get('reason', ''), r)
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', sha,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun, '--broadcast', '--confirm', sha,
                  '--write', bfile, '--', '--private-key', ANVIL_KEY)
     check(f'{tag} broadcast refused with a key that is not the deployer', rc == 1 and 'signing key' in
           r.get('reason', ''), r)
-    rc, sent = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', sha,
+    rc, sent = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun, '--broadcast', '--confirm', sha,
                     '--write', bfile, '--', *wallet)
     check(f'{tag} broadcast (offline-signed creation) lands at the planned address', rc == 0
           and sent.get('contractAddress') == p['contract']['address'], sent)
@@ -306,16 +307,16 @@ def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=No
     onchain = out(CAST, 'keccak', out(CAST, 'code', p['contract']['address'], '--rpc-url', url)).lower()
     check(f'{tag} on-chain runtime keccak == planned (immutables linked offline)',
           onchain == p['contract']['runtimeCodeHash'], (onchain, p['contract']['runtimeCodeHash']))
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *srun)
     check(f'{tag} a second run is refused (nonce moved)', rc == 1 and 'nonce' in r.get('reason', ''), r)
     bad = json.loads(plan.read_text())
     bad['expected']['threshold'] += 1
     badp = work / f'{name}.bad-plan.json'
     badp.write_text(json.dumps(bad))
-    rc, r = tool('run', '--config', c, '--plan', badp, '--rpc', url, *flags)
+    rc, r = tool('run', '--config', c, '--plan', badp, '--rpc', url, *flags, *srun)
     check(f'{tag} a tampered plan is refused', rc == 1 and 'plan differs' in r.get('reason', ''), r)
     if other_rpc:
-        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', other_rpc, *flags)
+        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', other_rpc, *flags, *srun)
         check(f'{tag} the plan is refused on another chain', rc == 1 and 'chain id' in r.get('reason', ''), r)
     return p
 
@@ -328,10 +329,14 @@ def main():
         if dirty:
             raise SystemExit('run from a clean checkout')
         sh(FORGE, 'build', '--root', ROOT, '--ast')
-        templates = {b: json.loads((ROOT / f'deployments/mainnet/{f}').read_text())
+        # The committed templates, read from git: the owner runs this after filling the configs in the working tree
+        # (BRIDGES-MAINNET.md section 4, step 4), and the filled files must not change what is rehearsed.
+        for f in ('wgnb-mainnet.config.json', 'busdc-mainnet.config.json', 'busdc-vault-mainnet.config.json'):
+            (work / f).write_text(out('git', '-C', ROOT, 'show', f'HEAD:deployments/mainnet/{f}'))
+        templates = {b: json.loads((work / f).read_text())
                      for b, f in (('wgnb', 'wgnb-mainnet.config.json'), ('stable', 'busdc-mainnet.config.json'))}
         for b, f in (('wgnb', 'wgnb-mainnet.config.json'), ('stable', 'busdc-mainnet.config.json')):
-            rc, r = tool('validate', '--config', ROOT / 'deployments/mainnet' / f)
+            rc, r = tool('validate', '--config', work / f)
             check(f'[template {b}] the committed config is refused while decisions are null',
                   rc == 1 and 'undecided' in r.get('reason', ''), r)
 

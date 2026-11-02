@@ -586,6 +586,8 @@ def cmd_release(ctx, args):
     source = ctx.cfg.get('l2_source', 'rebuild')
     if ctx.pins is not None and source != 'rebuild':
         refuse(f'l2_source "{source}" trusts an RPC for finality: tests only, refused with l2_pins')
+    if ctx.cfg.get('work_dir'):
+        Path(ctx.cfg['work_dir']).mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
     try:
         release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id)

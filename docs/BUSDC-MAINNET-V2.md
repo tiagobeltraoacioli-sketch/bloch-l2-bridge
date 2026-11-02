@@ -79,6 +79,17 @@ Fill every `null` in `deployments/mainnet/busdc-vault-mainnet.config.json` and e
 with the two Ethereum guardian addresses (sorted ascending) before the vault exists; the rest of
 `ethereum` comes from step 4.4. Review both as a pull request.
 
+The committed `busdc-mainnet.config.json` already carries seven L2 signer addresses and a deployer address. Keep
+them only if the operators who generated those keys confirm they still hold them; otherwise replace every one with
+addresses the chosen operators generated on their own hosts. The deployer, in both configs, must be a key the owner
+generated for this deployment alone (nonce 0, `validate` checks it); never use a committed address whose key you did
+not create.
+
+**Where the tools run.** `plan` refuses unless `git HEAD` equals `source.revision` and `contracts/` is clean, so the
+filled configs cannot be committed at the pinned revision. Check out `source.revision` (the reviewed commit, which
+holds the templates), copy the reviewed configs over the templates in the working tree, and run every step from
+there. Commit the filled configs, plans and deployment records afterwards, in a later commit.
+
 ### 4.2 Validate the vault config and derive the constructor arguments
 
 ```
@@ -103,7 +114,9 @@ forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVaul
 forge create --rpc-url "$ETH_RPC" --ledger --broadcast contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
 ```
 
-`windowLimit` must equal the token's `bucketCapacity`, `l2MinBurn` its `minBurn`, and the cap its `supplyCap` (`validate --token-config`). The first is the dry run. Note the address (`VAULT`) and the block. A creation that does not land as
+`windowLimit` must equal the token's `bucketCapacity`, `l2MinBurn` its `minBurn`, and the cap its `supplyCap` (`validate --token-config`). The first is the dry run; the `forge` line that `args` prints is that dry run too.
+**One-way:** the second command creates the vault with `--broadcast`, and its signers, guardians and limits can never
+change. Run it once, only after the dry run and the second reviewer's comparison. Note the address (`VAULT`) and the block. A creation that does not land as
 planned is not repaired: new deployer key, new review.
 
 ### 4.4 Verify at Ethereum finality (~13 min later)
@@ -118,8 +131,8 @@ into every signer's `eth-half.json`. `state.depositsEnabled` and `state.releases
 ### 4.5 Deploy the L2 token
 
 Follow `docs/BRIDGES-MAINNET.md` section 4 (steps 2–9) with `deploy_pontes.py`: `validate`, `plan`
-(second reviewer regenerates), `rehearse_anvil.py` = `REHEARSAL OK`, dry `run` against `L2_RPC`,
-`run --broadcast --confirm <configSha256>`, `record`, then after L2 finality:
+(second reviewer regenerates), `rehearse_anvil.py` = `REHEARSAL OK`, dry `run` against `L2_RPC` with
+`--source-rpc "$ETH_RPC"`, `run --broadcast --confirm <configSha256> --source-rpc "$ETH_RPC"`, `record`, then after L2 finality:
 
 ```
 python3 tools/deploy-pontes/deploy_pontes.py verify --config deployments/mainnet/busdc-mainnet.config.json --plan deployments/mainnet/busdc.plan.json --rpc "$L2_RPC" --record deployments/mainnet/busdc.deployment.json --source-rpc "$ETH_RPC"
@@ -127,11 +140,20 @@ python3 tools/deploy-pontes/deploy_pontes.py verify --config deployments/mainnet
 
 L2 finality needs an accepted, finalized settlement of the deployment block (section 3).
 
+**Never put a new token over a used vault.** One vault serves exactly one token, for its whole life. `run` refuses a
+vault with any deposit, locked funds or control change (`--source-rpc` is required for this reason). Signers remember
+deposits per token database, so a second token over a used vault lets a fresh signer database mint every old deposit
+again, and no guardian sees it, because each token alone looks backed (agents/101-bridge-audit.md D3). The new token's
+burn nonces also restart at 1, and `release` refuses nonces the vault already used, so those burns could never exit
+(F4). Any change of signers, guardians or limits is a new vault **and** a new token (section 4.10).
+
 ### 4.6 Signers, relayer, guardians, monitor
 
 Per operator, from `deployments/mainnet/busdc-ops/*.template.json`: fill the TBD-owner values from the
 two deployment records; keystores and password files are created by each operator on its own host and
-never leave it. Before going live, each signer runs a dry check that must refuse only because the burn
+never leave it. Create the directories the configs name (`/var/lib/bloch-busdc-signer/work`, the `shared_dir`,
+`feed.publish_dir`, the relayer's `/var/lib/bloch-busdc-relayer`), owned by the service user. The relayer config needs
+`db` (it is in the template): without it every relayed mint fails with `KeyError: 'db'`. Before going live, each signer runs a dry check that must refuse only because the burn
 does not exist (every pin, the rebuild and the private settled RPC pass):
 
 ```
@@ -164,12 +186,53 @@ cast send "$VAULT" "setControls(bool,bool,uint64,uint256,bytes[])" true true 0 "
 
 Do this only after a disposable-value round trip worked (10 USDC deposit → mint → burn → release), which
 needs the controls on: so enable, rehearse with 10 USDC, and if anything is wrong disable with the same
-three steps and `false false 1`.
+three steps and `false false "$NONCE"`, where `NONCE` is the current `cast call "$VAULT" "controlNonce()(uint64)"`
+(1 right after the first enable; every control change uses the next value). Deposits need at least `minDeposit`
+(10 USDC) and a burn at least `minBurn` (10 USDC), so the round trip is a 10 USDC deposit and a 10 USDC burn.
 
 ### 4.8 HF1 window
 
 Signers refuse new release certificates from epoch 7180 until the follower finalizes a checkpoint of epoch
-≥ 7180 (~16:11–16:45 UTC on 2026-11-01). Do not schedule the go-live in that window.
+≥ 7180 (~16:11–16:45 UTC on 2026-11-01). That window has passed. Do not schedule a go-live, a pause drill or a key
+change in the hour around any later L1 fork activation (HF2 at e7270, HF3 at e7360, KES at e8620): watch
+`liveness-not-final` instead of assuming releases flow.
+
+### 4.9 Pause, resume and reserves
+
+| Action | Who | Command |
+| --- | --- | --- |
+| Pause the vault (deposits and releases) | one Ethereum guardian | `cast send "$VAULT" "guardianPause()" --rpc-url "$ETH_RPC" <guardian wallet>` (not `pause()`, which does not exist on the vault) |
+| Pause the token (mints only; burns never pause) | one L2 guardian | `cast send "$TOKEN" "pause()" --rpc-url "$L2_RPC" <guardian wallet>` |
+| Renew a vault pause | a **second** guardian, when the first pause ends | `guardianPause()` again; each guardian starts one pause per chain (section 9) |
+| End a vault pause early | `switchThreshold` (6 of 7) release signers | `COUNT=$(cast call "$VAULT" "pauseCount()(uint64)")`, `DIGEST=$(cast call "$VAULT" "unpauseDigest(uint64,uint256)(bytes32)" "$COUNT" "$VALID_UNTIL")`, six `cast wallet sign --no-hash "$DIGEST"`, then `cast send "$VAULT" "unpause(uint64,uint256,bytes[])" "$COUNT" "$VALID_UNTIL" "[$S1,...,$S6]"` ordered by signer address |
+| End a token pause early | `threshold` (5 of 7) mint signers | `DIGEST=$(cast call "$TOKEN" "unpauseDigest()(bytes32)")`, five `cast wallet sign --no-hash`, then `cast send "$TOKEN" "unpause(bytes)" 0x<sig1><sig2>...` with the five 65-byte signatures **concatenated** (one `bytes`, not a list), ordered by signer address |
+| Reserves | anyone | `python3 tools/reservas/reservas.py --config reservas.json check`: exit 0 `ok`, 2 deficit, 3 surplus, 1 unverifiable. By hand: `totalLocked()` on the vault equals `totalSupply()` plus `pendingSupply()` of the token at finalized blocks |
+
+**Before a committee unpause:** it blocks every vault guardian for `pauseCooldown` (72 h) afterwards
+(`guardianBlockedUntil`), and the guardian treats a past release finding first seen before it as settled
+(`tools/guardiao/README.md`, "After a committee unpause"). End a pause early only when the cause is understood. A
+surplus (exit 3) is normal while a deposit waits for its mint.
+
+### 4.10 Lost, compromised or changed keys
+
+There is no signer rotation, in the vault or the token (`docs/AUDIT-SCOPE.md` V7):
+
+| Lost release keys (of 7) | Effect |
+| --- | --- |
+| 1 | Nothing visible: 6 still exceed every threshold |
+| 2 | Releases and mints go on (5 of 7), but nobody can end a vault pause early or propose or cancel the switch (6 of 7) |
+| 3 or more | Releases stop for good; deposits already locked can leave only through a light-client switch that 6 keys must propose, so in practice never |
+
+L2 mint keys: mints and the token's unpause both need 5 of 7, so mints go on with two lost keys and stop for good
+at three (the token's optional switch, where deployed, needs its own `mintSwitch.threshold`). Losing a guardian key
+costs that guardian's vote only.
+
+Replacing a signer, a guardian or a limit is a **new vault and a new token**, deployed with this whole section 4 and
+new fresh deployer keys, never a new token over the old vault (4.5). Migration: disable deposits on the old vault
+(`setControls(false, true, ...)`, releases stay on), announce the new pair, let holders burn on the old token and
+deposit into the new vault, and keep the old signers, relayer, guardians and reserves monitor running until the old
+token's supply is zero. Start at the first lost key: at two lost keys the old vault can no longer be unpaused early.
+
 
 ## 5. Host specifications
 
@@ -236,6 +299,9 @@ been made on real L2 data.
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |
 | Light-client prover and shadow verifier (after the LC port) | sombra `prover_dir`, `shadow_verifier` |
+| Guardian alert command (pager) | guardiao `alert_command` |
+| Firewall allow-list of operator and relayer IPs for TCP 8787 (`docs/SIG-TRANSPORT.md`) | each operator's host |
+| Frontend pins (`frontend.bridge.json` in the DEX repo: vault, route, code hashes, both signer sets, guardians, token, Ethereum RPC) | from 4.4 and 4.5 outputs |
 
 ## 8. Open decisions
 

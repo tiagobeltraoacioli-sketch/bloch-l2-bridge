@@ -3,7 +3,7 @@
 
   deploy_pontes.py validate --config C [--rehearsal]
   deploy_pontes.py plan     --config C [--rehearsal] [--write PLAN]
-  deploy_pontes.py run      --config C --plan PLAN --rpc URL [--rehearsal]
+  deploy_pontes.py run      --config C --plan PLAN --rpc URL [--rehearsal] [--source-rpc ETH_URL (stable: required)]
                             [--broadcast --confirm <configSha256> --write BROADCAST] [-- <cast wallet args>]
   deploy_pontes.py record   --config C --plan PLAN --rpc URL --broadcast-file BROADCAST [--rehearsal] --write RECORD
   deploy_pontes.py verify   --config C --plan PLAN --rpc URL --record RECORD [--rehearsal] [--block finalized]
@@ -20,7 +20,9 @@ One reviewed JSON config per bridge (deployments/mainnet/*.config.json); `null` 
             gas price cap) and a dry run (eth_call of the init code must return the planned runtime code).
             With --broadcast --confirm <configSha256>: signs ONE legacy creation offline with `cast mktx`
             (the settled L2 RPC has no "pending" tag; signer options go before --create), checks the
-            signed transaction, writes BROADCAST, publishes it and waits for the receipt.
+            signed transaction, writes BROADCAST, publishes it and waits for the receipt. Stable: --source-rpc is
+            required and run refuses a vault that was ever used (a deposit, locked funds or a control change),
+            because a second token over a used vault mints its old deposits again.
   record    re-reads the transaction from the chain (sender, nonce, chain id, creation, init code hash,
             created address, status) and writes the deployment record.
   verify    at `--block` (default finalized): the deployment block is canonical and <= that block, runtime
@@ -461,6 +463,25 @@ def preflight(plan, rpc):
     return {'nonce': nonce, 'gasPrice': price, 'balance': balance}
 
 
+def unused_vault(plan, source_rpc):
+    """A stable token may only be created over a vault that has never been used (agents/101-bridge-audit.md D3).
+
+    Signers key a mint on the deposit id, which is per vault, and keep that memory per token database: a second
+    token over a vault with deposits lets a fresh signer database mint every old deposit again, and its burn nonces
+    restart at 1 against the vault's `releasedNonce` (F4). A used vault is never reused: new vault, new token."""
+    sv, eth = plan['sourceVault'], Rpc(source_rpc)
+    refuse(int(eth('eth_chainId', []), 16) == sv['chainId'], 'source RPC serves another chain')
+    refuse(code_hash(eth('eth_getCode', [sv['address'], 'latest'])) == sv['codeHash'],
+           'vault code hash differs from the config')
+    used = {}
+    for name in ('depositCount', 'totalLocked', 'controlNonce'):
+        used[name] = int(str(json.loads(eth.call(sv['address'], f'{name}()', block='latest',
+                                                 returns='(uint64)'))[0]).split()[0])
+    refuse(not any(used.values()), f'the vault {sv["address"]} has been used ({used}); a token over a used vault would '
+           'mint its old deposits again. Deploy a new vault and a new token (docs/BUSDC-MAINNET-V2.md 4.5)')
+    return {'vaultUnused': used}
+
+
 def dry_run(plan, init_code, rpc):
     deployer, gas = plan['deployer']['address'], hex(plan['tx']['gasLimit'])
     runtime = rpc('eth_call', [{'from': deployer, 'data': init_code, 'gas': gas}, 'latest'])
@@ -686,6 +707,9 @@ def main(argv):
         if opts['broadcast']:
             refuse(opts.get('confirm') == plan['configSha256'], f'--broadcast needs --confirm {plan["configSha256"]}')
         checked = preflight(plan, rpc)
+        if plan['bridge'] == 'stable':
+            refuse(opts.get('sourceRpc'), 'stable: pass --source-rpc (own Ethereum node): run refuses a used vault')
+            checked.update(unused_vault(plan, opts['sourceRpc']))
         sim = dry_run(plan, init_code, rpc)
         if not opts['broadcast']:
             return {'decision': 'dry-run', 'configSha256': plan['configSha256'], 'address': plan['contract']['address'],

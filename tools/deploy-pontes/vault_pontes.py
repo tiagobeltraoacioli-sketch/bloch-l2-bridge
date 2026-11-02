@@ -17,7 +17,8 @@ One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, d
             canonical config SHA-256.
   args      the constructor arguments in `forge create --constructor-args` order (domain labels hashed
             with keccak256, signers and guardians sorted ascending as the constructor requires) and the
-            forge command line without wallet options. The owner adds the wallet (e.g. --ledger).
+            forge dry-run command line without wallet options. The owner adds the wallet (e.g. --ledger), and
+            --broadcast only for the one-way creation after the dry run.
   verify    read-only, at --block (default finalized): chain id, code present, every immutable and
             constant, the signer and guardian arrays, committee mode (no verifier, no proposal), no pause.
             Prints the values the L2 token config (`ethereum`) and every eth_half config need: vault,
@@ -271,8 +272,11 @@ def main():
         elif args[0] == 'args':
             ctor = constructor_args(cfg, norm)
             result = {'decision': 'constructor-args', 'configSha256': sha, 'constructorArgs': ctor,
-                      'forge': ['forge', 'create', '--broadcast', '--rpc-url', '<OWN_ETHEREUM_RPC>', CONTRACT,
-                                '--constructor-args', *ctor]}
+                      # Dry run first (no --broadcast). The broadcast is the same line with --broadcast added by hand:
+                      # it is one-way, and a creation that lands wrong is not repaired (docs/BUSDC-MAINNET-V2.md 4.3).
+                      'forge': ['forge', 'create', '--rpc-url', '<OWN_ETHEREUM_RPC>', CONTRACT,
+                                '--constructor-args', *ctor],
+                      'next': 'run the forge line as printed (a dry run); only then add --broadcast and the wallet'}
         else:
             refuse(opt('--rpc') and is_addr(opt('--address')), '--rpc and --address are required')
             result = {'configSha256': sha, **verify(cfg, norm, opt('--rpc'), opt('--address'), opt('--block', 'finalized'))}
