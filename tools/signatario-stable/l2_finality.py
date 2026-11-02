@@ -38,6 +38,21 @@ EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
 STATUS_SCHEMA_V3 = 'bloch.l2.native-follower-status.v3'
 
+# ┌─ TODO(launch-build re-pin, agent 200 RC r10; owner decision 2026-11-02 22:14 UTC on agent 173 S1) ──────────────────────┐
+# │ OPEN, FAILS CLOSED. `MAINNET_V2['binaries']` still name the v2.1 release (c18752fd / fb0d5313 / 18be911a). The L2      │
+# │ deposit-only launch build is 17383fe (agents/PINS-NEXT.md: follower cdf5da5c…, produce e3f1a290…, settled-rpc         │
+# │ e5754d05…), and agent 195 is moving the settled-RPC hash again (15M simulation gas cap, 5 s budget: rpc-limits-r10    │
+# │ a0dd090, new release build after 01:00 UTC 2026-11-03). Until the FINAL launch build is reproduced and signed,         │
+# │ `check_binaries` refuses the launch binaries, so every release certificate is refused: no signer may be deployed.     │
+# │ The one follow-up commit, "signer: pin the final L2 launch build", changes exactly:                                   │
+# │   1. this file: `binaries` = the final build's follower, produce and settled_rpc sha256 (from the signed PINS file); │
+# │      `name` = that build; `SETTLED_RPC_PIN_PROVISIONAL = False`; drop this TODO box;                                │
+# │   2. test_daemons_r10.py: LAUNCH_BUILD = the same three hashes; remove the two `expectedFailure` decorators;         │
+# │   3. test_hf1_finality.py: the "mainnet-v2 pins" check names the new prefixes;                                       │
+# │   4. README.md (signatario-stable), docs/BUSDC-MAINNET-V2.md table row "L2 build" and section 9,                    │
+# │      deployments/mainnet/busdc-mainnet.config.json `notes.l2Build`: the same build and hashes.                       │
+# │ Then run the 4.6 dry check of docs/BUSDC-MAINNET-V2.md on a follower of that build before any signer starts.        │
+# └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 # PROVISIONAL: `binaries` below hold the v2.1 release of agents/PINS-V21.md (unsigned). Set the
 # flag to False once the owner has signed that release and its suites have passed. v2.1 changed two pins, not
 # one: settled_rpc (spool-dos, receipt/latest, and finality closing on a lost follower status) and produce (F2, the flag-day inbox height fix in `reconstruct`).
@@ -55,7 +70,7 @@ MAINNET_V2 = {
     'l2_network_args': ['--rules', 'mainnet', '--domain',
                         '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
                         '--genesis-time', '1786656679'],
-    'binaries': {
+    'binaries': {  # TODO(launch-build re-pin): see the box above SETTLED_RPC_PIN_PROVISIONAL
         'follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
         # PROVISIONAL, see SETTLED_RPC_PIN_PROVISIONAL.
         'produce': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
