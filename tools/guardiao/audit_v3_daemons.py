@@ -140,7 +140,7 @@ class Net:
 
     def new_token(self, url=None, source_chain=ETH_CHAIN):
         limits = f'({10**6 * U},{10**5 * U},{10**5 * U // 86400},{1000 * U},43200,{U})'
-        return self.create(url or self.l2, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', 'Bloch Bridged USDC', 'bUSDC',
+        return self.create(url or self.l2, 'solidity-tests/harness/BridgedStablecoinV3AnyT.sol:BridgedStablecoinV3AnyT', 'Bloch Bridged USDC', 'bUSDC',  # T > 0: the V3 test harness (BridgedStablecoinV3 itself refuses T != 0 since agent 194)
                            str(source_chain), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)', '(2,1209600)')
 
     def view(self, url, to, sig, *args):

@@ -116,7 +116,16 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
             name_, symbol_, sourceChainId_, sourceVault_, sourceRoute_, signers_, threshold_, limits, guard, mintSwitch
         )
     {
+        _launchThreshold(limits.largeMintThreshold);
         mintHead = keccak256(abi.encode(MINT_CHAIN_TAG, sourceChainId_, sourceVault_, sourceRoute_));
+    }
+
+    /// @dev T = 0 is a hard rule (owner decision 2026-11-02; agents 171 F171-5, 175): every mint queues for
+    ///      `largeMintDelay` and stays cancellable, and the instant capacity is 0. At T > 0 one wrong instant mint, forged
+    ///      or from a bug of honest signers, credits with no cancel window and holds every later exit for good (111 F3).
+    ///      Only test harnesses override this, to keep exercising the inherited T > 0 code paths.
+    function _launchThreshold(uint256 largeMintThreshold_) internal pure virtual {
+        if (largeMintThreshold_ != 0) revert BadConfig();
     }
 
     function burn(uint64 amount, address ethRecipient) external override returns (bytes32 burnId) {

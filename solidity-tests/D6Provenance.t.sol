@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
 import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {V3Deploy} from "./harness/BridgedStablecoinV3AnyT.sol";
 import {ContextBoundSourceVault} from "../contracts/usdt/ContextBoundSourceVault.sol";
 import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
 
@@ -158,7 +159,7 @@ contract D6ProvenanceTest {
         );
         uint256 until = block.timestamp + 100;
         p.vault.setControls(true, true, 0, until, cert(p.vault.controlDigest(true, true, 0, until), 5));
-        p.token = new BridgedStablecoinV3(
+        p.token = V3Deploy.make(
             "Bloch Bridged USDC", "bUSDC", block.chainid, address(p.vault), p.vault.routeId(), addrs(mintKeys), 5,
             limits(), noGuard(), BridgedStablecoinV2.MintSwitch(6, 14 days)
         );

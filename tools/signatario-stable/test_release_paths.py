@@ -106,7 +106,9 @@ class Net:
         self.guard = out(CAST, 'wallet', 'address', '--private-key', GUARD_KEY).lower()
         sh(CAST, 'rpc', 'anvil_setBalance', self.guard, hex(10**21), '--rpc-url', self.l2)
         token_contract = 'BridgedStablecoinV3' if V3 else 'BridgedStablecoinV2'
-        self.token = self.create(self.l2, f'contracts/stable/{token_contract}.sol:{token_contract}', 'Bloch Bridged USDC', 'bUSDC',
+        target = ('solidity-tests/harness/BridgedStablecoinV3AnyT.sol:BridgedStablecoinV3AnyT' if V3 and LARGE else
+                  f'contracts/stable/{token_contract}.sol:{token_contract}')  # T > 0: the V3 test harness (BridgedStablecoinV3 itself refuses T != 0 since agent 194)
+        self.token = self.create(self.l2, target, 'Bloch Bridged USDC', 'bUSDC',
                                  str(ETH_CHAIN), self.vault, self.route, addrs, '2', limits,
                                  f'([{self.guard}],259200,259200)', '(3,1209600)')
         code = out(CAST, 'keccak', out(CAST, 'code', self.token, '--rpc-url', self.l2))

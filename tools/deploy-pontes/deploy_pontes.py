@@ -72,6 +72,7 @@ LIMITS_T = '(uint256,uint256,uint256,uint256,uint256,uint256)'
 GUARD_T = '(address[],uint256,uint256)'
 MINT_SWITCH_T = '(uint256,uint64)'
 MIN_SWITCH_DELAY = 7 * 86400
+INSTANT_MINTS = 10  # BridgedStablecoinV2.INSTANT_MINTS
 L2_MAX_TX_GAS = 5_000_000  # sequencer policy max_tx_gas on chain 700770
 LIMIT_KEYS = ('supplyCap', 'bucketCapacity', 'refillPerSecond', 'largeMintThreshold', 'largeMintDelay', 'minBurn')
 
@@ -279,6 +280,15 @@ def validate(cfg, rehearsal):
         refuse(lim['largeMintThreshold'] < lim['bucketCapacity'],
                'mainnet policy: mints above a threshold below the bucket capacity are delayed')
         refuse(lim['minBurn'] < lim['bucketCapacity'], 'minBurn must be below the bucket capacity')
+    if bridge == 'stable' and (tok['contract'] == STABLE_V3['contract'] or not rehearsal):
+        # T = 0 is a hard rule (owner decision 2026-11-02; agents 171 F171-5, 175): every mint queues largeMintDelay and
+        # stays cancellable. At T > 0 one wrong instant mint, forged or buggy, holds every later exit for good (111 F3).
+        # BridgedStablecoinV3's constructor reverts on T != 0 as well; the tool refuses it first, on every network.
+        refuse(lim['largeMintThreshold'] == 0,
+               f'largeMintThreshold must be 0 (T = 0 is a hard rule of the launch design), config has {lim["largeMintThreshold"]}')
+        refuse(instant_capacity(lim) == 0,
+               f'the instant capacity must be 0 (10 x T), it would be {instant_capacity(lim)}: bucketCapacity below '
+               f'{INSTANT_MINTS} units makes the whole bucket instant')
 
     params = {'bridge': bridge, 'contract': tok['contract'], 'chainId': chain, 'name': name, 'symbol': symbol, 'signers': signers,
               'threshold': k, 'guardians': guardians, 'pauseDuration': pd, 'pauseCooldown': pc,
@@ -389,15 +399,20 @@ def load_artifacts(p, build):
                          'evmVersion': meta['settings']['evmVersion']}}
 
 
+def instant_capacity(lim):
+    """BridgedStablecoinV2's instantCapacity: INSTANT_MINTS x T, or the whole bucket once T >= bucket / INSTANT_MINTS."""
+    large, bucket = lim['largeMintThreshold'], lim['bucketCapacity']
+    return bucket if large >= bucket // INSTANT_MINTS else large * INSTANT_MINTS
+
+
 def immutable_values(p):
     lim = p['limits']
     v = {'NAME_HASH': keccak_text(CONTRACTS[p['bridge']]['domain_name']),
          'decimals': CONTRACTS[p['bridge']]['decimals'], 'threshold': p['threshold'],
          'pauseDuration': p['pauseDuration'], 'pauseCooldown': p['pauseCooldown'], **lim}
     if p['bridge'] != 'wgnb':  # as the constructor computes them
-        large, bucket = lim['largeMintThreshold'], lim['bucketCapacity']
-        capacity = bucket if large >= bucket // 10 else large * 10
-        v.update(instantCapacity=capacity, instantRefillPerSecond=max(1, capacity * lim['refillPerSecond'] // bucket))
+        capacity = instant_capacity(lim)
+        v.update(instantCapacity=capacity, instantRefillPerSecond=max(1, capacity * lim['refillPerSecond'] // lim['bucketCapacity']))
     if p['bridge'] == 'wgnb':
         v['gnbChainId'] = p['gnbChainId']
     else:

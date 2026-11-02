@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
 import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
 import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {V3Deploy} from "./harness/BridgedStablecoinV3AnyT.sol";
 import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
 
 interface A123Vm {
@@ -94,7 +95,7 @@ contract A123ReauditTest {
         vault.setControls(true, true, 0, until, cert(vault.controlDigest(true, true, 0, until), 5));
         address[] memory g = new address[](3);
         for (uint256 i; i < 3; ++i) g[i] = vm.addr(guardKeys[i]);
-        token = new BridgedStablecoinV3(
+        token = V3Deploy.make(
             "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
             SignerMintedToken.Limits(uint64(100_000 * U), BUCKET, BUCKET / 1 days, largeThreshold(), 12 hours, uint64(10 * U)),
             SignerMintedToken.Guard(g, 3 days, 3 days), BridgedStablecoinV2.MintSwitch(6, 14 days)

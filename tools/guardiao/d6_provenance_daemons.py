@@ -141,7 +141,7 @@ class Net:
         self.send(self.eth, self.usdc, 'approve(address,uint256)', self.vault, str(10**5 * U), key=ALICE)
         limits = f'({10**6 * U},{10**5 * U},{10**5 * U // 86400},{1000 * U},43200,{U})'
         if self.prov:
-            self.token = self.create(self.l2, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', 'Bloch Bridged USDC', 'bUSDC',
+            self.token = self.create(self.l2, 'solidity-tests/harness/BridgedStablecoinV3AnyT.sol:BridgedStablecoinV3AnyT', 'Bloch Bridged USDC', 'bUSDC',  # T > 0: the V3 test harness (BridgedStablecoinV3 itself refuses T != 0 since agent 194)
                                      str(ETH_CHAIN), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)', '(2,1209600)')
         else:
             self.token = self.create(self.l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch Bridged USDC', 'bUSDC',
