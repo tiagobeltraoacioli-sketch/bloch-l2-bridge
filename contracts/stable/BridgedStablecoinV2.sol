@@ -313,6 +313,16 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         emit Burned(burnId, nonce, msg.sender, amount, ethRecipient);
     }
 
+    /// @notice Signatures that end a guardian pause: above the mint quorum, as on the vault, so the keys that can forge a mint
+    ///         cannot also end the pause meant to stop it.
+    function unpauseThreshold() public view returns (uint256) {
+        return switchThreshold;
+    }
+
+    function _unpauseSigners() internal view override returns (uint256) {
+        return switchThreshold;
+    }
+
     function _requireCommittee() internal view override {
         if (verifier != address(0)) revert CommitteeRetired();
     }

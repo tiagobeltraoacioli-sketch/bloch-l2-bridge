@@ -665,7 +665,7 @@ contract MintSwitchTest {
     function testCommitteeUnpausesBeforeTheSwitchAsBefore() public {
         propose(address(good)); // a pending proposal changes nothing
         guardianPause(G1_KEY);
-        token.unpause(sigs(token.unpauseDigest(), K));
+        token.unpause(sigs(token.unpauseDigest(), token.switchThreshold()));
         require(!token.paused(), "unpaused");
     }
 

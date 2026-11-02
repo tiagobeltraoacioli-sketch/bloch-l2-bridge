@@ -227,9 +227,14 @@ abstract contract SignerMintedToken {
     function unpause(bytes calldata signatures) external {
         _requireCommittee();
         if (!paused()) revert NotPaused();
-        _checkSignatures(unpauseDigest(), signatures, threshold);
+        _checkSignatures(unpauseDigest(), signatures, _unpauseSigners());
         pausedUntil = block.timestamp;
         emit Unpaused(pauseCount);
+    }
+
+    /// @dev Signatures that end a pause.
+    function _unpauseSigners() internal view virtual returns (uint256) {
+        return threshold;
     }
 
     // ── mint ───────────────────────────────────────────────────────────────────
