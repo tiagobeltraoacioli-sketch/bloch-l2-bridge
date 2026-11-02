@@ -399,6 +399,21 @@ contract R171TokenReviewTest is R171Base {
         assertEq(block.timestamp - start, 288 hours);
     }
 
+    /// F171-5: nothing on-chain enforces T = 0. The V3 constructor accepts any largeMintThreshold; with T > 0 one forged
+    /// unit credits at once (no cancel window) and holds every later exit for good (docs: "T > 0 needs a settlement
+    /// path"). Only the config and the deploy tool keep T = 0. The instant refill is also floored at 1 unit/s.
+    function test_F5_v3AcceptsTAboveZeroAndAForgedUnitCreditsAtOnce() public {
+        BridgedStablecoinV3 t2 = _deploy(1_000 * U);
+        assertEq(t2.instantCapacity(), 10_000 * U); // = bucket: the instant bucket is the main bucket
+        bytes32 fake = _id(0, 666);
+        _mint(t2, fake, 1, MALLORY);
+        assertEq(t2.balanceOf(MALLORY), 1);
+        assertEq(t2.mintCount(), 1);
+        BridgedStablecoinV3 t3 = _deploy(1); // capacity 10 units, proportional refill 0 -> floored to 1 unit/s
+        assertEq(t3.instantCapacity(), 10);
+        assertEq(t3.instantRefillPerSecond(), 1);
+    }
+
     // ── decimals and burns ──────────────────────────────────────────────────────
 
     function test_OK_decimalsAndBurnBounds() public {
