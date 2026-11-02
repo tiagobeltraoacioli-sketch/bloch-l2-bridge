@@ -294,7 +294,7 @@ class Ctx:
         except ValueError:
             refuse('the Ethereum half returned no JSON', exit=done.returncode, stderr=done.stderr.strip()[-1500:])
         if done.returncode or not out.get('ok'):
-            refuse('the Ethereum half refused', eth=out)
+            refuse(f"the Ethereum half refused: {out.get('reason')}", eth=out)
         return out
 
 

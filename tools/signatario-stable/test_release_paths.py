@@ -31,7 +31,7 @@ ALICE_KEY, MALLORY_KEY = '0x' + '0a' * 32, '0x' + '0e' * 32
 BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
-LARGE, DELAY = 50 * U, 43200
+LARGE, DELAY = 500 * U, 43200
 results = []
 
 
@@ -271,7 +271,7 @@ def s_hold(net):
         d.unlink()
     tried = signed(0) + signed(1)
     check('accepted: the reviewed id releases the hold', any(e.get('signed') for e in tried), tried)
-    net.forge_mint('fd', 60 * U, net.mallory)  # above the large-mint threshold: queued, not credited
+    net.forge_mint('fd', 600 * U, net.mallory)  # above the large-mint threshold: queued, not credited
     net.mine(net.l2)
     net.send(net.l2, ALICE_KEY, net.token, 'burn(uint64,address)', str(U), BOB)
     net.mine(net.l2)
