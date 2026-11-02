@@ -50,7 +50,9 @@ reader holds. Signing checks are unchanged: `signatario.py` still verifies every
 Attestor partials need post-quantum verification, which only the native binary does, and only over a full
 set. `aggregate_attestation.py` keeps every distinct well-formed candidate per signer and lets
 `bloch-pos l2-claim verify-attestation` choose (at most 1024 sets), so a forged partial cannot displace a
-real one. A partial above the claim's 4593-byte signature bound is refused before that, and the agent re-signs until its own
+real one. Run it with `--bloch-pos` pointing at the attestor keystore build of `bloch-pos` (`093909a2…`), not the
+node build: the node build (fa980367) has no `l2-claim verify-attestation`, so every set reads as refused (agent 55).
+`prepare` and `sign` can still use the node `bloch-pos`. A partial above the claim's 4593-byte signature bound is refused before that, and the agent re-signs until its own
 fits. Attestors do not read each other: only the aggregator and the monitor are readers.
 
 ## Limits
