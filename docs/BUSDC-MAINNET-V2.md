@@ -79,6 +79,8 @@ Fill every `null` in `deployments/mainnet/busdc-vault-mainnet.config.json` and e
 with the three Ethereum vault guardian addresses (sorted ascending) before the vault exists; the rest of
 `ethereum` comes from step 4.4. Review both as a pull request. The launch decisions these configs encode are in 4.11.
 
+Every key comes from the key ceremony first (`docs/BRIDGE-V3-KEY-CEREMONY.md`): its inventory must pass `tools/deploy-pontes/key_inventory.py check` against both filled configs.
+
 Every key address in the templates is `TBD-owner`. The 22 addresses committed on 2026-10-14 (the deployer
 `0x703a…`, 7+7 signers, 3+3 guardians, the wGSMH deployer) had no recorded holder; the owner had them removed
 (2026-11-02), and `deploy_pontes.py` and `vault_pontes.py` refuse them in every role. Fill every role from

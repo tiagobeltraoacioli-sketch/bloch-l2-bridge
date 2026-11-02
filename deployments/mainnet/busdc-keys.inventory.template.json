@@ -1,0 +1,330 @@
+{
+  "domain": "bloch.bridge.key-inventory.v1",
+  "_about": "Template for docs/BRIDGE-V3-KEY-CEREMONY.md section 4.2. Public data only: copy to busdc-keys.inventory.json and fill one record per key from each holder's attestation. Contract accounts (bloch-inc-safe, recovery-authority) keep attestation null. recovery-authority and its owners may stay out until the light-client switch is planned.",
+  "keys": [
+    {
+      "role": "l2-mint-signer",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 4,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 5,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 6,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-mint-signer",
+      "index": 7,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 4,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 5,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 6,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-release-signer",
+      "index": 7,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-token-guardian",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-token-guardian",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-token-guardian",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-vault-guardian",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-vault-guardian",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-vault-guardian",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-vault-deployer",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-token-deployer",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "l2-relayer-gas",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-file",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "eth-relayer-gas",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-file",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "safe",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe-owner",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe-owner",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe-owner",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe-owner",
+      "index": 4,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "bloch-inc-safe-owner",
+      "index": 5,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "safe",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority-owner",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority-owner",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority-owner",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority-owner",
+      "index": 4,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "recovery-authority-owner",
+      "index": 5,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hardware-wallet",
+      "date": null,
+      "attestation": null
+    }
+  ]
+}
