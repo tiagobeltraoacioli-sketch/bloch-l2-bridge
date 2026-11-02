@@ -18,6 +18,10 @@ import {BridgedStablecoinV2} from "./BridgedStablecoinV2.sol";
 ///           cancelled mints are not in the chain, so a forged mint the guardians cancel leaves no trace in it.
 ///         - Every burn states the chain it was made under. ProvenanceSourceVault keeps the same chain over its deposits and
 ///           pays a burn only if the heads match: every credited token up to the burn came from a real deposit, in order.
+///         - Pending cap: at most MAX_PENDING mints are queued and not yet executed, on every path (agent 129 F129-B, agent
+///           175 option d, owner decision 2026-11-02). A forger with the mint quorum then adds a candidate only after a
+///           guardian cancel frees a place, so it cannot outrun the guardians' cancels; it can only refuse honest mints
+///           while it holds the keys (censorship, not a hold).
 ///         A forged mint that is credited (instant path, or a cancel that failed) cannot be paid out; it holds the exits of
 ///         burns made after it instead.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
@@ -27,6 +31,11 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     uint256 internal constant MAX_DRAIN = 8;
     /// Candidates of a contested slot one `drain` step looks at, at most; the scan resumes where it stopped.
     uint256 internal constant MAX_PROBE = 32;
+    /// Queued, not yet executed mints, at most (F129-B). With T = 0 every mint waits `largeMintDelay` (12 h), so the guardians
+    /// must cancel a full queue of forged candidates within 12 h: MAX_PENDING / 12 h = 2.84 cancels a minute, against about 25
+    /// measured (cancel_batch 32 per round, agents 129 and 175). Honest mints are at least minDeposit (10 USDC) and the bucket
+    /// admits at most 10,000 + 5,000 USDC per 12 h delay, so 1,500 queue at most, and 2,000 with one more delay of lag.
+    uint256 public constant MAX_PENDING = 2048;
 
     /// Next slot (deposit nonce) a new mint may open.
     uint64 public nextSlot;
@@ -46,6 +55,8 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     mapping(uint64 => uint256) internal candidateCursor;
     mapping(uint64 => uint256) internal candidateScan;
     bool private draining;
+    /// Mints queued and not yet executed, cancelled, replaced or dropped (the live entries of `pendingMints`).
+    uint256 public pendingCount;
 
     event MintDropped(bytes32 indexed replayKey, uint64 slot, uint64 amount);
     error NotStale();
@@ -64,6 +75,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     error MintOutOfOrder();
     error WrongSlot();
     error ZeroId();
+    error PendingCapReached();
 
     /// @notice The slot a deposit id names: its top 8 bytes, the deposit nonce (ProvenanceSourceVault.depositId).
     function slotFor(bytes32 key) public pure returns (uint64) {
@@ -96,6 +108,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         if (p.amount == 0 || s >= mintCount || slotKey[s] == key) revert NotStale();
         delete pendingMints[key];
         pendingSupply -= p.amount;
+        _unqueue();
         _refund(key, p.amount);
         emit MintDropped(key, s, p.amount);
     }
@@ -143,10 +156,14 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
 
     /// @dev The slot is the deposit's own nonce, read from its id: a mint (or remint, or proof) naming another nonce is
     ///      unrepresentable, and nothing about a slot outlives a cancel except the freed slot itself.
+    ///      Every path that queues a mint (mint, remint, mintWithProof) opens its slot here first, so the pending count is
+    ///      taken here; every path that removes one ends in _afterCredit, _onCancel, _vacate or dropStale.
     function _openSlot(bytes32 key, uint64 nonce) internal override {
         if (key == 0) revert ZeroId(); // it would name slot 0 and hold nothing (agent 123, A1)
         if (slotFor(key) != nonce) revert WrongSlot();
         if (nonce < mintCount) revert MintOutOfOrder();
+        if (pendingCount >= MAX_PENDING) revert PendingCapReached();
+        ++pendingCount;
         if (nonce == nextSlot) {
             nextSlot = nonce + 1;
         } else if (nonce > nextSlot) {
@@ -160,7 +177,15 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         slotKey[nonce] = key;
     }
 
+    /// @dev One queued mint is gone. Never below zero: each removal follows the _openSlot that counted it.
+    function _unqueue() private {
+        unchecked {
+            --pendingCount;
+        }
+    }
+
     function _onCancel(bytes32 key) internal override {
+        _unqueue();
         uint64 s = slotFor(key);
         if (slotKey[s] == key) {
             slotKey[s] = 0;
@@ -169,6 +194,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     }
 
     function _vacate(bytes32 key) internal override {
+        _unqueue();
         uint64 s = slotFor(key);
         if (slotKey[s] == key) slotKey[s] = 0;
     }
@@ -179,6 +205,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     }
 
     function _afterCredit(bytes32 key, address recipient, uint64 amount) internal override {
+        _unqueue(); // an instant credit (only at T > 0, test harness) took its count in _openSlot too
         slotKey[mintCount] = key; // a contested slot closes on its first credit
         delete instantHeld[key];
         mintHead = keccak256(abi.encode(mintHead, key, uint256(amount), recipient));

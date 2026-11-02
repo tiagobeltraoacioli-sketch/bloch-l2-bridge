@@ -150,7 +150,7 @@ It is in scope only for the correctness of what it tells users.
 - Forged mints affect **liveness**:
   - a forgery that is cancelled leaves no trace;
   - a forgery that credits holds later exits (F3).
-- "Nothing forged credits while 2 of 3 guardians live" holds **only within the guardians' off-chain cancel rate** (section 6, limit 2).
+- "Nothing forged credits while 2 of 3 guardians live" holds while the guardians cancel more than `MAX_PENDING` (2,048) forged candidates per 12 h delay, 2.84 a minute (section 6, limit 2).
 
 **Assumptions:**
 - 3 independent guardian operators;
@@ -185,13 +185,16 @@ It is in scope only for the correctness of what it tells users.
    - At T = 0, it needs a cancel missed for 12 h.
    - The asserted limit tests are `test_limit_*` in `AuditR7V3`, and A5 at T > 0 in `A123ReauditV3`.
    - It is an owner decision before T can ever be raised.
-2. **The flood bound is off-chain only (F2 residual, F129-B).**
-   - Nothing on-chain caps the live candidates of a contested slot.
-   - The forger pays about 128.7k gas per candidate. The guardians pay about 108.6k per cancel (2 votes).
-   - The real bound is about `cancel_batch` (32) cancels per round, where a round is the interval plus about 13 s.
-   - A forger who adds more than that for the whole 12 h outruns the guardians. Every item past its deadline then alerts.
-   - The exposed windows are the first grace (2,700 s) and the 72 h after a pause chain. A pause stops new candidates.
-   - The rates were measured on loopback anvil only (81 RPC calls per round, flat from 64 to 1,024 candidates), not on the paced real L2.
+2. **The flood bound is on-chain since agent 194 (F2 residual, F129-B; owner decision 2026-11-02).**
+   - `MAX_PENDING` = 2,048 caps the queued, not yet executed mints on every path (`pendingCount`, `PendingCapReached`).
+   - A forger with the mint quorum adds a candidate only after a cancel frees a place, so each forged candidate is cancelled
+     within 2,048 / C of its queueing, under the 12 h delay for any guardian cancel rate C above 2.84 a minute.
+   - The guardians cancel about `cancel_batch` (32) per round, where a round is the interval plus about 13 s: about 25 a minute,
+     measured on loopback anvil only (81 RPC calls per round, flat from 64 to 1,024 candidates), not on the paced real L2.
+   - `R194PendingCap.t.sol`: at a fifth of that rate no forged candidate credits in 16 h of the attack; below 2.84 a minute
+     (the control) one does. Honest flow at the bucket rate with one delay of lag peaks at 1,994 queued.
+   - Residual: while a forger holds the mint keys and keeps the queue full, honest mints are refused (censorship, not a hold).
+     The exposed windows are the first grace (2,700 s) and the 72 h after a pause chain. A pause stops new candidates.
 3. **D3: one vault, one token.**
    - A second token over a used vault, with fresh signer databases, mints old deposits again. No tool detects it.
    - It is a deploy rule only. `audit_v3_daemons` D3 fails by design.
