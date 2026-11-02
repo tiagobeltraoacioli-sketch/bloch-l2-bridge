@@ -1,6 +1,6 @@
 # Audit scope: bUSDC bridge V3 launch design (Ethereum USDC <-> Bloch L2)
 
-The target is branch `codex/bridge-v3-r7-20261102` @ `9f91a56` of `bloch-l2-bridge`. This document sits on `codex/bridge-audit-scope-v3-r8-20261102`, which adds docs only.
+The target is branch `codex/bridge-v3-lc-merge-r8-20261102` of `bloch-l2-bridge`: the V3 launch tip `9f91a56` (`codex/bridge-v3-r7-20261102`) plus `RecoverableReleaseVerifier` with its handoff (agent 103, `2a116fa`, merged unchanged in `4422d13`), its tests on the V3 vault and the anvil release driver (agent 138). The contracts of `9f91a56` are unchanged on it. This document was first written by agent 131 on `codex/bridge-audit-scope-v3-r8-20261102` (`323eddd`, docs only) and extended for the verifier by agent 138.
 
 The frontend is `postern-dex` `codex/bridge-v3-r7-20261102` @ `f7cdf26`.
 
@@ -13,7 +13,9 @@ Sources for the design, the findings and the evidence are the agent reports in `
 - 101: the first independent audit (D1-D7);
 - 108: the D6 mint-chain design;
 - 109: the V3 port and its fixes;
+- 103: the light-client exit path (`RecoverableReleaseVerifier` and its handoff);
 - 110 and 130: the light-client release guest;
+- 138: the verifier merged onto V3 and its release run with the V3 vault;
 - 111, 123 and 129: the audits of V3.
 
 ## 1. The design in one paragraph
@@ -37,7 +39,7 @@ Build settings:
 - **`optimizer_runs = 1`**, which was 200 before `9f91a56` (F129-C);
 - forge 1.7.1.
 
-Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
+Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`); the two verifiers' are from agent 138's run of the same build (`agents/138-evidence/suites/summary.txt`), equal for the other four. Runtime keccaks of the verifiers are of the artifact, with the immutables zeroed; a deployed verifier's code hash covers its immutables (agent 138's anvil code hashes are in its report). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
 
 | Contract | File (lines, last commit) | Chain | Creation keccak (bytes) | Runtime keccak (bytes) |
 |---|---|---|---|---|
@@ -46,8 +48,8 @@ Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/
 | BridgedStablecoinV2 (V3's base: cancel, remint, unpause, instant cap, switch) | `contracts/stable/BridgedStablecoinV2.sol` (416, `9f91a56`) | - | `0xb3e074f211c00c7499ecfec615bc8890cb8389bc9db1eed2f68bdd3e43cc9205` (19,555) | `0x71fc02742f1545c6dd385325994cf7252857904f9cdcbd964d2f3d1cf00042b1` (15,929) |
 | SignerMintedToken (shared core: k-of-n EIP-712 mint, buckets, queue, guardians, burn) | `contracts/bridged/SignerMintedToken.sol` (399, `24150f1`) | - | abstract | abstract |
 | ContextBoundSourceVault (ProvenanceSourceVault's base) | `contracts/usdt/ContextBoundSourceVault.sol` (609, `b281104`) | - | `0x332f195a6ab7ab806c97f308629eedc61d34c0491b9f2f889d56de48e0071ddd` (15,308) | `0x6e1a3508e1eb3c7e47e3e64f2ae0f8bb53eb319329b5b10c96f71a792c87db00` (12,534) |
-| SP1ReleaseVerifier | `contracts/usdt/SP1ReleaseVerifier.sol` (60, `dc1d8fc`) | Ethereum | unchanged | unchanged |
-| RecoverableReleaseVerifier | **not on this branch**: `2a116fa` (agent 110 copied it into its scratch tree) | Ethereum | - | - |
+| SP1ReleaseVerifier | `contracts/usdt/SP1ReleaseVerifier.sol` (60, `dc1d8fc`) | Ethereum | `0x3571805df5f1af321010c4a34be68c4b142d367521b3c076858c966006dda36b` (1,822) | `0x37e0624f92673e031131e2c31de74dcc056c5a53c2fa019fe73fcb89c9935498` (1,448) |
+| **RecoverableReleaseVerifier** (the recommended light-client verifier: recovery and optional handoff) | `contracts/usdt/RecoverableReleaseVerifier.sol` (283, `2a116fa`) | Ethereum | `0x5a5ee586d0d89aed745a48cc49c29186680b2da1acdad3f33829fa2c5331298c` (8,345) | `0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145` (6,802) |
 
 The vendored Succinct `SP1VerifierGroth16` v6.1.0 (`contracts/sp1/v6.1.0/`) is pinned and unmodified, and it is out of scope.
 
@@ -58,6 +60,23 @@ The vendored Succinct `SP1VerifierGroth16` v6.1.0 (`contracts/sp1/v6.1.0/`) is p
 - the instant-bucket refund on cancel;
 - the vault's provenance check on both release paths (`_checkRelease`) and the v2 `releaseId`;
 - the storage layout: V3 is V2's layout plus appended slots, with no proxy.
+
+### 2.1 `RecoverableReleaseVerifier` (the vault's light-client verifier)
+
+The vault switches to it once, through its own 6-of-7, 14-day path (`proposeVerifier`, `activateVerifier`). The vault calls `verifyRelease(vault, releaseId, proof)`, whose selector is the same as `IProvenanceReleaseVerifier.verifyRelease`, so the v2 release id (with the burn's mint-chain fields) is what the proof must commit. Until a successor is active it verifies exactly as `SP1ReleaseVerifier`: public values `abi.encode(trustAnchor, l2ChainId, l2Token, block.chainid, vault, releaseId)` under `programVKey`, with `trustAnchor = sha256("BLOCH-LC-TRUST-v1" || anchorDigest || stepVKeyWords)` derived in the constructor.
+
+Two ways to a successor, both set by one immutable `recoveryAuthority`:
+- **Recovery** (`proposeSuccessor`): for a light client that has stopped. Activates after `recoveryDelay` (at least 7 d; 14 d proposed) unless anyone first posts a Groth16 step proof of the pinned step program from the pinned anchor with a checkpoint no older than `activatesAt - lifeWindow` (`proveLife`). After a proof of life the authority waits `proposalCooldown`.
+- **Handoff** (`proposeHandoff`, off when `handoffDelay` is 0; at least 14 d, 30 d recommended by agent 103): a planned change of the step or release program or of the SP1 verifier while the client works. The successor must name an anchor that this client proves with a step proof (`endorseHandoff`), so the authority chooses the new rules but not the new root. A proof of life does not stop a handoff.
+
+Launch parameters are not in a config yet (owner decisions in report 103): the authority (a cold multisig, disjoint from the L2 mint keys and the Ethereum release keys), `recoveryDelay` 14 d, `lifeWindow` 3 d, `proposalCooldown` 14 d, `handoffDelay` 30 d, the release vkey and anchor of the pinned guest (section 3.1), and `sp1Verifier` = the vendored `SP1VerifierGroth16` v6.1.0, never the gateway.
+
+**Questions for the auditor on the verifier:**
+- can a proof of life, an endorsement or an activation be replayed, front-run or made to target another proposal (`_clearProposal`, `proposalLive`, `ACTIVATION_WINDOW`)?
+- `_checkStepOutput`: the 152-byte step output layout, the little-endian epoch and the checkpoint-time bounds in `proveLife`;
+- the successor's code-hash pin and the handoff's checks on the successor (`anchorDigest`, `l2Token`, `l2ChainId`), including a successor that reverts or lies in those views;
+- that the verifier adds no path that bypasses the vault's provenance check, the window bucket or replay protection (the vault checks replay and provenance in `_checkRelease` before calling `verifyRelease`, and the bucket in `_pay` after it);
+- the trust it adds: during a handoff notice holders who distrust the new programs must leave; a lost authority leaves a stopped client locked (report 103).
 
 ## 3. Off-chain components in scope
 
@@ -92,9 +111,13 @@ This lives in the `bloch-sis-pow` light-client repo, and its own review is a pre
   - the V3 code is in a new crate, `bloch-lc-mint-chain`, and the release guest is in its own package, `sp1/release-program`;
   - the step and probe ELFs equal the old pins (step `dc179471…`, vkey `0x00bcf592…76e0`);
   - the new release ELF is `38b911a9131ab03c22351013b872144ca4b1cba9e9d4cad934d3891f56edd0c4`, vkey `0x007d50e2d044585dd42afb636c6a061df51f2af439e0332923704cd8085adc73`;
-  - real step and honest release proofs were made;
-  - at the time of writing, the forged release proof was still queued, so check report 130 for its result.
-- **Pin only one of the two layouts** (agent 130's is recommended), and only after review.
+  - real step, honest and forged release proofs were made on agent 110's a97c3cb burn (report 130);
+  - with the step vkey unchanged, the trust anchor of the e8699 rehearsal anchor stays `0x9b1823c9…e56a`, and agent 47's real mainnet e7108 step proof (`test-vectors/sp1-release-lc-guests/step-groth16-mainnet-e7108.json`) still serves `proveLife` and `endorseHandoff`.
+- **Agent 110's pins (`4d47ca04` / `0x00d1c59a`) are superseded** by 130's: do not use them. Pin 130's only after review.
+- **Agent 138's release run through `RecoverableReleaseVerifier`** (this branch, handoff 30 d), real SP1VerifierGroth16 v6.1.0, release vkey `0x007d50e2…dc73`:
+  - with 130's stored proofs, on the a97c3cb vault and token they bind: honest burn paid (400 USDC, `releaseWithProof` 379,914 gas), forged burn's valid proof refused with `ProvenanceMismatch`;
+  - 130's proofs **cannot** be paid by the `9f91a56` vault: F1 (`9cbde58`) puts the nonce in the deposit id, so the vault's chain heads and every v2 release id change. A release proof must be made over a burn of the deployed pair; the guest is unchanged (same instruction counts);
+  - with the `9f91a56` vault and token at T = 0 (`scripts/lc-exit/rehearse_v3.py`): new real proofs with 130's unchanged ELFs (step compressed 421 s, 45.7 GiB scope peak; honest release Groth16 281 s, forged 380 s, about 20 GiB each). Honest burn paid 400 USDC; `releaseWithProof` **381,517** gas through `RecoverableReleaseVerifier` (379,390 through `SP1ReleaseVerifier`); `verifyRelease` about 268,100. The forged burn's valid proof is accepted by both verifiers and refused by the vault with `ProvenanceMismatch`, also after the honest one was paid; a lie about the head, a swapped proof and a tampered proof give `InvalidProof`; the replay gives `InvalidRelease`. These proofs are vectors in `test-vectors/sp1-release-lc-guests/release-v3-9f91a56-groth16.json` (`RecoverableReleaseVerifierV3Groth16`).
 
 **Assumptions in the LC runs:**
 - L1 settlement and finality were made up (agent 110's table);
@@ -189,13 +212,13 @@ It is in scope only for the correctness of what it tells users.
 9. **LC guest.**
    - The proof runs used made-up L1 settlement and finality.
    - The vkeys are not pinned. Agent 110's layout rotates the step vkey.
-   - `RecoverableReleaseVerifier` is not on this branch, and its handoff path was not exercised with the new keys.
+   - `RecoverableReleaseVerifier`'s handoff and recovery paths on the V3 vault are covered by mock-SP1 forge tests (`RecoverableReleaseVerifierV3`) and, for the real step proof, by `RecoverableReleaseVerifierGroth16` (e7108 endorsement and proof of life). Real V3 release proofs exist for the e8699 rehearsal anchor only (`RecoverableReleaseVerifierV3Groth16`); none for a successor anchored elsewhere.
 10. **Test environment.**
     - Everything ran on anvil, with synthetic `finalized` and `l2_source: rpc`.
     - Most daemon scripts use 2-of-3 quorums and 1 guardian. The gas runs and the browser run use 5 of 7.
     - **No real-L2 run** was done.
 11. **`mintedTotal`** is a `uint64`, so it overflows after 1.8e13 USDC lifetime (Info).
-12. **Config note.** The `launchDesign` text in `busdc-mainnet.config.json` ("a forged mint never credits while 2 of 3 guardians live") does not state limit 2, so read it with that qualification.
+12. **Config note.** Fixed on this branch (`cf4d0dc`): `notes.launchDesign` in `busdc-mainnet.config.json` now says a forged mint is cancelled before it credits only while 2 of 3 guardians live **and** the forger queues fewer candidates than the guardians cancel, and states limit 2.
 
 ## 7. Prior findings and their fixes
 
@@ -230,10 +253,10 @@ Needs:
 - python3;
 - the Rust toolchain for `scripts/tests`.
 
-Every net is a loopback anvil with throwaway keys. Run all commands from the repository root:
+Every net is a loopback anvil with throwaway keys. Run all commands from the repository root. Check out `9f91a56` instead for the launch tip without the verifier:
 
 ```
-git checkout 9f91a56
+git checkout codex/bridge-v3-lc-merge-r8-20261102
 forge test
 python3 tools/guardiao/test_guardiao.py .
 python3 tools/guardiao/test_sombra.py .
@@ -284,7 +307,7 @@ These suites run as unittest modules, from their own tool directory:
 ### Expected results at `9f91a56`
 
 **Contract and unit suites:**
-- forge: **368 passed, 0 failed, 1 skipped**. This includes `AuditR7V3`, `A123ReauditV3` (with the A9 and A10 stateful fuzz) and `A129FinalV3`.
+- forge: **368 passed, 0 failed, 1 skipped** at `9f91a56`; **417 passed, 0 failed, 1 skipped** on this branch (agent 138), the 49 more being `RecoverableReleaseVerifier` (16), `LcExitFailurePaths` (13), `RecoverableReleaseVerifierGroth16` (9, real Groth16 vectors), `RecoverableReleaseVerifierV3` (6, the V3 vault with mock SP1) and `RecoverableReleaseVerifierV3Groth16` (5, real V3 release proofs). This includes `AuditR7V3`, `A123ReauditV3` (with the A9 and A10 stateful fuzz) and `A129FinalV3`.
 - Guardian suites: 32, 19, 8, 26, 30, 37, 4, 15 and 5.
 - Reserves 16, alerts 4.
 - gnb signer 15, vigia 16.
@@ -313,6 +336,7 @@ These suites run as unittest modules, from their own tool directory:
 - Mutation testing uses agent 129's `mutate.py` (`agents/129-bridge-v3-final-evidence/`).
 - The A9 and A10 fuzz at 2,000 runs: `agents/123-bridge-v3-reaudit-evidence/forge-fuzz-2000.txt`.
 - Browser (frontend `f7cdf26` against `9f91a56`): 40 passed, 0 failed, at 1280, 390 and 360 px. The scripts are in `agents/109-evidence/ui/`.
+- LC release through `RecoverableReleaseVerifier` on the V3 vault: `scripts/lc-exit/rehearse_v3.py WORK nets|burn|jobs|verify|stop` (this branch; `V3_T0=0` for the a97c3cb flow), with the light-client host's `dump_v3_release_chain` and `lc` prover between `burn` and `verify`. Evidence: `agents/138-evidence/`.
 - LC guest: `build-elfs.sh` and `sp1/prover/rehearse_v3.py` on the light-client branches. The ELF sums and on-chain verdicts are in `agents/110-lc-guest-v3-evidence/`. Proving needs a 64 GiB host with 2 SP1 core workers.
 
 ## 9. Not in scope
