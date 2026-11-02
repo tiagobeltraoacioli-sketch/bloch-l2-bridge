@@ -269,7 +269,7 @@ abstract contract SignerMintedToken {
         bucketUpdatedAt = block.timestamp;
         minted[replayKey] = true;
 
-        if (amount > largeMintThreshold) {
+        if (amount > largeMintThreshold || !_takeInstant(amount)) {
             uint256 readyAt = block.timestamp + largeMintDelay;
             pendingMints[replayKey] = PendingMint(recipient, amount, uint64(readyAt));
             pendingSupply += amount;
@@ -278,6 +278,11 @@ abstract contract SignerMintedToken {
         }
         _credit(recipient, amount);
         emit MintExecuted(replayKey, recipient, amount);
+        return true;
+    }
+
+    /// @dev Whether a mint at or below the threshold may credit at once. Otherwise it queues, like a large mint.
+    function _takeInstant(uint64) internal virtual returns (bool) {
         return true;
     }
 

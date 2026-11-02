@@ -42,6 +42,8 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     uint64 public constant MIN_SWITCH_DELAY = 7 days;
     /// A proposal can be activated only this long after `verifierActivatesAt`.
     uint64 public constant VERIFIER_ACTIVATION_WINDOW = 30 days;
+    /// Threshold-sized mints that credit at once per bucket period: the instant bucket is this many times the threshold.
+    uint256 public constant INSTANT_MINTS = 10;
     bytes32 public constant MINT_SWITCH_TYPEHASH =
         keccak256("MintVerifierSwitch(bool cancel,address verifier,bytes32 codehash,uint64 nonce,uint256 validUntil)");
 
@@ -64,6 +66,8 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     uint256 public immutable sourceChainId;
     address public immutable sourceVault;
     bytes32 public immutable sourceRoute;
+    uint256 public immutable instantCapacity;
+    uint256 public immutable instantRefillPerSecond;
     uint256 public immutable switchThreshold;
     uint64 public immutable switchDelay;
     /// Guardian votes that cancel a queued mint: a majority of the set. Zero without guardians.
@@ -73,6 +77,8 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     bytes32 public proposedVerifierCodehash;
     uint64 public verifierActivatesAt;
     uint64 public switchNonce;
+    uint256 public instantLevel;
+    uint256 public instantUpdatedAt;
     /// Zero while the committee mints; set once, never changed or cleared.
     address public verifier;
 
@@ -123,6 +129,15 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         sourceChainId = sourceChainId_;
         sourceVault = sourceVault_;
         sourceRoute = sourceRoute_;
+        // A lower threshold alone bounds nothing: a split mint skips the queue up to the main bucket. So under the threshold a
+        // second bucket applies; past it mints queue. A threshold of a tenth of the bucket or more changes nothing; zero queues all.
+        uint256 large = limits.largeMintThreshold;
+        uint256 capacity = large >= limits.bucketCapacity / INSTANT_MINTS ? limits.bucketCapacity : large * INSTANT_MINTS;
+        uint256 refill = capacity * limits.refillPerSecond / limits.bucketCapacity;
+        instantCapacity = capacity;
+        instantRefillPerSecond = refill == 0 ? 1 : refill;
+        instantLevel = capacity;
+        instantUpdatedAt = block.timestamp;
         if (
             mintSwitch.threshold < threshold_ || mintSwitch.threshold > signers_.length
                 || mintSwitch.delay < MIN_SWITCH_DELAY || mintSwitch.delay <= limits.largeMintDelay
@@ -303,6 +318,21 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         verifier = pending;
         delete proposedVerifier;
         emit VerifierActivated(pending, proposedVerifierCodehash);
+    }
+
+    /// @notice What can credit at once right now, in mints at or below the threshold.
+    function availableInstant() public view returns (uint256) {
+        uint256 refilled = instantLevel + (block.timestamp - instantUpdatedAt) * instantRefillPerSecond;
+        return refilled > instantCapacity ? instantCapacity : refilled;
+    }
+
+    function _takeInstant(uint64 amount) internal override returns (bool) {
+        if (instantCapacity == bucketCapacity) return true; // the main bucket is already the bound
+        uint256 available = availableInstant();
+        if (amount > available) return false;
+        instantLevel = available - amount;
+        instantUpdatedAt = block.timestamp;
+        return true;
     }
 
     function burn(uint64 amount, address ethRecipient) external returns (bytes32 burnId) {

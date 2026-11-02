@@ -364,6 +364,10 @@ def immutable_values(p):
     v = {'NAME_HASH': keccak_text(CONTRACTS[p['bridge']]['domain_name']),
          'decimals': CONTRACTS[p['bridge']]['decimals'], 'threshold': p['threshold'],
          'pauseDuration': p['pauseDuration'], 'pauseCooldown': p['pauseCooldown'], **lim}
+    if p['bridge'] != 'wgnb':  # as the constructor computes them
+        large, bucket = lim['largeMintThreshold'], lim['bucketCapacity']
+        capacity = bucket if large >= bucket // 10 else large * 10
+        v.update(instantCapacity=capacity, instantRefillPerSecond=max(1, capacity * lim['refillPerSecond'] // bucket))
     if p['bridge'] == 'wgnb':
         v['gnbChainId'] = p['gnbChainId']
     else:
