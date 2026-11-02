@@ -205,6 +205,15 @@ def vault_rehearsal(url, work, token_cfg):
                     lambda c: c['vault']['policy'].update(switchThreshold=5), '6 of 7')
     if vc['vault'].get('provenance'):
         mainnet_refused('a provenance vault outside mode 1 refused', lambda c: c['vault']['provenance'].update(mode=2), 'mode 1')
+        fees = lambda **kw: (lambda c: c['vault']['provenance']['fees'].update(**kw))
+        mainnet_refused('a fee above 30 bps refused', fees(depositBps=31), 'above 30')
+        mainnet_refused('no protocol fee on mainnet refused', fees(recipient=None, depositBps=0, releaseBps=0), 'revenue')
+        mainnet_refused('an undecided fee recipient refused', fees(recipient=None), 'recipient')
+        mainnet_refused('a signer as fee recipient refused',
+                        lambda c: c['vault']['provenance']['fees'].update(recipient=c['vault']['signers']['set'][0]['address']),
+                        'fee recipient')
+        mainnet_refused('minDeposit 10 USDC netting below l2MinBurn after the deposit fee refused',
+                        lambda c: c['vault']['policy'].update(minDeposit=c['vault']['policy']['l2MinBurn']), 'after the deposit fee')
         tc = json.loads(json.dumps(token_cfg))
         tc['ethereum'] = json.loads(json.dumps(be))
         tc['token']['contract'] = 'BridgedStablecoinV2'
