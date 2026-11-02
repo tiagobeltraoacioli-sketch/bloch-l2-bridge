@@ -57,7 +57,12 @@ again if the shortfall grows past what it was when acknowledged. Without a commi
 after every cooldown, as before.
 
 Queued-mint cancel (a token with `cancelQuorum`): a due provenance finding on a mint still in the queue also sends this guardian's
-vote, one transaction per round of up to `cancel_batch` (32) mints, largest first, before the pause. A majority of the guardians cancels the mint; one vote alone does nothing. A mint with no
+vote, one transaction per round of up to `cancel_batch` (32) mints, earliest `readyAt` first (a 1-unit forgery on the V3 token
+holds every later exit as a large one does), before the pause. A round reads the queue from events and the Ethereum deposits in one
+scan, so its RPC calls do not grow with the number of queued mints, except at most 2 x `cancel_batch` vote checks. Throughput bound:
+each guardian votes at most `cancel_batch` mints per round (interval plus round time), so with a cancel quorum of 2 the guardians
+cancel about `cancel_batch` forged mints per round; a forger who adds more than that for the whole 12 h delay outruns them, and
+every item past `cancel_deadline_s` alerts (critical) whether or not it was voted. A majority of the guardians cancels the mint; one vote alone does nothing. A mint with no
 deposit is voted on only if this guardian's Ethereum head is at least `cancel_fresh_s` (default 300) past the block that queued it and
 no `Deposited` log for it exists up to that head: an honest mint is signed after finality, so any fresh node holds its deposit. A
 deposit at the head that is not yet finalized holds the vote. A stale view never votes, and alerts instead. Votes name the exact mint
@@ -97,6 +102,7 @@ EVENTS = {
 MINT_QUEUED = 'MintQueued(bytes32,address,uint64,uint256)'
 MINT_CANCELLED = 'MintCancelled(bytes32,address,uint64,uint64)'
 MINT_DROPPED = 'MintDropped(bytes32,uint64,uint64)'
+MINT_EXECUTED = 'MintExecuted(bytes32,address,uint64)'
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED_V3 = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
@@ -342,6 +348,11 @@ class Guardian:
         mints = []
         cancels = {}
         self.cancelled_mints = []
+        # Queue state from events, one log scan per kind and round: no call per queued mint, so a round stays bounded as a
+        # flood of forged candidates grows (agent 129, F129-B). Ordered by (block, log index): queued -> pending; executed,
+        # cancelled or dropped -> not.
+        order = lambda l: (int(l['blockNumber'], 16), int(l['logIndex'], 16))  # noqa: E731
+        ends = []
         if self.cancel_enabled():
             # A candidate dropped with `dropStale` (V3) never credits either: it counts as a cancel (agent 123, R1).
             dropped = [self.topic(MINT_DROPPED)] if self.provenance else []
@@ -349,6 +360,7 @@ class Guardian:
                 for l in self.logs(self.l2, self.token, t, start, b):
                     key = l['topics'][1].lower()
                     cancels[key] = cancels.get(key, 0) + 1
+                    ends.append(l)
         for l in self.logs(self.l2, self.token, self.topic(ev['Minted']), start, b):
             w = words(l['data'])
             m = {'key': l['topics'][1].lower(), 'recipient': addr(l['topics'][2]), 'tx': l['transactionHash'],
@@ -362,11 +374,16 @@ class Guardian:
                 self.cancelled_mints.append(m)
                 continue
             mints.append(m)
-        queued = {}
-        for l in self.logs(self.l2, self.token, self.topic(MINT_QUEUED), start, b):
+        queued, pending_now = {}, {}
+        queue_logs = self.logs(self.l2, self.token, self.topic(MINT_QUEUED), start, b)
+        for l in queue_logs:
             w = words(l['data'])
             queued[l['topics'][1].lower()] = {'amount': uint(w[0]), 'ready_at': uint(w[1]),
                                               'recipient': addr(l['topics'][2])}
+        if queue_logs:
+            ends += self.logs(self.l2, self.token, self.topic(MINT_EXECUTED), start, b)
+        for l in sorted(queue_logs + ends, key=order):
+            pending_now[l['topics'][1].lower()] = l['topics'][0].lower() == self.topic(MINT_QUEUED)
         burns = []
         for l in self.logs(self.l2, self.token, self.topic(BURNED_V3 if self.provenance else ev['Burned']), start, b):
             w = words(l['data'])
@@ -385,8 +402,7 @@ class Guardian:
         for m in mints:
             q = queued.get(m['key'])
             if q:
-                p = self.call(self.l2, self.token, 'pendingMints(bytes32)', m['key'], block=b)
-                m['queued'] = {**q, 'still_pending': uint(p[1]) != 0}
+                m['queued'] = {**q, 'still_pending': pending_now.get(m['key'], False)}
         # Kept only while the newest mint of its key was not cancelled.
         live = {m['key'] for m in mints}
         self.cancelled_mints = [m for m in self.cancelled_mints if m['key'] not in live]
@@ -712,6 +728,7 @@ class Guardian:
     def round(self):
         self.l2_read_failed = self.blind = False
         self.cancel_candidates = {}
+        self._head_deposits, self._l2_times = None, {}  # per-round caches (F129-B)
         try:
             return self.full_round()
         except Unverifiable as e:
@@ -851,33 +868,60 @@ class Guardian:
                     return False
         return self.cancel_quorum > 0
 
+    def head_deposit_ids(self):
+        """Deposit ids in the vault's `Deposited` logs up to this guardian's Ethereum head: one scan per round, shared by every
+        finding, instead of one scan per queued mint (F129-B). Returns (head number, head time, ids)."""
+        if getattr(self, '_head_deposits', None) is None:
+            eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+            head, head_time, _ = self.block(eth, 'latest')
+            ids, start = set(), int(self.cfg.get('vault_from_block', 0))
+            while start <= head:
+                stop = min(head, start + self.chunk - 1)
+                for l in self.rpc(eth, 'eth_getLogs', [{'address': vault, 'topics': [self.topic(DEPOSITED)],
+                                                        'fromBlock': hex(start), 'toBlock': hex(stop)}]):
+                    ids.add(l['topics'][1].lower())
+                start = stop + 1
+            self._head_deposits = (head, head_time, ids)
+        return self._head_deposits
+
+    def l2_time(self, number):
+        """Block time on the L2, cached for the round."""
+        cache = self.__dict__.setdefault('_l2_times', {})
+        if number not in cache:
+            cache[number] = self.block(self.l2, number)[1]
+        return cache[number]
+
     def cancel_blocker(self, m):
         """Why this guardian may not vote on this mint yet, or None. Reorgs, a lagging node and a stalled finality end up here."""
         if m['verdict'] != 'pending':
             return None  # a finalized deposit under this id with other fields: nothing later changes that
-        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
-        head, head_time, _ = self.block(eth, 'latest')
-        queued_at = self.block(self.l2, m['block'])[1]
+        _, head_time, ids = self.head_deposit_ids()
+        queued_at = self.l2_time(m['block'])
         if head_time < queued_at + self.cancel_fresh:
             return f'Ethereum head at {head_time} is not {self.cancel_fresh} s past the mint at {queued_at}'
-        start, topics = int(self.cfg.get('vault_from_block', 0)), [self.topic(DEPOSITED), m['key']]
-        while start <= head:
-            stop = min(head, start + self.chunk - 1)
-            if self.rpc(eth, 'eth_getLogs', [{'address': vault, 'topics': topics, 'fromBlock': hex(start), 'toBlock': hex(stop)}]):
-                return 'the deposit exists at the head and is not finalized yet'
-            start = stop + 1
+        if m['key'] in ids:
+            return 'the deposit exists at the head and is not finalized yet'
         return None
 
     def cancel_votes(self, now, due):
-        """One transaction per round: this guardian's votes on the due queued mints, largest first, so under a flood value goes first."""
+        """One transaction per round: this guardian's votes on the due queued mints, earliest `readyAt` first (agent 129, F129-A).
+        On the V3 token a credited forgery of 1 unit holds every later exit as a large one does, so the deadline decides, not the
+        amount; ties go to the larger amount. Every due item past its deadline alerts, voted this round or not. At most
+        2 x `cancel_batch` items are examined per round, so a round stays bounded under a flood."""
         if not self.cancel_candidates or self.blind or not self.cancel_enabled():
             return
-        items = [self.cancel_candidates[f] for f in due if f in self.cancel_candidates]
-        batch = []
-        for m in sorted(items, key=lambda x: -x['amount']):
-            if len(batch) >= self.cancel_batch:
-                self.log(kind='cancel-backlog', left=len(items) - len(batch))
+        items = sorted((self.cancel_candidates[f] for f in due if f in self.cancel_candidates),
+                       key=lambda x: (x['queued']['ready_at'], -x['amount']))
+        for m in items:  # no RPC: the deadline alert must not depend on the batch reaching the item
+            if now >= m['queued']['ready_at'] - self.cancel_deadline:
+                self.problem_once(f"cancel-deadline:{m['key']}",
+                                  f"{m['amount']} units become executable at {m['queued']['ready_at']} and are not cancelled")
+        batch, examined = [], 0
+        for m in items:
+            if len(batch) >= self.cancel_batch or examined >= 2 * self.cancel_batch:
+                self.log(kind='cancel-backlog', left=len(items) - examined, voted=len(batch))
                 break
+            examined += 1
             try:
                 vote = self.vote_needed(m, now)
             except (Unverifiable, IndexError, ValueError, LevelClosed) as e:
@@ -902,8 +946,6 @@ class Guardian:
         if uint(self.call(self.l2_tx, self.token, 'uncancellable(bytes32)', key)[0]):
             self.problem_once(f'mint-not-cancellable:{key}', f'{m["amount"]} units to {m["recipient"]} from {q["ready_at"]} cannot be cancelled')
             return False
-        if now >= q['ready_at'] - self.cancel_deadline:
-            self.problem_once(f'cancel-deadline:{key}', f'{m["amount"]} units become executable at {q["ready_at"]} and are not cancelled')
         vote = b32(self.call(self.l2_tx, self.token, 'cancelVoteId(bytes32,address,uint64,uint64)', key, m['recipient'], str(m['amount']), str(q['ready_at']))[0])
         if uint(self.call(self.l2_tx, self.token, 'cancelVoted(bytes32,address)', vote, self.me())[0]):
             return False
@@ -983,7 +1025,11 @@ class Guardian:
             # `vault_pause_on_mint` (default true on the V3 launch design, agents 87 V and 99): false keeps the token-only pause.
             # The cost: a false `mint:` finding closes the vault for `pauseDuration`.
             if self.vault_pause and self.kind == 'stable' and self.cfg.get('vault_pause_on_mint', True):
-                vault_due += [f for f in due if f.startswith('mint:') and self.mint_forged(details.get(f))]
+                # One evidenced forgery is enough to pause; looking at at most `cancel_batch` (no RPC each, the deposit scan and
+                # block times are shared for the round) keeps a flooded round bounded.
+                for f in [f for f in due if f.startswith('mint:')][:self.cancel_batch]:
+                    if self.mint_forged(details.get(f)):
+                        vault_due.append(f)
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
                 self.pause_vault(vault_due)
@@ -1006,18 +1052,12 @@ class Guardian:
             return False
         if m['key'] in getattr(self, 'deposits', {}):
             return True  # eth_provenance answered a contradiction, or this finding would not be open
-        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
         try:
-            head, head_time, _ = self.block(eth, 'latest')
-            if head_time < self.block(self.l2, m['block'])[1] + int(self.cfg.get('vault_hold_fresh_s', 300)):
+            _, head_time, ids = self.head_deposit_ids()  # one scan per round for every finding (F129-B)
+            if head_time < self.l2_time(m['block']) + int(self.cfg.get('vault_hold_fresh_s', 300)):
                 return False
-            start = int(self.cfg.get('vault_from_block', 0))
-            while start <= head:
-                stop = min(head, start + self.chunk - 1)
-                if self.rpc(eth, 'eth_getLogs', [{'address': vault, 'topics': [self.topic(DEPOSITED), m['key']],
-                                                  'fromBlock': hex(start), 'toBlock': hex(stop)}]):
-                    return False
-                start = stop + 1
+            if m['key'] in ids:
+                return False
         except (Unverifiable, LevelClosed, IndexError, ValueError, KeyError) as e:
             self.log(kind='alert', severity='soft', id='mint-hold-unreadable', reason=str(e)[-200:])
             return False
