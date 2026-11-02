@@ -176,7 +176,9 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         external
     {
         address active = verifier;
-        if (active == address(0)) revert InvalidProof();
+        // The code hash pinned at proposal is never cleared after activation; code changed since (a metamorphic redeploy,
+        // or none at all) is refused rather than trusted (agent 171, F171-4).
+        if (active == address(0) || active.codehash != proposedVerifierCodehash) revert InvalidProof();
         // A deposit cancelled before the switch has no committee left to remint it; its proof brings it back.
         bool reopened = mintCancels[depositId] > lastRemint[depositId];
         if (reopened) minted[depositId] = false;
