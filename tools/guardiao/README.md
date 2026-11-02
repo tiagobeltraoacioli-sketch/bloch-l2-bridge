@@ -56,6 +56,11 @@ Reads are ordered L2 first, then the source's backing, then release status, so a
 round can only make the check more lenient. Nodes that lag each other (the guardian's Ethereum
 `finalized` behind the signers') can show a transient shortfall, hence `reserves_grace_s`.
 
+**A forged mint also holds the vault (stablecoin, `vault_pause`).** A due `mint:` finding also calls `guardianPause()` on the vault, if
+the deposit contradicts the mint, or if the guardian's Ethereum head is `vault_hold_fresh_s` (300) past the mint and no `Deposited` log
+for the id exists up to it. Forged bUSDC can be burned during a token pause, honest release keys would certify the burn, and `reserves`
+stays quiet while unminted deposits leave slack. Cost: one wrong view closes releases and deposits for 72 h, as a release finding does.
+
 ### 2. MINT PROVENANCE (hard)
 
 Every `Minted` log (queued or not; a queued mint also has `MintQueued`) must match the source chain:

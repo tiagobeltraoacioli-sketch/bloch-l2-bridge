@@ -857,8 +857,10 @@ class Guardian:
 
     def act(self, now, findings):
         seen, due = set(), []
+        details = {}
         for severity, fid, grace, detail in findings:
             seen.add(fid)
+            details[fid] = detail
             st = self.state['open'].get(fid)
             if st is None:
                 st = self.state['open'][fid] = {'first_seen': now, 'severity': severity}
@@ -884,6 +886,10 @@ class Guardian:
             # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
             vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:',
                                                                              'release-before-final:'))]
+            # A forged balance burns while the token is paused, honest release keys certify the burn, and `reserves` stays quiet while
+            # unminted deposits leave slack. So a mint with no deposit also holds the vault, on evidence a lagging node cannot give.
+            if self.vault_pause and self.kind == 'stable':
+                vault_due += [f for f in due if f.startswith('mint:') and self.mint_forged(details.get(f))]
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
                 self.pause_vault(vault_due)
@@ -894,6 +900,31 @@ class Guardian:
             return 4
         hard = any(v['severity'] == 'hard' for v in self.state['open'].values())
         return 2 if hard else 3 if self.state['open'] else 0
+
+    def mint_forged(self, detail):
+        """Whether a mint finding is evidence enough to stop the vault. A contradiction with a finalized deposit is. A deposit not found
+        needs a fresh Ethereum head past the mint with no log for the id up to it: an honest mint is signed after finality. No read, no pause."""
+        m = (detail or {}).get('mint')
+        if not m:
+            return False
+        if m['key'] in getattr(self, 'deposits', {}):
+            return True  # eth_provenance answered a contradiction, or this finding would not be open
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        try:
+            head, head_time, _ = self.block(eth, 'latest')
+            if head_time < self.block(self.l2, m['block'])[1] + int(self.cfg.get('vault_hold_fresh_s', 300)):
+                return False
+            start = int(self.cfg.get('vault_from_block', 0))
+            while start <= head:
+                stop = min(head, start + self.chunk - 1)
+                if self.rpc(eth, 'eth_getLogs', [{'address': vault, 'topics': [self.topic(DEPOSITED), m['key']],
+                                                  'fromBlock': hex(start), 'toBlock': hex(stop)}]):
+                    return False
+                start = stop + 1
+        except (Unverifiable, LevelClosed, IndexError, ValueError, KeyError) as e:
+            self.log(kind='alert', severity='soft', id='mint-hold-unreadable', reason=str(e)[-200:])
+            return False
+        return True
 
     def vault_unpaused_at(self):
         eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
