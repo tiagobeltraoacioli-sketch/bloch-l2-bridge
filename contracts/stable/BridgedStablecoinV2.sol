@@ -88,6 +88,8 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     /// The queued mint under this key cannot be cancelled: reminted `locked`, or queued by the proof path.
     mapping(bytes32 => bool) public uncancellable;
     mapping(bytes32 => uint256) public cancelVotes;
+    /// Instant capacity a queued mint holds (credit order only); returned if it is cancelled (agent 111, F4).
+    mapping(bytes32 => uint64) public instantHeld;
     mapping(bytes32 => mapping(address => bool)) public cancelVoted;
 
     event Minted(bytes32 indexed depositId, uint64 depositNonce, address indexed recipient, uint64 amount);
@@ -229,13 +231,33 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         delete pendingMints[replayKey];
         pendingSupply -= amount;
         // The bucket charged at queue time comes back: nothing was credited, so bad votes cannot drain honest capacity.
-        uint256 level = availableToMint() + amount;
-        bucketLevel = level > bucketCapacity ? bucketCapacity : level;
-        bucketUpdatedAt = block.timestamp;
+        _refund(replayKey, amount);
         emit MintCancelled(replayKey, recipient, amount, ++mintCancels[replayKey]);
         _onCancel(replayKey);
         return true;
     }
+
+    /// @dev A queued mint that will never credit gives back what it took: the main bucket, and the instant bucket if it
+    ///      took instant capacity (F4).
+    function _refund(bytes32 replayKey, uint64 amount) internal {
+        uint256 level = availableToMint() + amount;
+        bucketLevel = level > bucketCapacity ? bucketCapacity : level;
+        bucketUpdatedAt = block.timestamp;
+        uint64 held = instantHeld[replayKey];
+        if (held != 0) {
+            delete instantHeld[replayKey];
+            uint256 instant = availableInstant() + held;
+            instantLevel = instant > instantCapacity ? instantCapacity : instant;
+            instantUpdatedAt = block.timestamp;
+        }
+    }
+
+    function _onQueuedInstant(bytes32 replayKey, uint64 amount) internal override {
+        instantHeld[replayKey] = amount;
+    }
+
+    /// @dev A locked remint replaces this key's pending, cancellable remint (V3 frees its slot hold first).
+    function _vacate(bytes32) internal virtual {}
 
     function remintDigest(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient, bool locked)
         public
@@ -253,11 +275,26 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     {
         _requireCommittee();
         uint64 generation = mintCancels[depositId];
-        if (generation == lastRemint[depositId]) revert NothingToRemint();
+        bool replace;
+        if (generation == lastRemint[depositId]) {
+            // A forger with the mint quorum can take every generation with its own cancellable remint (agent 111, F2).
+            // A locked remint by `switchThreshold` signers replaces that pending remint; nothing else does.
+            PendingMint memory old = pendingMints[depositId];
+            if (!locked || generation == 0 || old.amount == 0 || uncancellable[depositId]) revert NothingToRemint();
+            replace = true;
+        }
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroRecipient();
         if (paused()) revert IsPaused();
         _checkSignatures(remintDigest(depositId, depositNonce, amount, recipient, locked), signatures, locked ? switchThreshold : threshold);
+        if (replace) {
+            PendingMint memory old = pendingMints[depositId];
+            delete pendingMints[depositId];
+            pendingSupply -= old.amount;
+            _refund(depositId, old.amount);
+            emit MintCancelled(depositId, old.recipient, old.amount, generation);
+            _vacate(depositId);
+        }
         _openSlot(depositId, depositNonce);
         uint256 available = availableToMint();
         if (amount > available) revert RateLimited();

@@ -275,6 +275,7 @@ abstract contract SignerMintedToken {
             uint256 readyAt = block.timestamp + (delayed ? largeMintDelay : 0);
             pendingMints[replayKey] = PendingMint(recipient, amount, uint64(readyAt));
             pendingSupply += amount;
+            if (!delayed) _onQueuedInstant(replayKey, amount);
             emit MintQueued(replayKey, recipient, amount, readyAt);
             return false;
         }
@@ -291,6 +292,9 @@ abstract contract SignerMintedToken {
 
     /// @dev Called after every credit, instant or executed.
     function _afterCredit(bytes32, address, uint64) internal virtual {}
+
+    /// @dev A mint that took instant capacity but queued for the credit order: a cancel must give that capacity back.
+    function _onQueuedInstant(bytes32, uint64) internal virtual {}
 
     /// @dev Whether a mint at or below the threshold may credit at once. Otherwise it queues, like a large mint.
     function _takeInstant(uint64) internal virtual returns (bool) {

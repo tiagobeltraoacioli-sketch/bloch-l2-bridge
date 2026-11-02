@@ -34,9 +34,18 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     uint64 public mintedTotal;
     /// Hash chain over every credited mint, in slot order.
     bytes32 public mintHead;
-    /// Deposit id holding slot k (zero: free or never opened).
+    /// Deposit id holding slot k (zero: free or never opened). Once slot k credits, the id that credited it.
     mapping(uint64 => bytes32) public slotKey;
+    /// A guardian cancel freed slot k. From then on mints for k do not hold the slot: each queues as a candidate, and the
+    /// first to execute credits k (agent 111, F2: a forger refilling the freed slot cannot keep the real deposit out).
+    mapping(uint64 => bool) public contested;
+    /// Candidates of a contested slot, in arrival order, for `drain`; and the first one that may still be live.
+    mapping(uint64 => bytes32[]) public candidates;
+    mapping(uint64 => uint256) public candidateCursor;
     bool private draining;
+
+    event MintDropped(bytes32 indexed replayKey, uint64 slot, uint64 amount);
+    error NotStale();
 
     event Burned(
         bytes32 indexed burnId,
@@ -57,10 +66,29 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         return uint64(uint256(key) >> 192);
     }
 
-    /// @notice The slot `key` holds, plus one; zero if it holds none (never minted, or cancelled and not refilled).
+    /// @notice The slot `key` holds, plus one; zero if it holds none (never minted, cancelled, or a candidate of a
+    ///         contested slot).
     function slotOf(bytes32 key) public view returns (uint64) {
         uint64 s = slotFor(key);
         return slotKey[s] == key && key != 0 ? s + 1 : 0;
+    }
+
+    /// @notice Whether a queued mint under `key` is at the credit head now (its slot is next and it holds it, or the slot
+    ///         is contested and not yet credited). Relayers execute only these.
+    function isCreditHead(bytes32 key) external view returns (bool) {
+        return _creditNow(key);
+    }
+
+    /// @notice A queued candidate of a slot another id already credited can never credit: anyone drops it, and the
+    ///         buckets and pending supply it held come back.
+    function dropStale(bytes32 key) external {
+        SignerMintedToken.PendingMint memory p = pendingMints[key];
+        uint64 s = slotFor(key);
+        if (p.amount == 0 || s >= mintCount || slotKey[s] == key) revert NotStale();
+        delete pendingMints[key];
+        pendingSupply -= p.amount;
+        _refund(key, p.amount);
+        emit MintDropped(key, s, p.amount);
     }
 
     constructor(
@@ -102,7 +130,12 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         if (nonce < mintCount) revert MintOutOfOrder();
         if (nonce == nextSlot) {
             nextSlot = nonce + 1;
-        } else if (nonce > nextSlot || slotKey[nonce] != 0) {
+        } else if (nonce > nextSlot) {
+            revert MintOutOfOrder();
+        } else if (contested[nonce]) {
+            candidates[nonce].push(key); // a candidate: it holds nothing, and the first candidate to execute credits the slot
+            return;
+        } else if (slotKey[nonce] != 0) {
             revert MintOutOfOrder();
         }
         slotKey[nonce] = key;
@@ -110,26 +143,57 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
 
     function _onCancel(bytes32 key) internal override {
         uint64 s = slotFor(key);
+        if (slotKey[s] == key) {
+            slotKey[s] = 0;
+            contested[s] = true;
+        }
+    }
+
+    function _vacate(bytes32 key) internal override {
+        uint64 s = slotFor(key);
         if (slotKey[s] == key) slotKey[s] = 0;
     }
 
     function _creditNow(bytes32 key) internal view override returns (bool) {
         uint64 s = slotFor(key);
-        return s == mintCount && slotKey[s] == key;
+        return s == mintCount && (slotKey[s] == key || (slotKey[s] == 0 && contested[s]));
     }
 
     function _afterCredit(bytes32 key, address recipient, uint64 amount) internal override {
+        slotKey[mintCount] = key; // a contested slot closes on its first credit
+        delete instantHeld[key];
         mintHead = keccak256(abi.encode(mintHead, key, uint256(amount), recipient));
         mintedTotal += amount;
         mintCount += 1;
         if (!draining) _drain();
     }
 
+    /// @dev The first queued, due candidate of contested slot `s`, looking at most MAX_DRAIN entries; dead entries at the
+    ///      front are skipped for good. Anyone can still execute any due candidate directly with executeMint.
+    function _readyCandidate(uint64 s) private returns (bytes32) {
+        bytes32[] storage list = candidates[s];
+        uint256 i = candidateCursor[s];
+        for (uint256 probes; i < list.length && probes < MAX_DRAIN; ++i) {
+            ++probes;
+            SignerMintedToken.PendingMint memory p = pendingMints[list[i]];
+            if (p.amount == 0) {
+                if (i == candidateCursor[s]) candidateCursor[s] = i + 1;
+                continue;
+            }
+            if (block.timestamp >= p.readyAt) return list[i];
+        }
+        return 0;
+    }
+
     function _drain() private {
         draining = true;
         for (uint256 i; i < MAX_DRAIN; ++i) {
             bytes32 key = slotKey[mintCount];
-            if (key == 0) break;
+            if (key == 0) {
+                if (!contested[mintCount]) break;
+                key = _readyCandidate(mintCount);
+                if (key == 0) break;
+            }
             SignerMintedToken.PendingMint memory p = pendingMints[key];
             if (p.amount == 0 || paused() || block.timestamp < p.readyAt) break;
             _executeReady(key, p);
