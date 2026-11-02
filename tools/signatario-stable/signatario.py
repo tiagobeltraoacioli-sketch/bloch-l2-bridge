@@ -415,9 +415,25 @@ def cmd_remint(ctx, args):
     dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
     ctx.check_contract(url)
     generation = ctx.word(ctx.call(url, 'mintCancels(bytes32)(uint64)', deposit_id))
-    if generation == 0 or generation == ctx.word(ctx.call(url, 'lastRemint(bytes32)(uint64)', deposit_id)):
+    replace = False
+    if generation == 0:
         refuse('this deposit has no cancelled mint to remint', deposit_id=deposit_id, generation=generation)
-    ctx.cap_check(url, amount)
+    if generation == ctx.word(ctx.call(url, 'lastRemint(bytes32)(uint64)', deposit_id)):
+        # The generation is taken by a pending remint. A locked remint (switchThreshold) replaces it on-chain, which answers a
+        # forger who front-runs every remint generation (agent 111 F2, agent 123 R2). Only when that pending remint is
+        # cancellable and differs from the verified deposit: an honest pending remint needs nothing.
+        pending = ctx.call(url, 'pendingMints(bytes32)(address,uint64,uint64)', deposit_id)
+        p_recipient, p_amount = '0x' + pending[2 + 24:2 + 64].lower(), ctx.word(pending, 1)
+        cancellable = not ctx.word(ctx.call(url, 'uncancellable(bytes32)(bool)', deposit_id))
+        if not locked or p_amount == 0 or not cancellable:
+            refuse('this deposit has no cancelled mint to remint (a pending remint holds the generation: only a locked '
+                   'remint replaces a cancellable one)', deposit_id=deposit_id, generation=generation, locked=locked,
+                   pending_amount=p_amount, cancellable=cancellable)
+        if (p_recipient, p_amount) == (recipient, amount):
+            refuse('the pending remint already matches the verified deposit: nothing to replace', deposit_id=deposit_id)
+        replace = True
+    if not replace:  # a replace first returns the pending remint's bucket on-chain; the token checks its own limits
+        ctx.cap_check(url, amount)
     struct = ctx.keccak(ctx.abi_encode('f(bytes32,uint256,address,bytes32,bytes32,uint64,uint64,address)',
                                        ctx.keccak_text(MINT_TYPEHASH_STR), ctx.source_chain_id, ctx.source_vault, ctx.source_route,
                                        deposit_id, nonce, amount, recipient))
@@ -443,7 +459,7 @@ def cmd_remint(ctx, args):
     record = {'signed': True, 'kind': 'stable-remint', 'signer': signer, 'l2_chain_id': ctx.l2_chain_id, 'token': ctx.token,
               'source_chain_id': ctx.source_chain_id, 'source_vault': ctx.source_vault, 'source_route': ctx.source_route,
               'deposit_id': deposit_id, 'deposit_nonce': nonce, 'amount': amount, 'recipient': recipient, 'generation': generation,
-              'locked': locked, 'k': k, 'digest': digest, 'signature': sig}
+              'locked': locked, 'replaces_pending': replace, 'k': k, 'digest': digest, 'signature': sig}
     ctx.db['mints'].setdefault(deposit_id, {'nonce': nonce, 'amount': amount, 'recipient': recipient, 'digest': ctx.mint_digest(deposit_id, nonce, amount, recipient)})
     ctx.save_db()
     out.write_text(json.dumps(record, indent=2) + '\n')
@@ -607,12 +623,14 @@ def token_mints(ctx, url, fin_number):
     start, chunk = int(ctx.cfg.get('token_from_block', 0)), int(ctx.cfg.get('log_chunk', 10000))
     minted, queued = ctx.keccak_text(MINTED_TOPIC_STR), ctx.keccak_text(MINT_QUEUED_TOPIC_STR)
     cancelled = ctx.keccak_text(MINT_CANCELLED_TOPIC_STR)
+    dropped = ctx.keccak_text('MintDropped(bytes32,uint64,uint64)')  # V3 dropStale: never credits, as a cancel
     found, dead = {}, set()
     for lo in range(start, fin_number + 1, chunk):
-        for l in ctx.rpc(url, 'eth_getLogs', [{'address': ctx.token, 'topics': [[minted, queued, cancelled]], 'fromBlock': hex(lo),
+        for l in ctx.rpc(url, 'eth_getLogs', [{'address': ctx.token, 'topics': [[minted, queued, cancelled, dropped]], 'fromBlock': hex(lo),
                                                'toBlock': hex(min(lo + chunk - 1, fin_number))}]):
-            key, recipient, t0 = l['topics'][1].lower(), '0x' + l['topics'][2][-40:].lower(), l['topics'][0].lower()
-            if t0 == cancelled:
+            key, t0 = l['topics'][1].lower(), l['topics'][0].lower()
+            recipient = '0x' + l['topics'][2][-40:].lower() if len(l['topics']) > 2 else None  # MintDropped names none
+            if t0 in (cancelled, dropped):
                 dead.add(key)  # a guardian cancel never credits; a remint names the key again below
             elif t0 == minted:
                 dead.discard(key)

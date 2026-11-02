@@ -96,6 +96,7 @@ EVENTS = {
 }
 MINT_QUEUED = 'MintQueued(bytes32,address,uint64,uint256)'
 MINT_CANCELLED = 'MintCancelled(bytes32,address,uint64,uint64)'
+MINT_DROPPED = 'MintDropped(bytes32,uint64,uint64)'
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED_V3 = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
@@ -342,9 +343,12 @@ class Guardian:
         cancels = {}
         self.cancelled_mints = []
         if self.cancel_enabled():
-            for l in self.logs(self.l2, self.token, self.topic(MINT_CANCELLED), start, b):
-                key = l['topics'][1].lower()
-                cancels[key] = cancels.get(key, 0) + 1
+            # A candidate dropped with `dropStale` (V3) never credits either: it counts as a cancel (agent 123, R1).
+            dropped = [self.topic(MINT_DROPPED)] if self.provenance else []
+            for t in [self.topic(MINT_CANCELLED)] + dropped:
+                for l in self.logs(self.l2, self.token, t, start, b):
+                    key = l['topics'][1].lower()
+                    cancels[key] = cancels.get(key, 0) + 1
         for l in self.logs(self.l2, self.token, self.topic(ev['Minted']), start, b):
             w = words(l['data'])
             m = {'key': l['topics'][1].lower(), 'recipient': addr(l['topics'][2]), 'tx': l['transactionHash'],

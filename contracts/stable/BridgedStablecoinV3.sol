@@ -25,6 +25,8 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     bytes32 public constant MINT_CHAIN_TAG = bytes32("BLOCH-USDT-MINT-CHAIN-v1");
     /// Queued mints credited behind one execution, at most.
     uint256 public constant MAX_DRAIN = 8;
+    /// Candidates of a contested slot one `drain` step looks at, at most; the scan resumes where it stopped.
+    uint256 public constant MAX_PROBE = 32;
 
     /// Next slot (deposit nonce) a new mint may open.
     uint64 public nextSlot;
@@ -42,6 +44,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     /// Candidates of a contested slot, in arrival order, for `drain`; and the first one that may still be live.
     mapping(uint64 => bytes32[]) public candidates;
     mapping(uint64 => uint256) public candidateCursor;
+    mapping(uint64 => uint256) public candidateScan;
     bool private draining;
 
     event MintDropped(bytes32 indexed replayKey, uint64 slot, uint64 amount);
@@ -60,6 +63,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
 
     error MintOutOfOrder();
     error WrongSlot();
+    error ZeroId();
 
     /// @notice The slot a deposit id names: its top 8 bytes, the deposit nonce (ProvenanceSourceVault.depositId).
     function slotFor(bytes32 key) public pure returns (uint64) {
@@ -126,6 +130,7 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     /// @dev The slot is the deposit's own nonce, read from its id: a mint (or remint, or proof) naming another nonce is
     ///      unrepresentable, and nothing about a slot outlives a cancel except the freed slot itself.
     function _openSlot(bytes32 key, uint64 nonce) internal override {
+        if (key == 0) revert ZeroId(); // it would name slot 0 and hold nothing (agent 123, A1)
         if (slotFor(key) != nonce) revert WrongSlot();
         if (nonce < mintCount) revert MintOutOfOrder();
         if (nonce == nextSlot) {
@@ -168,21 +173,30 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         if (!draining) _drain();
     }
 
-    /// @dev The first queued, due candidate of contested slot `s`, looking at most MAX_DRAIN entries; dead entries at the
-    ///      front are skipped for good. Anyone can still execute any due candidate directly with executeMint.
+    /// @dev A queued, due candidate of contested slot `s`. It looks at most MAX_PROBE entries, starting where the last
+    ///      scan stopped and wrapping, so live candidates that are not yet due cannot hide a due one from repeated drains
+    ///      (agent 123, A4b); dead entries at the front are skipped for good. Anyone can still execute any due candidate
+    ///      directly with executeMint, as the relayer does.
     function _readyCandidate(uint64 s) private returns (bytes32) {
         bytes32[] storage list = candidates[s];
-        uint256 i = candidateCursor[s];
-        for (uint256 probes; i < list.length && probes < MAX_DRAIN; ++i) {
-            ++probes;
+        uint256 n = list.length;
+        uint256 c = candidateCursor[s];
+        uint256 i = candidateScan[s];
+        if (i < c || i >= n) i = c;
+        bytes32 found;
+        for (uint256 probes; probes < MAX_PROBE && c < n; ++probes) {
             SignerMintedToken.PendingMint memory p = pendingMints[list[i]];
             if (p.amount == 0) {
-                if (i == candidateCursor[s]) candidateCursor[s] = i + 1;
-                continue;
+                if (i == c) c = i + 1;
+            } else if (block.timestamp >= p.readyAt) {
+                found = list[i];
+                break;
             }
-            if (block.timestamp >= p.readyAt) return list[i];
+            i = i + 1 >= n ? c : i + 1;
         }
-        return 0;
+        candidateCursor[s] = c;
+        candidateScan[s] = i;
+        return found;
     }
 
     function _drain() private {
