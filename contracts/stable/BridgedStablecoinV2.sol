@@ -89,7 +89,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     mapping(bytes32 => bool) public uncancellable;
     mapping(bytes32 => uint256) public cancelVotes;
     /// Instant capacity a queued mint holds (credit order only); returned if it is cancelled (agent 111, F4).
-    mapping(bytes32 => uint64) public instantHeld;
+    mapping(bytes32 => uint64) internal instantHeld;
     mapping(bytes32 => mapping(address => bool)) public cancelVoted;
 
     event Minted(bytes32 indexed depositId, uint64 depositNonce, address indexed recipient, uint64 amount);

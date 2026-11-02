@@ -22,11 +22,11 @@ import {BridgedStablecoinV2} from "./BridgedStablecoinV2.sol";
 ///         burns made after it instead.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
 contract BridgedStablecoinV3 is BridgedStablecoinV2 {
-    bytes32 public constant MINT_CHAIN_TAG = bytes32("BLOCH-USDT-MINT-CHAIN-v1");
+    bytes32 internal constant MINT_CHAIN_TAG = bytes32("BLOCH-USDT-MINT-CHAIN-v1");
     /// Queued mints credited behind one execution, at most.
-    uint256 public constant MAX_DRAIN = 8;
+    uint256 internal constant MAX_DRAIN = 8;
     /// Candidates of a contested slot one `drain` step looks at, at most; the scan resumes where it stopped.
-    uint256 public constant MAX_PROBE = 32;
+    uint256 internal constant MAX_PROBE = 32;
 
     /// Next slot (deposit nonce) a new mint may open.
     uint64 public nextSlot;
@@ -42,9 +42,9 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     /// first to execute credits k (agent 111, F2: a forger refilling the freed slot cannot keep the real deposit out).
     mapping(uint64 => bool) public contested;
     /// Candidates of a contested slot, in arrival order, for `drain`; and the first one that may still be live.
-    mapping(uint64 => bytes32[]) public candidates;
-    mapping(uint64 => uint256) public candidateCursor;
-    mapping(uint64 => uint256) public candidateScan;
+    mapping(uint64 => bytes32[]) internal candidates;
+    mapping(uint64 => uint256) internal candidateCursor;
+    mapping(uint64 => uint256) internal candidateScan;
     bool private draining;
 
     event MintDropped(bytes32 indexed replayKey, uint64 slot, uint64 amount);
@@ -75,6 +75,11 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     function slotOf(bytes32 key) public view returns (uint64) {
         uint64 s = slotFor(key);
         return slotKey[s] == key && key != 0 ? s + 1 : 0;
+    }
+
+    /// @notice Candidates queued so far for contested slot `s` (live or dead); for monitors.
+    function candidateCount(uint64 s) external view returns (uint256) {
+        return candidates[s].length;
     }
 
     /// @notice Whether a queued mint under `key` is at the credit head now (its slot is next and it holds it, or the slot

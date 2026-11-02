@@ -6,7 +6,9 @@ cache_path = "cache"
 solc_version = "0.8.24"
 evm_version = "shanghai"
 optimizer = true
-optimizer_runs = 200
+# 1, not 200: the smallest code, so that BridgedStablecoinV3's creation fits the L2's 5,000,000 max_tx_gas with margin
+# (agent 129, F129-C). Every contract and suite was re-run at this setting (agent 109).
+optimizer_runs = 1
 bytecode_hash = "none"
 fs_permissions = [
     { access = "read", path = "./test-vectors" },

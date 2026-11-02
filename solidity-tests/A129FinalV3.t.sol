@@ -169,7 +169,7 @@ contract A129FinalTest {
         console.log("F129-1 pending supply held by the dust (units)", token.pendingSupply());
         console.log("F129-1 batch of candidates under a 5M tx cap", 5_000_000 * n / forgerGas);
         require(
-            candidatesLen(0) <= token.MAX_PROBE() || forgerGas / n >= guardGas / 32,
+            candidatesLen(0) <= 32 || forgerGas / n >= guardGas / 32,
             "F129-1: no on-chain bound on forged candidates while no guardian can pause, and each costs the forger less gas than its cancel costs the guardians"
         );
     }
@@ -243,11 +243,7 @@ contract A129FinalTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────
     function candidatesLen(uint64 s) internal view returns (uint256 n) {
-        while (true) {
-            (bool ok,) = address(token).staticcall(abi.encodeWithSignature("candidates(uint64,uint256)", s, n));
-            if (!ok) return n;
-            ++n;
-        }
+        n = token.candidateCount(s); // agent 109: the candidates array is internal since the size cut (F129-C)
     }
 
     function sorted(uint256 base) internal view returns (uint256[] memory k) {

@@ -72,6 +72,7 @@ LIMITS_T = '(uint256,uint256,uint256,uint256,uint256,uint256)'
 GUARD_T = '(address[],uint256,uint256)'
 MINT_SWITCH_T = '(uint256,uint64)'
 MIN_SWITCH_DELAY = 7 * 86400
+L2_MAX_TX_GAS = 5_000_000  # sequencer policy max_tx_gas on chain 700770
 LIMIT_KEYS = ('supplyCap', 'bucketCapacity', 'refillPerSecond', 'largeMintThreshold', 'largeMintDelay', 'minBurn')
 
 HERE = Path(__file__).resolve().parent
@@ -332,6 +333,10 @@ def validate(cfg, rehearsal):
     tx = cfg['tx']
     exact_keys(tx, ['gasLimit', 'maxGasPriceWei'], 'tx')
     refuse(is_uint(tx['gasLimit'], 30_000_000, 100_000), 'tx.gasLimit is undecided or outside 100k..30M')
+    if not rehearsal:
+        # The L2 sequencer policy caps the gas USED by every transaction, exempt senders included (max_tx_gas, agents 90 and
+        # 121): a higher limit here would only make the creation fail at the sequencer (agent 129, F129-C).
+        refuse(tx['gasLimit'] <= L2_MAX_TX_GAS, f'tx.gasLimit above the L2 max_tx_gas {L2_MAX_TX_GAS}: the sequencer refuses it')
     refuse(is_uint(tx['maxGasPriceWei'], lo=1), 'tx.maxGasPriceWei is undecided')
     return params
 
