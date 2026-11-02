@@ -261,11 +261,13 @@ sees any loss.
 
 **`reserves` and every token finding are never settled.** On the base `SignerMintedToken` the token's `unpause` needs only the mint quorum; on BridgedStablecoinV2/V3 it needs `switchThreshold` (6 of 7 at launch, agent 171 F171-1), one more. Either way a forged queued mint, one bad guardian's pause and an unpause would
 otherwise silence the honest guardian, and the mint would execute. The same pause and unpause on the vault would leave a real shortfall unwatched. The cost: a false token or `reserves`
-finding keeps pausing about half the time until the finding itself clears. On the token a guardian must also be able to pause within the large-mint delay. Without the token guardian chains the 72 h cooldown still blocks that (report 54), and only the vault pause on `reserves` remains.
+finding keeps pausing about half the time until the finding itself clears. On the token a guardian must also be able to pause within the large-mint delay. Without the token guardian chains the 72 h cooldown still blocks that (report 54). Do not count on `reserves` to pause the vault in that case: it is blind while an unminted deposit leaves slack, which every deposit's normal wait does (report 101, D6). On the V3 launch design the vault pause on a `mint:` finding (`vault_pause_on_mint`, default true, above) is the defence.
 
 **Grace periods must exceed the settlement delay.** A replica shows settled blocks only, so unsettled mints and burns are not
-visible. One settlement cycle takes 8-14 min, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and
-one round: `SETTLEMENT_DELAY_S` = 2400 s in `guardiao.py`. A shorter grace can pause on a lagging view.
+visible. One settlement cycle took 8-14 min on the rehearsal nets, and a transaction can wait two cycles, up to 28 min, plus the replica's refresh and
+one round: `SETTLEMENT_DELAY_S` = 2400 s in `guardiao.py`. A shorter grace can pause on a lagging view. **This assumption does not hold for the
+deposit-only L2 launch settings** (L2 go-live plan D15: at most one block every 30 min, proofs of 30-60 min, a deposit consumed in about
+40-70 min; agents 92, 93, 127): re-measure the cycle and raise the graces above it before the guardians run against that L2.
 
 | Setting | Default on chain 700770 | Elsewhere | Against 2400 s |
 | --- | --- | --- | --- |
