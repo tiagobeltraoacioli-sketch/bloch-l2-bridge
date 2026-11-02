@@ -1,0 +1,472 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+pragma solidity ^0.8.24;
+
+import {SignerMintedToken} from "../contracts/bridged/SignerMintedToken.sol";
+import {BridgedStablecoinV2} from "../contracts/stable/BridgedStablecoinV2.sol";
+import {BridgedStablecoinV3} from "../contracts/stable/BridgedStablecoinV3.sol";
+import {ProvenanceSourceVault} from "../contracts/usdt/ProvenanceSourceVault.sol";
+
+interface R10Vm {
+    function addr(uint256 privateKey) external pure returns (address);
+    function sign(uint256 privateKey, bytes32 digest) external pure returns (uint8 v, bytes32 r, bytes32 s);
+    function warp(uint256 timestamp) external;
+    function roll(uint256 blockNumber) external;
+    function prank(address sender) external;
+    function setBlockhash(uint256 blockNumber, bytes32 hash) external;
+}
+
+contract R10Usdc {
+    uint8 public constant decimals = 6;
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+/// Launch-parameter claims of the bridge V3 decision memo (agents/175-bridge-params.md), on the mainnet shape of
+/// deployments/mainnet/busdc-*.config.json: 5-of-7 mint and release, mintSwitch 6-of-7 / 14 d, bucket and windowLimit
+/// 10,000 USDC a day, cap 100,000, minDeposit = minBurn = 10 USDC, largeMintDelay 12 h, 3 token guardians and 2 vault
+/// guardians with 72 h pause and 72 h cooldown, provenance mode 1, releaseDelay 0. Each test deploys its own token, so the
+/// parameter under decision (T = largeMintThreshold, mintSwitch threshold, largeMintDelay) varies per test.
+contract R10BridgeParamsTest {
+    R10Vm constant vm = R10Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+    uint256 constant U = 1e6;
+    uint64 constant BUCKET = uint64(10_000 * U);
+    uint64 constant CAP = uint64(100_000 * U);
+    uint256 constant REFILL = 115_740; // busdc-mainnet.config.json limits.refillPerSecond
+    uint256 constant PAUSE = 3 days;
+    address constant MALLORY = address(0xBAD);
+    address constant ALICE = address(0xA11CE);
+    address constant BOB = address(0xB0B);
+    address constant CAROL = address(0xCA201);
+    address constant DAVE = address(0xDA7E);
+
+    uint256[] mintKeys;
+    uint256[] ethKeys;
+    uint256[3] guardKeys = [uint256(0x6a01), 0x6a02, 0x6a03];
+    uint256[] vaultGuardKeys;
+    R10Usdc usdc;
+    ProvenanceSourceVault vault;
+    BridgedStablecoinV3 token;
+
+    function setUp() public {
+        vm.warp(1_000_000);
+        vm.roll(1000);
+        mintKeys = sorted(0x1000, 7);
+        ethKeys = sorted(0x2000, 7);
+        vaultGuardKeys = sorted(0x7a00, 2);
+        usdc = new R10Usdc();
+        vault = new ProvenanceSourceVault(
+            keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 0, addrs(ethKeys), 5,
+            ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
+            ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
+            ProvenanceSourceVault.Provenance(1, 0, address(0))
+        );
+        uint256 until = block.timestamp + 100;
+        vault.setControls(true, true, 0, until, cert(vault.controlDigest(true, true, 0, until), 5));
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    function deployToken(uint256 large, uint256 delay, uint256 switchK) internal returns (BridgedStablecoinV3 t) {
+        address[] memory g = new address[](3);
+        for (uint256 i; i < 3; ++i) g[i] = vm.addr(guardKeys[i]);
+        t = new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
+            SignerMintedToken.Limits(CAP, BUCKET, REFILL, large, delay, uint64(10 * U)),
+            SignerMintedToken.Guard(g, PAUSE, PAUSE), BridgedStablecoinV2.MintSwitch(switchK, 14 days)
+        );
+        token = t;
+    }
+
+    function sorted(uint256 base, uint256 n) internal view returns (uint256[] memory k) {
+        k = new uint256[](n);
+        for (uint256 i; i < n; ++i) k[i] = base + i;
+        for (uint256 i; i < n; ++i) {
+            for (uint256 j = i + 1; j < n; ++j) {
+                if (vm.addr(k[j]) < vm.addr(k[i])) (k[i], k[j]) = (k[j], k[i]);
+            }
+        }
+    }
+
+    function addrs(uint256[] memory k) internal view returns (address[] memory a) {
+        a = new address[](k.length);
+        for (uint256 i; i < k.length; ++i) a[i] = vm.addr(k[i]);
+    }
+
+    function cert(bytes32 digest, uint256 n) internal view returns (bytes[] memory out) {
+        out = new bytes[](n);
+        for (uint256 i; i < n; ++i) {
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(ethKeys[i], digest);
+            out[i] = abi.encodePacked(r, s, v);
+        }
+    }
+
+    function blob(bytes32 digest, uint256 n) internal view returns (bytes memory out) {
+        for (uint256 i; i < n; ++i) {
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(mintKeys[i], digest);
+            out = bytes.concat(out, abi.encodePacked(r, s, v));
+        }
+    }
+
+    function deposit(uint64 amount, address l2) internal returns (bytes32 id) {
+        usdc.mint(address(this), amount);
+        id = vault.deposit(amount, bytes32(uint256(uint160(l2))));
+    }
+
+    function slot(bytes32 id) internal pure returns (uint64) {
+        return uint64(uint256(id) >> 192);
+    }
+
+    function mint(bytes32 id, uint64 amount, address to) internal {
+        uint64 n = slot(id);
+        token.mint(id, n, amount, to, blob(token.mintDigest(id, n, amount, to), 5));
+    }
+
+    function tryMint(bytes32 id, uint64 amount, address to) internal returns (bool ok) {
+        uint64 n = slot(id);
+        bytes memory sigs = blob(token.mintDigest(id, n, amount, to), 5);
+        (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (id, n, amount, to, sigs)));
+    }
+
+    function cancel(bytes32 id) internal {
+        (address r, uint64 a, uint64 ready) = token.pendingMints(id);
+        for (uint256 i; i < 2; ++i) {
+            vm.prank(vm.addr(guardKeys[i]));
+            token.voteCancelMint(id, r, a, ready);
+        }
+    }
+
+    function burn(address holder, uint64 amount) internal returns (ProvenanceSourceVault.Release memory) {
+        vm.prank(holder);
+        bytes32 burnId = token.burn(amount, holder);
+        return ProvenanceSourceVault.Release(
+            vault.routeId(), token.burnNonce(), holder, amount, burnId, token.mintCount(), token.mintedTotal(), token.mintHead()
+        );
+    }
+
+    function release(ProvenanceSourceVault.Release memory r) internal returns (bool ok, bytes4 err) {
+        vm.roll(block.number + 1);
+        vm.setBlockhash(block.number - 1, keccak256(abi.encode(block.number)));
+        ProvenanceSourceVault.ReleaseContext memory c = ProvenanceSourceVault.ReleaseContext(
+            block.timestamp + 100, block.number - 1, keccak256(abi.encode(block.number)), 7, keccak256("l2")
+        );
+        bytes memory data;
+        (ok, data) =
+            address(vault).call(abi.encodeCall(ProvenanceSourceVault.release, (r, c, cert(vault.releaseDigest(r, c), 5))));
+        if (!ok && data.length >= 4) err = bytes4(data);
+    }
+
+    function paid(ProvenanceSourceVault.Release memory r) internal returns (bool ok) {
+        (ok,) = release(r);
+    }
+
+    function errOf(bytes memory data) internal pure returns (bytes4) {
+        return data.length >= 4 ? bytes4(data) : bytes4(0);
+    }
+
+    /// A made-up deposit id that names slot `s` (nonce in the top 8 bytes, as ProvenanceSourceVault ids).
+    function fid(bytes32 salt, uint64 s) internal pure returns (bytes32) {
+        return bytes32((uint256(s) << 192) | (uint256(salt) & type(uint192).max));
+    }
+
+    // ── 1. T and the instant cap ──────────────────────────────────────────────────────────────────────────────────────
+    /// The instant cap is not a parameter of its own: the constructor derives it as INSTANT_MINTS (10) x T, refilled in
+    /// proportion to the main bucket, and it is the whole bucket once T >= bucket / 10. At T = 0 it is zero, so every
+    /// mint, even 1 unit, queues for largeMintDelay and stays cancellable.
+    function test_T_instantCapIsDerivedFromT() public {
+        BridgedStablecoinV3 t0 = deployToken(0, 12 hours, 6);
+        require(t0.instantCapacity() == 0 && t0.instantRefillPerSecond() == 1, "T = 0: no instant capacity");
+        BridgedStablecoinV3 t100 = deployToken(100 * U, 12 hours, 6);
+        require(t100.instantCapacity() == 1_000 * U, "T = 100: instant cap 1,000 USDC");
+        require(t100.instantRefillPerSecond() == 1_000 * U * REFILL / BUCKET, "T = 100: refills 1,000 USDC a day");
+        BridgedStablecoinV3 t1000 = deployToken(1_000 * U, 12 hours, 6);
+        require(t1000.instantCapacity() == BUCKET, "T >= bucket / 10: the instant cap is the whole bucket");
+
+        deployToken(0, 12 hours, 6);
+        bytes32 a = deposit(uint64(10 * U), ALICE);
+        mint(a, uint64(10 * U), ALICE);
+        (, uint64 amount, uint64 readyAt) = token.pendingMints(a);
+        require(amount == 10 * U && readyAt == block.timestamp + 12 hours, "T = 0: the smallest deposit waits 12 h");
+        require(token.balanceOf(ALICE) == 0 && token.mintCount() == 0, "nothing credited at once");
+    }
+
+    // ── 2. Honest but faulty signers: a wrong amount on a real deposit ────────────────────────────────────────────────
+    /// T = 0. Five honest signers mint a real deposit with a wrong amount (a bug, not an attack). It queues; the guardians'
+    /// provenance check sees the mismatch and cancels it; a plain 5-of-7 remint with the right amount restores the slot,
+    /// and every later deposit and exit proceeds. Cost: the deposit and the ones behind it wait two 12 h delays.
+    function test_T0_faultyAmountIsRepairedByCancelAndRemint() public {
+        deployToken(0, 12 hours, 6);
+        bytes32 a = deposit(uint64(100 * U), ALICE);
+        bytes32 b = deposit(uint64(50 * U), BOB);
+        mint(a, uint64(101 * U), ALICE); // the bug: one USDC too many
+        mint(b, uint64(50 * U), BOB);
+        cancel(a);
+        token.remint(a, 0, uint64(100 * U), ALICE, false, blob(token.remintDigest(a, 0, uint64(100 * U), ALICE, false), 5));
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(a); // drains Bob's slot behind it
+        require(token.balanceOf(ALICE) == 100 * U && token.balanceOf(BOB) == 50 * U, "both credited, right amounts");
+        require(paid(burn(BOB, uint64(50 * U))) && paid(burn(ALICE, uint64(100 * U))), "both exits paid");
+        bytes32 c = deposit(uint64(20 * U), CAROL);
+        mint(c, uint64(20 * U), CAROL);
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(c);
+        require(paid(burn(CAROL, uint64(20 * U))), "later deposits unaffected");
+    }
+
+    /// T = 100 USDC. The same faulty mint, small enough for the instant path, credits at once. The token's mint chain now
+    /// differs from the vault's deposit chain for good: no cancel (nothing pending), no remint (no cancelled generation, not
+    /// even locked by 6 of 7), so every burn made after it, honest or not, is refused. Burns made before it still pay.
+    /// This is F3 without any attacker.
+    function test_Tpositive_faultyAmountHoldsEveryLaterExitForever() public {
+        deployToken(100 * U, 12 hours, 6);
+        bytes32 c = deposit(uint64(20 * U), CAROL);
+        mint(c, uint64(20 * U), CAROL);
+        ProvenanceSourceVault.Release memory early = burn(CAROL, uint64(20 * U));
+        bytes32 a = deposit(uint64(50 * U), ALICE);
+        mint(a, uint64(51 * U), ALICE); // the bug, credited through the instant path
+        require(token.balanceOf(ALICE) == 51 * U, "credited at once");
+        bytes32 b = deposit(uint64(50 * U), BOB);
+        mint(b, uint64(50 * U), BOB);
+        require(token.balanceOf(BOB) == 50 * U, "Bob's correct mint credited too");
+
+        (bool ok, bytes4 err) = release(burn(BOB, uint64(50 * U)));
+        require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "an honest later exit is refused");
+        (ok, err) = release(burn(ALICE, uint64(50 * U)));
+        require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "the faulty mint's holder is refused");
+        require(paid(early), "a burn from before the fault still pays");
+
+        (address r, uint64 amt, uint64 ready) = token.pendingMints(a);
+        vm.prank(vm.addr(guardKeys[0]));
+        (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.voteCancelMint, (a, r, amt, ready)));
+        require(!ok, "nothing pending to cancel");
+        bytes memory six = blob(token.remintDigest(a, 1, uint64(50 * U), ALICE, true), 6);
+        bytes memory data;
+        (ok, data) = address(token).call(abi.encodeCall(BridgedStablecoinV2.remint, (a, 1, uint64(50 * U), ALICE, true, six)));
+        require(!ok && errOf(data) == BridgedStablecoinV2.NothingToRemint.selector, "no remint, even 6-of-7 locked");
+        require(vault.totalLocked() == 100 * U, "100 USDC of real deposits stay locked with no path out");
+    }
+
+    // ── 3. vault_pause_on_mint: what a vault pause does with the V3 pair ──────────────────────────────────────────────
+    /// After a credited forgery (here T = 100, 5 forged mint keys) the vault already refuses every later burn, so a vault
+    /// pause adds no protection against theft. What it adds: a deposit made after the forgery is trapped (its exit is held
+    /// for good), and a vault pause refuses that deposit. Its cost: an honest burn from before the forgery, which would pay,
+    /// waits for the pause. The forger's 5 keys cannot end the pause; 6 of 7 can, and it also expires by itself.
+    function test_vaultPause_keepsNewDepositsOutOfAHeldToken() public {
+        deployToken(100 * U, 12 hours, 6);
+        bytes32 a = deposit(uint64(100 * U), ALICE);
+        mint(a, uint64(100 * U), ALICE);
+        ProvenanceSourceVault.Release memory early = burn(ALICE, uint64(100 * U));
+        mint(fid(keccak256("forged"), 1), 1, MALLORY); // 1 unit, instant
+        // Without a vault pause, later deposits walk into the held state. Bob's deposit takes vault nonce 1, the slot the
+        // forger already credited: it can never be minted at all (its USDC is locked with no token and no refund).
+        bytes32 b = deposit(uint64(30 * U), BOB);
+        require(!tryMint(b, uint64(30 * U), BOB), "the real deposit 1 is unmintable: its slot was credited to the forgery");
+        // Dave's deposit (nonce 2) mints, but its exit is held for good.
+        bytes32 d = deposit(uint64(30 * U), DAVE);
+        mint(d, uint64(30 * U), DAVE);
+        (bool ok, bytes4 err) = release(burn(DAVE, uint64(30 * U)));
+        require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "a deposit after the forgery is trapped");
+        // A vault guardian pauses on the `mint:` finding.
+        vm.prank(vm.addr(vaultGuardKeys[0]));
+        vault.guardianPause();
+        usdc.mint(address(this), 30 * U);
+        (ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.deposit, (uint64(30 * U), bytes32(uint256(uint160(CAROL))))));
+        require(!ok, "the pause refuses new deposits");
+        (ok, err) = release(early);
+        require(!ok && err == ProvenanceSourceVault.Paused.selector, "cost: a payable pre-forgery exit waits");
+        uint64 count = vault.pauseCount();
+        uint256 until = block.timestamp + 100;
+        bytes[] memory five = cert(vault.unpauseDigest(count, until), 5);
+        (ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.unpause, (count, until, five)));
+        require(!ok, "5 release keys cannot end a vault pause");
+        vm.warp(block.timestamp + PAUSE);
+        require(paid(early), "after the pause the pre-forgery exit pays");
+        require(usdc.balanceOf(MALLORY) == 0 && vault.totalLocked() == 60 * U, "nothing for the forger; Bob and Dave locked");
+    }
+
+    // ── 4. Unpause threshold = mintSwitch.threshold ───────────────────────────────────────────────────────────────────
+    /// The token's unpause quorum is not a separate parameter: it is mintSwitch.threshold, which also proposes the
+    /// one-way verifier switch and signs locked remints. It can never be set below the mint quorum (the constructor
+    /// refuses), so 5 forged mint keys never end a guardian pause.
+    function test_unpauseThreshold_isTheSwitchThreshold() public {
+        address[] memory g = new address[](3);
+        for (uint256 i; i < 3; ++i) g[i] = vm.addr(guardKeys[i]);
+        bytes memory args = abi.encode(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), uint256(5),
+            SignerMintedToken.Limits(CAP, BUCKET, REFILL, 0, 12 hours, uint64(10 * U)),
+            SignerMintedToken.Guard(g, PAUSE, PAUSE), BridgedStablecoinV2.MintSwitch(4, 14 days)
+        );
+        bytes memory code = bytes.concat(type(BridgedStablecoinV3).creationCode, args);
+        address made;
+        assembly {
+            made := create(0, add(code, 0x20), mload(code))
+        }
+        require(made == address(0), "mintSwitch.threshold below the mint quorum is refused");
+
+        deployToken(0, 12 hours, 6);
+        require(token.unpauseThreshold() == 6 && token.switchThreshold() == 6, "6 of 7");
+        vm.prank(vm.addr(guardKeys[0]));
+        token.pause();
+        bytes memory five = blob(token.unpauseDigest(), 5);
+        (bool ok,) = address(token).call(abi.encodeCall(SignerMintedToken.unpause, (five)));
+        require(!ok, "the mint quorum cannot unpause");
+        token.unpause(blob(token.unpauseDigest(), 6));
+        require(!token.paused(), "6 of 7 unpause");
+    }
+
+    /// 7 of 7: one lost or uncooperative key and no early unpause, no verifier proposal and no locked remint, ever. The
+    /// pause still expires by itself, so mints resume after pauseDuration.
+    function test_unpauseThreshold_sevenOfSevenLosesTheSwitchWithOneKey() public {
+        deployToken(0, 12 hours, 7);
+        vm.prank(vm.addr(guardKeys[0]));
+        token.pause();
+        bytes memory six = blob(token.unpauseDigest(), 6);
+        (bool ok,) = address(token).call(abi.encodeCall(SignerMintedToken.unpause, (six)));
+        require(!ok, "6 keys cannot unpause at 7 of 7");
+        uint256 until = block.timestamp + 1 days;
+        address verifier = address(vault); // any contract with code
+        bytes memory sixSwitch = blob(token.mintSwitchDigest(false, verifier, verifier.codehash, 0, until), 6);
+        (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.proposeVerifier, (verifier, 0, until, sixSwitch)));
+        require(!ok, "6 keys cannot propose the switch at 7 of 7");
+        vm.warp(block.timestamp + PAUSE);
+        bytes32 a = deposit(uint64(10 * U), ALICE);
+        mint(a, uint64(10 * U), ALICE);
+        (, uint64 amount,) = token.pendingMints(a);
+        require(amount == 10 * U, "the pause expired by itself: mints resume");
+    }
+
+    /// The 6-of-7 boundary: a forger with 6 mint keys ends the guardian pause and locks a remint of its own cancelled
+    /// forgery, which then credits. The vault still pays it nothing; every later exit is held (F3).
+    function test_sixKeyForger_creditsAForgeryButIsPaidNothing() public {
+        deployToken(0, 12 hours, 6);
+        bytes32 a = deposit(uint64(100 * U), ALICE);
+        mint(a, uint64(100 * U), ALICE);
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(a);
+        bytes32 f = fid(keccak256("forged"), 1);
+        mint(f, uint64(500 * U), MALLORY);
+        cancel(f);
+        vm.prank(vm.addr(guardKeys[0]));
+        token.pause();
+        token.unpause(blob(token.unpauseDigest(), 6));
+        token.remint(f, 1, uint64(500 * U), MALLORY, true, blob(token.remintDigest(f, 1, uint64(500 * U), MALLORY, true), 6));
+        (address r, uint64 amt, uint64 ready) = token.pendingMints(f);
+        vm.prank(vm.addr(guardKeys[1]));
+        (bool ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.voteCancelMint, (f, r, amt, ready)));
+        require(!ok, "a locked remint cannot be cancelled");
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(f);
+        require(token.balanceOf(MALLORY) == 500 * U, "credited");
+        (bool okF, bytes4 err) = release(burn(MALLORY, uint64(100 * U))); // within totalLocked
+        require(!okF && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "the forged burn is refused");
+        (ok, err) = release(burn(ALICE, uint64(100 * U)));
+        require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "Alice's later burn is held");
+        require(usdc.balanceOf(MALLORY) == 0 && vault.totalLocked() == 100 * U, "drained 0");
+    }
+
+    // ── 5. F129-B: the window without a pause, and largeMintDelay against pauseCooldown ───────────────────────────────
+    function spendPauseChain() internal {
+        for (uint256 i; i < 3; ++i) {
+            vm.prank(vm.addr(guardKeys[i]));
+            token.pause();
+            vm.warp(token.pausedUntil());
+        }
+        for (uint256 i; i < 3; ++i) require(!token.guardianCanPause(vm.addr(guardKeys[i])), "cooldown: no guardian can pause");
+    }
+
+    /// Launch values (delay 12 h, cooldown 72 h): a forged candidate added at the start of the cooldown window ripens 12 h
+    /// later, while no guardian can pause, so only a cancel stops it. One left uncancelled credits.
+    function test_F129B_launchDelayRipensInsideTheCooldownWindow() public {
+        deployToken(0, 12 hours, 6);
+        spendPauseChain();
+        uint256 windowEnd = block.timestamp + PAUSE;
+        bytes32 f = fid(keccak256("window"), 0);
+        mint(f, 1, MALLORY);
+        vm.warp(block.timestamp + 12 hours);
+        require(block.timestamp < windowEnd && !token.guardianCanPause(vm.addr(guardKeys[0])), "still no pause possible");
+        token.executeMint(f);
+        require(token.mintCount() == 1 && token.balanceOf(MALLORY) == 1, "an uncancelled forged unit credits in the window");
+    }
+
+    /// With largeMintDelay above pauseCooldown, a candidate added anywhere in the cooldown window ripens only after the
+    /// window ends, when the guardians can pause again (a new chain), and the pause stops its execution. The forger's
+    /// unpaused time no longer overlaps any ripe candidate except at pause boundaries (see the memo).
+    function test_F129B_delayAboveCooldownRipensOnlyWhenAPauseIsPossibleAgain() public {
+        deployToken(0, PAUSE + 1 hours, 6);
+        spendPauseChain();
+        uint256 windowEnd = block.timestamp + PAUSE;
+        bytes32 f = fid(keccak256("window"), 0);
+        mint(f, 1, MALLORY); // at the very start of the window
+        (,, uint64 ready) = token.pendingMints(f);
+        require(ready > windowEnd, "ripens after the window");
+        vm.warp(windowEnd);
+        require(token.guardianCanPause(vm.addr(guardKeys[0])), "a new chain: a guardian can pause again");
+        vm.prank(vm.addr(guardKeys[0]));
+        token.pause();
+        vm.warp(ready);
+        (bool ok, bytes memory data) = address(token).call(abi.encodeCall(SignerMintedToken.executeMint, (f)));
+        require(!ok && errOf(data) == SignerMintedToken.IsPaused.selector, "ripe, but paused");
+        cancel(f);
+        require(token.mintCount() == 0, "cancelled during the pause");
+    }
+
+    /// The boundary between two pauses of a chain: at the second the first pause ends, the token is unpaused until the
+    /// next guardian's pause lands. A ripe uncancelled candidate executes in that gap. So every candidate that ripens during
+    /// a pause must be cancelled before that pause ends, whatever the parameters.
+    function test_F129B_ripeCandidateExecutesInTheGapBetweenTwoPauses() public {
+        deployToken(0, 12 hours, 6);
+        bytes32 f = fid(keccak256("gap"), 0);
+        mint(f, 1, MALLORY);
+        vm.prank(vm.addr(guardKeys[0]));
+        token.pause();
+        vm.warp(token.pausedUntil()); // the first pause just ended; guardian 2 has not paused yet
+        require(!token.paused() && token.guardianCanPause(vm.addr(guardKeys[1])), "gap: unpaused, a pause is possible");
+        token.executeMint(f); // the forger front-runs guardian 2
+        require(token.balanceOf(MALLORY) == 1, "credited in the gap");
+    }
+
+    // ── 6. BR-10 vault values ─────────────────────────────────────────────────────────────────────────────────────────
+    /// The proposed vault values deploy, and its bounds hold: a deposit above windowLimit or below minDeposit is refused
+    /// (no refund path), the release bucket refills windowLimit a day, and releaseDelay above 14 days or a mintVerifier
+    /// without a delay is refused. The token bucket (115,740 units/s) refills slightly below the vault (115,740.7/s).
+    function test_BR10_proposedVaultValues() public {
+        require(vault.windowLimit() == BUCKET && vault.cap() == CAP && vault.minDeposit() == 10 * U, "values");
+        require(vault.switchThreshold() == 6 && vault.switchDelay() == 14 days && vault.threshold() == 5, "quorums");
+        require(vault.releaseDelay() == 0 && vault.provenanceMode() == 1 && vault.guardianCount() == 2, "launch design");
+        usdc.mint(address(this), 20_000 * U);
+        (bool ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.deposit, (BUCKET + 1, bytes32(uint256(uint160(ALICE))))));
+        require(!ok, "a deposit above windowLimit is refused");
+        (ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.deposit, (uint64(10 * U - 1), bytes32(uint256(uint160(ALICE))))));
+        require(!ok, "a deposit below minDeposit is refused");
+        require(BUCKET * 1 days / 1 days == BUCKET && REFILL * 1 days <= BUCKET, "token refills at most the vault window");
+        // 100,000 USDC cap through a 10,000 a day window: 10 days, inside the 14-day switch delay.
+        require((CAP + BUCKET - 1) / BUCKET * 1 days <= 14 days, "the whole cap can exit within switchDelay");
+        bytes memory code = bytes.concat(
+            type(ProvenanceSourceVault).creationCode,
+            abi.encode(
+                keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, uint8(0), addrs(ethKeys),
+                uint8(5), ProvenanceSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
+                ProvenanceSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
+                ProvenanceSourceVault.Provenance(1, 15 days, address(0))
+            )
+        );
+        address made;
+        assembly {
+            made := create(0, add(code, 0x20), mload(code))
+        }
+        require(made == address(0), "releaseDelay above 14 days is refused");
+    }
+}
