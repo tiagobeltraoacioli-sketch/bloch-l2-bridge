@@ -142,10 +142,10 @@ class Net:
         limits = f'({10**6 * U},{10**5 * U},{10**5 * U // 86400},{1000 * U},43200,{U})'
         if self.prov:
             self.token = self.create(self.l2, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', 'Bloch Bridged USDC', 'bUSDC',
-                                     str(ETH_CHAIN), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)')
+                                     str(ETH_CHAIN), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)', '(2,1209600)')
         else:
             self.token = self.create(self.l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch Bridged USDC', 'bUSDC',
-                                     str(ETH_CHAIN), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)')
+                                     str(ETH_CHAIN), self.vault, self.route, self.addrs, '2', limits, f'([{self.guard}],7200,7200)', '(2,1209600)')
         self.code = out(CAST, 'keccak', out(CAST, 'code', self.token, '--rpc-url', self.l2))
 
     def stop(self):
@@ -287,7 +287,7 @@ def d6_attack(net, tag):
     """101's D6: Bob's 1,000 deposit is final and unminted; the quorum mints 500 to Mallory, who burns it."""
     net.deposit(1000 * U, net.bob)
     net.mine(net.eth)
-    nonce = int(net.view(net.l2, net.token, 'mintCount()(uint64)')) if net.prov else 0
+    nonce = int(net.view(net.l2, net.token, 'nextSlot()(uint64)')) if net.prov else 0
     net.forge_mint('0x' + 'fe' * 32, nonce, 500 * U, net.mallory)
     return net.burn(MALLORY, 500 * U, net.mallory)
 
