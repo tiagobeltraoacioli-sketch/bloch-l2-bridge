@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Real signers, relayer and Ethereum half on two private anvils, throwaway keys: a release lost to a real reorg, and the release hold.
+
+  python3 test_release_paths.py FOUNDRY_PROJECT_DIR reorg|hold
+
+reorg: paid releases are taken back by `anvil_reorg` (the blocks are replaced, with another sender's transaction in the new ones). A later
+burn then queues behind the gap. `vigia sign` and `vigia relay` run as daemons at their default `lost_after_s` until all are paid.
+REORG_WAIT_S bounds the wait (default 300). A run against the code before the fix shows the burns unpaid.
+hold: with `release_hold: true`, a mint with no deposit stops every signer's Ethereum half, queued or executed, until the operators accept it.
+"""
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = Path(__file__).resolve().parent
+BIN = Path.home() / '.foundry/bin'
+CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
+DEPLOYER = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+OTHER_DEV = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
+SIGNER_KEYS = ['0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+               '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a',
+               '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6']
+ALICE_KEY, MALLORY_KEY = '0x' + '0a' * 32, '0x' + '0e' * 32
+BOB = '0x' + 'b0' * 20
+ETH_CHAIN, L2_CHAIN = 11155111, 700771
+U = 10**6
+LARGE, DELAY = 50 * U, 43200
+results = []
+
+
+def sh(*argv, ok=True):
+    done = subprocess.run([str(a) for a in argv], capture_output=True, text=True)
+    if ok and done.returncode:
+        raise SystemExit(f'FAILED {argv[:3]}: {done.stderr[-1500:]}{done.stdout[-500:]}')
+    return done
+
+
+def out(*argv):
+    return sh(*argv).stdout.strip()
+
+
+def check(name, cond, detail=''):
+    results.append((name, bool(cond)))
+    print(('PASS ' if cond else 'FAIL ') + name + (f'  {detail}' if detail != '' else ''), flush=True)
+
+
+def start_anvil(chain_id):
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([ANVIL, '--chain-id', str(chain_id), '--port', str(port), '--silent'])
+    url = f'http://127.0.0.1:{port}'
+    for _ in range(50):
+        if sh(CAST, 'chain-id', '--rpc-url', url, ok=False).returncode == 0:
+            return proc, url
+        time.sleep(0.2)
+    raise SystemExit('anvil did not start')
+
+
+class Net:
+    def __init__(self, project, work, hold):
+        self.work, self.procs, self.hold = work, [], hold
+        eth_proc, self.eth = start_anvil(ETH_CHAIN)
+        l2_proc, self.l2 = start_anvil(L2_CHAIN)
+        self.procs += [eth_proc, l2_proc]
+        self.project = project
+        self.alice = out(CAST, 'wallet', 'address', '--private-key', ALICE_KEY).lower()
+        self.mallory = out(CAST, 'wallet', 'address', '--private-key', MALLORY_KEY).lower()
+        for url in (self.eth, self.l2):
+            for who in (self.alice, self.mallory):
+                sh(CAST, 'rpc', 'anvil_setBalance', who, hex(10**21), '--rpc-url', url)
+        self.signers = sorted((out(CAST, 'wallet', 'address', '--private-key', k).lower(), k) for k in SIGNER_KEYS)
+        addrs = '[' + ','.join(a for a, _ in self.signers) + ']'
+        self.usdc = self.create(self.eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
+        k = lambda t: out(CAST, 'keccak', t)  # noqa: E731
+        self.vault = self.create(self.eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault',
+                                 k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), self.usdc, str(1_000_000 * U), '0', addrs,
+                                 '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)')
+        vu = str(int(time.time()) + 3600)
+        d = self.view(self.eth, self.vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
+        sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in self.signers[:2]]
+        self.send(self.eth, DEPLOYER, self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu,
+                  '[' + ','.join(sigs) + ']')
+        self.route = self.view(self.eth, self.vault, 'routeId()(bytes32)').lower()
+        self.send(self.eth, DEPLOYER, self.usdc, 'mintTo(address,uint256)', self.alice, str(1000 * U))
+        self.send(self.eth, ALICE_KEY, self.usdc, 'approve(address,uint256)', self.vault, str(2**256 - 1))
+        cap = 100_000 * U
+        limits = f'({1_000_000 * U},{cap},{cap // 86400},{LARGE},{DELAY},{U})'
+        self.token = self.create(self.l2, 'contracts/stable/BridgedStablecoinV2.sol:BridgedStablecoinV2', 'Bloch Bridged USDC', 'bUSDC',
+                                 str(ETH_CHAIN), self.vault, self.route, addrs, '2', limits,
+                                 '([0x000000000000000000000000000000000000Ba5E],259200,259200)')
+        code = out(CAST, 'keccak', out(CAST, 'code', self.token, '--rpc-url', self.l2))
+        vault_code = out(CAST, 'keccak', out(CAST, 'code', self.vault, '--rpc-url', self.eth))
+        (work / 'pw').write_text('test-password\n')
+        (work / 'relayer.key').write_text(DEPLOYER + '\n')
+        self.cfgs, self.eth_cfgs = [], []
+        for i, (addr, key) in enumerate(self.signers, 1):
+            sh(CAST, 'wallet', 'import', f's{i}', '--private-key', key, '--keystore-dir', work, '--unsafe-password', 'test-password')
+            ks = str(work / f's{i}')
+            ecfg = work / f'eth{i}.json'
+            ecfg.write_text(json.dumps({'eth_rpc': self.eth, 'eth_chain_id': ETH_CHAIN, 'vault': self.vault, 'vault_code_keccak': vault_code,
+                                        'vault_from_block': 0, 'keystore': ks, 'password_file': str(work / 'pw'), 'cast': CAST,
+                                        'release_hold': self.hold,
+                                        'db': str(work / f'ethdb{i}.json')}))
+            half = [sys.executable, str(HERE / 'eth_half.py'), '--config', str(ecfg)]
+            path = work / f'cfg{i}.json'
+            path.write_text(json.dumps({
+                'signer': i, 'l2_rpc': self.l2, 'l2_chain_id': L2_CHAIN, 'token': self.token, 'token_code_keccak': code,
+                'source_chain_id': ETH_CHAIN, 'source_vault': self.vault, 'source_route': self.route, 'threshold': 2,
+                'vault_threshold': 2, 'keystore': ks, 'password_file': str(work / 'pw'), 'eth_signer': addr, 'cast': CAST,
+                'db': str(work / f'db{i}.json'), 'l2_source': 'rpc', 'work_dir': str(work),
+                'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
+                'eth_half_release': half + ['release', '--intent', '{intent}'],
+                'shared_dir': str(work / 'shared'), 'eth_rpc': self.eth, 'eth_chain_id': ETH_CHAIN,
+                'l2_relayer_key': str(work / 'relayer.key'), 'eth_relayer_key': str(work / 'relayer.key')}))
+            self.cfgs.append(path)
+            self.eth_cfgs.append(ecfg)
+
+    def create(self, url, target, *ctor):
+        args = ['--constructor-args', *ctor] if ctor else []
+        dep = out(FORGE, 'create', '--root', self.project, '--broadcast', '--rpc-url', url, '--private-key', DEPLOYER, target, *args)
+        return next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
+
+    def send(self, url, key, to, *call):
+        return json.loads(out(CAST, 'send', to, *call, '--rpc-url', url, '--private-key', key, '--json', '--gas-limit', '1500000'))
+
+    def view(self, url, to, sig, *args):
+        return out(CAST, 'call', to, sig, *args, '--rpc-url', url).split()[0]
+
+    def mine(self, url, n=0x80):
+        sh(CAST, 'rpc', 'anvil_mine', hex(n), '--rpc-url', url)
+
+    def vigia(self, i, mode):
+        done = sh(sys.executable, HERE / 'vigia.py', '--config', self.cfgs[i], mode, '--once', ok=False)
+        return [json.loads(l) for l in done.stdout.splitlines() if l.startswith('{')] + ([{'stderr': done.stderr[-800:]}] if done.returncode else [])
+
+    def deposit_and_mint(self, amount):
+        self.send(self.eth, ALICE_KEY, self.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + self.alice[2:])
+        self.mine(self.eth)
+        for i in (0, 1):
+            self.vigia(i, 'sign')
+        self.vigia(2, 'relay')
+
+    def burn(self, key, amount, to=BOB):
+        r = self.send(self.l2, key, self.token, 'burn(uint64,address)', str(amount), to)
+        assert r['status'] == '0x1', r
+        return r
+
+    def burn_id(self, nonce):
+        return out(CAST, 'keccak', out(CAST, 'abi-encode', 'f(uint256,address,uint64)', str(L2_CHAIN), self.token, str(nonce))).lower()
+
+    def released(self, burn):
+        return self.view(self.eth, self.vault, 'releasedBurn(bytes32)(bool)', burn) == 'true'
+
+    def bob(self):
+        return int(self.view(self.eth, self.usdc, 'balanceOf(address)(uint256)', BOB))
+
+    def forge_mint(self, tag, amount, who):
+        dep = '0x' + tag * 32
+        d = self.view(self.l2, self.token, 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', dep, '0', str(amount), who)
+        blob = '0x' + ''.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)[2:] for _, k in self.signers[:2])
+        self.send(self.l2, DEPLOYER, self.token, 'mint(bytes32,uint64,uint64,address,bytes)', dep, '0', str(amount), who, blob)
+        return dep
+
+
+def s_reorg(net):
+    wait = int(os.environ.get('REORG_WAIT_S', 300))
+    net.deposit_and_mint(100 * U)
+    check('setup: the deposit is minted', int(net.view(net.l2, net.token, 'balanceOf(address)(uint256)', net.alice)) == 100 * U)
+    net.burn(ALICE_KEY, 3 * U)
+    net.burn(ALICE_KEY, 4 * U)
+    net.mine(net.l2)
+    b1, b2, b3 = net.burn_id(1), net.burn_id(2), net.burn_id(3)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    net.vigia(2, 'relay')
+    check('setup: both releases paid', net.released(b1) and net.released(b2) and net.bob() == 7 * U, net.bob())
+    net.vigia(2, 'relay')  # the relayer records them done
+    head = int(out(CAST, 'block-number', '--rpc-url', net.eth))
+    before = json.loads(out(CAST, 'block', str(head), '--json', '--rpc-url', net.eth))['hash']
+    relayer = out(CAST, 'wallet', 'address', '--private-key', DEPLOYER)
+    count = lambda level: int(out(CAST, 'nonce', relayer, '--block', level, '--rpc-url', net.eth))  # noqa: E731
+    nonce_before = count('latest')
+    # A real reorg: two blocks replaced, another sender's transaction in the new chain, the paid releases gone.
+    done = sh(CAST, 'rpc', 'anvil_reorg', '--raw', json.dumps([2, [[{'from': OTHER_DEV, 'to': BOB, 'value': '0x1'}, 0]]]), '--rpc-url', net.eth, ok=False)
+    check('reorg: anvil_reorg accepted', done.returncode == 0, done.stderr[-300:])
+    after = json.loads(out(CAST, 'block', str(head), '--json', '--rpc-url', net.eth))['hash']
+    check('reorg: the block at the old head has another hash', before != after, (before, after))
+    check('reorg: the chain took both payments back', not net.released(b1) and not net.released(b2) and net.bob() == 0, net.bob())
+    check('reorg: the relayer nonce went back', count('latest') == nonce_before - 2, (nonce_before, count('latest')))
+    net.burn(ALICE_KEY, 5 * U)  # a third burn, which on the old code sends above the gap
+    net.mine(net.l2)
+    logs, daemons = [], []
+    for i, mode in ((0, 'sign'), (1, 'sign'), (2, 'sign'), (2, 'relay')):
+        path = net.work / f'{mode}{i}.log'
+        logs.append(path)
+        daemons.append(subprocess.Popen([sys.executable, str(HERE / 'vigia.py'), '--config', str(net.cfgs[i]), mode, '--interval', '10'],
+                                        stdout=open(path, 'w'), stderr=subprocess.STDOUT))
+    net.procs += daemons
+    t0, paid = time.time(), False
+    next_note = 600
+    while time.time() - t0 < wait:
+        net.mine(net.eth, 1)  # about one Ethereum block per slot
+        paid = all(net.released(b) for b in (b1, b2, b3))
+        if paid:
+            break
+        if time.time() - t0 > next_note:
+            print(f'NOTE {int(time.time() - t0)} s: unpaid {[b[:10] for b in (b1, b2, b3) if not net.released(b)]}, latest {count("latest")}, pending {count("pending")}', flush=True)
+            next_note += 600
+        time.sleep(12)
+    took = int(time.time() - t0)
+    check(f'relayer: all three burns paid after the reorg within {wait} s', paid, f'{took} s, latest {count("latest")}, pending {count("pending")}')
+    # Let any resend land, then count money.
+    if paid:
+        for _ in range(4):
+            net.mine(net.eth, 1)
+            time.sleep(12)
+    for d in daemons:
+        d.send_signal(signal.SIGTERM)
+    check('money: each burn paid exactly once', not paid or net.bob() == 12 * U, net.bob())
+    check('money: the vault holds the rest', int(net.view(net.eth, net.vault, 'totalLocked()(uint64)')) == 100 * U - net.bob())
+    relay_log = [json.loads(l) for l in logs[-1].read_text().splitlines() if l.startswith('{')]
+    kinds = {'lost': sum('lost' in l for l in relay_log), 'rewound': sum('rewound' in l for l in relay_log),
+             'gap': sum('gap' in l for l in relay_log), 'dropped': sum('dropped' in l for l in relay_log)}
+    print('INFO relayer log counts', kinds, 'took_s', took, 'pending-latest', count('pending') - count('latest'), flush=True)
+    check('relayer: nothing left queued behind a gap', count('pending') == count('latest'), (count('pending'), count('latest')))
+    for l in relay_log:
+        if any(k in l for k in ('lost', 'rewound', 'gap', 'dropped', 'error')):
+            print('LOG', json.dumps(l)[:300], flush=True)
+
+
+def s_hold(net):
+    net.deposit_and_mint(100 * U)
+    net.send(net.l2, ALICE_KEY, net.token, 'burn(uint64,address)', str(2 * U), BOB)
+    net.mine(net.l2)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    net.vigia(2, 'relay')
+    check('control: an honest burn pays with the hold on', net.bob() == 2 * U, net.bob())
+
+    def signed(i):
+        return [e for e in net.vigia(i, 'sign') if e.get('kind') == 'release']
+    forged = net.forge_mint('fe', 20 * U, net.mallory)  # no deposit, with slack in the vault: `reserves` stays quiet
+    net.mine(net.l2)
+    net.burn(MALLORY_KEY, 20 * U, net.mallory)
+    net.mine(net.l2)
+    tried = signed(0) + signed(1)
+    check('hold: no signer certifies the burn of forged tokens', tried and not any(e.get('signed') for e in tried), tried)
+    check('hold: the reason names it', any('release hold' in str(e.get('reason')) for e in tried), tried)
+    net.vigia(2, 'relay')
+    check('hold: nothing paid', int(net.view(net.eth, net.usdc, 'balanceOf(address)(uint256)', net.mallory)) == 0)
+    net.send(net.l2, ALICE_KEY, net.token, 'burn(uint64,address)', str(U), BOB)
+    net.mine(net.l2)
+    tried = signed(0) + signed(1)
+    check('hold: an honest burn waits too: the tokens are fungible', not any(e.get('signed') for e in tried) and net.bob() == 2 * U, tried)
+
+    # Operators review it and accept the id: then a mismatch on another mint still holds.
+    for c in net.eth_cfgs:
+        doc = json.loads(c.read_text())
+        c.write_text(json.dumps({**doc, 'accepted_unbacked_mints': [forged]}))
+    for d in (net.work / 'shared' / 'release').glob('*/.join-refusals'):
+        d.unlink()
+    for d in (net.work / 'shared' / 'release').glob('*/.signs'):
+        d.unlink()
+    tried = signed(0) + signed(1)
+    check('accepted: the reviewed id releases the hold', any(e.get('signed') for e in tried), tried)
+    net.forge_mint('fd', 60 * U, net.mallory)  # above the large-mint threshold: queued, not credited
+    net.mine(net.l2)
+    net.send(net.l2, ALICE_KEY, net.token, 'burn(uint64,address)', str(U), BOB)
+    net.mine(net.l2)
+    tried = [e for i in (0, 1) for e in signed(i) if e.get('nonce') == 4]
+    check('hold: a queued forged mint holds as well', tried and not any(e.get('signed') for e in tried), tried)
+
+
+def main():
+    project = Path(sys.argv[1]).resolve()
+    scenario = {'reorg': s_reorg, 'hold': s_hold}[sys.argv[2]]
+    work = Path(tempfile.mkdtemp(prefix='release-paths-'))
+    net = None
+    try:
+        net = Net(project, work, sys.argv[2] == 'hold')
+        scenario(net)
+    finally:
+        for p in net.procs if net else []:
+            p.kill()
+            p.wait()
+        shutil.rmtree(work, ignore_errors=True)
+    failed = [n for n, ok in results if not ok]
+    print(f'\n{len(results) - len(failed)}/{len(results)} passed')
+    raise SystemExit(1 if failed else 0)
+
+
+main()
