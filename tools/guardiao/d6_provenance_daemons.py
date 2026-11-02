@@ -288,7 +288,8 @@ def d6_attack(net, tag):
     net.deposit(1000 * U, net.bob)
     net.mine(net.eth)
     nonce = int(net.view(net.l2, net.token, 'nextSlot()(uint64)')) if net.prov else 0
-    net.forge_mint('0x' + 'fe' * 32, nonce, 500 * U, net.mallory)
+    # A forged id names the slot it takes (ProvenanceSourceVault ids carry the nonce in the top 8 bytes, agent 111 F1).
+    net.forge_mint('0x%016x' % nonce + 'fe' * 24, nonce, 500 * U, net.mallory)
     return net.burn(MALLORY, 500 * U, net.mallory)
 
 

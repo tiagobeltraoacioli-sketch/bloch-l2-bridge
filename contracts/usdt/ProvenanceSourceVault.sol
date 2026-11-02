@@ -363,16 +363,21 @@ contract ProvenanceSourceVault {
         );
     }
 
+    /// @notice The deposit id commits to its nonce in the open: the top 8 bytes are the nonce, the low 24 bytes the low
+    ///         24 bytes of sha256(abi.encode("BLOCH-USDT-DEPOSIT-v2", route, nonce, sender, amount, pqRecipientHash)).
+    ///         BridgedStablecoinV3 reads a mint's slot from the id, so a real deposit cannot be minted into another
+    ///         deposit's slot (agent 111, F1).
     function depositId(uint64 nonce, address sender, uint64 amount, bytes32 pqRecipientHash)
         public
         view
         returns (bytes32)
     {
-        return sha256(
+        bytes32 h = sha256(
             abi.encode(
-                bytes32("BLOCH-USDT-DEPOSIT-v1"), routeId(), uint256(nonce), sender, uint256(amount), pqRecipientHash
+                bytes32("BLOCH-USDT-DEPOSIT-v2"), routeId(), uint256(nonce), sender, uint256(amount), pqRecipientHash
             )
         );
+        return bytes32((uint256(nonce) << 192) | (uint256(h) & type(uint192).max));
     }
 
     function releaseId(Release calldata item) public pure returns (bytes32) {

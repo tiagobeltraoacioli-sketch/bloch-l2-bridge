@@ -216,7 +216,7 @@ contract D6ProvenanceTest {
     function forgeD6(Pair memory p) internal returns (ProvenanceSourceVault.Release memory r) {
         // 101's D6: Alice's 1,000 deposit is final and not yet minted; the quorum mints 500 to Mallory, who burns.
         deposit(p, 1000 * uint64(U), ALICE);
-        mint(p, keccak256("forged"), p.token.nextSlot(), 500 * uint64(U), MALLORY);
+        mint(p, fid(keccak256("forged"), p.token.nextSlot()), p.token.nextSlot(), 500 * uint64(U), MALLORY);
         r = burn(p, MALLORY, 500 * uint64(U));
     }
 
@@ -270,7 +270,7 @@ contract D6ProvenanceTest {
         Pair memory p = pair(1, 0, address(0));
         (bytes32 a,) = deposit(p, 1000 * uint64(U), ALICE);
         mint(p, a, 0, 1000 * uint64(U), ALICE);
-        mint(p, keccak256("ahead"), 1, 500 * uint64(U), MALLORY); // no deposit 1 exists
+        mint(p, fid(keccak256("ahead"), 1), 1, 500 * uint64(U), MALLORY); // no deposit 1 exists
         ProvenanceSourceVault.Release memory r = burn(p, MALLORY, 500 * uint64(U));
         (bool ok, bytes4 err) = tryRelease(p, r);
         require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "count above depositCount");
@@ -304,6 +304,10 @@ contract D6ProvenanceTest {
         (bool ok, bytes memory ret) =
             address(p.token).call(abi.encodeCall(BridgedStablecoinV2.mint, (b, 1, 100 * uint64(U), BOB, sigs)));
         require(!ok && bytes4(ret) == BridgedStablecoinV3.MintOutOfOrder.selector, "deposit order");
+        // A real deposit named under another nonce is not representable: the id carries its own slot (agent 111, F1).
+        sigs = mintBlob(p.token.mintDigest(b, 0, 100 * uint64(U), BOB));
+        (ok, ret) = address(p.token).call(abi.encodeCall(BridgedStablecoinV2.mint, (b, 0, 100 * uint64(U), BOB, sigs)));
+        require(!ok && bytes4(ret) == BridgedStablecoinV3.WrongSlot.selector, "wrong slot");
     }
 
     /// Honest flows pass, including burns made under an older head after later deposits.
@@ -354,7 +358,7 @@ contract D6ProvenanceTest {
         (bytes32 a,) = deposit(p, 1000 * uint64(U), ALICE);
         mint(p, a, 0, 1000 * uint64(U), ALICE);
         ProvenanceSourceVault.Release memory early = burn(p, ALICE, 400 * uint64(U));
-        mint(p, keccak256("forged"), 1, 500 * uint64(U), MALLORY);
+        mint(p, fid(keccak256("forged"), 1), 1, 500 * uint64(U), MALLORY);
         (bool ok,) = tryRelease(p, early);
         require(ok && usdc.balanceOf(ALICE) == 400 * U, "pre-forgery burn paid");
         (bool forgedOk,) = tryRelease(p, burn(p, MALLORY, 500 * uint64(U)));
@@ -366,7 +370,7 @@ contract D6ProvenanceTest {
         Pair memory p = pair(1, 0, address(0));
         (bytes32 a,) = deposit(p, 1000 * uint64(U), ALICE);
         mint(p, a, 0, 1000 * uint64(U), ALICE);
-        mint(p, keccak256("forged"), 1, 500 * uint64(U), MALLORY);
+        mint(p, fid(keccak256("forged"), 1), 1, 500 * uint64(U), MALLORY);
         (bool ok, bytes4 err) = tryRelease(p, burn(p, ALICE, 1000 * uint64(U)));
         require(!ok && err == ProvenanceSourceVault.ProvenanceMismatch.selector, "held");
         require(p.vault.totalLocked() == 1000 * U, "nothing left the vault");
@@ -445,7 +449,7 @@ contract D6ProvenanceTest {
         ProvenanceSourceVault.Release memory r = forgeD6(p);
         (bool ok,) = tryRelease(p, r);
         require(ok, "certified and queued");
-        ProvenanceSourceVault.MintClaim memory m = claimOf(keccak256("forged"), 0, 500 * uint64(U), MALLORY);
+        ProvenanceSourceVault.MintClaim memory m = claimOf(fid(keccak256("forged"), 0), 0, 500 * uint64(U), MALLORY);
         // the Ethereum committee attests the final `Minted` log; anyone submits
         p.vault.proveForgedMint(m, cert(p.vault.mintClaimDigest(m), 5), "");
         vm.warp(block.timestamp + DELAY);
@@ -463,7 +467,7 @@ contract D6ProvenanceTest {
         (bool ok, bytes memory ret) =
             address(p.vault).call(abi.encodeCall(ProvenanceSourceVault.proveForgedMint, (m, sigs, bytes(""))));
         require(!ok && bytes4(ret) == ProvenanceSourceVault.NotForged.selector, "a real mint cannot freeze");
-        ProvenanceSourceVault.MintClaim memory fake = claimOf(keccak256("x"), 0, 1, MALLORY);
+        ProvenanceSourceVault.MintClaim memory fake = claimOf(fid(keccak256("x"), 0), 0, 1, MALLORY);
         bytes[] memory few = cert(p.vault.mintClaimDigest(fake), 4);
         (ok, ret) = address(p.vault).call(abi.encodeCall(ProvenanceSourceVault.proveForgedMint, (fake, few, bytes(""))));
         require(!ok && bytes4(ret) == ProvenanceSourceVault.InvalidCertificate.selector, "evidence needs the quorum");
@@ -507,8 +511,8 @@ contract D6ProvenanceTest {
         ProvenanceSourceVault.Release memory r = burn(p, ALICE, 1000 * uint64(U));
         (bool ok,) = tryRelease(p, r);
         require(ok, "queued");
-        mint(p, keccak256("forged"), 1, 10 * uint64(U), MALLORY);
-        ProvenanceSourceVault.MintClaim memory m = claimOf(keccak256("forged"), 1, 10 * uint64(U), MALLORY);
+        mint(p, fid(keccak256("forged"), 1), 1, 10 * uint64(U), MALLORY);
+        ProvenanceSourceVault.MintClaim memory m = claimOf(fid(keccak256("forged"), 1), 1, 10 * uint64(U), MALLORY);
         p.vault.proveForgedMint(m, cert(p.vault.mintClaimDigest(m), 5), "");
         vm.warp(block.timestamp + DELAY);
         (ok,) = address(p.vault).call(abi.encodeCall(ProvenanceSourceVault.executeRelease, (p.vault.releaseId(r))));
@@ -523,7 +527,7 @@ contract D6ProvenanceTest {
         ProvenanceSourceVault.Release memory r = forgeD6(p);
         lc.commit(p.vault.releaseId(r));
         p.vault.releaseWithProof(r, "");
-        ProvenanceSourceVault.MintClaim memory m = claimOf(keccak256("forged"), 0, 500 * uint64(U), MALLORY);
+        ProvenanceSourceVault.MintClaim memory m = claimOf(fid(keccak256("forged"), 0), 0, 500 * uint64(U), MALLORY);
         bytes[] memory none = new bytes[](0);
         (bool ok,) = address(p.vault).call(abi.encodeCall(ProvenanceSourceVault.proveForgedMint, (m, none, bytes(""))));
         require(!ok, "no proof of that Minted log yet");
@@ -553,7 +557,7 @@ contract D6ProvenanceTest {
     function test_O3_limit_redirectedDepositIsPaid() public {
         Pair memory p = pair(2, 0, address(0));
         deposit(p, 1000 * uint64(U), ALICE);
-        mint(p, keccak256("redirect"), 0, 1000 * uint64(U), MALLORY);
+        mint(p, fid(keccak256("redirect"), 0), 0, 1000 * uint64(U), MALLORY);
         (bool ok,) = tryRelease(p, burn(p, MALLORY, 1000 * uint64(U)));
         require(ok && usdc.balanceOf(MALLORY) == 1000 * U, "redirected deposit paid");
     }
@@ -623,7 +627,7 @@ contract D6ProvenanceTest {
     function test_gas_O2_challenge() public {
         Pair memory p = pair(0, DELAY, address(0));
         forgeD6(p);
-        ProvenanceSourceVault.MintClaim memory m = claimOf(keccak256("forged"), 0, 500 * uint64(U), MALLORY);
+        ProvenanceSourceVault.MintClaim memory m = claimOf(fid(keccak256("forged"), 0), 0, 500 * uint64(U), MALLORY);
         bytes[] memory sigs = cert(p.vault.mintClaimDigest(m), 5);
         uint256 g = gasleft();
         p.vault.proveForgedMint(m, sigs, "");
@@ -667,4 +671,10 @@ contract D6ProvenanceTest {
         v.release(r, c, rs);
         emit Gas("release", g - gasleft());
     }
+}
+
+/// A made-up deposit id that names slot `slot`, as ProvenanceSourceVault ids do (nonce in the top 8 bytes): a forger who wants
+/// a slot must name it in the id (agent 111, F1).
+function fid(bytes32 salt, uint64 slot) pure returns (bytes32) {
+    return bytes32((uint256(slot) << 192) | (uint256(salt) & type(uint192).max));
 }

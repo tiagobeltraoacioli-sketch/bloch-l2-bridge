@@ -144,8 +144,8 @@ contract D6ComposeTest {
     /// fills its slot and nothing is held.
     function test_C_cancelledForgeryLeavesNoTraceAndNothingIsHeld() public {
         bytes32 bob = deposit(uint64(1000 * U), BOB);
-        mint(keccak256("forged"), 0, uint64(5000 * U), MALLORY); // takes slot 0, queued 12 h
-        cancel(keccak256("forged"));
+        mint(fid(keccak256("forged"), 0), 0, uint64(5000 * U), MALLORY); // takes slot 0, queued 12 h
+        cancel(fid(keccak256("forged"), 0));
         require(token.slotKey(0) == 0 && token.mintCount() == 0, "slot 0 free again");
         mint(bob, 0, uint64(1000 * U), BOB); // the real deposit 0, queued (above T)
         vm.warp(block.timestamp + 12 hours);
@@ -160,7 +160,7 @@ contract D6ComposeTest {
         mint(a, 0, uint64(100 * U), ALICE);
         ProvenanceSourceVault.Release memory early = burn(ALICE, uint64(50 * U));
         deposit(uint64(5000 * U), BOB); // slack: unminted
-        mint(keccak256("forged"), 1, uint64(100 * U), MALLORY); // instant
+        mint(fid(keccak256("forged"), 1), 1, uint64(100 * U), MALLORY); // instant
         require(token.balanceOf(MALLORY) == 100 * U, "credited by the instant path");
         require(!release(burn(MALLORY, uint64(100 * U))), "forged burn refused");
         require(release(early), "a burn from before the forgery still pays");
@@ -172,9 +172,9 @@ contract D6ComposeTest {
     function test_smallForgeriesBehindAQueuedMintAreCancellable() public {
         bytes32 a = deposit(uint64(5000 * U), ALICE);
         mint(a, 0, uint64(5000 * U), ALICE); // queued
-        for (uint64 i = 1; i <= 3; ++i) mint(keccak256(abi.encode("small", i)), i, uint64(50 * U), MALLORY);
+        for (uint64 i = 1; i <= 3; ++i) mint(fid(keccak256(abi.encode("small", i)), i), i, uint64(50 * U), MALLORY);
         require(token.balanceOf(MALLORY) == 0, "under T but waiting for slot 0");
-        for (uint64 i = 1; i <= 3; ++i) cancel(keccak256(abi.encode("small", i)));
+        for (uint64 i = 1; i <= 3; ++i) cancel(fid(keccak256(abi.encode("small", i)), i));
         vm.warp(block.timestamp + 12 hours);
         token.executeMint(a);
         require(token.balanceOf(MALLORY) == 0 && token.mintCount() == 1, "the cancelled small mints never credit");
@@ -201,14 +201,14 @@ contract D6ComposeTest {
     function test_slotsCannotBeDoubledOrMoved() public {
         bytes32 a = deposit(uint64(500 * U), ALICE);
         mint(a, 0, uint64(500 * U), ALICE);
-        bytes memory sigs = blob(token.mintDigest(keccak256("x"), 0, uint64(50 * U), MALLORY), 5);
-        (bool ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (keccak256("x"), 0, uint64(50 * U), MALLORY, sigs)));
+        bytes memory sigs = blob(token.mintDigest(fid(keccak256("x"), 0), 0, uint64(50 * U), MALLORY), 5);
+        (bool ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (fid(keccak256("x"), 0), 0, uint64(50 * U), MALLORY, sigs)));
         require(!ok, "slot 0 taken");
-        sigs = blob(token.mintDigest(keccak256("y"), 5, uint64(50 * U), MALLORY), 5);
-        (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (keccak256("y"), 5, uint64(50 * U), MALLORY, sigs)));
+        sigs = blob(token.mintDigest(fid(keccak256("y"), 5), 5, uint64(50 * U), MALLORY), 5);
+        (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.mint, (fid(keccak256("y"), 5), 5, uint64(50 * U), MALLORY, sigs)));
         require(!ok, "no slot ahead of nextSlot");
         cancel(a);
-        mint(keccak256("z"), 1, uint64(50 * U), BOB);
+        mint(fid(keccak256("z"), 1), 1, uint64(50 * U), BOB);
         sigs = blob(token.remintDigest(a, 1, uint64(500 * U), ALICE, false), 5);
         (ok,) = address(token).call(abi.encodeCall(BridgedStablecoinV2.remint, (a, 1, uint64(500 * U), ALICE, false, sigs)));
         require(!ok, "a remint goes back to its own slot");
@@ -223,4 +223,10 @@ contract D6ComposeTest {
         require(!ok, "5 keys cannot unpause");
         token.unpause(blob(token.unpauseDigest(), 6));
     }
+}
+
+/// A made-up deposit id that names slot `slot`, as ProvenanceSourceVault ids do (nonce in the top 8 bytes): a forger who wants
+/// a slot must name it in the id (agent 111, F1).
+function fid(bytes32 salt, uint64 slot) pure returns (bytes32) {
+    return bytes32((uint256(slot) << 192) | (uint256(salt) & type(uint192).max));
 }

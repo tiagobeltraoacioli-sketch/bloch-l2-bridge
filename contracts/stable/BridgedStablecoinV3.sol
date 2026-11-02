@@ -7,9 +7,10 @@ import {BridgedStablecoinV2} from "./BridgedStablecoinV2.sol";
 /// @title BridgedStablecoinV3 — the C+D+I token (agents/87-mint-cancel.md) with a credit-ordered mint chain
 ///        (D6 prototype, agents/108-d6-design.md)
 /// @notice Everything of BridgedStablecoinV2 (guardian cancel, remint, 6-of-7 unpause, instant cap, mint switch), plus:
-///         - Slots: every mint path (mint, remint, mintWithProof) names its deposit nonce, and nonce k is a slot. A new slot
-///           opens only at `nextSlot`; a slot freed by a guardian cancel can be filled again (by the real deposit's mint, or
-///           by a remint of the same deposit id, which must come back to its own slot).
+///         - Slots: every mint path (mint, remint, mintWithProof) names its deposit nonce, and nonce k is a slot. The nonce
+///           must equal the top 8 bytes of the deposit id (ProvenanceSourceVault commits the id to its nonce), so no mint
+///           can put a deposit in another's slot. A new slot opens only at `nextSlot`; a slot freed by a guardian cancel can
+///           be filled again (by the real deposit's mint, or by a remint of the same id, which can only name its own slot).
 ///         - Credit order: mints credit in slot order. One that is due while an earlier slot still waits (queued, cancelled
 ///           and not yet refilled) waits in the queue with no extra delay, and credits as soon as the earlier ones do.
 ///         - Mint chain: each credit extends `mintHead` = keccak256(abi.encode(head, depositId, amount, recipient)) from a
@@ -33,9 +34,8 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     uint64 public mintedTotal;
     /// Hash chain over every credited mint, in slot order.
     bytes32 public mintHead;
-    /// Deposit id holding slot k (zero: free or never opened); the slot of an id, plus one.
+    /// Deposit id holding slot k (zero: free or never opened).
     mapping(uint64 => bytes32) public slotKey;
-    mapping(bytes32 => uint64) public slotOf;
     bool private draining;
 
     event Burned(
@@ -50,6 +50,18 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
     );
 
     error MintOutOfOrder();
+    error WrongSlot();
+
+    /// @notice The slot a deposit id names: its top 8 bytes, the deposit nonce (ProvenanceSourceVault.depositId).
+    function slotFor(bytes32 key) public pure returns (uint64) {
+        return uint64(uint256(key) >> 192);
+    }
+
+    /// @notice The slot `key` holds, plus one; zero if it holds none (never minted, or cancelled and not refilled).
+    function slotOf(bytes32 key) public view returns (uint64) {
+        uint64 s = slotFor(key);
+        return slotKey[s] == key && key != 0 ? s + 1 : 0;
+    }
 
     constructor(
         string memory name_,
@@ -83,27 +95,27 @@ contract BridgedStablecoinV3 is BridgedStablecoinV2 {
         if (!draining) _drain();
     }
 
+    /// @dev The slot is the deposit's own nonce, read from its id: a mint (or remint, or proof) naming another nonce is
+    ///      unrepresentable, and nothing about a slot outlives a cancel except the freed slot itself.
     function _openSlot(bytes32 key, uint64 nonce) internal override {
+        if (slotFor(key) != nonce) revert WrongSlot();
         if (nonce < mintCount) revert MintOutOfOrder();
         if (nonce == nextSlot) {
             nextSlot = nonce + 1;
         } else if (nonce > nextSlot || slotKey[nonce] != 0) {
             revert MintOutOfOrder();
         }
-        uint64 previous = slotOf[key];
-        if (previous != 0 && previous - 1 != nonce) revert MintOutOfOrder();
         slotKey[nonce] = key;
-        slotOf[key] = nonce + 1;
     }
 
     function _onCancel(bytes32 key) internal override {
-        uint64 s = slotOf[key];
-        if (s != 0 && slotKey[s - 1] == key) slotKey[s - 1] = 0;
+        uint64 s = slotFor(key);
+        if (slotKey[s] == key) slotKey[s] = 0;
     }
 
     function _creditNow(bytes32 key) internal view override returns (bool) {
-        uint64 s = slotOf[key];
-        return s != 0 && s - 1 == mintCount;
+        uint64 s = slotFor(key);
+        return s == mintCount && slotKey[s] == key;
     }
 
     function _afterCredit(bytes32 key, address recipient, uint64 amount) internal override {
