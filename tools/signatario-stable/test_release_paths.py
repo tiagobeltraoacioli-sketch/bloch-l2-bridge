@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real signers, relayer and Ethereum half on two private anvils, throwaway keys: a release lost to a real reorg, and the release hold.
 
-  python3 test_release_paths.py FOUNDRY_PROJECT_DIR reorg|hold
+  python3 test_release_paths.py FOUNDRY_PROJECT_DIR reorg|hold|v3|v3remint|v3fee
 
 reorg: paid releases are taken back by `anvil_reorg` (the blocks are replaced, with another sender's transaction in the new ones). A later
 burn then queues behind the gap. `vigia sign` and `vigia relay` run as daemons at their default `lost_after_s` until all are paid.
@@ -11,6 +11,9 @@ v3: the launch design (BridgedStablecoinV3 over ProvenanceSourceVault mode 1, `p
 order in one pass, queued 12 h, executed at the credit head and drained; an honest burn paid with the v2 release id; a forged mint
 the forger executes makes the chain unclean, and its burn and every later burn are parked by vigia and refused by the Ethereum half,
 while guardiao reports `mint-chain` and reservas `held`. V3=1 runs `reorg` on the same pair (agent 109).
+v3fee: v3 with the decided vault fee (5 bps on deposit and on release, throwaway recipient): the unchanged signers and relayer
+mint the net amount, the release pays the burn less 5 bps, the fees stay outside backing, and `sweepFees` pays only the
+recipient (agent 200).
 """
 import json
 import os
@@ -37,9 +40,21 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint'))
-if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint'):
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee'):
     LARGE = 0  # the launch default T = 0
+# v3fee (agent 200): the same launch scenario with the decided protocol fee in the vault, 5 bps on deposit and 5 bps on
+# release to a throwaway recipient; every amount below is the exact net amount, and the fee is never backing.
+FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] == 'v3fee' else 0
+FEE_SINK = '0x' + 'fe' * 20
+
+
+def fee(amount):
+    return amount * FEE_BPS // 10_000
+
+
+def net_of(amount):
+    return amount - fee(amount)
 results = []
 
 
@@ -92,7 +107,7 @@ class Net:
                                               'ContextBoundSourceVault.sol:ContextBoundSourceVault')
         self.vault = self.create(self.eth, vault_contract,
                                  k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), self.usdc, str(1_000_000 * U), '0', addrs,
-                                 '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)', *(['(1,0,' + '0x' + '00' * 20 + ',(0x' + '00' * 20 + ',0,0))'] if V3 else []))
+                                 '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)', *(['(1,0,' + '0x' + '00' * 20 + (f',({FEE_SINK},{FEE_BPS},{FEE_BPS}))' if FEE_BPS else ',(0x' + '00' * 20 + ',0,0))')] if V3 else []))
         vu = str(int(time.time()) + 3600)
         d = self.view(self.eth, self.vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in self.signers[:2]]
@@ -325,7 +340,7 @@ def s_v3(net):
     check('v3 relay: both mints sent in one pass, in slot order', [e.get('slot') for e in relayed if e.get('tx')] == [0, 1], relayed)
     gas['token.mint (queued, T = 0)'] = [used(net.l2, e['tx']) for e in relayed if e.get('tx')]
     check('v3 relay: both land in one L2 block, queued (T = 0)', view('nextSlot()(uint64)') == '2' and view('mintCount()(uint64)') == '0'
-          and int(view('pendingSupply()(uint256)')) == 150 * U, (view('nextSlot()(uint64)'), view('pendingSupply()(uint256)')))
+          and int(view('pendingSupply()(uint256)')) == net_of(100 * U) + net_of(50 * U), (view('nextSlot()(uint64)'), view('pendingSupply()(uint256)')))
     waiting = [e for e in net.vigia(2, 'relay') if e.get('kind') == 'relay-execute']
     check('v3 relay: nothing executes before the 12 h delay', all(e.get('waiting_until') for e in waiting) and view('mintCount()(uint64)') == '0', waiting)
     net.warp(net.l2, DELAY + 1)
@@ -333,7 +348,7 @@ def s_v3(net):
     net.mine(net.l2)
     gas['token.executeMint (head, drains slot 1)'] = [used(net.l2, e['tx']) for e in ex if e.get('tx')]
     check('v3 relay: the head executes and the next slot drains behind it', view('mintCount()(uint64)') == '2'
-          and int(view('balanceOf(address)(uint256)', net.alice)) == 150 * U, ex)
+          and int(view('balanceOf(address)(uint256)', net.alice)) == net_of(100 * U) + net_of(50 * U), ex)
     check('v3: the mint chain equals the vault deposit chain', clean())
     r = net.burn(ALICE_KEY, 30 * U)
     gas['token.burn'] = [int(r['gasUsed'], 16)]
@@ -342,7 +357,16 @@ def s_v3(net):
         net.vigia(i, 'sign')
     rel = [e for e in net.vigia(2, 'relay') if e.get('kind') == 'relay-release' and e.get('tx')]
     gas['vault.release (2-of-3 certificate)'] = [used(net.eth, e['tx']) for e in rel]
-    check('v3: an honest burn is paid (v2 release id with the chain fields)', net.bob() == 30 * U, net.bob())
+    check('v3: an honest burn is paid (v2 release id with the chain fields)', net.bob() == net_of(30 * U), net.bob())
+    if FEE_BPS:
+        fees = int(vault('feesAccrued()(uint64)'))
+        held = int(net.view(net.eth, net.usdc, 'balanceOf(address)(uint256)', net.vault).split()[0])
+        locked = int(vault('totalLocked()(uint64)'))
+        check('v3fee: the deposits net 5 bps, the release pays 5 bps less, and the fees are not backing',
+              fees == fee(100 * U) + fee(50 * U) + fee(30 * U) and locked == net_of(100 * U) + net_of(50 * U) - 30 * U
+              and held == locked + fees, (fees, locked, held))
+        check('v3fee: bUSDC supply equals totalLocked (1:1 on the net amounts)',
+              int(view('totalSupply()(uint256)')) == locked, (view('totalSupply()(uint256)'), locked))
 
     def guardian(name, **extra):
         (net.work / 'gpw').write_text('test-password\n')
@@ -385,7 +409,7 @@ def s_v3(net):
     check('v3 vigia: both burns made after the forgery are parked, none signed', len({e.get('burn') for e in held}) == 2
           and not any(e.get('kind') == 'release' and e.get('signed') for e in signed), signed[-6:])
     net.vigia(2, 'relay')
-    check('v3: nothing paid to Mallory or Bob after the forgery', net.bob() == 30 * U
+    check('v3: nothing paid to Mallory or Bob after the forgery', net.bob() == net_of(30 * U)
           and int(net.view(net.eth, net.usdc, 'balanceOf(address)(uint256)', net.mallory)) == 0)
     done = sh(sys.executable, HERE / 'signatario.py', '--config', net.cfgs[0], 'release', '--burn-tx', tx(rf), '--out', net.work / 'f.sig', ok=False)
     reason = json.loads(done.stdout).get('reason', '') if done.stdout.strip().startswith('{') else done.stdout[-300:]
@@ -395,7 +419,16 @@ def s_v3(net):
     check('v3 guardiao: mint-chain and mint findings open', 'mint-chain' in ids and any(str(i).startswith('mint:') for i in ids), (rc, ids, err[-300:]))
     rc, lines = reserves()
     check('v3 reservas: held, exit 2', rc == 2 and any(l.get('status') == 'held' for l in lines), lines)
-    check('v3 money: the vault still holds every real deposit not burned', int(vault('totalLocked()(uint64)')) == 120 * U)
+    check('v3 money: the vault still holds every real deposit not burned',
+          int(vault('totalLocked()(uint64)')) == net_of(100 * U) + net_of(50 * U) - 30 * U)
+    if FEE_BPS:
+        before = int(vault('feesAccrued()(uint64)'))
+        net.send(net.eth, MALLORY_KEY, net.vault, 'sweepFees()')
+        sink = int(net.view(net.eth, net.usdc, 'balanceOf(address)(uint256)', FEE_SINK).split()[0])
+        held = int(net.view(net.eth, net.usdc, 'balanceOf(address)(uint256)', net.vault).split()[0])
+        check('v3fee: anyone sweeps, only the fee recipient is paid, backing untouched',
+              sink == before and int(vault('feesAccrued()(uint64)')) == 0 and held == int(vault('totalLocked()(uint64)')),
+              (sink, before, held))
     print('GAS ' + json.dumps(gas), flush=True)
 
 
@@ -456,7 +489,7 @@ def s_v3remint(net):
 
 def main():
     project = Path(sys.argv[1]).resolve()
-    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint}[sys.argv[2]]
+    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:
