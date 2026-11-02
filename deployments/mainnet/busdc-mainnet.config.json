@@ -8,8 +8,10 @@
     "l2Build": "L2 mainnet v2.1 build: bloch-l2-evm (build commit `a39b04e`) against native 78d4921c (follower c18752fd, produce-dev fb0d5313, settled-rpc 18be911a; release unsigned); network.genesisHash = the pinned L2 genesis 632e45ae",
     "vault": "deploy the Ethereum vault first (busdc-vault-mainnet.config.json, tools/deploy-pontes/vault_pontes.py); its verify output fills ethereum.vault/route/vaultCodeHash/vaultCap/vaultGuard",
     "sequence": "docs/BUSDC-MAINNET-V2.md",
-    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator (the 7 signer addresses are set, operators are not); guardians.set[0..2].operator; ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 2 Ethereum guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)",
-    "launchDesign": "BridgedStablecoinV3 over ProvenanceSourceVault mode 1 (agents 87, 108, 109): mint chain, guardian cancel, 6-of-7 unpause. largeMintThreshold 0 (T = 0): every mint waits largeMintDelay (12 h) and stays cancellable by a guardian majority, so a forged mint is cancelled before it credits while 2 of 3 guardians live AND the forger queues fewer candidates than the guardians cancel. That flood bound is off-chain only (agents 129 F129-B, 109; docs/AUDIT-SCOPE-BRIDGE-V3.md section 6 limit 2): nothing on-chain caps the live candidates of a contested slot, and each guardian votes at most cancel_batch (32) per round (interval plus round time), so the guardians cancel about 32 forged mints per round; a forger who adds more than that for the whole 12 h delay outruns them, a candidate that credits holds every later exit (F3, limit 1), and every item past its deadline alerts. Exposed windows: the first grace (2,700 s) and the 72 h after a pause chain; a pause stops new candidates"
+    "TBD-owner": "source.revision; deployer.address (fresh hardware-wallet key, nonce 0, never 0x703a...); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator and .address (7 fresh L2 mint keys from the key ceremony); guardians.set[0..2].operator and .address (3 fresh L2 token guardian keys); ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 3 Ethereum vault guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)",
+    "launchDesign": "BridgedStablecoinV3 over ProvenanceSourceVault mode 1 (agents 87, 108, 109): mint chain, guardian cancel, 6-of-7 unpause. largeMintThreshold 0 (T = 0): every mint waits largeMintDelay (12 h) and stays cancellable by a guardian majority, so a forged mint is cancelled before it credits while 2 of 3 guardians live AND the forger queues fewer candidates than the guardians cancel. That flood bound is off-chain only (agents 129 F129-B, 109; docs/AUDIT-SCOPE-BRIDGE-V3.md section 6 limit 2): nothing on-chain caps the live candidates of a contested slot, and each guardian votes at most cancel_batch (32) per round (interval plus round time), so the guardians cancel about 32 forged mints per round; a forger who adds more than that for the whole 12 h delay outruns them, a candidate that credits holds every later exit (F3, limit 1), and every item past its deadline alerts. Exposed windows: the first grace (2,700 s) and the 72 h after a pause chain; a pause stops new candidates",
+    "keys": "Owner decision 2026-11-02 (agents 174, 175): the 22 addresses committed to the mainnet configs on 2026-10-14 (d3f8a1f, 0315afd), including the deployer 0x703a..., have no recorded holder and are replaced by TBD-owner; deploy_pontes.py and vault_pontes.py validate refuse them. Fill the roles from docs/BRIDGE-V3-KEY-CEREMONY.md and run key_inventory.py check (agent 174)",
+    "launchDecisions": "Owner decisions 2026-11-02 (agents 171, 175; docs/BUSDC-MAINNET-V2.md section 4.11): T = 0 enforced by the V3 constructor and by validate; instant cap 0; unpause, verifier switch and locked remint 6 of 7 (mintSwitch.threshold, validated); 3 L2 token guardians and 3 Ethereum vault guardians (BR-6, validated); guardians run vault_pause_on_mint true; signers' Ethereum halves run release_hold false"
   },
   "network": {
     "name": "bloch-l2-mainnet",
@@ -21,7 +23,7 @@
     "revision": null
   },
   "deployer": {
-    "address": "0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b",
+    "address": "TBD-owner",
     "startNonce": 0,
     "fundedBy": {
       "entity": "Bloch Inc (Safe v1.4.1, 3-of-5)",
@@ -44,7 +46,7 @@
     "vaultCodeHash": null,
     "vaultCap": null,
     "vaultGuard": {
-      "guardians": null,
+      "guardians": "TBD-owner",
       "pauseDuration": 259200,
       "pauseCooldown": 259200
     }
@@ -54,31 +56,31 @@
     "set": [
       {
         "operator": null,
-        "address": "0xa981e9A6fbb32626c6dd56b167860BCc7496E441"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x181d1331163F9486C8153B38d7C4A43F18CEfDe9"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x5bDB78421B38494040fcb504F79c99CD411Ea3a0"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x91EC58A2aCf42Ac2FF1B592D8fD37033C2Bdc82D"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x494856914ACC0f370A17227A51B830ADbF3A7E60"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x811f46cc76c71f045c0291bA4aCf46080322AaE9"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0x3D800a0023b8CA3284b0D13513661F36A96B0A63"
+        "address": "TBD-owner"
       }
     ]
   },
@@ -88,15 +90,15 @@
     "set": [
       {
         "operator": null,
-        "address": "0xDb5Ef90964ED561bF592D88a065e5f61248cc375"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0xC8578A95df5c948a5F09844Bf3A75F7Aa4fCd6e7"
+        "address": "TBD-owner"
       },
       {
         "operator": null,
-        "address": "0xB473Fa954CAB70a2132263f8b78FAbF236103c90"
+        "address": "TBD-owner"
       }
     ]
   },

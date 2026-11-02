@@ -38,6 +38,8 @@ DOMAIN = 'bloch.bridge.vault-deploy.v1'
 USDC_MAINNET = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 ETH_MAINNET, REHEARSAL_CHAIN = 1, 31337
 POLICY_SIGNERS, POLICY_THRESHOLD = 7, 5
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from deploy_pontes import LEGACY_ADDRESSES, POLICY_GUARDIANS, POLICY_SWITCH_THRESHOLD  # noqa: E402
 MAX_SIGNERS, MAX_GUARDIANS = 16, 7
 MIN_SWITCH_DELAY = 7 * 86400
 MIN_PAUSE, MAX_PAUSE = 3600, 14 * 86400
@@ -141,6 +143,10 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_uint(pol['windowLimit'], v['cap'], 1), 'vault.policy.windowLimit is undecided or above the cap')
     refuse(is_uint(pol['windowSeconds'], lo=1), 'vault.policy.windowSeconds is undecided')
     refuse(is_uint(pol['switchThreshold'], n, k), 'vault.policy.switchThreshold is undecided or outside threshold..n')
+    if not rehearsal:
+        refuse(pol['switchThreshold'] == POLICY_SWITCH_THRESHOLD,
+               f'mainnet policy: unpause and switch need {POLICY_SWITCH_THRESHOLD} of {POLICY_SIGNERS} (switchThreshold), '
+               f'config has {pol["switchThreshold"]}')
     refuse(is_uint(pol['switchDelay'], lo=MIN_SWITCH_DELAY), 'vault.policy.switchDelay is undecided or below 7 days')
     refuse(is_uint(pol['l2MinBurn'], lo=1), 'vault.policy.l2MinBurn is undecided')
     refuse(is_uint(pol['minDeposit'], pol['windowLimit'], pol['l2MinBurn']),
@@ -164,6 +170,9 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(len(set(guardians)) == len(guardians), 'duplicate guardian address')
     refuse(not set(guardians) & set(signers), 'a guardian is also a release signer (the constructor refuses it)')
     refuse(not set(gops) & set(ops), 'a guardian operator also runs a release signer (guardians must be independent)')
+    if not rehearsal:
+        refuse(len(guardians) == POLICY_GUARDIANS,
+               f'mainnet policy (BR-6): {POLICY_GUARDIANS} vault guardians, one per guardian operator; config has {len(guardians)}')
     refuse(is_uint(gd['pauseDuration'], MAX_PAUSE, MIN_PAUSE), 'vault.guard.pauseDuration outside 1 h..14 d')
     refuse(is_uint(gd['pauseCooldown'], lo=gd['pauseDuration']), 'vault.guard.pauseCooldown below pauseDuration')
 
@@ -176,6 +185,9 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_addr(dep['fundedBy']['safe']), 'deployer.fundedBy.safe is undecided (Bloch Inc Safe address)')
     refuse(dep['fundedBy']['safe'].lower() not in signers + guardians + [dep['address'].lower()],
            'the Safe must hold no role and must not be the deployer')
+    legacy = sorted(LEGACY_ADDRESSES & set(signers + guardians + [dep['address'].lower(), dep['fundedBy']['safe'].lower()]))
+    refuse(not legacy, f'committed 2026-10-14 address(es) with no recorded holder: {legacy}; use fresh keys '
+                       '(docs/BRIDGE-V3-KEY-CEREMONY.md)')
 
     if token_cfg is not None:
         lim, te = token_cfg.get('limits', {}), token_cfg.get('ethereum', {})

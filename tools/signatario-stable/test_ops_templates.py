@@ -44,6 +44,13 @@ for name in ('signer.template.json', 'relayer.template.json'):
     except l2_finality.NotFinal as e:
         check(f'control, {name} without l2_pins: refused on chain 700770', 'needs l2_pins' in e.reason, e.reason)
 
+# Owner decision 2026-11-02 (agent 175, agent 194): guardians pause the vault on an evidenced forged mint; signers' Ethereum
+# halves do not hold releases (redundant with the V3 pair, and it would also hold honest releases).
+g = json.loads((ops / 'guardiao.template.json').read_text())
+check('guardiao.template.json: vault_pause_on_mint true (owner decision)', g.get('vault_pause_on_mint') is True, g.get('vault_pause_on_mint'))
+e = json.loads((ops / 'eth-half.template.json').read_text())
+check('eth-half.template.json: release_hold false (owner decision)', e.get('release_hold') is False, e.get('release_hold'))
+
 failed = results.count(False)
 print(f'\n{len(results) - failed}/{len(results)} passed')
 raise SystemExit(1 if failed else 0)

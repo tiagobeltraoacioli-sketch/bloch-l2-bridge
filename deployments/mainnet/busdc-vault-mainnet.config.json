@@ -6,11 +6,11 @@
     "units": "1 USDC = 1e6 units (6 decimals)",
     "cap": "proposed 100,000 USDC, must equal the L2 supplyCap (busdc-mainnet.config.json, validated); the vault refuses deposits above it",
     "windowLimit": "proposed 10,000 USDC per 24 h = the L2 token bucket: the release token bucket (capacity; full refill in windowSeconds): a colluding release quorum takes at most this plus the refill; it is also the largest single deposit (the vault refuses more) and must equal the L2 bucketCapacity, which is the largest single burn (validated)",
-    "switchThreshold": "proposed 6 of 7: one more than the release threshold to propose or cancel the one-way light-client switch (owner decision)",
+    "switchThreshold": "6 of 7 (owner decision 2026-11-02, validated on mainnet): one more than the release threshold to end a pause early and to propose or cancel the one-way light-client switch",
     "switchDelay": "proposed 14 days (contract minimum 7 days): time for users and guardians to react to a proposed verifier (owner decision)",
-    "guard": "two independent pause-only guardians: guardiao.py (fast path) and sombra.py (proof path); 72 h pause, 72 h cooldown, as the L2 token",
+    "guard": "three independent pause-only guardians (BR-6, owner decision 2026-11-02): one Ethereum vault guardian key per guardian operator, the same 3 operators who hold the L2 token guardian keys; each runs guardiao.py (fast path, vault_pause_on_mint true) and sombra.py (proof path) runs beside it once ported; 72 h pause, 72 h cooldown, as the L2 token. validate refuses another count on mainnet. The guardian set is immutable",
     "minDeposit": "proposed 10 USDC: the smallest deposit, immutable. The constructor requires l2MinBurn <= minDeposit <= windowLimit; validate --token-config requires l2MinBurn == the L2 minBurn",
-    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, recommended distinct from their L2 mint keys); 2 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchThreshold, switchDelay",
+    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0, never a 2026-10-14 address); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, distinct from their L2 mint keys); 3 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchDelay",
     "provenance": "mode 1: the vault keeps a hash chain over its deposits and pays a burn only if the burn states the same chain (BridgedStablecoinV3). Deposit ids carry the vault nonce in their top 8 bytes. releaseDelay 0 and no mintVerifier: options 2 and 3 are not the launch design"
   },
   "ethereum": {
@@ -78,6 +78,10 @@
     },
     "guard": {
       "guardians": [
+        {
+          "operator": null,
+          "address": null
+        },
         {
           "operator": null,
           "address": null

@@ -48,6 +48,26 @@ DEV_CHAIN_IDS = (700771, 31337)
 GNB_MAINNET, GNB_TESTNET = 0x474E0001, 0x474E0002
 ETH_MAINNET = 1
 POLICY_SIGNERS, POLICY_THRESHOLD = 7, 5  # PONTES-MAINNET-CHECKLIST.md section 2 / section 6
+# Owner decisions 2026-11-02 (agents 171, 175; docs/BUSDC-MAINNET-V2.md 4.11): the unpause, verifier switch and locked remint
+# quorum is 6 of 7 on the token and the vault, and there are 3 L2 token guardians and 3 Ethereum vault guardians (BR-6).
+POLICY_SWITCH_THRESHOLD, POLICY_GUARDIANS = 6, 3
+# Committed to deployments/mainnet/*.config.json on 2026-10-14 (commits d3f8a1f, 0315afd): 7+7 signers, 3+3 guardians and the
+# 2 deployers, including 0x703a.... Who holds these keys is not recorded, so a threshold over them means nothing; the owner
+# had them replaced by TBD-owner (2026-11-02). The same list as LEGACY in key_inventory.py (agent 174, 005d4b7). Refused in
+# every role, on every network.
+LEGACY_ADDRESSES = frozenset(a.lower() for a in (
+    '0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b', '0xa64b47b03d5F1a7a961fE98597c01E471D4b504A',
+    '0xa981e9A6fbb32626c6dd56b167860BCc7496E441', '0x181d1331163F9486C8153B38d7C4A43F18CEfDe9',
+    '0x5bDB78421B38494040fcb504F79c99CD411Ea3a0', '0x91EC58A2aCf42Ac2FF1B592D8fD37033C2Bdc82D',
+    '0x494856914ACC0f370A17227A51B830ADbF3A7E60', '0x811f46cc76c71f045c0291bA4aCf46080322AaE9',
+    '0x3D800a0023b8CA3284b0D13513661F36A96B0A63', '0xDb5Ef90964ED561bF592D88a065e5f61248cc375',
+    '0xC8578A95df5c948a5F09844Bf3A75F7Aa4fCd6e7', '0xB473Fa954CAB70a2132263f8b78FAbF236103c90',
+    '0xb908e883581Ca4beE5061DaFc479B59A1Aa42741', '0x38b887B1f00fA03A7924F222110c1b096e236783',
+    '0x372e8A729B67842E135E517dA9E9A1AE05B48522', '0x35b1d46862D43b454DeB145FFa7B44B8fa46CEA8',
+    '0x39fbD26d0864E710E107d96CF1c97f7697DA9838', '0xc4552D49cA8E94960b43A95e3Df64a22C8d86cCA',
+    '0x80403e894B6D06f18a32040B3D4b80812584D726', '0x399849A60901965C3787172598bD2eEBCb72faad',
+    '0x3F6043Ae9BB695463A67751c8083E329B60BF6e8', '0xdCC271d790FC2a6140B30A962E6d6FEbd0d72F1F',
+))
 MAX_SIGNERS, MAX_GNB_SIGNERS, MAX_GUARDIANS = 16, 7, 7
 MAX_PAUSE, MIN_PAUSE, MAX_DELAY = 14 * 86400, 3600, 30 * 86400
 UINT64_MAX, UINT256_MAX = 2**64 - 1, 2**256 - 1
@@ -264,6 +284,11 @@ def validate(cfg, rehearsal):
     if not rehearsal:
         refuse(len(guardians) >= 1, 'mainnet policy: at least one independent pause-only guardian')
     refuse(dep['address'].lower() not in signers + guardians, 'the deployer must hold no role')
+    legacy = sorted(LEGACY_ADDRESSES & set([dep['address'].lower(), dep['fundedBy']['safe'].lower()] + signers + guardians))
+    refuse(not legacy, f'committed 2026-10-14 address(es) with no recorded holder: {legacy}; use fresh keys '
+                       '(docs/BRIDGE-V3-KEY-CEREMONY.md)')
+    if not rehearsal and bridge == 'stable':
+        refuse(len(guardians) == POLICY_GUARDIANS, f'mainnet policy (BR-6): {POLICY_GUARDIANS} L2 token guardians, config has {len(guardians)}')
     refuse(dep['fundedBy']['safe'].lower() not in signers + guardians, 'the Bloch Inc Safe must hold no bridge role')
 
     lim = cfg['limits']
@@ -311,6 +336,10 @@ def validate(cfg, rehearsal):
                'mintSwitch.threshold must be within the mint threshold .. the signer count')
         refuse(is_uint(ms['delay']) and ms['delay'] >= MIN_SWITCH_DELAY and ms['delay'] > lim['largeMintDelay'],
                'mintSwitch.delay must be at least 7 days and above largeMintDelay')
+        if not rehearsal:
+            refuse(ms['threshold'] == POLICY_SWITCH_THRESHOLD,
+                   f'mainnet policy: unpause, switch and locked remint need {POLICY_SWITCH_THRESHOLD} of {POLICY_SIGNERS} '
+                   f'(mintSwitch.threshold), config has {ms["threshold"]}')
         params['switchThreshold'], params['switchDelay'] = ms['threshold'], ms['delay']
         refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId is undecided')
         refuse(rehearsal or eth['chainId'] == ETH_MAINNET, 'mainnet policy: ethereum.chainId must be 1')
@@ -333,7 +362,10 @@ def validate(cfg, rehearsal):
                'ethereum.vaultGuard pauseDuration/pauseCooldown are undecided')
         refuse(bool(vgs) == (vg['pauseDuration'] > 0) and (vgs or vg['pauseCooldown'] == 0),
                'ethereum.vaultGuard: guardians need pauseDuration > 0; no guardians need zero durations')
-        refuse(rehearsal or vgs, 'mainnet policy: the vault needs at least one guardian')
+        refuse(rehearsal or len(vgs) == POLICY_GUARDIANS,
+               f'mainnet policy (BR-6): {POLICY_GUARDIANS} Ethereum vault guardians, config has {len(vgs)}')
+        refuse(not (LEGACY_ADDRESSES & set(vgs + [eth['vault'].lower()])),
+               'committed 2026-10-14 address in ethereum.vaultGuard or ethereum.vault: use fresh keys')
         refuse(not set(vgs) & set(signers), 'an L2 signer key is also a vault guardian')
         params.update(sourceChainId=eth['chainId'], sourceVault=eth['vault'].lower(), sourceRoute=eth['route'].lower(),
                       vaultCodeHash=eth['vaultCodeHash'].lower(), vaultCap=eth['vaultCap'],
@@ -354,6 +386,13 @@ def validate(cfg, rehearsal):
             refuse(t.get('l2_pins') == 'mainnet-v2', f'{name}: chain 700770 needs "l2_pins": "mainnet-v2" (signatario.py refuses without it)')
             refuse(bool(t.get('provenance')) == (tok['contract'] == STABLE_V3['contract']),
                    f'{name}: "provenance" must be {str(tok["contract"] == STABLE_V3["contract"]).lower()} for {tok["contract"]}')
+        # Owner decision 2026-11-02 (agent 175): guardians pause the vault on an evidenced forged mint, signers do not hold releases.
+        for name, key, want in (('guardiao.template.json', 'vault_pause_on_mint', True), ('eth-half.template.json', 'release_hold', False)):
+            try:
+                t = json.loads((ops / name).read_text())
+            except (OSError, ValueError) as e:
+                refuse(False, f'{name}: unreadable ({e})')
+            refuse(t.get(key) is want, f'{name}: "{key}" must be {str(want).lower()} (owner decision 2026-11-02)')
     if not rehearsal:
         # The L2 sequencer policy caps the gas USED by every transaction, exempt senders included (max_tx_gas, agents 90 and
         # 121): a higher limit here would only make the creation fail at the sequencer (agent 129, F129-C).

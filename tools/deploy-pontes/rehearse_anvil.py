@@ -93,7 +93,7 @@ def vault_rehearsal(url, work, token_cfg):
     vc['vault']['token'] = mock
     vc['vault']['signers']['set'] = [{'operator': f'vault-op-{i}', 'address': new_key()[1]} for i in range(7)]
     vc['vault']['guard']['guardians'] = [{'operator': f'vault-guardian-org-{i}', 'address': new_key()[1]}
-                                         for i in range(2)]
+                                         for i in range(3)]  # BR-6: 3 vault guardians (owner decision 2026-11-02)
     vpath = work / 'vault.config.json'
     vpath.write_text(json.dumps(vc, indent=2))
     rc, v = vtool('validate', '--config', vpath, '--rehearsal')
@@ -197,6 +197,10 @@ def vault_rehearsal(url, work, token_cfg):
     mainnet_refused('a switchDelay holders cannot exit within refused',
                     lambda c: c['vault']['policy'].update(windowLimit=c['vault']['cap'] // 100), 'exit')
     mainnet_refused('no guardian refused', lambda c: c['vault']['guard'].update(guardians=[]), '1..7')
+    mainnet_refused('2 vault guardians refused (BR-6: 3)',
+                    lambda c: c['vault']['guard'].update(guardians=c['vault']['guard']['guardians'][:2]), '3 vault guardians')
+    mainnet_refused('switchThreshold 5 refused (owner decision: 6 of 7)',
+                    lambda c: c['vault']['policy'].update(switchThreshold=5), '6 of 7')
     if vc['vault'].get('provenance'):
         mainnet_refused('a provenance vault outside mode 1 refused', lambda c: c['vault']['provenance'].update(mode=2), 'mode 1')
         tc = json.loads(json.dumps(token_cfg))
@@ -265,7 +269,7 @@ def source_vault(eth, work, provenance=False):
     k = lambda t: out(CAST, 'keccak', t)
     token = create('solidity-tests/BridgedStablecoin.t.sol:MockStable')
     signers = sorted(new_key()[1] for _ in range(3))
-    guardians = sorted((new_key()[1] for _ in range(2)), key=lambda a: int(a, 16))
+    guardians = sorted((new_key()[1] for _ in range(3)), key=lambda a: int(a, 16))  # BR-6: 3 vault guardians
     vault = create(VAULTS[provenance],
                    k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
                    '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800,1,1)',
@@ -403,7 +407,13 @@ def main():
                 lambda c: c['deployer'].update(startNonce=3), needle='fresh')
         refused('[policy] mainnet vault without guardians refused',
                 lambda c: c['ethereum'].update(vaultGuard={'guardians': [], 'pauseDuration': 0, 'pauseCooldown': 0}),
-                needle='at least one guardian')
+                needle='Ethereum vault guardians')
+        refused('[policy] mainnet unpause/switch quorum 5 of 7 refused (owner decision: 6 of 7)',
+                lambda c: c['mintSwitch'].update(threshold=5), needle='6 of 7')
+        refused('[policy] a committed 2026-10-14 deployer (0x703a...) refused',
+                lambda c: c['deployer'].update(address='0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b'), needle='2026-10-14')
+        refused('[policy] T > 0 refused (owner decision: T = 0)',
+                lambda c: c['limits'].update(largeMintThreshold=100 * 10**6), needle='largeMintThreshold must be 0')
         refused('[policy] unsorted vault guardians refused',
                 lambda c: c['ethereum']['vaultGuard'].update(guardians=c['ethereum']['vaultGuard']['guardians'][::-1]),
                 needle='ascending')

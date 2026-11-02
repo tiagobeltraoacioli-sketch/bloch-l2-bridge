@@ -1,5 +1,5 @@
 {
-  "_about": "Fast-path guardian (guardiao.py), operator independent of every signer. Its own L2 settled RPC (v2) and its own Ethereum node.",
+  "_about": "Fast-path guardian (guardiao.py), operator independent of every signer. Its own L2 settled RPC (v2) and its own Ethereum node. vault_pause_on_mint true: owner decision 2026-11-02 (agent 175): an evidenced forged mint also pauses the vault for 72 h, so new deposits stay out of a token that a coming forgery could hold.",
   "kind": "stable",
   "name": "busdc-mainnet",
   "l2_rpc": "http://127.0.0.1:18955",
