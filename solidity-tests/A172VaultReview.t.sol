@@ -434,12 +434,12 @@ contract A172VaultReviewTest {
         vault.release(r, c, s);
         (bool ok, bytes memory ret) = tryRelease(r);
         require(!ok && err(ret) == ProvenanceSourceVault.InvalidRelease.selector, "fresh certificate refused");
-        ProvenanceSourceVault.Release memory sameBurn = r;
-        sameBurn.nonce = 999;
+        ProvenanceSourceVault.Release memory sameBurn = cleanBurn(ALICE, 100 * uint64(U), 1);
+        sameBurn.nativeBurn = r.nativeBurn;
         (ok, ret) = tryRelease(sameBurn);
         require(!ok && err(ret) == ProvenanceSourceVault.InvalidRelease.selector, "same burn, other nonce");
-        ProvenanceSourceVault.Release memory sameNonce = r;
-        sameNonce.nativeBurn = keccak256("other burn");
+        ProvenanceSourceVault.Release memory sameNonce = cleanBurn(ALICE, 100 * uint64(U), 1);
+        sameNonce.nonce = r.nonce;
         (ok, ret) = tryRelease(sameNonce);
         require(!ok && err(ret) == ProvenanceSourceVault.InvalidRelease.selector, "same nonce, other burn");
     }
@@ -686,11 +686,16 @@ contract A172VaultReviewTest {
         release(cleanBurn(BOB, BUCKET, 3));
         ProvenanceSourceVault.Release memory big = cleanBurn(ALICE, BUCKET, 3);
         uint256 maxSeen;
+        uint256 loopGas;
         for (uint256 i; i < 200; ++i) {
             vm.warp(block.timestamp + 87);
             if (vault.availableToRelease() > maxSeen) maxSeen = vault.availableToRelease();
+            uint256 g = gasleft();
             release(cleanBurn(MALLORY, MIN, 3));
+            depositAs(MALLORY, MIN, MALLORY); // the 10 USDC goes round again
+            loopGas += g - gasleft();
         }
+        log("attacker loop gas per 87 s (release + re-deposit, incl. test overhead)", loopGas / 200);
         (bool ok, bytes memory ret) = tryRelease(big);
         require(!ok && err(ret) == ProvenanceSourceVault.RateLimited.selector, "large exit still starved");
         log("max bucket seen over 200 loops (units)", maxSeen);
