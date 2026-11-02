@@ -194,6 +194,8 @@ def main():
         check('reorg: it lands', rpc(url, 'eth_getTransactionReceipt', [again]) is not None)
         queued = v.send('l2', TO, call)
         check('reorg: the L2 side is not rewound by it', rpc(url, 'eth_getTransactionByHash', [queued]) is not None)
+        # A read before the token is visible says nothing about its version: it must not be kept for the life of the process.
+        check('version: an empty address gives no version', v.token_version() is None, v.token_version())
     finally:
         anvil.terminate()
         shutil.rmtree(work, ignore_errors=True)

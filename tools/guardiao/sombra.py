@@ -49,6 +49,7 @@ import time
 import urllib.request
 
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
+RESCAN_BLOCKS = 128  # Ethereum finality is about 64-96 blocks behind the head
 
 
 class Unverifiable(Exception):
@@ -120,6 +121,8 @@ class Sombra:
     def releases(self, head):
         """New Released logs of the vault up to `head`, kept in the state with their block time."""
         start = self.state.get('scanned', self.cfg.get('vault_from_block', 0) - 1) + 1
+        # The scan runs to `latest`, so a reorg can replace what it passed: read again back past finality. Known ids are skipped.
+        start = max(self.cfg.get('vault_from_block', 0), start - RESCAN_BLOCKS)
         chunk = int(self.cfg.get('log_chunk', 5000))
         times = {}
         while start <= head:

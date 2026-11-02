@@ -78,6 +78,8 @@ def pins_from_config(cfg):
     """`l2_pins`: "mainnet-v2" (the constants above) or a full object (rehearsals). None: legacy devnet mode."""
     raw = cfg.get('l2_pins')
     if raw is None:
+        if int(cfg.get('l2_chain_id', 0)) == int(MAINNET_V2['l2_chain_id']):
+            raise NotFinal('chain 700770 needs l2_pins: without them nothing pins the binaries, and l2_source "rpc" trusts an RPC for finality')
         return None
     if raw == 'mainnet-v2':
         pins = dict(MAINNET_V2)

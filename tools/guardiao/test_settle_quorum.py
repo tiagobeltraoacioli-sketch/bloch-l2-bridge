@@ -155,6 +155,54 @@ def main():
               and not paused(eth, vault4), (rc, lines, err))
         stub.down = False
 
+        # ── an L2 RPC that answers HTTP 200 with a JSON-RPC error is as blind as one that answers 503 ──
+        for code in (-32603, -32000, -32005, -32601):
+            name = f'rpcerr{-code}'
+            vault5, route5, token5 = bridge(name)
+            fund(vault5, 200 * U)
+            sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+            cfg5 = config(name, vault5, token5, l2_rpc=stub.url, provenance_grace_s=20)
+            run(cfg5)
+            stub.rpc_code = code
+            forged_release(vault5, route5, 1)
+            sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+            for _ in range(3):
+                rc, lines, err = run(cfg5)
+            check(f'json-rpc {code}: repeated errors are critical, exit 4', 'l2-read-failed' in health(name)['problems'] and rc == 4, (rc, health(name), lines[-2:]))
+            time.sleep(21)
+            rc, lines, err = run(cfg5)
+            check(f'json-rpc {code}: a forged release pauses the vault after its grace', paused(eth, vault5), (rc, lines[-3:], err))
+            stub.rpc_code = None
+
+        # ── -32001 from the Ethereum node is EIP-1474 "resource not found": a failed read, not a closed L2 level ──
+        vault6, route6, token6 = bridge('eth32001')
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        eth_stub = t.Replica(eth)
+        eth_stub.rpc_code = -32001
+        rc, lines, err = run(config('eth32001', vault6, token6, eth_rpc=eth_stub.url))
+        check('eth -32001: an unverifiable round, no crash', 'Traceback' not in err and rc == 1
+              and any(x.get('id') == 'unverifiable' for x in lines), (rc, lines, err[-300:]))
+        eth_stub.server.shutdown()
+
+        # ── default: a forged mint pauses the token only ──
+        vault8, route8, token8 = bridge('mint-default')
+        fund(vault8, 1000 * U)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        forge_mint(token8, 'fa', 5 * U)
+        rc, lines, err = run(config('mint-default', vault8, token8, provenance_grace_s=0))
+        check('mint default: the token pauses, the vault does not', paused(l2, token8) and not paused(eth, vault8), (rc, lines, err))
+
+        # ── vault_pause_on_mint: a forged mint holds the vault as well, because its tokens burn while the token is paused ──
+        vault7, route7, token7 = bridge('mint-hold')
+        fund(vault7, 1000 * U)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
+        cfg7 = config('mint-hold', vault7, token7, provenance_grace_s=0, vault_pause_on_mint=True)
+        forge_mint(token7, 'fb', 5 * U)  # below every threshold, with slack in the vault: `reserves` is quiet
+        rc, lines, err = run(cfg7)
+        ids = [x.get('id') for x in lines if x.get('kind') == 'alert' and x.get('severity') == 'hard']
+        check('mint hold: a mint finding with reserves quiet', 'reserves' not in ids and any(str(i).startswith('mint:') for i in ids), (rc, ids, err))
+        check('mint hold: the token and the vault both pause', paused(l2, token7) and paused(eth, vault7), (rc, lines, err))
+
         # ── a committee unpause must not silence a finding the same quorum could have caused ──
         vault, route, token = bridge('settle')
         sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)

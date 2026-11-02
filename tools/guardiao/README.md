@@ -125,7 +125,9 @@ own Ethereum key, distinct from its L2 key and from `sombra.py`'s). When a RELEA
 is due, the guardian also calls `guardianPause()` on the `ContextBoundSourceVault` (it must be one of the
 vault's guardians, checked every round): committee releases and deposits stop for the vault's
 `pauseDuration`. Nothing is sent while the vault is paused, in the cooldown after a committee unpause, or once
-it has switched to its light-client verifier (`vault-pause-skip`). A forged L2 mint pauses only the token.
+it has switched to its light-client verifier (`vault-pause-skip`). A forged L2 mint pauses only the token, unless `vault_pause_on_mint: true` (default false, an owner decision). Without it, forged tokens still burn and honest release keys
+certify the burn, while `reserves` stays quiet as long as unminted deposits leave slack: report 101, D6. With it, a false `mint:` finding also closes the vault for `pauseDuration` (72 h on
+mainnet), until a committee unpause settles it. See also `release_hold` in `tools/signatario-stable/eth_half.py`.
 This is the fast path (detection within `provenance_grace_s`, by default 30 min); `sombra.py` is the
 proof-based one. The vault lists both guardians; either one alone can pause.
 
@@ -226,7 +228,7 @@ need the L2, so they wait. With no earlier view there is nothing to compare, so 
 
 ### After a committee unpause
 
-A past-release finding (`release-unknown`, `release-mismatch`, `release-before-final`) first seen no later than the last committee unpause of the vault
+A past-release finding (`release-unknown`, `release-mismatch`, `release-before-final`) or the vault side of a `mint:` finding first seen no later than the last committee unpause of the vault
 (`guardianBlockedUntil - pauseCooldown`) starts no further vault pause. It stays open and alerted, with one `settled-by-unpause` line. A new release is a new finding, and `reserves` still
 sees any loss.
 

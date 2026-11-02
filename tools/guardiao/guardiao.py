@@ -97,6 +97,7 @@ class LevelClosed(Exception):
 
 class Unverifiable(Exception):
     """A read failed: no evidence either way (never a reason to pause)."""
+    l2_rpc_error = False  # l2_rpc answered with a JSON-RPC error that is not a contract revert
 
 
 def words(data):
@@ -233,10 +234,18 @@ class Guardian:
             self.l2_read_failed = self.l2_read_failed or url == self.l2
             raise Unverifiable(f'{method} on {url}: {e}') from e
         if 'error' in out:
-            if isinstance(out['error'], dict) and out['error'].get('code') == -32001:
+            # Only the settled RPC means "closed level" by this code. On an EIP-1474 node it is "resource not found": a failed read.
+            if url == self.l2 and isinstance(out['error'], dict) and out['error'].get('code') == -32001:
                 raise LevelClosed(f'{method}: {out["error"].get("message")}')
-            raise Unverifiable(f'{method}: {out["error"]}')
+            failure = Unverifiable(f'{method}: {out["error"]}')
+            failure.l2_rpc_error = url == self.l2 and not self.is_revert(out['error'])
+            raise failure
         return out['result']
+
+    @staticmethod
+    def is_revert(error):
+        """A contract's own answer (a wrong address, a token without a method), not a broken backend."""
+        return isinstance(error, dict) and (error.get('code') == 3 or 'revert' in str(error.get('message', '')).lower())
 
     def call(self, url, to, sig, *args, block='latest'):
         key = (sig, *[str(a) for a in args])
@@ -604,7 +613,7 @@ class Guardian:
         try:
             return self.full_round()
         except Unverifiable as e:
-            if not self.l2_read_failed:
+            if not (self.l2_read_failed or e.l2_rpc_error):
                 raise
             return self.blind_round(e)
 
@@ -722,8 +731,10 @@ class Guardian:
             del self.state['open'][fid]
         if due:
             # the vault first: an Ethereum transaction lands in seconds, an L2 one may wait for the next L2 block
-            vault_due = [f for f in due if f == 'reserves' or f.startswith(('release-unknown:', 'release-mismatch:',
-                                                                             'release-before-final:'))]
+            # `vault_pause_on_mint` (off until the owner decides): forged tokens burn while the token is paused, honest release keys certify the
+            # burn, and `reserves` stays quiet while unminted deposits leave slack. The cost: a false `mint:` finding closes the vault for 72 h.
+            kinds = ('release-unknown:', 'release-mismatch:', 'release-before-final:') + (('mint:',) if self.cfg.get('vault_pause_on_mint') else ())
+            vault_due = [f for f in due if f == 'reserves' or f.startswith(kinds)]
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
                 self.pause_vault(vault_due)
@@ -740,8 +751,8 @@ class Guardian:
         return blocked - uint(self.call(eth, vault, 'pauseCooldown()')[0]) if blocked else 0
 
     def not_settled(self, due):
-        """Drop the past-release findings a committee unpause of the vault settled, so a reviewed false positive stops pausing it.
-        Only those: the funds have moved, a new release is a new finding, and `reserves` still sees any loss. `reserves` itself is
+        """Drop the findings a committee unpause of the vault settled, so a reviewed false positive stops pausing it. Past releases and
+        `mint:` findings, whose token side stays open: the funds have moved, a new release is a new finding, and `reserves` still sees any loss. `reserves` itself is
         never settled, because a quorum could otherwise pause, unpause, and leave a real shortfall unwatched. A failed read settles nothing."""
         try:
             at = self.vault_unpaused_at()

@@ -67,6 +67,7 @@ class Replica:
 
     def __init__(self, upstream):
         self.frozen, self.refused, self.down = None, 0, False
+        self.rpc_code = None  # answer everything with this JSON-RPC error, over a healthy HTTP 200
         self.closed, self.age = False, None  # stub finality; with REAL_SETTLED_RPC the real binary answers instead
         self.real = None
         me = self
@@ -82,6 +83,8 @@ class Replica:
                     self.send_header('content-length', '0')
                     self.end_headers()
                     return
+                if me.rpc_code is not None:
+                    return self.reply({'jsonrpc': '2.0', 'id': req.get('id'), 'error': {'code': me.rpc_code, 'message': 'backend error'}})
                 if req.get('method') == 'eth_sendRawTransaction':
                     me.refused += 1
                     return self.reply({'jsonrpc': '2.0', 'id': req.get('id'),
