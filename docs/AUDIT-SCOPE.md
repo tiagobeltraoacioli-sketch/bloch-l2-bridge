@@ -240,6 +240,16 @@ move. The constructor requires `l2MinBurn <= minDeposit <= windowLimit`, but `l2
 an Ethereum contract cannot read the L2. A wrong declaration is caught off-chain by `vault_pontes.py validate --token-config` and
 `verify`, not by the contract. A balance can still fall below `minBurn` by L2 transfers or partial burns; the holder then tops up.
 
+**A used vault is never reused for a new token.** The vault does not know its token, and a new token's constructor accepts any vault. With a fresh
+signer database, a deposit mints again on the new token, with no finding on either token's guardian. The new token's burn nonce restarts at 1, so its burn
+hits `releasedNonce` and cannot exit. Nothing on-chain refuses this: `deploy_pontes.py run` and `vault_pontes.py verify --unused` do.
+
+**Forged mints with honest release keys.** Mint keys alone can credit tokens up to the bucket. A guardian pause of the token does not stop burns, and no path cancels a queued
+mint: a pause delays it. `reserves` stays quiet while unminted deposits leave slack. So by default the vault can pay out a forged balance, up to the release bucket. Two optional
+off-chain holds exist, off until the owner decides. `vault_pause_on_mint` on a guardian pauses the vault on a `mint:` finding; a false finding closes the vault for `pauseDuration`
+(72 h). `release_hold` on a signer's Ethereum half refuses releases while the token shows a mint with no matching finalized deposit; a forged mint then stops every exit until operators
+list its id in `accepted_unbacked_mints`.
+
 ## 6. Live evidence index
 
 Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB-SMH = GnB-SMH mainnet.

@@ -17,7 +17,7 @@ One reviewed JSON config per bridge (deployments/mainnet/*.config.json); `null` 
             every immutable linked (its keccak is what `cast code` will return). Deterministic: a second
             reviewer regenerates it byte for byte.
   run       read-only preflight (chain id, genesis hash, deployer nonce at `latest`, empty target, balance,
-            gas price cap) and a dry run (eth_call of the init code must return the planned runtime code).
+            gas price cap; stable: --source-rpc ETH_URL is required, and a vault with a deposit is refused) and a dry run (eth_call of the init code must return the planned runtime code).
             With --broadcast --confirm <configSha256>: signs ONE legacy creation offline with `cast mktx`
             (the settled L2 RPC has no "pending" tag; signer options go before --create), checks the
             signed transaction, writes BROADCAST, publishes it and waits for the receipt.
@@ -548,6 +548,17 @@ def record(plan, init_code, rpc, broadcast_file):
 
 
 # ── verify ──────────────────────────────────────────────────────────────────
+def unused_vault(plan, source_rpc):
+    """One vault, one token, for life. A new token over a used vault mints its old deposits again, and its burn nonces restart under
+    releases already spent. Checked before a token deploys, not in `verify`, which runs again after deposits."""
+    refuse(source_rpc, 'stable: run needs --source-rpc (own Ethereum node) to check the vault is unused')
+    sv, eth = plan['sourceVault'], Rpc(source_rpc)
+    refuse(int(eth('eth_chainId', []), 16) == sv['chainId'], 'source RPC serves another chain')
+    for tag in ('finalized', 'latest'):
+        count = int(str(json.loads(eth.call(sv['address'], 'depositCount()', block=tag, returns='(uint64)'))[0]).split()[0])
+        refuse(count == 0, f'the vault has taken {count} deposits at {tag}: a new token needs a new vault')
+
+
 def verify(plan, rec, rpc, block_tag, source_rpc=None):
     refuse(rec.get('configSha256') == plan['configSha256'] and rec.get('address') == plan['contract']['address'],
            'the deployment record is for another config or address')
@@ -686,6 +697,8 @@ def main(argv):
         if opts['broadcast']:
             refuse(opts.get('confirm') == plan['configSha256'], f'--broadcast needs --confirm {plan["configSha256"]}')
         checked = preflight(plan, rpc)
+        if plan['bridge'] == 'stable':
+            unused_vault(plan, opts.get('sourceRpc'))
         sim = dry_run(plan, init_code, rpc)
         if not opts['broadcast']:
             return {'decision': 'dry-run', 'configSha256': plan['configSha256'], 'address': plan['contract']['address'],

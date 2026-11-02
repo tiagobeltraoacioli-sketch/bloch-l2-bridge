@@ -5,7 +5,8 @@ deploys anything. Contracts `WrappedGnBV2` and `BridgedStablecoinV2` (shared cor
 are **UNAUDITED**; audits come before any cap is raised (and preferably before launch).
 
 Ground rules: no owner, setter, upgrade or recurring signature; every limit is a constructor immutable;
-a change of any parameter is a new contract plus an assisted migration. Mainnet L2 chain id **700770**
+a change of any parameter is a new contract plus an assisted migration. A new token always gets a new vault: a used vault
+is never reused (`docs/BUSDC-MAINNET-V2.md`, section 4.5). Mainnet L2 chain id **700770**
 (devnet4 700771 and anvil 31337 are rehearsal-only).
 
 ## 1. Roles
@@ -96,7 +97,7 @@ What the tool enforces:
 3. `plan --config <c> --write deployments/mainnet/<bridge>.plan.json`; a second reviewer regenerates it.
 4. `python3 tools/deploy-pontes/rehearse_anvil.py` must end with `REHEARSAL OK`.
 5. Bloch Inc (Safe) sends gas to the deployer; nothing else is sent from it.
-6. Dry run: `run --config <c> --plan <p> --rpc <own L2 node>`.
+6. Dry run: `run --config <c> --plan <p> --rpc <own L2 node> --source-rpc <own Ethereum node>` (bUSDC: a vault that has taken a deposit is refused, for one vault, one token).
 7. Broadcast: `run ... --broadcast --confirm <configSha256> --write <bridge>.broadcast.json -- --ledger`
    (or `--keystore F --password-file P`).
 8. `record ... --broadcast-file <bridge>.broadcast.json --write deployments/mainnet/<bridge>.deployment.json`.

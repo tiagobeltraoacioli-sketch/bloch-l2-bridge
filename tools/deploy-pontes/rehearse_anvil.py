@@ -264,6 +264,7 @@ def source_vault(eth, work):
 
 def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=None):
     tag = f'[{name}]'
+    src = ['--source-rpc', source_rpc] if source_rpc else []
     c = work / f'{name}.config.json'
     c.write_text(json.dumps(cfg, indent=2))
     rc, v = tool('validate', '--config', c, *flags)
@@ -273,49 +274,58 @@ def full_flow(name, cfg, wallet, url, work, flags, source_rpc=None, other_rpc=No
     rc, p = tool('plan', '--config', c, *flags, '--write', plan)
     rc2, p2 = tool('plan', '--config', c, *flags)
     check(f'{tag} plan is deterministic', rc == 0 and rc2 == 0 and p == p2 and p['configSha256'] == sha, (p, p2))
-    rc, dry = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
+    rc, dry = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src)
     check(f'{tag} dry run: preflight + simulated runtime == planned', rc == 0 and dry.get('decision') == 'dry-run'
           and dry.get('address') == p['contract']['address'], dry)
+    if source_rpc:
+        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
+        check(f'{tag} run refused without --source-rpc', rc == 1 and '--source-rpc' in r.get('reason', ''), r)
+        # A vault that answers 1 to depositCount(), on a snapshot: one vault, one token.
+        snap = out(CAST, 'rpc', 'evm_snapshot', '--rpc-url', source_rpc).strip('"')
+        sh(CAST, 'rpc', 'anvil_setCode', p['sourceVault']['address'], '0x600160005260206000f3', '--rpc-url', source_rpc)
+        sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', source_rpc)
+        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src)
+        check(f'{tag} a used vault is refused', rc == 1 and 'new vault' in r.get('reason', ''), r)
+        sh(CAST, 'rpc', 'evm_revert', snap, '--rpc-url', source_rpc)
     bfile = work / f'{name}.broadcast.json'
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--write', bfile,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast', '--write', bfile,
                  '--', *wallet)
     check(f'{tag} broadcast refused without --confirm', rc == 1 and '--confirm' in r.get('reason', ''), r)
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', '0x' + '0' * 64,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast', '--confirm', '0x' + '0' * 64,
                  '--write', bfile, '--', *wallet)
     check(f'{tag} broadcast refused with a wrong --confirm', rc == 1 and '--confirm' in r.get('reason', ''), r)
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', sha,
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast', '--confirm', sha,
                  '--write', bfile, '--', '--private-key', ANVIL_KEY)
     check(f'{tag} broadcast refused with a key that is not the deployer', rc == 1 and 'signing key' in
           r.get('reason', ''), r)
-    rc, sent = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast', '--confirm', sha,
+    rc, sent = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast', '--confirm', sha,
                     '--write', bfile, '--', *wallet)
     check(f'{tag} broadcast (offline-signed creation) lands at the planned address', rc == 0
           and sent.get('contractAddress') == p['contract']['address'], sent)
     rec = work / f'{name}.record.json'
-    rc, r = tool('record', '--config', c, '--plan', plan, '--rpc', url, *flags, '--broadcast-file', bfile,
+    rc, r = tool('record', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--broadcast-file', bfile,
                  '--write', rec)
     check(f'{tag} record re-reads the deployment from the chain', rc == 0 and r.get('decision') == 'recorded', r)
-    src = ['--source-rpc', source_rpc] if source_rpc else []
-    rc, r = tool('verify', '--config', c, '--plan', plan, '--rpc', url, *flags, '--record', rec, *src)
+    rc, r = tool('verify', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--record', rec, *src)
     check(f'{tag} verify refuses before the deployment is finalized', rc == 1 and 'finalized' in r.get('reason', ''), r)
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', url)
-    rc, r = tool('verify', '--config', c, '--plan', plan, '--rpc', url, *flags, '--record', rec, *src)
+    rc, r = tool('verify', '--config', c, '--plan', plan, '--rpc', url, *flags, *src, '--record', rec, *src)
     check(f'{tag} verify at finalized: code hash, immutables, signers, guardians, no role for deployer/Safe',
           rc == 0 and r.get('decision') == 'verified' and r['checked']['signers'] == p['expected']['signers']
           and r['state']['bucketLevel'] == p['expected']['bucketCapacity'], r)
     onchain = out(CAST, 'keccak', out(CAST, 'code', p['contract']['address'], '--rpc-url', url)).lower()
     check(f'{tag} on-chain runtime keccak == planned (immutables linked offline)',
           onchain == p['contract']['runtimeCodeHash'], (onchain, p['contract']['runtimeCodeHash']))
-    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags)
+    rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', url, *flags, *src)
     check(f'{tag} a second run is refused (nonce moved)', rc == 1 and 'nonce' in r.get('reason', ''), r)
     bad = json.loads(plan.read_text())
     bad['expected']['threshold'] += 1
     badp = work / f'{name}.bad-plan.json'
     badp.write_text(json.dumps(bad))
-    rc, r = tool('run', '--config', c, '--plan', badp, '--rpc', url, *flags)
+    rc, r = tool('run', '--config', c, '--plan', badp, '--rpc', url, *flags, *src)
     check(f'{tag} a tampered plan is refused', rc == 1 and 'plan differs' in r.get('reason', ''), r)
     if other_rpc:
-        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', other_rpc, *flags)
+        rc, r = tool('run', '--config', c, '--plan', plan, '--rpc', other_rpc, *flags, *src)
         check(f'{tag} the plan is refused on another chain', rc == 1 and 'chain id' in r.get('reason', ''), r)
     return p
 

@@ -3,7 +3,7 @@
 
   vault_pontes.py validate --config V [--token-config BUSDC] [--rehearsal]
   vault_pontes.py args     --config V [--rehearsal]
-  vault_pontes.py verify   --config V --rpc ETH_URL --address VAULT [--block finalized] [--rehearsal]
+  vault_pontes.py verify   --config V --rpc ETH_URL --address VAULT [--block finalized] [--unused] [--rehearsal]
 
 One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, domain
 `bloch.bridge.vault-deploy.v1`); `null` = undecided and refused.
@@ -204,7 +204,7 @@ def rpc(url, method, params):
     return out['result']
 
 
-def verify(cfg, norm, url, address, block):
+def verify(cfg, norm, url, address, block, unused=False):
     v = cfg['vault']
     refuse(int(rpc(url, 'eth_chainId', []), 16) == cfg['ethereum']['chainId'], 'the RPC serves another chain')
     tag = rpc(url, 'eth_getBlockByNumber', [block, False])
@@ -228,7 +228,7 @@ def verify(cfg, norm, url, address, block):
         'pauseCooldown()(uint64)': str(v['guard']['pauseCooldown']), 'decimals()(uint8)': '6',
         'signerCount()(uint256)': str(len(norm['signers'])), 'guardianCount()(uint256)': str(len(norm['guardians'])),
         'verifier()(address)': '0x' + '00' * 20, 'proposedVerifier()(address)': '0x' + '00' * 20,
-        'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositsEnabled()(bool)': None,
+        'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
     checked, state = {}, {}
     for sig, want in expect.items():
@@ -243,6 +243,10 @@ def verify(cfg, norm, url, address, block):
     for i, a in enumerate(norm['guardians']):
         refuse(get('guardians(uint256)(address)', i).lower() == a, f'guardians({i}) differs from the config')
     route = get('routeId()(bytes32)').lower()
+    if unused:
+        # A new token over a used vault mints its old deposits again, and its burn nonces restart under releases already spent.
+        refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
+               f'{state["totalLocked"]}): a new token needs a new vault')
     code_hash = cast('keccak', code).lower()
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
@@ -275,7 +279,7 @@ def main():
                                 '--constructor-args', *ctor]}
         else:
             refuse(opt('--rpc') and is_addr(opt('--address')), '--rpc and --address are required')
-            result = {'configSha256': sha, **verify(cfg, norm, opt('--rpc'), opt('--address'), opt('--block', 'finalized'))}
+            result = {'configSha256': sha, **verify(cfg, norm, opt('--rpc'), opt('--address'), opt('--block', 'finalized'), '--unused' in args)}
     except Refused as e:
         print(json.dumps({'decision': 'refused', 'reason': str(e)}, indent=2))
         raise SystemExit(1)

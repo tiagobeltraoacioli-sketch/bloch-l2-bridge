@@ -109,13 +109,17 @@ planned is not repaired: new deployer key, new review.
 ### 4.4 Verify at Ethereum finality (~13 min later)
 
 ```
-python3 tools/deploy-pontes/vault_pontes.py verify --config deployments/mainnet/busdc-vault-mainnet.config.json --rpc "$ETH_RPC" --address "$VAULT"
+python3 tools/deploy-pontes/vault_pontes.py verify --config deployments/mainnet/busdc-vault-mainnet.config.json --rpc "$ETH_RPC" --address "$VAULT" --unused
 ```
 
-It must say `verified`. Copy `busdcEthereum` into `ethereum` of `busdc-mainnet.config.json` and `ethHalf`
+It must say `verified`. `--unused` refuses a vault that has taken a deposit: **a token never goes over a used vault.** Copy `busdcEthereum` into `ethereum` of `busdc-mainnet.config.json` and `ethHalf`
 into every signer's `eth-half.json`. `state.depositsEnabled` and `state.releasesEnabled` are `false`.
 
 ### 4.5 Deploy the L2 token
+
+**One token, one vault, for life.** Never point a new token at a vault that has taken a deposit, including for a migration or a change of
+parameter. Its signers would mint the old deposits a second time with no contract or guardian finding, and its burn nonces restart at 1,
+so a burn collides with `releasedNonce` and cannot exit (`docs/AUDIT-SCOPE.md`, section 5). A new token gets a new vault.
 
 Follow `docs/BRIDGES-MAINNET.md` section 4 (steps 2–9) with `deploy_pontes.py`: `validate`, `plan`
 (second reviewer regenerates), `rehearse_anvil.py` = `REHEARSAL OK`, dry `run` against `L2_RPC`,
