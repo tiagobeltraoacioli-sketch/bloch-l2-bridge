@@ -137,7 +137,7 @@ def main():
         r = send(l2, DEPLOYER, token, 'proposeVerifier(address,uint64,uint256,bytes)', accept, '0', until, concat(d, 6))
         check('six signers propose', r['status'] == '0x1')
         rc, lines, err = guardian()
-        check('a pending switch is a soft guardian alert', rc == 3 and any(str(l.get('id', '')).startswith('mint-verifier-proposed:') for l in lines), (rc, lines, err))
+        check('a pending switch is a critical guardian problem (BR-3, a266bb2)', rc == 4 and any(l.get('severity') == 'critical' and str(l.get('id', '')).startswith('mint-verifier-proposed:') for l in lines), (rc, lines, err))
 
         warp(1209600)
         r = send(l2, DEPLOYER, token, 'activateVerifier()')
