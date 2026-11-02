@@ -68,6 +68,10 @@ window, and keeps a database that refuses to sign two different releases for one
 
 **Provisional pin:** `l2_finality.MAINNET_V2` holds the provisional v2.1 settled-RPC and produce-dev hashes, marked by
 `SETTLED_RPC_PIN_PROVISIONAL`, until the owner signs the v2.1 release. Do not deploy signers while it is `True`.
+**The L2 is planned to launch on the next build, not v2.1** (release `bloch-l2-2026-11-02-next-native-78d4921c`, signing target
+`116bfaba…`: follower `cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `e5754d05…`). Against that build `check_binaries`
+refuses every pinned role, so `l2_pins: "mainnet-v2"` fails closed. `MAINNET_V2` must move to the build the owner signs
+before any signer is deployed (code change, not made on this branch).
 
 ## Config
 
