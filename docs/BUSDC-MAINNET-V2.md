@@ -105,13 +105,13 @@ runs both and compares `configSha256` and the arguments.
 ### 4.3 Deploy the vault (deposits and releases start disabled)
 
 Bloch Inc's Safe sends the deployer only the gas (a mainnet-shaped vault creation, 7 signers and 2
-guardians, used 3,351,987 gas on anvil; at 30 gwei that is ~0.101 ETH, so send 0.15 ETH). Then, with the ten arguments from 4.2 in order (`ARG1` … `ARG10`):
+guardians, used 3,351,987 gas on anvil; at 30 gwei that is ~0.101 ETH, so send 0.15 ETH). Then, with the eleven arguments from 4.2 in order (`ARG1` … `ARG11`; the eleventh is the Provenance policy `(1,0,0x0000000000000000000000000000000000000000)`). The 3.35 M gas above is the RC vault; the V3 vault is larger, so measure it in the rehearsal:
 
 ```
-forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
+forge create --rpc-url "$ETH_RPC" --ledger contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10" "$ARG11"
 ```
 ```
-forge create --rpc-url "$ETH_RPC" --ledger --broadcast contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10"
+forge create --rpc-url "$ETH_RPC" --ledger --broadcast contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault --constructor-args "$ARG1" "$ARG2" "$ARG3" "$ARG4" "$ARG5" "$ARG6" "$ARG7" "$ARG8" "$ARG9" "$ARG10" "$ARG11"
 ```
 
 `windowLimit` must equal the token's `bucketCapacity`, `l2MinBurn` its `minBurn`, and the cap its `supplyCap` (`validate --token-config`). The first is the dry run; the `forge` line that `args` prints is that dry run too.

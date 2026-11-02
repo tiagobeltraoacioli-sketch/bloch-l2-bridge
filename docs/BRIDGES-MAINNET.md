@@ -1,7 +1,7 @@
 # Bridges v1.1 on the Bloch L2 mainnet: parameters and deployment
 
 Status 2026-10-14, branch `feat/pontes-mainnet-deploy` (from `feat/pontes-v11` `da4a26c`). Nothing here
-deploys anything. Contracts `WrappedGnBV2` and `BridgedStablecoinV2` (shared core `SignerMintedToken`)
+deploys anything. Contracts `WrappedGnBV2` and `BridgedStablecoinV3` over `ProvenanceSourceVault` (shared core `SignerMintedToken`; `BridgedStablecoinV2` remains for the RC pair)
 are **UNAUDITED**; audits come before any cap is raised (and preferably before launch).
 
 Ground rules: no owner, setter, upgrade or recurring signature; every limit is a constructor immutable;
@@ -30,7 +30,7 @@ Units: wGSMH 8 decimals (1 GSMH = 1e8), bUSDC 6 decimals (1 USDC = 1e6).
 | `supplyCap` | 30 GSMH (`3000000000`) | 100,000 USDC (`100000000000`) | wGSMH: GnB-SMH mainnet was just reset and the pilot is 30 GSMH, so the L2 can never hold more than the pilot. bUSDC: checklist §6 (≤ 100k); must also be ≤ the vault `cap` (validated, and `verify --source-rpc` reads the vault) |
 | `bucketCapacity` | 10 GSMH (`1000000000`) | 10,000 USDC (`10000000000`) | Token bucket (Chainlink CCIP style): the most a full key compromise can mint before refill. wGSMH: 1/3 of the pilot per day (the checklist's "1% of circulating supply" has no meaning right after a reset; revisit when supply is known). bUSDC: checklist §6 |
 | `refillPerSecond` | `11574` (= 10 GSMH / 86400, floor) | `115740` (= 10,000 USDC / 86400, floor) | Full refill in 24 h (86,400.6 s after flooring); continuous, so no window boundary lets 2x through |
-| `largeMintThreshold` | 1 GSMH (`100000000`) | 1,000 USDC (`1000000000`) | 10% of the bucket capacity (checklist §6): larger mints are queued |
+| `largeMintThreshold` | 1 GSMH (`100000000`) | 0 (T = 0, the V3 launch design: every mint waits `largeMintDelay` and stays cancellable; T > 0 needs a settlement path, AUDIT-SCOPE 5.x) | larger mints are queued |
 | `largeMintDelay` | 12 h (`43200`) | 12 h (`43200`) | Wormhole-governor style delay; gives guardians time to pause before a queued mint becomes executable |
 | `minBurn` | 0.01 GSMH (`1000000`) | 10 USDC (`10000000`) | Every burn costs a release on the source chain (a GnB-SMH policy transaction / an Ethereum `vault.release` paid by the relayer); dust burns would be uneconomic and spam the signers. Small enough not to trap users |
 | `pauseDuration` | 72 h (`259200`) | 72 h (`259200`) | Checklist §3: long enough to investigate and coordinate a response; expires by itself |

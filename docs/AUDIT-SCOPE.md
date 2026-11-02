@@ -267,6 +267,34 @@ Two off-chain holds remain as alert layers: `vault_pause_on_mint` on a guardian 
 finding, and a false one closes the vault for `pauseDuration` (72 h); `release_hold` on a signer's Ethereum half refuses releases while the token shows
 a mint with no matching finalized deposit, until operators list its id in `accepted_unbacked_mints`.
 
+### 5.x The V3 launch design (agents 87, 108, 109, 111)
+
+The committed mainnet configs select `BridgedStablecoinV3` over `ProvenanceSourceVault` in mode 1 with
+`largeMintThreshold = 0` (T = 0), and every daemon with `provenance: true`.
+
+- **Deposit ids name their slot.** `ProvenanceSourceVault.depositId` puts the vault nonce in the top 8 bytes and the low
+  24 bytes of sha256("BLOCH-USDT-DEPOSIT-v2", route, nonce, sender, amount, pqRecipientHash) below it. Every V3 mint
+  path requires `slotFor(id) == depositNonce` (`WrongSlot`), so a real deposit cannot be minted into another deposit's
+  slot (agent 111 F1, a permanent lock at a97c3cb).
+- **Contested slots.** A guardian cancel marks its slot contested. Mints for a contested slot do not hold it: each queues
+  as a candidate, the first to execute credits the slot and closes it, and `dropStale` lets anyone drop a candidate of a
+  slot that another id credited. A forger who refills a freed slot cannot keep the real deposit out while the guardians
+  cancel the refills (111 F2). The token cannot see the vault, so it cannot accept only the deposit the vault recorded;
+  that needs a proof (the mint switch).
+- **Locked remint.** A remint signed by `switchThreshold` (6 of 7) replaces a pending cancellable remint of the same
+  generation, and is itself never cancelled or replaced (111 F2).
+- **Instant bucket.** A queued mint that took instant capacity gives it back when cancelled or dropped (111 F4).
+- **Held exits (known limit, 111 F3).** A credited mint with no deposit behind it makes every later burn unpayable, on
+  the committee path and after the vault's switch, because `_checkRelease` checks the chain on both. No settlement path
+  exists. Funds are not paid out wrongly, and they are not released either. T = 0 is the launch default because then
+  every mint waits 12 h and stays cancellable by 2 of 3 guardians, so a forgery credits only if the guardians miss it for
+  12 h. **T > 0 needs a settlement path before it can be used**: with T > 0, 5 mint keys can freeze every exit with one
+  instant unit, and no guardian can prevent it.
+- **What the daemons do.** vigia relays mints in slot order and executes only at the credit head (`isCreditHead`), and
+  parks burns the vault would refuse (`release-held-provenance`). guardiao raises `mint-chain` (hard, alert only) when
+  `mintHead` differs from `chainHeadAt(mintCount)`; reservas reports `held` (exit 2). The bridge page refuses a burn while
+  the chain is not clean, at finalized or at latest.
+
 ## 6. Live evidence index
 
 Ethereum = anvil 11155111 on 45.77.142.123:18950. L2 = Bloch devnet4 (700771). GnB-SMH = GnB-SMH mainnet.
