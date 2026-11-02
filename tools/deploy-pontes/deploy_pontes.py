@@ -369,6 +369,7 @@ def immutable_values(p):
     else:
         v.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'],
                  switchThreshold=p['switchThreshold'], switchDelay=p['switchDelay'])
+        v['cancelQuorum'] = len(p['guardians']) // 2 + 1 if p['guardians'] else 0
     return v
 
 
@@ -417,7 +418,8 @@ def make_plan(cfg, rehearsal, build=True):
         expected['gnbChainId'] = p['gnbChainId']
     else:
         expected.update(sourceChainId=p['sourceChainId'], sourceVault=p['sourceVault'], sourceRoute=p['sourceRoute'],
-                        switchThreshold=p['switchThreshold'], switchDelay=p['switchDelay'])
+                        switchThreshold=p['switchThreshold'], switchDelay=p['switchDelay'],
+                        cancelQuorum=len(p['guardians']) // 2 + 1 if p['guardians'] else 0)
     plan = {'domain': DOMAIN, 'bridge': p['bridge'], 'configSha256': config_sha256(cfg),
             'chain': {'id': p['chainId'], 'genesisHash': cfg['network']['genesisHash'].lower(),
                       'rehearsal': cfg['network']['rehearsal']},
@@ -594,7 +596,8 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
     else:
         scalar += [('sourceChainId', 'sourceChainId()', '(uint256)'), ('sourceVault', 'sourceVault()', '(address)'),
                    ('sourceRoute', 'sourceRoute()', '(bytes32)'),
-                   ('switchThreshold', 'switchThreshold()', '(uint256)'), ('switchDelay', 'switchDelay()', '(uint64)')]
+                   ('switchThreshold', 'switchThreshold()', '(uint256)'), ('switchDelay', 'switchDelay()', '(uint64)'),
+                   ('cancelQuorum', 'cancelQuorum()', '(uint256)')]
     for key, sig, ret in scalar:
         got = get(sig, ret)
         got = got.lower() if isinstance(got, str) and got.startswith('0x') else int(str(got).split()[0])

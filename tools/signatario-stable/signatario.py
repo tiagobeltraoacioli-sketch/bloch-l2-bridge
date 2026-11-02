@@ -2,6 +2,7 @@
 """Stablecoin bridge signer (Ethereum vault <-> BridgedStablecoin on the L2), Bloch half (devnet rehearsal).
 
   python3 signatario.py --config CFG.json mint    --deposit-id 0xID --out SIG.json
+  python3 signatario.py --config CFG.json remint  --deposit-id 0xID [--locked] --out SIG.json
   python3 signatario.py --config CFG.json combine --sig A.json --sig B.json [...] --out CALL.json
   python3 signatario.py --config CFG.json release --burn-tx 0xHASH [--burn-id 0xID] [--context CERT.json] --out CERT.json
 
@@ -19,6 +20,11 @@ fields. This half then requires:
      and the amount within the period and supply caps (level latest);
   5. the EIP-712 digest computed here equals the contract's mintDigest;
 and only then signs the digest with this signer's secp256k1 keystore.
+
+remint: recovery of a deposit the guardians cancelled. The same deposit checks as mint, against the signer's own Ethereum node, and
+the token must show a cancelled generation not yet reminted; fields this signer signed earlier for the id must match. A plain remint
+takes the mint quorum and can be cancelled again. `--locked` takes `switchThreshold` signers and cannot; use it once the guardians
+have cancelled a deposit this signer has verified as real, knowing that a locked mint has only its delay and a pause left against it.
 
 release: the burn must be finalized, read from an L2 this signer rebuilt itself (same code as
 tools/signatario-gnb):
@@ -67,6 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l2_finality  # noqa: E402
 
 MAX_STATUS_AGE = 600  # seconds, as atestador.py
+REMINT_TYPEHASH_STR = 'Remint(bytes32 mintHash,uint64 generation,bool locked)'
 MINT_TYPEHASH_STR = ('Mint(uint256 sourceChainId,address sourceVault,bytes32 sourceRoute,bytes32 depositId,'
                      'uint64 depositNonce,uint64 amount,address recipient)')
 DOMAIN_TYPEHASH_STR = 'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
@@ -297,11 +304,8 @@ class Ctx:
 
 
 # ── mint ────────────────────────────────────────────────────────────────────
-def cmd_mint(ctx, args):
-    deposit_id = hex32(option(args, '--deposit-id'), 'deposit id')
-    out = Path(option(args, '--out'))
-    url = ctx.cfg['l2_rpc']
-
+def verified_deposit(ctx, deposit_id):
+    """The deposit from this signer's Ethereum half, checked field by field. Returns (dep, nonce, amount, recipient)."""
     # Ethereum half: the Deposited log at `finalized` on this signer's own Ethereum node
     dep = ctx.eth_half('deposit', deposit_id=deposit_id)
     if hex32(dep.get('deposit_id', ''), 'deposit_id') != deposit_id:
@@ -330,6 +334,14 @@ def cmd_mint(ctx, args):
     recipient = '0x' + pq[26:]
     if int(recipient, 16) == 0:
         refuse('pqRecipientHash is a zero L2 address')
+    return dep, nonce, amount, recipient
+
+
+def cmd_mint(ctx, args):
+    deposit_id = hex32(option(args, '--deposit-id'), 'deposit id')
+    out = Path(option(args, '--out'))
+    url = ctx.cfg['l2_rpc']
+    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
 
     # L2: the right contract, not minted, within the caps
     ctx.check_contract(url)
@@ -368,6 +380,49 @@ def cmd_mint(ctx, args):
     print(json.dumps(record, indent=2))
 
 
+def cmd_remint(ctx, args):
+    deposit_id = hex32(option(args, '--deposit-id'), 'deposit id')
+    out = Path(option(args, '--out'))
+    locked = '--locked' in args
+    url = ctx.cfg['l2_rpc']
+    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
+    ctx.check_contract(url)
+    generation = ctx.word(ctx.call(url, 'mintCancels(bytes32)(uint64)', deposit_id))
+    if generation == 0 or generation == ctx.word(ctx.call(url, 'lastRemint(bytes32)(uint64)', deposit_id)):
+        refuse('this deposit has no cancelled mint to remint', deposit_id=deposit_id, generation=generation)
+    ctx.cap_check(url, amount)
+    struct = ctx.keccak(ctx.abi_encode('f(bytes32,uint256,address,bytes32,bytes32,uint64,uint64,address)',
+                                       ctx.keccak_text(MINT_TYPEHASH_STR), ctx.source_chain_id, ctx.source_vault, ctx.source_route,
+                                       deposit_id, nonce, amount, recipient))
+    remint = ctx.keccak(ctx.abi_encode('f(bytes32,bytes32,uint64,bool)', ctx.keccak_text(REMINT_TYPEHASH_STR), struct, generation,
+                                       'true' if locked else 'false'))
+    domain = ctx.keccak(ctx.abi_encode('f(bytes32,bytes32,bytes32,uint256,address)', ctx.keccak_text(DOMAIN_TYPEHASH_STR),
+                                       ctx.keccak_text(DOMAIN_NAME), ctx.keccak_text(ctx.contract_version(url)), ctx.l2_chain_id, ctx.token))
+    digest = ctx.keccak('0x1901' + domain[2:] + remint[2:])
+    onchain = '0x' + ctx.call(url, 'remintDigest(bytes32,uint64,uint64,address,bool)(bytes32)', deposit_id, nonce, amount, recipient,
+                              'true' if locked else 'false')[2:66]
+    if onchain.lower() != digest:
+        refuse('the local EIP-712 digest differs from the contract', local=digest, contract=onchain)
+    prior = ctx.db['mints'].get(deposit_id)
+    if prior is not None and (prior['nonce'], prior['amount'], prior['recipient']) != (nonce, amount, recipient):
+        refuse('this depositId was already signed with different fields', prior=prior)
+    sig = ctx.run([ctx.cast, 'wallet', 'sign', '--no-hash', '--keystore', ctx.cfg['keystore'],
+                   '--password-file', ctx.cfg['password_file'], digest], 'cast wallet sign').lower()
+    signer = ctx.run([ctx.cast, 'wallet', 'address', '--keystore', ctx.cfg['keystore'],
+                      '--password-file', ctx.cfg['password_file']], 'cast wallet address').lower()
+    if not ctx.word(ctx.call(url, 'isSigner(address)(bool)', signer)):
+        refuse('this keystore is not one of the contract signers', signer=signer)
+    k = ctx.word(ctx.call(url, 'switchThreshold()(uint256)')) if locked else int(ctx.cfg['threshold'])
+    record = {'signed': True, 'kind': 'stable-remint', 'signer': signer, 'l2_chain_id': ctx.l2_chain_id, 'token': ctx.token,
+              'source_chain_id': ctx.source_chain_id, 'source_vault': ctx.source_vault, 'source_route': ctx.source_route,
+              'deposit_id': deposit_id, 'deposit_nonce': nonce, 'amount': amount, 'recipient': recipient, 'generation': generation,
+              'locked': locked, 'k': k, 'digest': digest, 'signature': sig}
+    ctx.db['mints'].setdefault(deposit_id, {'nonce': nonce, 'amount': amount, 'recipient': recipient, 'digest': ctx.mint_digest(deposit_id, nonce, amount, recipient)})
+    ctx.save_db()
+    out.write_text(json.dumps(record, indent=2) + '\n')
+    print(json.dumps(record, indent=2))
+
+
 # ── combine ─────────────────────────────────────────────────────────────────
 def cmd_combine(ctx, args):
     """Anyone may combine: checks the partials agree, orders them by signer address."""
@@ -380,6 +435,10 @@ def cmd_combine(ctx, args):
         fields = ('token', 'l2_chain_id', 'source_chain_id', 'source_vault', 'source_route', 'deposit_id',
                   'deposit_nonce', 'amount', 'recipient', 'digest')
         k = int(ctx.cfg['threshold'])
+    elif kind == 'stable-remint':
+        fields = ('token', 'l2_chain_id', 'source_chain_id', 'source_vault', 'source_route', 'deposit_id',
+                  'deposit_nonce', 'amount', 'recipient', 'generation', 'locked', 'k', 'digest')
+        k = int(sigs[0]['k'])
     elif kind == 'stable-release':
         fields = ('source_chain_id', 'source_vault', 'release', 'context', 'digest')
         k = int(ctx.cfg.get('vault_threshold', ctx.cfg['threshold']))
@@ -398,6 +457,11 @@ def cmd_combine(ctx, args):
         blob = '0x' + ''.join(by_signer[a][2:] for a in chosen)
         call = ['mint(bytes32,uint64,uint64,address,bytes)', first['deposit_id'], str(first['deposit_nonce']),
                 str(first['amount']), first['recipient'], blob]
+        result = {'kind': kind, **first, 'signers': chosen, 'signatures': blob, 'to': first['token'], 'call': call}
+    elif kind == 'stable-remint':
+        blob = '0x' + ''.join(by_signer[a][2:] for a in chosen)
+        call = ['remint(bytes32,uint64,uint64,address,bool,bytes)', first['deposit_id'], str(first['deposit_nonce']),
+                str(first['amount']), first['recipient'], 'true' if first['locked'] else 'false', blob]
         result = {'kind': kind, **first, 'signers': chosen, 'signatures': blob, 'to': first['token'], 'call': call}
     else:
         rel, c = first['release'], first['context']
@@ -685,7 +749,7 @@ def main():
     if not args or args[-1] in ('-h', '--help'):
         raise SystemExit(__doc__)
     ctx = Ctx(option(args, '--config'))
-    commands = {'mint': cmd_mint, 'combine': cmd_combine, 'release': cmd_release}
+    commands = {'mint': cmd_mint, 'remint': cmd_remint, 'combine': cmd_combine, 'release': cmd_release}
     if not any(c in args for c in commands):
         raise SystemExit(__doc__)
     cmd = next(c for c in args if c in commands)

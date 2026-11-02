@@ -27,6 +27,12 @@ interface IMintVerifier {
 ///         path, and carry over the switch unchanged. A guardian pause also stops the proof path, because it only
 ///         delays entry: burns are never paused and the pause expires by itself. A mint queued before the switch
 ///         stays executable after its delay, since its deposit is already locked.
+///         Queued-mint cancel: a majority of the guardians, each with one vote, cancels a queued committee mint. The vote
+///         names the exact mint, so it cannot carry over to another. A cancel refunds the bucket and leaves `minted` set, so
+///         the old certificate is dead. A deposit that was real comes back by `remint`: the mint quorum signs a new message
+///         for that generation and the mint queues again, cancellable; or `switchThreshold` signers sign it `locked`, and it
+///         cannot be cancelled again. One remint per generation. Delay, bucket, cap and pause apply to every remint. A mint
+///         queued by the proof path cannot be cancelled. Guardians still cannot move funds or credit anyone.
 /// STATUS: UNAUDITED.
 contract BridgedStablecoinV2 is SignerMintedToken {
     bytes32 public constant MINT_TYPEHASH = keccak256(
@@ -46,11 +52,22 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         uint64 delay;
     }
 
+    bytes32 public constant REMINT_TYPEHASH = keccak256("Remint(bytes32 mintHash,uint64 generation,bool locked)");
+
+    struct CancelVote {
+        bytes32 replayKey;
+        address recipient;
+        uint64 amount;
+        uint64 readyAt;
+    }
+
     uint256 public immutable sourceChainId;
     address public immutable sourceVault;
     bytes32 public immutable sourceRoute;
     uint256 public immutable switchThreshold;
     uint64 public immutable switchDelay;
+    /// Guardian votes that cancel a queued mint: a majority of the set. Zero without guardians.
+    uint256 public immutable cancelQuorum;
 
     address public proposedVerifier;
     bytes32 public proposedVerifierCodehash;
@@ -58,6 +75,14 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     uint64 public switchNonce;
     /// Zero while the committee mints; set once, never changed or cleared.
     address public verifier;
+
+    /// Times this replay key was cancelled, and the last of those generations already reminted.
+    mapping(bytes32 => uint64) public mintCancels;
+    mapping(bytes32 => uint64) public lastRemint;
+    /// The queued mint under this key cannot be cancelled: reminted `locked`, or queued by the proof path.
+    mapping(bytes32 => bool) public uncancellable;
+    mapping(bytes32 => uint256) public cancelVotes;
+    mapping(bytes32 => mapping(address => bool)) public cancelVoted;
 
     event Minted(bytes32 indexed depositId, uint64 depositNonce, address indexed recipient, uint64 amount);
     event Burned(
@@ -68,12 +93,19 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     event VerifierCancelled(address indexed verifier, uint64 indexed nonce);
     event VerifierExpired(address indexed verifier, uint64 indexed nonce);
     event VerifierActivated(address indexed verifier, bytes32 codehash);
+    event MintCancelVote(bytes32 indexed replayKey, address indexed guardian, bytes32 voteId, uint256 votes);
+    event MintCancelled(bytes32 indexed replayKey, address indexed recipient, uint64 amount, uint64 generation);
+    event MintRequeued(bytes32 indexed replayKey, uint64 generation, bool locked);
 
     error BadEthRecipient();
     error BurnTooLarge();
     error CommitteeRetired();
     error InvalidSwitch();
     error InvalidProof();
+    error AlreadyVoted();
+    error StaleCancelVote();
+    error NotCancellable();
+    error NothingToRemint();
 
     constructor(
         string memory name_,
@@ -97,6 +129,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         ) revert BadConfig();
         switchThreshold = mintSwitch.threshold;
         switchDelay = mintSwitch.delay;
+        cancelQuorum = guard.guardians.length == 0 ? 0 : guard.guardians.length / 2 + 1;
     }
 
     function mintDigest(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient)
@@ -120,6 +153,9 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     {
         address active = verifier;
         if (active == address(0)) revert InvalidProof();
+        // A deposit cancelled before the switch has no committee left to remint it; its proof brings it back.
+        bool reopened = mintCancels[depositId] > lastRemint[depositId];
+        if (reopened) minted[depositId] = false;
         _checkMintable(depositId, amount, recipient);
         bytes32 mintHash = _structHash(depositId, depositNonce, amount, recipient);
         (bool ok, bytes memory data) =
@@ -127,7 +163,89 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         if (!ok || data.length != 32 || abi.decode(data, (bytes4)) != IMintVerifier.verifyMint.selector) {
             revert InvalidProof();
         }
-        _admitMint(depositId, amount, recipient);
+        if (reopened) lastRemint[depositId] = mintCancels[depositId];
+        if (!_admitMint(depositId, amount, recipient)) uncancellable[depositId] = true;
+        emit Minted(depositId, depositNonce, recipient, amount);
+    }
+
+    /// @notice What one guardian votes on. It names the queued mint and its generation exactly.
+    function cancelVoteId(bytes32 replayKey, address recipient, uint64 amount, uint64 readyAt) public view returns (bytes32) {
+        return keccak256(abi.encode(replayKey, recipient, amount, readyAt, mintCancels[replayKey]));
+    }
+
+    /// @notice One guardian's vote to cancel a queued mint. Works during a pause and after `readyAt`, until the mint executes.
+    function voteCancelMint(bytes32 replayKey, address recipient, uint64 amount, uint64 readyAt) external {
+        if (!isGuardian[msg.sender]) revert NotGuardian();
+        PendingMint memory p = pendingMints[replayKey];
+        if (p.amount == 0) revert NotPending();
+        if (p.recipient != recipient || p.amount != amount || p.readyAt != readyAt) revert StaleCancelVote();
+        if (uncancellable[replayKey]) revert NotCancellable();
+        if (!_countVote(replayKey, recipient, amount, readyAt)) revert AlreadyVoted();
+    }
+
+    /// @notice The same vote for many mints in one transaction, so a flood of small forgeries does not outrun the guardians.
+    ///         An item that is gone, changed, locked or already voted is skipped: other guardians race this one.
+    function voteCancelMints(CancelVote[] calldata items) external returns (uint256 counted) {
+        if (!isGuardian[msg.sender]) revert NotGuardian();
+        for (uint256 i; i < items.length; ++i) {
+            CancelVote calldata v = items[i];
+            PendingMint memory p = pendingMints[v.replayKey];
+            if (p.amount == 0 || p.recipient != v.recipient || p.amount != v.amount || p.readyAt != v.readyAt) continue;
+            if (uncancellable[v.replayKey]) continue;
+            if (_countVote(v.replayKey, v.recipient, v.amount, v.readyAt)) ++counted;
+        }
+    }
+
+    function _countVote(bytes32 replayKey, address recipient, uint64 amount, uint64 readyAt) private returns (bool) {
+        bytes32 voteId = cancelVoteId(replayKey, recipient, amount, readyAt);
+        if (cancelVoted[voteId][msg.sender]) return false;
+        cancelVoted[voteId][msg.sender] = true;
+        uint256 votes = ++cancelVotes[voteId];
+        emit MintCancelVote(replayKey, msg.sender, voteId, votes);
+        if (votes < cancelQuorum) return true;
+        delete pendingMints[replayKey];
+        pendingSupply -= amount;
+        // The bucket charged at queue time comes back: nothing was credited, so bad votes cannot drain honest capacity.
+        uint256 level = availableToMint() + amount;
+        bucketLevel = level > bucketCapacity ? bucketCapacity : level;
+        bucketUpdatedAt = block.timestamp;
+        emit MintCancelled(replayKey, recipient, amount, ++mintCancels[replayKey]);
+        return true;
+    }
+
+    function remintDigest(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient, bool locked)
+        public
+        view
+        returns (bytes32)
+    {
+        bytes32 mintHash = _structHash(depositId, depositNonce, amount, recipient);
+        return _typedDigest(keccak256(abi.encode(REMINT_TYPEHASH, mintHash, mintCancels[depositId], locked)));
+    }
+
+    /// @notice Recovery of a cancelled deposit. The mint quorum queues it again, cancellable; `switchThreshold` signers may
+    ///         sign it `locked`, which guardians cannot cancel. Always through the queue, whatever the amount.
+    function remint(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient, bool locked, bytes calldata signatures)
+        external
+    {
+        _requireCommittee();
+        uint64 generation = mintCancels[depositId];
+        if (generation == lastRemint[depositId]) revert NothingToRemint();
+        if (amount == 0) revert ZeroAmount();
+        if (recipient == address(0)) revert ZeroRecipient();
+        if (paused()) revert IsPaused();
+        _checkSignatures(remintDigest(depositId, depositNonce, amount, recipient, locked), signatures, locked ? switchThreshold : threshold);
+        uint256 available = availableToMint();
+        if (amount > available) revert RateLimited();
+        if (totalSupply + pendingSupply + amount > supplyCap) revert SupplyCapExceeded();
+        bucketLevel = available - amount;
+        bucketUpdatedAt = block.timestamp;
+        lastRemint[depositId] = generation;
+        uncancellable[depositId] = locked;
+        uint256 readyAt = block.timestamp + largeMintDelay;
+        pendingMints[depositId] = PendingMint(recipient, amount, uint64(readyAt));
+        pendingSupply += amount;
+        emit MintQueued(depositId, recipient, amount, readyAt);
+        emit MintRequeued(depositId, generation, locked);
         emit Minted(depositId, depositNonce, recipient, amount);
     }
 

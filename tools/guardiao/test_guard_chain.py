@@ -124,7 +124,8 @@ def main():
         rc, lines, err = guardian()
         skip = [l for l in lines if l.get('kind') == 'pause-skip']
         check('once its pause expired the same guardian skips, with no failed pause', view(token, 'paused()(bool)') == 'false'
-              and skip and skip[0]['reason'] == 'pause cooldown' and not [l for l in lines if l.get('kind') == 'pause'] and rc == 2, (rc, lines, err))
+              and skip and skip[0]['reason'] == 'pause cooldown' and not [l for l in lines if l.get('kind') == 'pause'] and rc == 4
+              and any(str(l.get('id')).startswith('cancel-deadline:') for l in lines), (rc, lines, err))
     finally:
         for p in procs:
             p.terminate()

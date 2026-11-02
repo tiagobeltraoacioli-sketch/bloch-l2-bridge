@@ -56,6 +56,14 @@ pause on that contract; it stays open and alerted, and a new finding still pause
 again if the shortfall grows past what it was when acknowledged. Without a committee unpause an open finding pauses again
 after every cooldown, as before.
 
+Queued-mint cancel (a token with `cancelQuorum`): a due provenance finding on a mint still in the queue also sends this guardian's
+vote, one transaction per round of up to `cancel_batch` (32) mints, largest first, before the pause. A majority of the guardians cancels the mint; one vote alone does nothing. A mint with no
+deposit is voted on only if this guardian's Ethereum head is at least `cancel_fresh_s` (default 300) past the block that queued it and
+no `Deposited` log for it exists up to that head: an honest mint is signed after finality, so any fresh node holds its deposit. A
+deposit at the head that is not yet finalized holds the vote. A stale view never votes, and alerts instead. Votes name the exact mint
+and are checked on the send side. A cancelled mint leaves the findings and stays as a soft `mint-cancelled` alert; real deposits say
+so, and `signatario.py remint` recovers them. No vote lands `cancel_deadline_s` (default 3600) before `readyAt`: critical.
+
 Light-client switch (stablecoin): a live verifier proposal on the vault raises a critical `verifier-proposed:<address>` alert
 for as long as it is live. It never pauses: guardians have no power over the switch.
 Development tool; UNAUDITED.
@@ -86,6 +94,7 @@ EVENTS = {
                'Burned': 'Burned(bytes32,uint64,address,uint64,address)'},
 }
 MINT_QUEUED = 'MintQueued(bytes32,address,uint64,uint256)'
+MINT_CANCELLED = 'MintCancelled(bytes32,address,uint64,uint64)'
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
 
@@ -143,6 +152,12 @@ class Guardian:
         self.pause_confirm = int(c.get('pause_confirm_s', 3600))
         self.health_path = Path(c.get('health_file', f'{c["state"]}.health.json'))
         self.pause_margin = int(c.get('pause_margin_s', 3600))
+        self.cancel_fresh = int(c.get('cancel_fresh_s', 300))
+        self.cancel_deadline = int(c.get('cancel_deadline_s', 3600))
+        self.cancel_batch = int(c.get('cancel_batch', 32))  # about 2 M gas; the estimate per item is 120,000
+        self.cancel_quorum = None
+        self.cancelled_mints = []
+        self.cancel_candidates = {}
         self.stall_alert = int(c.get('l2_stall_alert_s', MAINNET_GRACE_S if mainnet else 0))
         self.read_fail_alert = int(c.get('l2_read_fail_rounds', 3))
         self.frozen_extra_grace = int(c.get('l2_frozen_extra_grace_s', 0))
@@ -301,6 +316,12 @@ class Guardian:
         start = int(self.cfg.get('token_from_block', 0))
         ev = EVENTS[self.kind]
         mints = []
+        cancels = {}
+        self.cancelled_mints = []
+        if self.cancel_enabled():
+            for l in self.logs(self.l2, self.token, self.topic(MINT_CANCELLED), start, b):
+                key = l['topics'][1].lower()
+                cancels[key] = cancels.get(key, 0) + 1
         for l in self.logs(self.l2, self.token, self.topic(ev['Minted']), start, b):
             w = words(l['data'])
             m = {'key': l['topics'][1].lower(), 'recipient': addr(l['topics'][2]), 'tx': l['transactionHash'],
@@ -309,6 +330,10 @@ class Guardian:
                 m.update(lock_txid=b32(w[0]), lock_vout=uint(w[1]), amount=uint(w[2]))
             else:
                 m.update(deposit_nonce=uint(w[0]), amount=uint(w[1]))
+            if cancels.get(m['key'], 0) > 0:  # at most one queued mint per key at a time: the oldest logs are the cancelled ones
+                cancels[m['key']] -= 1
+                self.cancelled_mints.append(m)
+                continue
             mints.append(m)
         queued = {}
         for l in self.logs(self.l2, self.token, self.topic(MINT_QUEUED), start, b):
@@ -333,6 +358,9 @@ class Guardian:
             if q:
                 p = self.call(self.l2, self.token, 'pendingMints(bytes32)', m['key'], block=b)
                 m['queued'] = {**q, 'still_pending': uint(p[1]) != 0}
+        # Kept only while the newest mint of its key was not cancelled.
+        live = {m['key'] for m in mints}
+        self.cancelled_mints = [m for m in self.cancelled_mints if m['key'] not in live]
         return supply, pending, mints, burns
 
     def burn_time(self, burn):
@@ -601,6 +629,7 @@ class Guardian:
 
     def round(self):
         self.l2_read_failed = self.blind = False
+        self.cancel_candidates = {}
         try:
             return self.full_round()
         except Unverifiable as e:
@@ -659,7 +688,7 @@ class Guardian:
                               'shortfall': need - backing, 'l2_block': b}))
 
         for m in mints:
-            if self.state['mints_ok'].get(m['key']):
+            if self.state['mints_ok'].get(m['key']) == m['tx']:  # the tx, not the key: a remint of a key is a new mint to check
                 continue
             verdict = provenance(m)
             if verdict == 'ok':
@@ -678,7 +707,15 @@ class Guardian:
             else:
                 grace = 0
                 detail['reason'] = verdict
+            if q and q['still_pending']:
+                self.cancel_candidates[f'mint:{m["key"]}'] = {**m, 'verdict': verdict}
             findings.append(('hard', f'mint:{m["key"]}', grace, detail))
+
+        for m in self.cancelled_mints:
+            real = m['key'] in self.deposits  # a deposit under this id, whatever the cancelled mint claimed about it
+            findings.append(('soft', f'mint-cancelled:{m["key"]}', 0, {
+                'reason': 'real deposit: the committee must remint it' if real else 'cancelled by the guardians, no matching deposit',
+                'deposit_real': real, 'mint': m}))
 
         for x in burns:
             if x['burn_id'] in released:
@@ -713,6 +750,111 @@ class Guardian:
         return [('soft', f'mint-verifier-proposed:{proposed}', 0, {
             'reason': 'a one-way mint switch is pending', 'verifier': proposed, 'activates_at': active_at})]
 
+    # ── queued-mint cancel ───────────────────────────────────────────────────
+    def cancel_enabled(self):
+        """Whether this token has the cancel path. Asked until a real answer: only a contract's own refusal means no."""
+        if self.cancel_quorum is None:
+            if self.kind != 'stable':
+                self.cancel_quorum = 0
+            else:
+                try:
+                    self.cancel_quorum = uint(self.call(self.l2, self.token, 'cancelQuorum()')[0])
+                except Unverifiable as e:
+                    if 'revert' not in str(e).lower():
+                        raise
+                    self.cancel_quorum = 0
+                except IndexError:
+                    return False
+        return self.cancel_quorum > 0
+
+    def cancel_blocker(self, m):
+        """Why this guardian may not vote on this mint yet, or None. Reorgs, a lagging node and a stalled finality end up here."""
+        if m['verdict'] != 'pending':
+            return None  # a finalized deposit under this id with other fields: nothing later changes that
+        eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
+        head, head_time, _ = self.block(eth, 'latest')
+        queued_at = self.block(self.l2, m['block'])[1]
+        if head_time < queued_at + self.cancel_fresh:
+            return f'Ethereum head at {head_time} is not {self.cancel_fresh} s past the mint at {queued_at}'
+        start, topics = int(self.cfg.get('vault_from_block', 0)), [self.topic(DEPOSITED), m['key']]
+        while start <= head:
+            stop = min(head, start + self.chunk - 1)
+            if self.rpc(eth, 'eth_getLogs', [{'address': vault, 'topics': topics, 'fromBlock': hex(start), 'toBlock': hex(stop)}]):
+                return 'the deposit exists at the head and is not finalized yet'
+            start = stop + 1
+        return None
+
+    def cancel_votes(self, now, due):
+        """One transaction per round: this guardian's votes on the due queued mints, largest first, so under a flood value goes first."""
+        if not self.cancel_candidates or self.blind or not self.cancel_enabled():
+            return
+        items = [self.cancel_candidates[f] for f in due if f in self.cancel_candidates]
+        batch = []
+        for m in sorted(items, key=lambda x: -x['amount']):
+            if len(batch) >= self.cancel_batch:
+                self.log(kind='cancel-backlog', left=len(items) - len(batch))
+                break
+            try:
+                vote = self.vote_needed(m, now)
+            except (Unverifiable, IndexError, ValueError, LevelClosed) as e:
+                self.problem_once(f"cancel-vote-failed:{m['key']}", e)
+                continue
+            if vote:
+                batch.append(m)
+        if not batch:
+            return
+        if self.dry_run:
+            self.log(kind='cancel-vote-dry-run', keys=[m['key'] for m in batch])
+            return
+        self.send_votes(batch)
+
+    def vote_needed(self, m, now):
+        """Whether this guardian should vote on this mint now. Everything is read from the send side: reorgs leave no state to repair."""
+        key, q = m['key'], m['queued']
+        pending = self.call(self.l2_tx, self.token, 'pendingMints(bytes32)', key)
+        if (addr(pending[0]), uint(pending[1]), uint(pending[2])) != (m['recipient'], m['amount'], q['ready_at']):
+            self.clear_problem(f'cancel-vote-failed:{key}')
+            return False  # executed, already cancelled or changed on the send side: the next view shows which
+        if uint(self.call(self.l2_tx, self.token, 'uncancellable(bytes32)', key)[0]):
+            self.problem_once(f'mint-not-cancellable:{key}', f'{m["amount"]} units to {m["recipient"]} from {q["ready_at"]} cannot be cancelled')
+            return False
+        if now >= q['ready_at'] - self.cancel_deadline:
+            self.problem_once(f'cancel-deadline:{key}', f'{m["amount"]} units become executable at {q["ready_at"]} and are not cancelled')
+        vote = b32(self.call(self.l2_tx, self.token, 'cancelVoteId(bytes32,address,uint64,uint64)', key, m['recipient'], str(m['amount']), str(q['ready_at']))[0])
+        if uint(self.call(self.l2_tx, self.token, 'cancelVoted(bytes32,address)', vote, self.me())[0]):
+            return False
+        blocker = self.cancel_blocker(m)
+        if blocker:
+            note = f'{key}:{blocker}'
+            if self.state.get('cancel_hold') != note:
+                self.state['cancel_hold'] = note
+                self.log(kind='cancel-hold', key=key, reason=blocker)
+            return False
+        return True
+
+    def send_votes(self, batch):
+        sig = 'voteCancelMints((bytes32,address,uint64,uint64)[])'
+        arg = '[' + ','.join(f'({m["key"]},{m["recipient"]},{m["amount"]},{m["queued"]["ready_at"]})' for m in batch) + ']'
+        gas = 80_000 + int(self.cfg.get('cancel_item_gas', 120_000)) * len(batch)
+        if self.cfg.get('l2_raw_tx'):
+            rc, out, err = self.send_raw_l2(sig, arg, gas=gas)
+        else:
+            rc, out, err = self.run([self.cast, 'send', self.token, sig, arg, '--keystore', self.cfg['keystore'],
+                                     '--password-file', self.cfg['password_file'], '--rpc-url', self.l2_tx, '--gas-limit', str(gas),
+                                     '--chain', str(self.cfg['l2_chain_id']), '--json'])
+        try:
+            receipt = json.loads(out) if rc == 0 else {}
+        except ValueError:
+            receipt, err = {}, f'unreadable answer: {out[-200:]}'
+        ok = receipt.get('status') in ('0x1', 1)
+        self.log(kind='cancel-vote', ok=ok, keys=[m['key'] for m in batch], total=sum(m['amount'] for m in batch), tx=receipt.get('transactionHash'),
+                 gas_used=int(str(receipt['gasUsed']), 0) if receipt.get('gasUsed') else None, error=None if ok else (err or out).strip()[-300:])
+        for m in batch:
+            if ok:
+                self.clear_problem(f'cancel-vote-failed:{m["key"]}')
+            else:
+                self.problem_once(f'cancel-vote-failed:{m["key"]}', (err or out).strip()[-200:])
+
     def act(self, now, findings):
         seen, due = set(), []
         for severity, fid, grace, detail in findings:
@@ -727,6 +869,9 @@ class Guardian:
                 if not st.get('due'):
                     st['due'] = now
                     self.log(kind='alert', severity='hard', id=fid, due=True, reason=detail.get('reason'))
+        for pid in [p for p in self.state['problems'] if p.startswith(('cancel-deadline:', 'cancel-vote-failed:', 'mint-not-cancellable:'))
+                    and f'mint:{p.split(":", 1)[1]}' not in seen and not self.blind]:
+            self.clear_problem(pid)
         for fid in [f for f in self.state['open'] if f not in seen]:
             st = self.state['open'][fid]
             if self.blind:  # unseen is not resolved: a round without the L2 cannot tell, and an open grace keeps running
@@ -742,6 +887,7 @@ class Guardian:
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
                 self.pause_vault(vault_due)
+            self.cancel_votes(now, due)
             # A token finding is never settled: the token's unpause needs only the mint quorum, the very keys that could forge a mint.
             self.pause(now, due)
         if self.state['problems']:
@@ -859,7 +1005,7 @@ class Guardian:
                 time.sleep(self.pause_retry)
         self.problem('pause-failed', f'{self.pause_attempts} attempts through l2_tx_rpc: {(err or out).strip()[-200:]}')
 
-    def send_raw_l2(self, sig):
+    def send_raw_l2(self, sig, *args, gas=None):
         """For an L2 RPC with no `pending` level (the settled devnet4 RPC refuses gas estimation and pending
         nonces): offline-signed legacy tx at the `latest` nonce with a fixed gas limit, then wait for its
         receipt. Returns (rc, receipt json, error) like `cast send --json`."""
@@ -869,8 +1015,8 @@ class Guardian:
             price = int(self.rpc(self.l2_tx, 'eth_gasPrice', []), 16) * 2
             raw = self.cast_out('mktx', '--keystore', self.cfg['keystore'], '--password-file',
                                 self.cfg['password_file'], '--chain', str(self.cfg['l2_chain_id']), '--nonce', str(nonce),
-                                '--gas-limit', str(self.cfg.get('l2_pause_gas', 200_000)), '--gas-price', str(price),
-                                '--legacy', self.token, sig)
+                                '--gas-limit', str(gas or self.cfg.get('l2_pause_gas', 200_000)), '--gas-price', str(price),
+                                '--legacy', self.token, sig, *args)
             tx = self.rpc(self.l2_tx, 'eth_sendRawTransaction', [raw])
             end = time.time() + int(self.cfg.get('l2_receipt_timeout_s', 1800))
             while time.time() < end:

@@ -112,6 +112,9 @@ before use, so the transport is untrusted.
        the proof itself with `eth_call` on a deployed, never-activated `SP1ReleaseVerifier`.
 5. **L2 token guardians.** These are `SignerMintedToken` guardians: they can pause mints only. Burns and
    transfers never stop. The pause expires, `pauseCooldown ≥ pauseDuration`, and k signers may unpause.
+   - A majority of them may cancel a queued committee mint (`voteCancelMint`). This cannot credit anyone. `remint` by the mint quorum
+     returns a cancelled deposit, cancellable again; by `switchThreshold` signers, locked against cancel. Mints at or below
+     `largeMintThreshold` are credited at once and cannot be cancelled.
 6. **Reserves monitor.** `reservas.py` compares, at finality, the vault backing
    (`min(totalLocked, balanceOf)`) or the GnB-SMH vault UTXO sum with `totalSupply + pendingSupply`. It only
    alerts.

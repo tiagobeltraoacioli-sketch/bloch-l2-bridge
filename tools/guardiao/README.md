@@ -72,6 +72,28 @@ enough) yet is due after `provenance_grace_s`, except a mint still in the delay 
 `min(firstSeen + provenance_grace_s, readyAt − pause_margin_s)`, so the pause lands **before** the mint
 can be executed. A verified mint is cached and not re-checked (a later source reorg shows up in RESERVES).
 
+A verified mint is cached by its transaction, so a remint under the same id is checked again.
+
+**Queued-mint cancel (a token with `cancelQuorum`).** A due finding on a mint still in the queue also sends this guardian's
+`voteCancelMints`, one transaction per round of up to `cancel_batch` (32) mints, largest first, before the pause. A majority of the guardians cancels. It is the only guardian action that
+ends a forged queued mint: a pause only delays it.
+
+- A mint with no deposit is voted on only if the guardian's Ethereum `latest` is at least `cancel_fresh_s` (300) past the block that
+  queued it and no `Deposited` log for the id exists up to that head. Honest mints are signed after Ethereum finality, so any node
+  past the mint holds their deposit. A stale view, or a deposit at the head that is not finalized, logs `cancel-hold` and does not vote.
+- A finalized deposit under the id with other fields is voted on at once.
+- The vote names the key, recipient, amount, readyAt and generation, and is read back from the chain every round, so an L2 reorg
+  that drops a vote or a mint needs no state repair. State on the send side (`l2_tx_rpc`) decides.
+- Critical: `cancel-deadline:<key>` when the mint is still queued `cancel_deadline_s` (3600) before `readyAt`, `cancel-vote-failed:<key>`,
+  `mint-not-cancellable:<key>` (a locked remint or a proof mint without a deposit).
+- Soft, for as long as it stands: `mint-cancelled:<key>`, with `deposit_real`. Real means the committee must act.
+
+Independent views matter more than the count: two guardians reading one lying Ethereum endpoint can cancel an honest mint.
+
+Recovery, one signer at a time on its own nodes: `signatario.py remint --deposit-id 0xID --out SIG.json`, then `combine`, then
+send the resulting call from any account. The mint quorum makes a remint that can be cancelled again; `--locked` with
+`switchThreshold` signers makes one that cannot. It is not automatic: signers decide when guardians and signers disagree.
+
 ### 3. RELEASES (hard) and LIVENESS (soft)
 
 - Every release on the source must match an L2 burn: same `burnId` (stablecoin `nativeBurn`; wGSMH marker),

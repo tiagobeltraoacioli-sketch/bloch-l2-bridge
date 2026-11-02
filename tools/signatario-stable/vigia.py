@@ -660,7 +660,10 @@ class Vigia:
             (d / 'executed').write_text('v1\n')
             return
         words = [int(pending[2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range(3)]
-        if words[1] == 0:  # executed (or never queued)
+        if words[1] == 0:  # executed, never queued, or cancelled by the guardians
+            if self.cancelled_open(dep):
+                log(kind='relay-execute', deposit=dep, cancelled=True, reason='the guardians cancelled this mint; recovery is signatario.py remint')
+                return
             (d / 'executed').write_text('done\n')
             return
         if (d / 'execute-sent').exists() and not self.failed(self.l2_tx, d / 'execute-sent'):
@@ -672,6 +675,15 @@ class Vigia:
         tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
         (d / 'execute-sent').write_text(tx + '\n')
         log(kind='relay-execute', deposit=dep, tx=tx)
+
+    def cancelled_open(self, dep):
+        """A cancelled generation not yet reminted. A token without the cancel path has none."""
+        try:
+            url = self.cfg['l2_rpc']
+            cancels = int(self.call(url, self.token, 'mintCancels(bytes32)', dep), 16)
+            return cancels > int(self.call(url, self.token, 'lastRemint(bytes32)', dep), 16)
+        except RuntimeError:
+            return False
 
     def failed(self, url, sent_file):
         """A sent transaction that reverted, or never landed, is forgotten so the next round retries it."""
