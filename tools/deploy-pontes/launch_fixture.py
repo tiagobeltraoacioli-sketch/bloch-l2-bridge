@@ -43,6 +43,7 @@ def filled_vault(token_cfg):
     v['signers']['set'] = [{'operator': f'rel{i}', 'address': fresh(50 + i)} for i in range(7)]
     v['guard']['guardians'] = [{'operator': f'guard{i}', 'address': a}
                                for i, a in enumerate(token_cfg['ethereum']['vaultGuard']['guardians'])]
+    v['provenance']['fees']['recipient'] = fresh(70)  # stand-in protocol treasury (agent 197)
     return cfg
 
 
