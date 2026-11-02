@@ -5,7 +5,12 @@ pragma solidity ^0.8.24;
 /// @notice A token minted by k-of-n set-once signers for value locked on another chain, with the
 ///         market's defense-in-depth controls (PONTES-MAINNET-CHECKLIST.md §2), all fixed at deployment:
 ///         - token bucket on mints (capacity + continuous refill, as Chainlink CCIP token pools):
-///           no window boundary lets twice the limit through;
+///           no window boundary lets twice the limit through. Exception (agent 171, F171-2): a queued mint that
+///           is cancelled or dropped refunds its whole charge, capped at capacity, on top of what refilled while it
+///           waited, so a short window can admit up to capacity plus that refill. Kept on purpose: an exact
+///           refund needs the charge time and history, the simple partial refund would cost honest capacity, and
+///           with every mint queued and cancellable (T = 0 on BridgedStablecoinV3) the bucket is not what stops
+///           a forgery;
 ///         - outstanding-supply cap, counting mints still in the delay queue;
 ///         - delay for large mints (as Wormhole's governor): above `largeMintThreshold` the mint is
 ///           queued and executable by anyone only after `largeMintDelay`;
