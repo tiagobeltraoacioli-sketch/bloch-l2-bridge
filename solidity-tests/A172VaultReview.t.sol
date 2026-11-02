@@ -571,6 +571,47 @@ contract A172VaultReviewTest {
         require(!ok && err(ret) == ProvenanceSourceVault.ProvenanceMismatch.selector, "Alice held by one unit");
     }
 
+    /// T = 0, a forged mint queued and NOT cancelled (guardians failed), `vault_pause_on_mint` pauses the vault. A holder
+    /// who burns on L2 during the pause, before the forgery credits, is paid after the pause: the burn's chain state is
+    /// fixed when it is burned. So the vault pause costs exits only delay, and its real effect is to stop new deposits
+    /// that the coming forgery would hold.
+    function test_P1_T0_burnDuringVaultPauseBeforeCreditStillPays() public {
+        BridgedStablecoinV3 token = new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(vault), vault.routeId(), addrs(mintKeys), 5,
+            SignerMintedToken.Limits(CAP, BUCKET, BUCKET / 1 days, 0, 12 hours, MIN),
+            SignerMintedToken.Guard(new address[](0), 0, 0), BridgedStablecoinV2.MintSwitch(6, 14 days)
+        );
+        bytes32 id = depositAs(ALICE, 1000 * uint64(U), ALICE);
+        mintAs(token, id, 0, 1000 * uint64(U), ALICE);
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(id);
+        bytes32 forged = bytes32((uint256(1) << 192) | 0xF0F0);
+        mintAs(token, forged, 1, 1, MALLORY);
+        vm.warp(block.timestamp + 45 minutes);
+        address[] memory gs = guardians();
+        vm.prank(gs[0]);
+        vault.guardianPause();
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(ALICE);
+        bytes32 burnId = token.burn(1000 * uint64(U), ALICE);
+        ProvenanceSourceVault.Release memory r = ProvenanceSourceVault.Release(
+            vault.routeId(), token.burnNonce(), ALICE, 1000 * uint64(U), burnId, token.mintCount(), token.mintedTotal(),
+            token.mintHead()
+        );
+        (bool ok, bytes memory ret) = tryRelease(r);
+        require(!ok && err(ret) == ProvenanceSourceVault.Paused.selector, "paused");
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(forged);
+        require(token.mintCount() == 2, "the forgery credited");
+        usdc.mint(BOB, 100 * U);
+        vm.prank(BOB);
+        (ok, ret) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.deposit, (100 * uint64(U), pad(BOB))));
+        require(!ok && err(ret) == ProvenanceSourceVault.Paused.selector, "new deposits kept out");
+        vm.warp(block.timestamp + 72 hours);
+        release(r);
+        require(usdc.balanceOf(ALICE) == 1000 * U, "the burn made before the credit pays after the pause");
+    }
+
     function mintAs(BridgedStablecoinV3 token, bytes32 id, uint64 nonce, uint64 amount, address to) internal {
         bytes32 d = token.mintDigest(id, nonce, amount, to);
         bytes memory blob;
@@ -635,7 +676,7 @@ contract A172VaultReviewTest {
         log("release 7 sigs gas", g - gasleft());
     }
 
-    /// A holder who takes exactly the refill (10 USDC every 86.4 s, the mainnet minBurn) keeps the bucket where it is:
+    /// A holder who takes exactly the refill (10 USDC every 87 s, just above the 86.4 s refill of the mainnet minBurn) keeps the bucket where it is:
     /// after one large exit drains it, a 10,000 USDC release stays RateLimited for as long as the loop runs. Each loop
     /// costs the attacker one 10 USDC round trip; the USDC comes back.
     function test_G2_bucketStarvation() public {
@@ -646,7 +687,7 @@ contract A172VaultReviewTest {
         ProvenanceSourceVault.Release memory big = cleanBurn(ALICE, BUCKET, 3);
         uint256 maxSeen;
         for (uint256 i; i < 200; ++i) {
-            vm.warp(block.timestamp + 86);
+            vm.warp(block.timestamp + 87);
             if (vault.availableToRelease() > maxSeen) maxSeen = vault.availableToRelease();
             release(cleanBurn(MALLORY, MIN, 3));
         }
