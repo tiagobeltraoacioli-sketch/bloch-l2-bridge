@@ -304,8 +304,11 @@ def s_v3(net):
     view = lambda sig, *a: net.view(net.l2, net.token, sig, *a).split()[0]  # noqa: E731
     vault = lambda sig, *a: net.view(net.eth, net.vault, sig, *a).split()[0]  # noqa: E731
     clean = lambda: view('mintHead()(bytes32)').lower() == vault('chainHeadAt(uint64)(bytes32)', view('mintCount()(uint64)')).lower()  # noqa: E731
+    gas = {}
+    used = lambda url, h: int(json.loads(out(CAST, 'receipt', h, '--rpc-url', url, '--json'))['gasUsed'], 16)  # noqa: E731
     for amount in (100 * U, 50 * U):
-        net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + net.alice[2:])
+        d = net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + net.alice[2:])
+        gas.setdefault('vault.deposit', []).append(int(d['gasUsed'], 16))
     net.mine(net.eth)
     ids = [l['topics'][1] for l in json.loads(out(CAST, 'logs', '--from-block', '0', '--address', net.vault, '--rpc-url', net.eth, '--json'))
            if l['topics'][0].lower() == out(CAST, 'keccak', 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)').lower()]
@@ -317,6 +320,7 @@ def s_v3(net):
     sh(CAST, 'rpc', 'evm_setAutomine', 'true', '--rpc-url', net.l2)
     net.mine(net.l2, 1)
     check('v3 relay: both mints sent in one pass, in slot order', [e.get('slot') for e in relayed if e.get('tx')] == [0, 1], relayed)
+    gas['token.mint (queued, T = 0)'] = [used(net.l2, e['tx']) for e in relayed if e.get('tx')]
     check('v3 relay: both land in one L2 block, queued (T = 0)', view('nextSlot()(uint64)') == '2' and view('mintCount()(uint64)') == '0'
           and int(view('pendingSupply()(uint256)')) == 150 * U, (view('nextSlot()(uint64)'), view('pendingSupply()(uint256)')))
     waiting = [e for e in net.vigia(2, 'relay') if e.get('kind') == 'relay-execute']
@@ -324,14 +328,17 @@ def s_v3(net):
     net.warp(net.l2, DELAY + 1)
     ex = [e for e in net.vigia(2, 'relay') if e.get('kind') == 'relay-execute']
     net.mine(net.l2)
+    gas['token.executeMint (head, drains slot 1)'] = [used(net.l2, e['tx']) for e in ex if e.get('tx')]
     check('v3 relay: the head executes and the next slot drains behind it', view('mintCount()(uint64)') == '2'
           and int(view('balanceOf(address)(uint256)', net.alice)) == 150 * U, ex)
     check('v3: the mint chain equals the vault deposit chain', clean())
     r = net.burn(ALICE_KEY, 30 * U)
+    gas['token.burn'] = [int(r['gasUsed'], 16)]
     net.mine(net.l2)
     for i in (0, 1):
         net.vigia(i, 'sign')
-    net.vigia(2, 'relay')
+    rel = [e for e in net.vigia(2, 'relay') if e.get('kind') == 'relay-release' and e.get('tx')]
+    gas['vault.release (2-of-3 certificate)'] = [used(net.eth, e['tx']) for e in rel]
     check('v3: an honest burn is paid (v2 release id with the chain fields)', net.bob() == 30 * U, net.bob())
 
     def guardian(name, **extra):
@@ -386,6 +393,7 @@ def s_v3(net):
     rc, lines = reserves()
     check('v3 reservas: held, exit 2', rc == 2 and any(l.get('status') == 'held' for l in lines), lines)
     check('v3 money: the vault still holds every real deposit not burned', int(vault('totalLocked()(uint64)')) == 120 * U)
+    print('GAS ' + json.dumps(gas), flush=True)
 
 
 def main():
