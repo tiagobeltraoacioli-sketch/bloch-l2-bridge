@@ -80,6 +80,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 MARKER_VALUE = 546  # GnB-SMH marker output (lock destination / release burn marker)
@@ -116,6 +117,17 @@ class LevelClosed(Exception):
 class Unverifiable(Exception):
     """A read failed: no evidence either way (never a reason to pause)."""
     l2_rpc_error = False  # l2_rpc answered with a JSON-RPC error that is not a contract revert
+
+
+def redact(url):
+    """scheme://host[:port] of an RPC URL: provider API keys sit in the path, the query or the user part."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return '<rpc>'
+    if not u.scheme or not u.hostname:
+        return '<rpc>'
+    return f'{u.scheme}://{u.hostname}' + (f':{u.port}' if u.port else '')
 
 
 def words(data):
@@ -197,20 +209,30 @@ class Guardian:
                      reserves_grace_s=self.reserves_grace, provenance_grace_s=self.provenance_grace)
 
     # ── plumbing ─────────────────────────────────────────────────────────────
+    def scrub(self, text):
+        """Every configured RPC URL in `text` replaced by its scheme, host and port (agents/173 G3)."""
+        text = str(text)
+        for key in ('eth_rpc', 'l2_rpc', 'l2_tx_rpc', 'gnb_rpc'):
+            url = self.cfg.get(key)
+            if isinstance(url, str) and url and redact(url) != url:
+                text = text.replace(url, redact(url))
+        return text
+
     def log(self, **kv):
-        print(json.dumps({'t': int(time.time()), 'bridge': self.name, **kv}), flush=True)
+        print(self.scrub(json.dumps({'t': int(time.time()), 'bridge': self.name, **kv})), flush=True)
 
     def problem(self, pid, detail):
         """Something that stops this guardian protecting the bridge: never only a log line."""
-        self.state['problems'][pid] = {'t': int(time.time()), 'detail': str(detail)[-300:]}
-        self.log(kind='alert', severity='critical', id=pid, detail=str(detail)[-300:])
+        detail = self.scrub(detail)
+        self.state['problems'][pid] = {'t': int(time.time()), 'detail': detail[-300:]}
+        self.log(kind='alert', severity='critical', id=pid, detail=detail[-300:])
         self.notify(pid, detail)
 
     def notify(self, pid, detail):
         """Runs `alert_command` once. Callers deduplicate: `problems` and `open` hold what was already sent."""
         command = self.cfg.get('alert_command')
         if command:
-            argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+            argv = [str(a).replace('{id}', pid).replace('{detail}', self.scrub(detail)[-300:]) for a in command]
             try:
                 done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
                 if done.returncode:
@@ -268,7 +290,7 @@ class Guardian:
                 out = json.loads(r.read())
         except (OSError, ValueError) as e:
             self.l2_read_failed = self.l2_read_failed or url == self.l2
-            raise Unverifiable(f'{method} on {url}: {e}') from e
+            raise Unverifiable(f'{method} on {redact(url)}: {e}') from e
         if 'error' in out:
             # Only the settled RPC means "closed level" by this code. On an EIP-1474 node it is "resource not found": a failed read.
             if url == self.l2 and isinstance(out['error'], dict) and out['error'].get('code') == -32001:
@@ -294,7 +316,7 @@ class Guardian:
     def block(self, url, tag):
         b = self.rpc(url, 'eth_getBlockByNumber', [hex(tag) if isinstance(tag, int) else tag, False])
         if b is None:
-            raise Unverifiable(f'no {tag} block on {url}')
+            raise Unverifiable(f'no {tag} block on {redact(url)}')
         return int(b['number'], 16), int(b['timestamp'], 16), b['hash']
 
     def finalized_l2(self):
@@ -846,10 +868,14 @@ class Guardian:
             active_at = uint(self.call(self.l2, self.token, 'verifierActivatesAt()')[0])
         except (Unverifiable, IndexError):
             return []
-        if not int(proposed, 16):
-            return []
-        return [('soft', f'mint-verifier-proposed:{proposed}', 0, {
-            'reason': 'a one-way mint switch is pending', 'verifier': proposed, 'activates_at': active_at})]
+        pid = f'mint-verifier-proposed:{proposed}'
+        live = bool(int(proposed, 16))
+        for old in [k for k in self.state['problems'] if k.startswith('mint-verifier-proposed:') and (k != pid or not live)]:
+            self.clear_problem(old)
+        if live and pid not in self.state['problems']:  # BR-3 (a266bb2): paged as the vault's switch is
+            self.problem(pid, f'the token has a live one-way mint switch to {proposed}, activating from {active_at}: '
+                              'it cannot be undone, and guardians cannot stop it')
+        return []
 
     # ── queued-mint cancel ───────────────────────────────────────────────────
     def cancel_enabled(self):
@@ -1028,11 +1054,14 @@ class Guardian:
                 # One evidenced forgery is enough to pause; looking at at most `cancel_batch` (no RPC each, the deposit scan and
                 # block times are shared for the round) keeps a flooded round bounded.
                 for f in [f for f in due if f.startswith('mint:')][:self.cancel_batch]:
-                    if self.mint_forged(details.get(f)):
+                    if self.mint_forged(details.get(f)) and self.mint_on_send_side(details.get(f)):
                         vault_due.append(f)
             vault_due = self.not_settled(vault_due) if self.vault_pause else []
             if vault_due:
-                self.pause_vault(vault_due)
+                try:  # a failed Ethereum read here must not cost this round's votes and token pause (agents/173 G1)
+                    self.pause_vault(vault_due)
+                except (Unverifiable, LevelClosed, ValueError, IndexError, KeyError) as e:
+                    self.problem('vault-pause-failed', f'cannot pause the vault this round: {e}')
             self.cancel_votes(now, due)
             # A token finding is never settled by an unpause. The token's unpause needs switchThreshold (6 of 7 at launch), one more than
             # the mint quorum (agent 171, F171-1: an older comment here said the mint quorum); not settling stays the conservative choice.
@@ -1063,6 +1092,20 @@ class Guardian:
             self.log(kind='alert', severity='soft', id='mint-hold-unreadable', reason=str(e)[-200:])
             return False
         return True
+
+    def mint_on_send_side(self, detail):
+        """The mint behind a vault pause, read again on `l2_tx_rpc`: two L2 views must show it before 72 h of closed exits
+        (agents/173 G2). Queued: the same pending mint; credited: `minted` set. A failed read pauses nothing this round."""
+        m = (detail or {}).get('mint') or {}
+        try:
+            q = m.get('queued')
+            if q and q.get('still_pending'):
+                p = self.call(self.l2_tx, self.token, 'pendingMints(bytes32)', m['key'])
+                return (addr(p[0]), uint(p[1]), uint(p[2])) == (m['recipient'], m['amount'], q['ready_at'])
+            return bool(uint(self.call(self.l2_tx, self.token, 'minted(bytes32)', m['key'])[0]))
+        except (Unverifiable, LevelClosed, IndexError, ValueError, KeyError) as e:
+            self.log(kind='alert', severity='soft', id='mint-hold-unreadable', reason=str(e)[-200:])
+            return False
 
     def vault_unpaused_at(self):
         eth, vault = self.cfg['eth_rpc'], self.cfg['vault'].lower()
@@ -1182,6 +1225,10 @@ class Guardian:
             frm = self.me()
             nonce = int(self.rpc(self.l2_tx, 'eth_getTransactionCount', [frm, 'latest']), 16)
             price = int(self.rpc(self.l2_tx, 'eth_gasPrice', []), 16) * 2
+            last = self.state.get('raw_l2_last') or {}
+            if last.get('nonce') == nonce:  # replacing our own unconfirmed transaction: +25 % clears a 10 % rule (agents/173 G4)
+                price = max(price, int(last.get('price', 0)) * 125 // 100)
+            self.state['raw_l2_last'] = {'nonce': nonce, 'price': price}
             raw = self.cast_out('mktx', '--keystore', self.cfg['keystore'], '--password-file',
                                 self.cfg['password_file'], '--chain', str(self.cfg['l2_chain_id']), '--nonce', str(nonce),
                                 '--gas-limit', str(gas or self.cfg.get('l2_pause_gas', 200_000)), '--gas-price', str(price),

@@ -49,8 +49,20 @@ import json
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+def redact(url):
+    """scheme://host[:port] of an RPC URL: provider API keys sit in the path, the query or the user part (agents/173)."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return '<rpc>'
+    if not u.scheme or not u.hostname:
+        return '<rpc>'
+    return f'{u.scheme}://{u.hostname}' + (f':{u.port}' if u.port else '')
 
 
 class Unverifiable(Exception):
@@ -64,9 +76,9 @@ def rpc(url, method, params):
                                     timeout=60) as r:
             out = json.loads(r.read())
     except (OSError, ValueError) as e:
-        raise Unverifiable(f'{method} on {url}: {e}') from e
+        raise Unverifiable(f'{method} on {redact(url)}: {e}') from e
     if 'error' in out:
-        raise Unverifiable(f'{method} on {url}: {out["error"]}')
+        raise Unverifiable(f'{method} on {redact(url)}: {out["error"]}')
     return out['result']
 
 
@@ -105,7 +117,7 @@ class Monitor:
     def finalized(url):
         b = rpc(url, 'eth_getBlockByNumber', ['finalized', False])
         if not b:
-            raise Unverifiable(f'no finalized block on {url}')
+            raise Unverifiable(f'no finalized block on {redact(url)}')
         return int(b['number'], 16)
 
     def liabilities(self, b):

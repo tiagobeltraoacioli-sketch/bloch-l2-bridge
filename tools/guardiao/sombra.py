@@ -54,10 +54,22 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
 RESCAN_BLOCKS = 128  # Ethereum finality is about 64-96 blocks behind the head
+
+
+def redact(url):
+    """scheme://host[:port] of an RPC URL: provider API keys sit in the path, the query or the user part (agents/173)."""
+    try:
+        u = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return '<rpc>'
+    if not u.scheme or not u.hostname:
+        return '<rpc>'
+    return f'{u.scheme}://{u.hostname}' + (f':{u.port}' if u.port else '')
 
 
 class Unverifiable(Exception):
@@ -136,9 +148,9 @@ class Sombra:
                                         timeout=60) as r:
                 out = json.loads(r.read())
         except OSError as e:
-            raise Unverifiable(f'{method} @ {url}: {e}') from e
+            raise Unverifiable(f'{method} @ {redact(url)}: {e}') from e
         if 'error' in out:
-            raise Unverifiable(f'{method} @ {url}: {out["error"]}')
+            raise Unverifiable(f'{method} @ {redact(url)}: {out["error"]}')
         return out['result']
 
     def call(self, to, sig, *args, ok=True):
