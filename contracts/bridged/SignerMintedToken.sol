@@ -269,8 +269,10 @@ abstract contract SignerMintedToken {
         bucketUpdatedAt = block.timestamp;
         minted[replayKey] = true;
 
-        if (amount > largeMintThreshold || !_takeInstant(amount)) {
-            uint256 readyAt = block.timestamp + largeMintDelay;
+        bool delayed = amount > largeMintThreshold || !_takeInstant(amount);
+        if (delayed || !_creditNow(replayKey)) {
+            // A mint that may not credit yet only because of the token's credit order waits in the queue without a delay.
+            uint256 readyAt = block.timestamp + (delayed ? largeMintDelay : 0);
             pendingMints[replayKey] = PendingMint(recipient, amount, uint64(readyAt));
             pendingSupply += amount;
             emit MintQueued(replayKey, recipient, amount, readyAt);
@@ -278,8 +280,17 @@ abstract contract SignerMintedToken {
         }
         _credit(recipient, amount);
         emit MintExecuted(replayKey, recipient, amount);
+        _afterCredit(replayKey, recipient, amount);
         return true;
     }
+
+    /// @dev Whether an admitted mint may credit at once (tokens with a credit order say no while an earlier one waits).
+    function _creditNow(bytes32) internal view virtual returns (bool) {
+        return true;
+    }
+
+    /// @dev Called after every credit, instant or executed.
+    function _afterCredit(bytes32, address, uint64) internal virtual {}
 
     /// @dev Whether a mint at or below the threshold may credit at once. Otherwise it queues, like a large mint.
     function _takeInstant(uint64) internal virtual returns (bool) {
@@ -292,10 +303,17 @@ abstract contract SignerMintedToken {
         if (p.amount == 0) revert NotPending();
         if (paused()) revert IsPaused();
         if (block.timestamp < p.readyAt) revert NotReady();
+        if (!_creditNow(replayKey)) revert NotReady();
+        _executeReady(replayKey, p);
+    }
+
+    /// @dev Credits a queued mint whose checks passed.
+    function _executeReady(bytes32 replayKey, PendingMint memory p) internal {
         delete pendingMints[replayKey];
         pendingSupply -= p.amount;
         _credit(p.recipient, p.amount);
         emit MintExecuted(replayKey, p.recipient, p.amount);
+        _afterCredit(replayKey, p.recipient, p.amount);
     }
 
     function _credit(address recipient, uint64 amount) private {

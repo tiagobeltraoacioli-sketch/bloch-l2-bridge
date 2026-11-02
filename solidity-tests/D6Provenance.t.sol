@@ -160,7 +160,7 @@ contract D6ProvenanceTest {
         p.vault.setControls(true, true, 0, until, cert(p.vault.controlDigest(true, true, 0, until), 5));
         p.token = new BridgedStablecoinV3(
             "Bloch Bridged USDC", "bUSDC", block.chainid, address(p.vault), p.vault.routeId(), addrs(mintKeys), 5,
-            limits(), noGuard()
+            limits(), noGuard(), BridgedStablecoinV2.MintSwitch(6, 14 days)
         );
         require(p.token.mintHead() == p.vault.mintChainGenesis(), "same genesis on both sides");
     }
@@ -216,7 +216,7 @@ contract D6ProvenanceTest {
     function forgeD6(Pair memory p) internal returns (ProvenanceSourceVault.Release memory r) {
         // 101's D6: Alice's 1,000 deposit is final and not yet minted; the quorum mints 500 to Mallory, who burns.
         deposit(p, 1000 * uint64(U), ALICE);
-        mint(p, keccak256("forged"), p.token.mintCount(), 500 * uint64(U), MALLORY);
+        mint(p, keccak256("forged"), p.token.nextSlot(), 500 * uint64(U), MALLORY);
         r = burn(p, MALLORY, 500 * uint64(U));
     }
 
@@ -231,7 +231,7 @@ contract D6ProvenanceTest {
         uint256 until = block.timestamp + 100;
         v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));
         BridgedStablecoinV2 t = new BridgedStablecoinV2(
-            "Bloch Bridged USDC", "bUSDC", block.chainid, address(v), v.routeId(), addrs(mintKeys), 5, limits(), noGuard()
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(v), v.routeId(), addrs(mintKeys), 5, limits(), noGuard(), BridgedStablecoinV2.MintSwitch(6, 14 days)
         );
         usdc.mint(address(this), 1000 * U);
         v.deposit(uint64(1000 * U), pad(ALICE));
@@ -302,7 +302,7 @@ contract D6ProvenanceTest {
         (bytes32 b,) = deposit(p, 100 * uint64(U), BOB);
         bytes memory sigs = mintBlob(p.token.mintDigest(b, 1, 100 * uint64(U), BOB));
         (bool ok, bytes memory ret) =
-            address(p.token).call(abi.encodeCall(BridgedStablecoinV3.mint, (b, 1, 100 * uint64(U), BOB, sigs)));
+            address(p.token).call(abi.encodeCall(BridgedStablecoinV2.mint, (b, 1, 100 * uint64(U), BOB, sigs)));
         require(!ok && bytes4(ret) == BridgedStablecoinV3.MintOutOfOrder.selector, "deposit order");
     }
 
@@ -329,19 +329,23 @@ contract D6ProvenanceTest {
         require(p.vault.totalLocked() == 0 && p.token.totalSupply() == 0, "fully unwound");
     }
 
-    /// Queued (large) mints extend the chain when authorized, so a burn made while a large mint waits still matches.
-    function test_O1_queuedLargeMintKeepsChainInOrder() public {
+    /// Mints credit in slot order: a small mint behind a queued large one waits, then credits with it.
+    function test_O1_creditOrderSmallMintWaitsForTheLargeOneAhead() public {
         Pair memory p = pair(1, 0, address(0));
         (bytes32 a,) = deposit(p, 5000 * uint64(U), ALICE);
         (bytes32 b,) = deposit(p, 200 * uint64(U), BOB);
         mint(p, a, 0, 5000 * uint64(U), ALICE); // queued 12 h
-        mint(p, b, 1, 200 * uint64(U), BOB); // credited at once
-        (bool ok,) = tryRelease(p, burn(p, BOB, 200 * uint64(U)));
-        require(ok, "Bob paid while Alice's mint waits");
+        mint(p, b, 1, 200 * uint64(U), BOB); // due now, but slot 0 waits
+        require(p.token.balanceOf(BOB) == 0 && p.token.mintCount() == 0, "Bob waits for slot 0");
+        (bool ok,) = address(p.token).call(abi.encodeCall(SignerMintedToken.executeMint, (b)));
+        require(!ok, "not out of order");
         vm.warp(block.timestamp + 12 hours);
         p.token.executeMint(a);
+        require(p.token.balanceOf(BOB) == 200 * U && p.token.mintCount() == 2, "Bob credited with Alice's execution");
+        (ok,) = tryRelease(p, burn(p, BOB, 200 * uint64(U)));
+        require(ok, "Bob paid");
         (ok,) = tryRelease(p, burn(p, ALICE, 5000 * uint64(U)));
-        require(ok, "Alice paid after her delay");
+        require(ok, "Alice paid");
     }
 
     /// Burns made before a forged mint keep paying after it: the chain holds them by count.
@@ -636,7 +640,7 @@ contract D6ProvenanceTest {
         uint256 until = block.timestamp + 100;
         v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));
         BridgedStablecoinV2 t = new BridgedStablecoinV2(
-            "Bloch Bridged USDC", "bUSDC", block.chainid, address(v), v.routeId(), addrs(mintKeys), 5, limits(), noGuard()
+            "Bloch Bridged USDC", "bUSDC", block.chainid, address(v), v.routeId(), addrs(mintKeys), 5, limits(), noGuard(), BridgedStablecoinV2.MintSwitch(6, 14 days)
         );
         usdc.mint(address(this), 2000 * U);
         bytes32 w = v.deposit(uint64(1000 * U), pad(BOB));

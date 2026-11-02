@@ -158,9 +158,16 @@ contract BridgedStablecoinV2 is SignerMintedToken {
     function mint(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient, bytes calldata signatures)
         external
     {
+        _openSlot(depositId, depositNonce);
         _authorizeMint(depositId, _structHash(depositId, depositNonce, amount, recipient), amount, recipient, signatures);
         emit Minted(depositId, depositNonce, recipient, amount);
     }
+
+    /// @dev Tokens that order mints by deposit nonce check and take the slot here (mint, mintWithProof, remint).
+    function _openSlot(bytes32, uint64) internal virtual {}
+
+    /// @dev Called when the guardians cancel a queued mint.
+    function _onCancel(bytes32) internal virtual {}
 
     /// @notice The only mint path once the verifier is active. Anyone may submit; the recipient is fixed by the proof.
     function mintWithProof(bytes32 depositId, uint64 depositNonce, uint64 amount, address recipient, bytes calldata proof)
@@ -172,6 +179,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         bool reopened = mintCancels[depositId] > lastRemint[depositId];
         if (reopened) minted[depositId] = false;
         _checkMintable(depositId, amount, recipient);
+        _openSlot(depositId, depositNonce);
         bytes32 mintHash = _structHash(depositId, depositNonce, amount, recipient);
         (bool ok, bytes memory data) =
             active.staticcall(abi.encodeCall(IMintVerifier.verifyMint, (address(this), mintHash, proof)));
@@ -225,6 +233,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         bucketLevel = level > bucketCapacity ? bucketCapacity : level;
         bucketUpdatedAt = block.timestamp;
         emit MintCancelled(replayKey, recipient, amount, ++mintCancels[replayKey]);
+        _onCancel(replayKey);
         return true;
     }
 
@@ -249,6 +258,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         if (recipient == address(0)) revert ZeroRecipient();
         if (paused()) revert IsPaused();
         _checkSignatures(remintDigest(depositId, depositNonce, amount, recipient, locked), signatures, locked ? switchThreshold : threshold);
+        _openSlot(depositId, depositNonce);
         uint256 available = availableToMint();
         if (amount > available) revert RateLimited();
         if (totalSupply + pendingSupply + amount > supplyCap) revert SupplyCapExceeded();
@@ -335,7 +345,7 @@ contract BridgedStablecoinV2 is SignerMintedToken {
         return true;
     }
 
-    function burn(uint64 amount, address ethRecipient) external returns (bytes32 burnId) {
+    function burn(uint64 amount, address ethRecipient) external virtual returns (bytes32 burnId) {
         if (ethRecipient == address(0) || ethRecipient == sourceVault) revert BadEthRecipient();
         if (amount > bucketCapacity) revert BurnTooLarge();
         uint64 nonce;
