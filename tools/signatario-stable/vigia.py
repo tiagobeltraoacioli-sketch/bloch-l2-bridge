@@ -658,9 +658,9 @@ class Vigia:
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
         self.new_pass()
-        self.check_design()
         if self.mainnet and not self.cfg.get('l2_tx_rpc'):
             raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
+        self.check_design()
         if self.feed:
             self.sync(self.deposits(), self.burns())
         mint_dir = self.shared / 'mint'
