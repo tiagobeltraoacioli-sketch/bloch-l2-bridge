@@ -131,7 +131,7 @@ class Net:
         if self.prov:
             mode, delay = kind
             self.vault = self.create(self.eth, 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault', *ctor,
-                                     f'({mode},{delay},{ZERO})')
+                                     f'({mode},{delay},{ZERO},({ZERO},0,0))')
         else:
             self.vault = self.create(self.eth, 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault', *ctor)
         self.route = self.view(self.eth, self.vault, 'routeId()(bytes32)').lower()

@@ -120,7 +120,7 @@ class Net:
         self.keccak = k
         self.vault = self.create(self.eth, 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault', k('ethereum'), k('bloch-l2'),
                                  k('USDC'), self.usdc, str(10**6 * U), '0', self.addrs, '2', f'({10**5 * U},86400,2,604800,1,1)',
-                                 f'([{self.guard}],7200,7200)', f'(1,0,{ZERO})')
+                                 f'([{self.guard}],7200,7200)', f'(1,0,{ZERO},({ZERO},0,0))')
         self.route = self.view(self.eth, self.vault, 'routeId()(bytes32)').lower()
         d = self.view(self.eth, self.vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', str(2**40))
         self.send(self.eth, self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', str(2**40), self.list_sigs(d))

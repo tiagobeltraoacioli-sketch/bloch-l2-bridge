@@ -92,7 +92,7 @@ class Net:
                                               'ContextBoundSourceVault.sol:ContextBoundSourceVault')
         self.vault = self.create(self.eth, vault_contract,
                                  k('ethereum-sepolia'), k('bloch-l2-700771'), k('USDC'), self.usdc, str(1_000_000 * U), '0', addrs,
-                                 '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)', *(['(1,0,' + '0x' + '00' * 20 + ')'] if V3 else []))
+                                 '2', f'({100_000 * U},86400,2,604800,1,1)', '([],0,0)', *(['(1,0,' + '0x' + '00' * 20 + ',(0x' + '00' * 20 + ',0,0))'] if V3 else []))
         vu = str(int(time.time()) + 3600)
         d = self.view(self.eth, self.vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
         sigs = [out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, d) for _, key in self.signers[:2]]

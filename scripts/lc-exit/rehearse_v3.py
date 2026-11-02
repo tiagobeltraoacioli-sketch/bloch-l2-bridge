@@ -210,7 +210,7 @@ def burn():
     eth_signers = '[' + ','.join(addr(x) for x in ek) + ']'
     s['vault'] = vault = create(E, k['deployer'], VAULT, '0x' + sh(CAST, 'keccak', 'ethereum')[2:], sh(CAST, 'keccak', 'bloch-l2'),
                                 sh(CAST, 'keccak', 'USDC'), usdc, str(CAP), '0', eth_signers, '5',
-                                f'({BUCKET},86400,6,{DELAY},{MIN},{MIN})', '([],0,0)', '(1,0,0x0000000000000000000000000000000000000000)')
+                                f'({BUCKET},86400,6,{DELAY},{MIN},{MIN})', '([],0,0)', '(1,0,0x0000000000000000000000000000000000000000,(0x0000000000000000000000000000000000000000,0,0))')
     s['route'] = route = call(E, vault, 'routeId()(bytes32)')
     until = str(now(E) + 3600)
     d = call(E, vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', until)

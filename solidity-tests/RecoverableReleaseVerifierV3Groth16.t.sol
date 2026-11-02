@@ -57,7 +57,7 @@ contract RecoverableReleaseVerifierV3Groth16Test {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(new D6Usdc()), 100_000e6, 0, s, 5,
             ProvenanceSourceVault.Policy(10_000e6, 1 days, 6, 14 days, 10e6, 10e6),
             ProvenanceSourceVault.Guard(new address[](0), 0, 0),
-            ProvenanceSourceVault.Provenance(1, 0, address(0))
+            ProvenanceSourceVault.Provenance(1, 0, address(0), ProvenanceSourceVault.Fees(address(0), 0, 0))
         );
     }
 

@@ -43,10 +43,12 @@ from deploy_pontes import LEGACY_ADDRESSES, POLICY_GUARDIANS, POLICY_SWITCH_THRE
 MAX_SIGNERS, MAX_GUARDIANS = 16, 7
 MIN_SWITCH_DELAY = 7 * 86400
 MIN_PAUSE, MAX_PAUSE = 3600, 14 * 86400
+MAX_FEE_BPS = 30  # ProvenanceSourceVault.MAX_FEE_BPS
 UINT64_MAX = 2**64 - 1
 CONTRACT = 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault'
 # The V3 launch design (agents/108-d6-design.md, 109): the vault keeps a deposit chain and pays a burn only if the token's
-# mint chain at the burn matches it. Config `vault.provenance` = {"mode": 1, "releaseDelay": 0, "mintVerifier": null}.
+# mint chain at the burn matches it. Config `vault.provenance` = {"mode": 1, "releaseDelay": 0, "mintVerifier": null,
+# "fees": {"recipient": ADDRESS, "depositBps": 5, "releaseBps": 5}} (agent 197: protocol fee fixed at deployment).
 PROVENANCE_CONTRACT = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'
 ZERO = '0x' + '00' * 20
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
@@ -108,9 +110,18 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(v['contract'] in (CONTRACT, PROVENANCE_CONTRACT), f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
     if provenance:
         pv = v['provenance']
-        exact_keys(pv, ['mode', 'releaseDelay', 'mintVerifier'], 'vault.provenance')
+        exact_keys(pv, ['mode', 'releaseDelay', 'mintVerifier', 'fees'], 'vault.provenance')
         refuse(pv['mode'] == 1 and pv['releaseDelay'] == 0 and pv['mintVerifier'] is None,
                'vault.provenance must be mode 1 (mint chain), releaseDelay 0, no mintVerifier (options 2 and 3 are not the launch design)')
+        fe = pv['fees']
+        exact_keys(fe, ['recipient', 'depositBps', 'releaseBps'], 'vault.provenance.fees')
+        refuse(is_uint(fe['depositBps'], MAX_FEE_BPS) and is_uint(fe['releaseBps'], MAX_FEE_BPS),
+               f'vault.provenance.fees: depositBps and releaseBps are undecided or above {MAX_FEE_BPS} (0.30%)')
+        no_fee = fe['depositBps'] == 0 and fe['releaseBps'] == 0
+        refuse(fe['recipient'] is None if no_fee else is_addr(fe['recipient']),
+               'vault.provenance.fees.recipient is undecided (the protocol treasury on Ethereum), or set with both fees 0')
+        if not rehearsal:
+            refuse(not no_fee, 'mainnet charges a protocol fee (owner: the bridge must generate revenue); both rates are 0')
     labels = (v['sourceDomainLabel'], v['nativeDomainLabel'], v['assetLabel'])
     refuse(all(isinstance(x, str) and x for x in labels), 'a vault domain label is undecided')
     refuse(v['sourceDomainLabel'] != v['nativeDomainLabel'], 'source and native domains must differ')
@@ -151,6 +162,10 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_uint(pol['l2MinBurn'], lo=1), 'vault.policy.l2MinBurn is undecided')
     refuse(is_uint(pol['minDeposit'], pol['windowLimit'], pol['l2MinBurn']),
            'vault.policy.minDeposit is undecided, below l2MinBurn (a balance that could not be bridged back alone) or above windowLimit')
+    if provenance and isinstance(pol['minDeposit'], int) and isinstance(v['provenance']['fees'].get('depositBps'), int):
+        net = pol['minDeposit'] - pol['minDeposit'] * v['provenance']['fees']['depositBps'] // 10_000
+        refuse(net >= pol['l2MinBurn'], f'vault.policy.minDeposit nets {net} after the deposit fee, below l2MinBurn '
+               '(the constructor refuses it; with 5 bps use minDeposit 11 USDC for l2MinBurn 10)')
     windows = -(-v['cap'] // pol['windowLimit'])
     refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
            'switchDelay is too short for holders to exit: the cap needs '
@@ -188,6 +203,10 @@ def validate(cfg, rehearsal, token_cfg=None):
     legacy = sorted(LEGACY_ADDRESSES & set(signers + guardians + [dep['address'].lower(), dep['fundedBy']['safe'].lower()]))
     refuse(not legacy, f'committed 2026-10-14 address(es) with no recorded holder: {legacy}; use fresh keys '
                        '(docs/BRIDGE-V3-KEY-CEREMONY.md)')
+    if provenance and v['provenance']['fees']['recipient'] is not None:
+        r = str(v['provenance']['fees']['recipient']).lower()
+        refuse(r not in signers + guardians + [dep['address'].lower(), str(v['token']).lower()],
+               'the fee recipient must not be a signer, a guardian, the deployer or the token')
 
     if token_cfg is not None:
         lim, te = token_cfg.get('limits', {}), token_cfg.get('ethereum', {})
@@ -218,7 +237,13 @@ def constructor_args(cfg, norm):
             str(v['signers']['threshold']),
             f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
             f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})'] + (
-                [f'({v["provenance"]["mode"]},{v["provenance"]["releaseDelay"]},{ZERO})'] if v['contract'] == PROVENANCE_CONTRACT else [])
+                [provenance_arg(v['provenance'])] if v['contract'] == PROVENANCE_CONTRACT else [])
+
+
+def provenance_arg(pv):
+    fe = pv['fees']
+    recipient = (fe['recipient'] or ZERO).lower()
+    return f'({pv["mode"]},{pv["releaseDelay"]},{ZERO},({recipient},{fe["depositBps"]},{fe["releaseBps"]}))'
 
 
 def rpc(url, method, params):
@@ -258,8 +283,12 @@ def verify(cfg, norm, url, address, block, unused=False):
         'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
     if v['contract'] == PROVENANCE_CONTRACT:
+        fe = v['provenance']['fees']
         expect.update({'provenanceMode()(uint8)': str(v['provenance']['mode']), 'releaseDelay()(uint64)': '0',
-                       'mintVerifier()(address)': ZERO, 'forgeryProvenAt()(uint64)': '0'})
+                       'mintVerifier()(address)': ZERO, 'forgeryProvenAt()(uint64)': '0',
+                       'feeRecipient()(address)': (fe['recipient'] or ZERO).lower(),
+                       'depositFeeBps()(uint16)': str(fe['depositBps']), 'releaseFeeBps()(uint16)': str(fe['releaseBps']),
+                       'feesAccrued()(uint64)': None})
     checked, state = {}, {}
     for sig, want in expect.items():
         got = get(sig).lower()

@@ -63,6 +63,12 @@ interface IMintVerifier {
 ///      - `releaseDelay` > 0 (option 2, challenge): releases are queued for `releaseDelay`; anyone who proves a final L2
 ///        mint that no deposit backs (committee certificate before the switch, `mintVerifier` proof after it) freezes
 ///        all queued and later releases.
+///      Protocol fee (`Fees`, fixed at deployment, agent 197): `depositFeeBps` of each deposit and `releaseFeeBps` of
+///      each release, rounded down, at most `MAX_FEE_BPS` (0.30%) each. A fee is never backing: the deposit chain,
+///      the deposit id, the `Deposited` log and `totalLocked` all carry the NET amount, which is exactly what the L2
+///      token mints, so every bUSDC stays backed by one locked USDC. A release pays `amount - fee` and unlocks the
+///      full burned `amount`. Fees accrue in `feesAccrued`, outside `totalLocked`, and anyone may send them to the
+///      immutable `feeRecipient` with `sweepFees()`. No setter, owner or signature can change a fee or the recipient.
 contract ProvenanceSourceVault {
     bytes32 public immutable sourceDomain;
     bytes32 public immutable nativeDomain;
@@ -130,6 +136,15 @@ contract ProvenanceSourceVault {
     address public immutable mintVerifier;
     bytes32 public constant MINT_CHAIN_TAG = bytes32("BLOCH-USDT-MINT-CHAIN-v1");
     uint64 public constant MAX_RELEASE_DELAY = 14 days;
+    /// Hard ceiling on each fee, checked by the constructor: 30 bps = 0.30%.
+    uint16 public constant MAX_FEE_BPS = 30;
+    uint16 private constant BPS = 10_000;
+    /// Protocol treasury that `sweepFees()` pays, or address(0) when both fees are zero.
+    address public immutable feeRecipient;
+    uint16 public immutable depositFeeBps;
+    uint16 public immutable releaseFeeBps;
+    /// Fees held by this vault that are not backing: never released to bridge users, only swept to `feeRecipient`.
+    uint64 public feesAccrued;
     /// mode 1: chain head after n deposits (n >= 1; n = 0 is `mintChainGenesis()`).
     mapping(uint64 => bytes32) public depositHead;
     /// mode 2: cumulative deposited amount after n deposits.
@@ -161,11 +176,20 @@ contract ProvenanceSourceVault {
         address recipient;
     }
 
-    /// D6 policy fixed at deployment. `mode`: 0 none (control), 1 mint chain, 2 cumulative supply.
+    /// D6 policy fixed at deployment. `mode`: 0 none (control), 1 mint chain, 2 cumulative supply. `fees`: the
+    /// protocol fee, also fixed at deployment (carried here to keep the constructor's argument list unchanged).
     struct Provenance {
         uint8 mode;
         uint64 releaseDelay;
         address mintVerifier;
+        Fees fees;
+    }
+
+    /// Protocol fee fixed at deployment. Both rates zero and recipient zero: no fee (the pre-197 behaviour).
+    struct Fees {
+        address recipient;
+        uint16 depositBps;
+        uint16 releaseBps;
     }
 
     struct PendingRelease {
@@ -222,6 +246,8 @@ contract ProvenanceSourceVault {
     );
     event ReleaseExecuted(bytes32 indexed id, address recipient, uint64 amount);
     event ForgedMintProven(bytes32 indexed mintClaimId, uint64 depositNonce, uint64 amount, address recipient);
+    event FeeAccrued(bytes32 indexed id, uint64 fee);
+    event FeesSwept(address indexed recipient, uint64 amount);
     event GuardianPaused(address indexed guardian, uint64 indexed pauseCount, uint64 pausedUntil);
     event Unpaused(uint64 indexed pauseCount, uint64 guardianBlockedUntil);
 
@@ -259,6 +285,16 @@ contract ProvenanceSourceVault {
         Guard memory guard,
         Provenance memory provenance
     ) {
+        Fees memory fees = provenance.fees;
+        if (
+            fees.depositBps > MAX_FEE_BPS || fees.releaseBps > MAX_FEE_BPS
+                || (fees.recipient == address(0)) != (fees.depositBps == 0 && fees.releaseBps == 0)
+                || fees.recipient == address(this) || fees.recipient == token_
+                || policy.minDeposit - _fee(policy.minDeposit, fees.depositBps) < policy.l2MinBurn
+        ) revert InvalidConfiguration();
+        feeRecipient = fees.recipient;
+        depositFeeBps = fees.depositBps;
+        releaseFeeBps = fees.releaseBps;
         if (
             provenance.mode > 2 || provenance.releaseDelay > MAX_RELEASE_DELAY
                 || (provenance.releaseDelay == 0 && provenance.mintVerifier != address(0))
@@ -532,13 +568,15 @@ contract ProvenanceSourceVault {
 
     function deposit(uint64 amount, bytes32 pqRecipientHash) external nonReentrant returns (bytes32 id) {
         if (paused()) revert Paused();
+        uint64 fee = _fee(amount, depositFeeBps);
+        uint64 net = amount - fee;
         if (
             !depositsEnabled || amount < minDeposit || amount > windowLimit || pqRecipientHash == 0
-                || uint256(pqRecipientHash) >> 160 != 0 || uint256(totalLocked) + amount > cap
+                || uint256(pqRecipientHash) >> 160 != 0 || uint256(totalLocked) + net > cap
                 || depositCount == type(uint64).max
         ) revert InvalidTransfer();
         uint256 beforeBalance = _balance(address(this));
-        if (beforeBalance < totalLocked) revert InsufficientBacking();
+        if (beforeBalance < uint256(totalLocked) + feesAccrued) revert InsufficientBacking();
         uint256 beforeSender = _balance(msg.sender);
         _call(
             abi.encodeWithSignature("transferFrom(address,address,uint256)", msg.sender, address(this), uint256(amount))
@@ -547,16 +585,34 @@ contract ProvenanceSourceVault {
             revert InvalidTransfer();
         }
         uint64 nonce = depositCount++;
-        totalLocked += amount;
-        id = depositId(nonce, msg.sender, amount, pqRecipientHash);
+        // From here on the deposit is its NET amount: what the L2 token mints and what stays locked.
+        totalLocked += net;
+        feesAccrued += fee;
+        id = depositId(nonce, msg.sender, net, pqRecipientHash);
         address l2Recipient = address(uint160(uint256(pqRecipientHash)));
         if (provenanceMode == 1) {
-            depositHead[nonce + 1] = keccak256(abi.encode(chainHeadAt(nonce), id, uint256(amount), l2Recipient));
+            depositHead[nonce + 1] = keccak256(abi.encode(chainHeadAt(nonce), id, uint256(net), l2Recipient));
         } else {
-            if (provenanceMode == 2) depositTotalAt[nonce + 1] = depositTotalAt[nonce] + amount;
-            if (releaseDelay != 0) depositRecord[nonce] = keccak256(abi.encode(id, uint256(amount), l2Recipient));
+            if (provenanceMode == 2) depositTotalAt[nonce + 1] = depositTotalAt[nonce] + net;
+            if (releaseDelay != 0) depositRecord[nonce] = keccak256(abi.encode(id, uint256(net), l2Recipient));
         }
-        emit Deposited(id, routeId(), nonce, msg.sender, amount, pqRecipientHash);
+        emit Deposited(id, routeId(), nonce, msg.sender, net, pqRecipientHash);
+        if (fee != 0) emit FeeAccrued(id, fee);
+    }
+
+    /// @notice Pays every accrued fee to the immutable `feeRecipient`. Anyone may call it; it never touches backing.
+    function sweepFees() external nonReentrant returns (uint64 amount) {
+        amount = feesAccrued;
+        if (amount == 0) return 0;
+        uint256 beforeVault = _balance(address(this));
+        if (beforeVault < uint256(totalLocked) + amount) revert InsufficientBacking();
+        uint256 beforeRecipient = _balance(feeRecipient);
+        feesAccrued = 0;
+        _call(abi.encodeWithSignature("transfer(address,uint256)", feeRecipient, uint256(amount)));
+        if (_balance(address(this)) + amount != beforeVault || _balance(feeRecipient) != beforeRecipient + amount) {
+            revert InvalidTransfer();
+        }
+        emit FeesSwept(feeRecipient, amount);
     }
 
     function release(Release calldata item, ReleaseContext calldata context, bytes[] calldata signatures)
@@ -742,17 +798,28 @@ contract ProvenanceSourceVault {
         uint256 available = availableToRelease();
         if (amount > available) revert RateLimited();
         if (amount > totalLocked) revert InsufficientBacking();
+        // The bucket and `totalLocked` take the full burned amount; the recipient gets it less the release fee,
+        // which moves from backing to `feesAccrued` (the burn already removed the same amount of bUSDC).
         releaseBucket = uint64(available - amount);
         releaseBucketUpdatedAt = uint64(block.timestamp);
+        uint64 fee = _fee(amount, releaseFeeBps);
+        uint64 paid = amount - fee;
         uint256 beforeVault = _balance(address(this));
-        if (beforeVault < totalLocked) revert InsufficientBacking();
+        if (beforeVault < uint256(totalLocked) + feesAccrued) revert InsufficientBacking();
         uint256 beforeRecipient = _balance(recipient);
         totalLocked -= amount;
-        _call(abi.encodeWithSignature("transfer(address,uint256)", recipient, uint256(amount)));
-        if (_balance(address(this)) + amount != beforeVault || _balance(recipient) != beforeRecipient + amount) {
+        feesAccrued += fee;
+        _call(abi.encodeWithSignature("transfer(address,uint256)", recipient, uint256(paid)));
+        if (_balance(address(this)) + paid != beforeVault || _balance(recipient) != beforeRecipient + paid) {
             revert InvalidTransfer();
         }
+        if (fee != 0) emit FeeAccrued(id, fee);
         if (releaseDelay != 0) emit ReleaseExecuted(id, recipient, amount);
+    }
+
+    /// @dev Fee on `amount` at `bps`, rounded down (in the user's favour).
+    function _fee(uint64 amount, uint16 bps) private pure returns (uint64) {
+        return uint64(uint256(amount) * bps / BPS);
     }
 
     function _checkCertificate(bytes32 digest, bytes[] calldata signatures, uint8 required) private view {

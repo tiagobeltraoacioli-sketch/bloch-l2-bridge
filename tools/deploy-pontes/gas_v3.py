@@ -67,7 +67,7 @@ def main():
         vault, gas['create ProvenanceSourceVault'] = create(
             eth, 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault', k('ethereum-mainnet'), k('bloch-l2-700770'),
             k('USDC'), usdc, str(100_000 * U), '0', addrs(ethk), '5', f'({10_000 * U},86400,6,1209600,{10 * U},{10 * U})',
-            f'({addrs(vg)},259200,259200)', '(1,0,0x' + '00' * 20 + ')')
+            f'({addrs(vg)},259200,259200)', '(1,0,0x' + '00' * 20 + ',(0x' + '00' * 20 + ',0,0))')
         route = out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth)
         token, gas['create BridgedStablecoinV3'] = create(
             l2, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', 'Bloch Bridged USDC', 'bUSDC', '1', vault, route,
