@@ -53,8 +53,8 @@ below and reproduces the manifests (section 11.4).
 | 2 | `bloch-l2-bridge` | **`eb5c981b61cbd6a9668bed8651fbfb839dd00e18`** (`codex/bridge-rc-r10-20261102`) | Bridge V3 release candidate with the 5/5 bps vault fee, `MAX_PENDING` = 2,048 and the T = 0 rule. Replaces the earlier candidates `125227b` and `8d988ce`. **One named post-freeze delta is allowed:** the signer re-pin to the final L2 launch build (constants and text in track A2 only; section 6.2 item 14) |
 | 2 (track C, optional) | `postern-dex` | **`3dae1edd56d018c497a05d23a5468edd803e1ce5`** (`codex/bridge-frontend-r10-20261102`) | Bridge pages of the web frontend: fee wording and net amounts, refusal of L2 recipients with code |
 | 2 (track B) | `bloch-pos` (light-client crates) | **`06faae5c079c9bb91b1d263b444b62342ec93f83`** (`codex/lc-step-fixed-r7-20261102`) | SP1 step and release guests, `bloch-lc-mint-chain`, `bloch-light-client`, `bloch-finality-cert` and the consensus modules they reach |
-| 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **`a058b25d10daa88082cc418944df4f57d03b47f0`** (`codex/fork-candidate-l2-r11-20261103`, the December candidate with forced inclusion, the fallback guest, the base-fee floor and the sweep-recipient gate) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
-| 3 | `bloch-sis-pow` (L1 node) | **`5399d34c8d1589fde7f64a27b839f782e675807b`** (`codex/fork-candidate-native-r11-20261103`) | Only the forced-inclusion queue and its settlement check (section 5.4), and optionally the L1 crossing fee (track 3E) |
+| 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **`3377f8a4020828abeaaabfaec8574279e35c6637`** (`codex/fork-candidate-l2-r11-20261103`, the December candidate with forced inclusion, the fallback guest, the base-fee floor and the sweep-recipient gate) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
+| 3 | `bloch-sis-pow` (L1 node) | **`9a34f6ff40340c83f33e89877c24390c96770fd1`** (`codex/fork-candidate-native-r11-20261103`) | Only the forced-inclusion queue and its settlement check (section 5.4), and optionally the L1 crossing fee (track 3E) |
 
 Build settings:
 
@@ -266,16 +266,16 @@ The fix review must confirm the final hashes from the pinned container at the fi
 ### 5.3 Scope and size
 
 Counted by `scripts/audit-rfp/manifest.py`. Manifests: `phase3-sparse.manifest.tsv` (at `b772f2d`; identical file
-hashes to the sparse package's `SCOPE-MANIFEST.txt`), `phase3-delta-l2.manifest.tsv` (at `a058b25`) and
-`phase3-forced-native.manifest.tsv` (at `5399d34c`).
+hashes to the sparse package's `SCOPE-MANIFEST.txt`), `phase3-delta-l2.manifest.tsv` (at `3377f8a`) and
+`phase3-forced-native.manifest.tsv` (at `9a34f6ff`).
 
 | Track | What | Size | Review mode |
 |---|---|---|---|
 | **3A primary** | `src/sparse_witness.rs`, `src/sparse_view.rs`, the three `guest-sparse` entry points, the pinned build (`Cargo.toml`, `Cargo.lock`, `Dockerfile`, `build-container.sh`) at `b772f2d` | **806 nSLOC** Rust (1,302 lines) + build files | All of it |
 | **3A secondary** | 11 core files the sparse path changed or newly relies on (`proof_statement.rs`, `chainspec.rs`, `executor.rs`, `lifecycle.rs`, `node_execution/mod.rs`, `stateroot.rs`, `state.rs`, `serde_bounded.rs`, `head.rs`, `lib.rs`, `Cargo.toml`) | 2,979 nSLOC; about 190 changed lines since the activated program | The diff from `2034701` and the named functions |
 | **3B forced inclusion and fallback, L2** (new since `b772f2d`) | `src/forced_inclusion.rs` (417 lines), `src/forced_complete.rs` (291), the `guest-fallback` crate (entry point 58 lines, `Cargo.toml`, `Cargo.lock`, `build-container.sh`) | **347 nSLOC** new | All of it |
-| **3B changed core** (since `b772f2d`) | `chainspec.rs` +329/-11 (base-fee floor, sweep-recipient gate, `validate`, forced bounds), `node_execution/select.rs` +135, `proof_statement.rs` +97, `sparse_witness.rs` +83, `executor.rs` +38, `transactions.rs` +17, `lib.rs` +8, the three next-rules entry points (release-gate assert) | about 720 changed lines | The diff from `b772f2d` |
-| **3C forced inclusion, L1 queue** | `transition/l2_forced.rs` (307 lines, 218 nSLOC, wire `0x1C`), `pub mod forced` in `l2_settlement.rs` (416 lines, 276 nSLOC), and the hooks in `l2_settlement.rs`, `hard_forks.rs`, `params.rs`, `transition.rs`, `local_cache.rs`, `wire_alloc.rs` | about 1,340 added lines in 7 files (494 nSLOC in the two units) | The two units in full; the hooks as a diff from `27f195d7` |
+| **3B changed core** (since `b772f2d`) | `chainspec.rs` +336/-11 (base-fee floor, sweep-recipient gate, `validate`, forced bounds), `node_execution/select.rs` +135, `proof_statement.rs` +102, `sparse_witness.rs` +83, `executor.rs` +38, `transactions.rs` +17, `lib.rs` +8, the three next-rules entry points (release-gate assert) | about 720 changed lines | The diff from `b772f2d` |
+| **3C forced inclusion, L1 queue** | `transition/l2_forced.rs` (307 lines, 218 nSLOC, wire `0x1C`), `pub mod forced` in `l2_settlement.rs` (416 lines, 276 nSLOC), and the hooks in `l2_settlement.rs` (including the head reset that re-queues consumed records, and its `forfeit` flag from agent 222), `hard_forks.rs`, `params.rs`, `transition.rs`, `local_cache.rs`, `wire_alloc.rs` | about 1,340 added lines in 7 files (494 nSLOC in the two units) | The two units in full; the hooks as a diff from `27f195d7` |
 | 3A/3B context | 17 core files compiled into the guests, unchanged (`mpt.rs`, `withdrawal.rs`, `proving.rs`, `native_settlement.rs`, ...) | 3,487 nSLOC | Read as needed; a finding there affects the activated guest too |
 | **3E (optional) L1 crossing fee** | `l2_revenue.rs` (182 lines), `transition/l2_deposit.rs` and `l2_claim.rs` (+75 lines), gate and parameters: a deposit pays `clamp(5 bps, 5,000 sat, 1 BLCH)` on top of the amount and a claim releases the leaf less the same fee, to one compiled treasury; the inbox record and outbox leaf are unchanged, so no guest moves. Inert gate `L2_REVENUE_EPOCH`; the coordinator ties it to the program swap | about 330 added lines | Include if it ships in December |
 
@@ -673,7 +673,7 @@ cargo test --release --locked --features serde --test next_consensus_rules --tes
 
 Expected: 3 and 3 passed.
 
-At the December candidate (`bloch-l2-evm` `a058b25`). The counts below were measured on the component branches that
+At the December candidate (`bloch-l2-evm` `3377f8a`). The counts below were measured on the component branches that
 the candidate merges (agents 215, 216, 217); agent 219 reruns them on the integrated tip. While the sweep recipient is
 unset, tests that need the next rules run on `ChainSpec::mainnet_next_or_rehearsal()` (a throwaway rehearsal recipient
 that can never be released).
@@ -708,7 +708,7 @@ cargo test --release --locked --lib
 
 Expected: 122 passed (feature off).
 
-L1 side (`bloch-sis-pow` `5399d34c`, Rust 1.98.1 for the test suites, `+1.94.1 check --locked` for the release
+L1 side (`bloch-sis-pow` `9a34f6ff`, Rust 1.98.1 for the test suites, `+1.94.1 check --locked` for the release
 toolchain):
 
 ```

@@ -4,8 +4,8 @@ new	58	33	30	554c2c2361736a9f57c0f07b5052a0b29b27f45dc1dde8827092e7e9dadd52f9	in
 new-build	33	-	-	931748829d4dc1734db87f53fe4b155ba29b5c09da3c8afe559a54d16685c5e7	integrations/sp1-execution/guest-fallback/Cargo.toml
 new-build	2370	-	-	16c1a35a83e59f40d67fdc7faabd8aada0079a08a0cebbe75f420fb888c165f2	integrations/sp1-execution/guest-fallback/Cargo.lock
 new-build	86	54	54	de8a29d70902141136425b4ef24d7c5ff9332d4f4fb955c755ea37c37f82b330	integrations/sp1-execution/guest-fallback/build-container.sh
-changed	982	310	296	2bccabf01baa85b7f1f429a299eae91d54ca6b9931cc0a04a8def681c101ff53	src/chainspec.rs
-changed	1310	640	454	73931f837869894836ac04753b7a9c258f7178d9cfe8ab85a04620404ed04183	src/proof_statement.rs
+changed	989	312	298	f8b70d604c0c28d79351c2f18f321f60afc52ea1ca5edbc5151bcecb3c3ecd78	src/chainspec.rs
+changed	1315	640	454	2675bc2c7c77e2fc3c61a8905703e0c2fecc608d97d6adb49a9f34f474353647	src/proof_statement.rs
 changed	1102	852	655	9ad7f0b92714dbc4a7a2976c3641b1ff2a7b6988fd021f87565ddae9d1903a3e	src/sparse_witness.rs
 changed	2661	945	725	a76b58cf6d14d71b76a27c3f7d4259fb4da5147e9aa8db54b01d5483a3e7491e	src/executor.rs
 changed	497	375	290	e936ad0cf0621a650246bb1e59fc9f3e4e131b4b0e297a5b0d9f5e9cc9e737a0	src/node_execution/select.rs
@@ -19,5 +19,5 @@ changed-build	85	54	54	ec305231464a9266dfacee0a4fb2827b3dc48cc406ad2e216cbe303a7
 changed-build	111	-	-	4fe388b4c0f9625b121c658f515a6c31cbbba5c52691facc842e1fdaec1c9ef9	Cargo.toml
 # total new	766	477	347
 # total new-build	2489	54	54
-# total changed	7373	3573	2790
+# total changed	7385	3575	2792
 # total changed-build	274	107	107
