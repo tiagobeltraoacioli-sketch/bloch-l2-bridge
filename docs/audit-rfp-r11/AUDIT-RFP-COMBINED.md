@@ -260,7 +260,17 @@ carries every account the admissibility check reads, and a database failure in t
 Bounds: 16 records and 300,000 declared gas per settlement, 21,000 to 300,000 gas per record, 8 KiB per envelope, 256
 weight units in the queue.
 
-PENDING-P3-FORCED-CHANGES
+**Changes after the internal review (agent 164), in the code under audit.** These were made in round 11 and are new to
+every internal review except their own tests:
+
+| Item | Rule now |
+|---|---|
+| R1 (High) rollback to a program without forced inclusion halts settlement | The arming rule also requires `PROGRAM_FALLBACK` to be listed as implementing forced inclusion, and an unlisted fallback takes no new record at run time. The fallback guest now implements the rule (section 5.2) |
+| R2 (Medium) a head reset dropped consumed records | A log of the last 1,024 consumed records; a reset re-queues those above its target at the front; a deeper reset is refused |
+| R3 (Medium) drain rate depended on record size | `weight(gas) = ceil(gas * 14 / 300,000)`; each settlement-sized group counts at least 14 units, so a record ending at queue position `p` is consumed by the `ceil(p / 14)`-th settlement anchored after it (19 at capacity), whatever the sizes and mix |
+| R4 (Medium) one record ahead invalidated in-flight transactions | The `0x1C` transaction signs `max_surcharge_sat`; the inputs fund it; the surcharge at the depth found is paid to the protocol treasury (output 2) and the rest is refunded to the funding key (output 1); `SurchargeAboveMax` otherwise. The surcharge is no longer added to the base fee. The treasury is a compiled constant (`TBD-owner`); the queue is never enabled without it |
+| R5 (Low) whole record priced at its entry tier | Each unit priced at its own position (closed form, at most two tiers) |
+| R6 (Low) keeping the queue full was cheap | Price doubles every 24 units instead of 32: the cheapest full hold costs 10,240,000 sat per settlement (10 times the reviewed design), 14,336,000 with transfers |
 
 ### 5.5 Invariants
 
@@ -275,7 +285,7 @@ equivalence with the complete witness; malleability is harmless; bounded decodin
 | S16 | **Statement binding.** The deposits slot is `inbox_hash(deposits, consumed records)`; `user_tx_count` and the DA commitment cover only sequencer transactions; a forced-only block has user count 0 and no DA | `proof_statement.rs` |
 | S17 | **One rule everywhere.** Producer, L1 rebuild and guest call the same function and reach the same body | `select_node_transactions_after_forced`, `reconstruct`, guest |
 | S18 | **L1 queue.** Every queued record is either consumed by an accepted statement or still pending; a head reset puts records consumed by discarded blocks back at the front (a reset deeper than the 1,024-record log is refused); the arming rule refuses forced inclusion with a fallback program that does not implement it | `l2_settlement.rs` (`mod forced`), `transition/l2_forced.rs`, `hard_forks.rs` |
-| S19 | **L1 surcharge and refund.** PENDING-P3-S19 | `transition/l2_forced.rs` |
+| S19 | **L1 surcharge and refund.** For every accepted `0x1C` transaction: inputs = L1 fee + surcharge paid to the treasury + refund to the funding key, exactly; the surcharge is the per-unit price summed over the record's own positions and never exceeds the signed `max_surcharge_sat`; the queue never exceeds 256 units; a record at position `p` is due by the `ceil(p / 14)`-th settlement after it | `transition/l2_forced.rs`, `l2_settlement.rs` (`mod forced`) |
 | S20 | **Base-fee floor.** Under the next rules the base fee never falls below 0.1 gwei; above the floor the EIP-1559 step is unchanged; a non-zero floor outside the next rules is refused by the configuration commitment | `ChainSpec::next_base_fee` (one choke point) |
 | S21 | **Fallback equivalence.** The complete-witness fallback guest under the same configuration produces the same statement as the sparse guest for every block, forced records included | fallback guest; differential |
 
