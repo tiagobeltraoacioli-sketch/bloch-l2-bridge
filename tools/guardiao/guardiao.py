@@ -741,11 +741,34 @@ class Guardian:
             self.log(kind='alert', severity='soft', id='switch-unreadable', reason=str(e)[-200:])
             return
         pid = f'verifier-proposed:{proposed}'
-        for old in [k for k in self.state['problems'] if k.startswith('verifier-proposed:') and (k != pid or not live)]:
+        uid = f'verifier-unsafe:{proposed}'
+        for old in [k for k in self.state['problems']
+                    if k.startswith(('verifier-proposed:', 'verifier-unsafe:')) and (k not in (pid, uid) or not live)]:
             self.clear_problem(old)
         if live and pid not in self.state['problems']:
             self.problem(pid, f'the vault has a live light-client verifier proposal {proposed}, activating from {activates}: '
                               'one way, and guardians cannot stop it')
+        if live and uid not in self.state['problems']:
+            self.review_proposed_code(eth, proposed, uid)
+
+    def review_proposed_code(self, eth, proposed, uid):
+        """Agent 172 V2 / 239: the vault pins the proposal's code hash, not its behaviour. A proxy (DELEGATECALL, CALLCODE,
+        EIP-1167, an EIP-7702 designator) or a self-destructing or creating contract is a hard alert: the switch signers'
+        own review (`verifier_review.py proposal`) must refuse it, and holders have only the switch delay to leave."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy-pontes'))
+            import verifier_review
+        except ImportError as e:
+            self.problem(uid, f'cannot review the proposed verifier {proposed}: verifier_review.py is missing ({e})')
+            return
+        try:
+            code = verifier_review.parse_hex(self.rpc(eth, 'eth_getCode', [proposed, 'latest']))
+            verifier_review.scan(code)
+        except verifier_review.Refused as e:
+            self.problem(uid, f'the proposed verifier {proposed} fails the review rule: {e}. Do not sign anything for it; '
+                              'holders must exit before it activates')
+        except Unverifiable as e:
+            self.log(kind='alert', severity='soft', id='switch-code-unreadable', reason=str(e)[-200:])
 
     def round(self):
         self.l2_read_failed = self.blind = False
