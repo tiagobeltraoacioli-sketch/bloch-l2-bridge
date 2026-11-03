@@ -56,7 +56,10 @@ below and reproduces the manifests (section 11.4).
 | 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **`3377f8a4020828abeaaabfaec8574279e35c6637`** (`codex/fork-candidate-l2-r11-20261103`, the December candidate with forced inclusion, the fallback guest, the base-fee floor and the sweep-recipient gate) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
 | 3 | `bloch-sis-pow` (L1 node) | **`9a34f6ff40340c83f33e89877c24390c96770fd1`** (`codex/fork-candidate-native-r11-20261103`) | Only the forced-inclusion queue and its settlement check (section 5.4), and optionally the L1 crossing fee (track 3E) |
 
-Before sending, the owner confirms that these commits are still final. The Phase 3 commits are the December
+Before sending, the owner confirms that these commits are still final. Phase 2: a later bridge line
+(`codex/bridge-rc-r11-20261103`, in progress at the time of writing) changes `ProvenanceSourceVault`,
+`RecoverableReleaseVerifier` and `vigia.py`; if it is accepted, its tip replaces `eb5c981` and the Phase 2 manifests
+and hashes are regenerated. The Phase 3 commits are the December
 candidate's tips at the time of writing (the integration was still adding test and tooling commits); if they move,
 section 2, section 5.3 and the two Phase 3 manifests are regenerated with `scripts/audit-rfp/manifest.py`.
 
