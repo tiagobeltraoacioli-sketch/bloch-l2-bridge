@@ -170,6 +170,10 @@ class LevelClosed(RuntimeError):
 
 
 class Vigia:
+    # Defaults for the round 11 state (agent 241), also for objects built without __init__ (test models).
+    replace_after, role, backup_index, backup_step = 300, None, None, {'l2': 1200, 'eth': 300}
+    scan_dir, scan_full_every, mode, _finished = None, 86400, 'sign', None
+
     def __init__(self, cfg_path):
         self.cfg_path = Path(cfg_path)
         self.cfg = json.loads(self.cfg_path.read_text())
@@ -489,10 +493,14 @@ class Vigia:
 
     # ── persisted scan state (F229-11, agent 241) ─────────────────────────────
     def scan_file(self, name):
-        me = re.sub(r'[^A-Za-z0-9_.-]', '_', str(self.me))
-        return self.scan_dir / f'{self.mode}-{me}-{name}.json'
+        if self.scan_dir is None:
+            return None  # no scan state configured: every pass reads everything, as before
+        me = re.sub(r'[^A-Za-z0-9_.-]', '_', str(getattr(self, 'me', 'x')))
+        return Path(self.scan_dir) / f'{self.mode}-{me}-{name}.json'
 
     def scan_load(self, name):
+        if self.scan_file(name) is None:
+            return None
         try:
             doc = json.loads(self.scan_file(name).read_text())
             return doc if isinstance(doc, dict) else None
@@ -501,6 +509,8 @@ class Vigia:
 
     def scan_save(self, name, doc):
         path = self.scan_file(name)
+        if path is None:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
         tmp.write_text(json.dumps(doc))
