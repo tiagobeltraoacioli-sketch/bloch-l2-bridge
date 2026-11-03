@@ -14,6 +14,9 @@ while guardiao reports `mint-chain` and reservas `held`. V3=1 runs `reorg` on th
 v3fee: v3 with the decided vault fee (5 bps on deposit and on release, throwaway recipient): the unchanged signers and relayer
 mint the net amount, the release pays the burn less 5 bps, the fees stay outside backing, and `sweepFees` pays only the
 recipient (agent 200).
+v3relay: agent 229's relayer review on the v3fee pair: A229_DEPOSITS (default 20) due mints all credit in the one L2 block after
+one relay pass (the relayer sends `drain()` behind the head it verified), and with the queue at MAX_PENDING (pendingCount set
+with anvil_setStorageAt) the relayer sends no mint at all and alerts, then relays as soon as there is room.
 """
 import json
 import os
@@ -40,12 +43,12 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee'))
-if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee'):
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay'):
     LARGE = 0  # the launch default T = 0
 # v3fee (agent 200): the same launch scenario with the decided protocol fee in the vault, 5 bps on deposit and 5 bps on
 # release to a throwaway recipient; every amount below is the exact net amount, and the fee is never backing.
-FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] == 'v3fee' else 0
+FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] in ('v3fee', 'v3relay') else 0
 FEE_SINK = '0x' + 'fe' * 20
 
 
@@ -487,9 +490,72 @@ def s_v3remint(net):
           and view('mintHead()(bytes32)').lower() == vault('chainHeadAt(uint64)(bytes32)', '2').lower())
 
 
+def s_v3relay(net):
+    """Agent 229: credit throughput behind one execution, and a full queue, with the real signers and relayer (5 bps fee on)."""
+    view = lambda sig, *a: net.view(net.l2, net.token, sig, *a).split()[0]  # noqa: E731
+    vault = lambda sig, *a: net.view(net.eth, net.vault, sig, *a).split()[0]  # noqa: E731
+    n, amount = int(os.environ.get('A229_DEPOSITS', 20)), 11 * U
+    automine = lambda on: sh(CAST, 'rpc', 'evm_setAutomine', 'true' if on else 'false', '--rpc-url', net.l2)  # noqa: E731
+
+    def one_block_pass():
+        """One relay pass while no L2 block lands, then exactly one block: the L2's cadence."""
+        automine(False)
+        lines = net.vigia(2, 'relay')
+        net.mine(net.l2, 1)
+        automine(True)
+        return lines
+    for _ in range(n):
+        net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + net.alice[2:])
+    net.mine(net.eth)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    for _ in range(4):  # max_inflight (16) per L2 block
+        one_block_pass()
+        if view('nextSlot()(uint64)') == str(n):
+            break
+    check(f'setup: {n} deposits queued in slot order (T = 0), net of the 5 bps fee', view('nextSlot()(uint64)') == str(n)
+          and view('mintCount()(uint64)') == '0' and int(view('pendingSupply()(uint256)')) == n * net_of(amount),
+          (view('nextSlot()(uint64)'), view('pendingSupply()(uint256)')))
+    net.warp(net.l2, DELAY + 1)
+    lines = one_block_pass()
+    credited = int(view('mintCount()(uint64)'))
+    sent = [l for l in lines if l.get('tx')]
+    blocks = {json.loads(out(CAST, 'receipt', l['tx'], '--rpc-url', net.l2, '--json'))['blockNumber'] for l in sent}
+    drains = [l for l in lines if l.get('kind') == 'relay-drain' and l.get('tx')]
+    gas = [int(json.loads(out(CAST, 'receipt', l['tx'], '--rpc-url', net.l2, '--json'))['gasUsed'], 16) for l in drains]
+    print('INFO drain() gas', gas, flush=True)
+    check(f'throughput: all {n} due mints credit in the one L2 block after one relay pass (was 1 + MAX_DRAIN = 9)',
+          credited == n and len(blocks) == 1, (credited, blocks, [l for l in lines if l.get('kind', '').startswith('relay')][-6:]))
+    check('throughput: the chain is clean and Alice holds the net amounts', int(view('balanceOf(address)(uint256)', net.alice)) ==
+          credited * net_of(amount) and view('mintHead()(bytes32)').lower() == vault('chainHeadAt(uint64)(bytes32)', str(credited)).lower())
+
+    # MAX_PENDING: the token refuses a new slot while 2,048 mints are queued. Stand the counter at the cap.
+    layout = json.loads(out(FORGE, 'inspect', '--root', net.project, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3',
+                            'storageLayout', '--json'))
+    slot = next(int(s['slot']) for s in layout['storage'] if s['label'] == 'pendingCount')
+    cap = int(view('MAX_PENDING()(uint256)'))
+    for _ in range(3):
+        net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + net.alice[2:])
+    net.mine(net.eth)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    real = int(view('pendingCount()(uint256)'))
+    sh(CAST, 'rpc', 'anvil_setStorageAt', net.token, hex(slot), '0x' + f'{cap:064x}', '--rpc-url', net.l2)
+    check('full: pendingCount stands at MAX_PENDING', int(view('pendingCount()(uint256)')) == cap)
+    lines = one_block_pass()
+    mints = [l for l in lines if l.get('kind') == 'relay-mint' and l.get('tx')]
+    check('full: the relayer sends no mint into a full queue (none can land)', not mints and view('nextSlot()(uint64)') == str(n),
+          (len(mints), view('nextSlot()(uint64)'), mints[-3:]))
+    check('full: it raises `mint-queue-full`', any(l.get('id') == 'mint-queue-full' for l in lines), lines[-4:])
+    sh(CAST, 'rpc', 'anvil_setStorageAt', net.token, hex(slot), '0x' + f'{real:064x}', '--rpc-url', net.l2)
+    one_block_pass()
+    check('full: with room again the three mints are relayed in order', view('nextSlot()(uint64)') == str(n + 3),
+          view('nextSlot()(uint64)'))
+
+
 def main():
     project = Path(sys.argv[1]).resolve()
-    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3}[sys.argv[2]]
+    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3, 'v3relay': s_v3relay}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:

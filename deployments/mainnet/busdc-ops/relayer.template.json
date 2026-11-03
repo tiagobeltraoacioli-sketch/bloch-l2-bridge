@@ -37,5 +37,8 @@
   "cast": "/opt/foundry/bin/cast",
   "round_margin": 600,
   "provenance": true,
-  "mint_gas_limit": 600000
+  "mint_gas_limit": 600000,
+  "_about_gas_ceilings": "The most this relayer pays per gas (agent 229): above it nothing is sent and gas-price-ceiling is alerted. Owner input: the values below are defaults, not a decision.",
+  "l2_max_gas_price_gwei": 50,
+  "eth_max_gas_price_gwei": 300
 }

@@ -66,7 +66,10 @@ def main():
         cfg = {'shared_dir': str(work / 'shared'), 'token': TO, 'source_vault': TO, 'source_route': '0x' + '22' * 32,
                'threshold': 1, 'l2_rpc': url, 'l2_tx_rpc': url, 'l2_chain_id': 700771, 'eth_rpc': url, 'eth_chain_id': 700771,
                'l2_relayer_key': str(work / 'gas.key'), 'eth_relayer_key': str(work / 'gas.key'),
-               'cast': str(FOUNDRY / 'cast'), 'resend_after_s': 1800, 'max_inflight': 16}
+               'cast': str(FOUNDRY / 'cast'), 'resend_after_s': 1800, 'max_inflight': 16,
+               # anvil's quote climbs past the 50 gwei L2 default as the unmined pool grows; nonces are the subject here, and
+               # the ceiling has its own tests (test_relayer_review GasPrice, agent 229)
+               'l2_max_gas_price_gwei': 10000, 'eth_max_gas_price_gwei': 10000}
         path = work / 'cfg.json'
         path.write_text(json.dumps(cfg))
         v = vigia.Vigia(path)

@@ -15,7 +15,9 @@ node no longer knows at all is sent again after this long), `log_chunk` (blocks 
 chain 700770, because a read-only `l2_rpc` refuses transactions; the transaction, its nonce and its receipt use it, and every
 read that decides anything stays on `l2_rpc`), `relayer_state` (the relayer's nonce record, default
 SHARED/relayer-nonces.json), `max_inflight` (unconfirmed transactions per gas key and side, default 16, the settled RPC's
-limit per sender).
+limit per sender), `l2_max_gas_price_gwei` / `eth_max_gas_price_gwei` (the most this relayer pays per gas on each side,
+default 50 and 300: an RPC that lies about `eth_gasPrice`, or a run of replacements, cannot spend the gas key; above the ceiling
+nothing is sent and `gas-price-ceiling` is alerted), `max_drains_per_pass` (default 8) and `drain_gas_limit` (default 2,000,000).
 
 Relayer gas keys. Each side (`l2`, `eth`) takes either `<side>_relayer_keystore` plus `<side>_relayer_password_file`
 (an encrypted keystore, as every other daemon), or, off the public chains only, `<side>_relayer_key` (a raw hex file).
@@ -24,6 +26,15 @@ written `credential:NAME` is read from `$CREDENTIALS_DIRECTORY/NAME` (systemd `L
 password file must be private to its owner (no group or other permission bits, e.g. mode 0600 or 0400). A raw hex key
 file is refused when `l2_chain_id` is 700770 or `eth_chain_id` is 1, because `cast` takes a raw key only as
 `--private-key <hex>` on argv, where every local user can read it (agent 174). Throwaway rehearsal keys may still use it.
+
+Relay checks (agent 229). Before the first send, every RPC must answer the configured chain id (a raw-key refusal or a
+signature for the wrong chain cannot rest on the config alone). One relayer per nonce record: a second process on the same
+`relayer_state` refuses to start, because both would sign the same nonces. Mints are sent only while the token's queue has room
+(`pendingCount` below `MAX_PENDING`; `mint-queue-full` otherwise), and a run of consecutive mints stops at the first one that
+could not be sent: the ones behind it would only revert. A queued mint is executed only if it matches the finalized deposit's
+amount (net of the vault fee, as the `Deposited` log states it) and recipient. Behind a head it executes, the relayer sends
+`drain()` for the queued mints it verified the same way, so a backlog credits in one L2 block instead of 9 per block. A release
+is not sent for one round while another round's release is still in flight.
 
 Relay nonces. An L2 block lands only every 8-14 min, so `latest` stands still across many passes, and several relayed
 transactions share it. One relayer per gas key keeps its own record of the next nonce, and sends at the highest of `latest`,
@@ -179,6 +190,12 @@ class Vigia:
         self.release_tuple = RELEASE_TUPLE_V3 if self.provenance else RELEASE_TUPLE
         self.release_fields = RELEASE_FIELDS_V3 if self.provenance else RELEASE_FIELDS
         self.mint_gas = int(self.cfg.get('mint_gas_limit', 600_000))
+        self.max_price = {side: int(float(self.cfg.get(f'{side}_max_gas_price_gwei', default)) * 10**9)
+                          for side, default in (('l2', 50), ('eth', 300))}
+        self.max_drains = int(self.cfg.get('max_drains_per_pass', 8))
+        self.drain_gas = int(self.cfg.get('drain_gas_limit', 2_000_000))
+        self.chains_checked = False
+        self.relayer_lock = None
         self.design_checked = False
         if self.cfg.get('l2_pins') and not self.cfg.get('feed'):
             raise SystemExit('a mainnet config needs a `feed` block: shared_dir alone is a local rehearsal mode')
@@ -456,6 +473,7 @@ class Vigia:
         logs = self.logs(self.cfg['eth_rpc'], self.vault, [topic, None, self.route], self.cfg.get('vault_from_block', 0))
         self.deposit_fields = {l['topics'][1].lower(): (int(l['data'][2 + 128:2 + 192], 16), '0x' + l['data'][-40:].lower())
                                for l in logs}
+        self.deposits_read = True
         return [l['topics'][1].lower() for l in logs]
 
     def burns(self):
@@ -592,12 +610,15 @@ class Vigia:
         """One bad item (a mint or release that reverts, a broken file) never stops the others."""
         try:
             work()
+            return True
         except Exception as e:  # noqa: BLE001 - the next round retries this item
             log(kind=kind, item=item, error=f'{type(e).__name__}: {e}')
+            return False
 
     # ── sign ─────────────────────────────────────────────────────────────────
     def new_pass(self):
         self.parked_now, self.chain_cache = {}, {}
+        self.deposits_read = False
 
     def sign_round(self):
         self.new_pass()
@@ -693,6 +714,8 @@ class Vigia:
         self.new_pass()
         if self.mainnet and not self.cfg.get('l2_tx_rpc'):
             raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
+        self.claim_relayer()
+        self.check_chain_ids()
         self.check_design()
         if self.feed:
             self.sync(self.deposits(), self.burns())
@@ -708,9 +731,102 @@ class Vigia:
         for d in sorted(rel_dir.glob('*')) if rel_dir.exists() else []:
             self.isolated('relay-release', d.name, lambda d=d: self.relay_release(d))
 
+    def claim_relayer(self):
+        """One relayer per nonce record: two processes on one `relayer_state` would read the same record and sign the same
+        nonces (a second unit instance, or a manual `--once` beside the daemon). The lock lives as long as the process."""
+        if self.relayer_lock is not None:
+            return
+        self.nonce_path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self.nonce_path.with_name(self.nonce_path.name + '.lock'), 'w')
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            raise SystemExit(f'another relayer holds {self.nonce_path}: one relayer per gas key and nonce record')
+        self.relayer_lock = f
+
+    def check_chain_ids(self):
+        """Every RPC answers the configured chain id before anything is signed: the raw-key refusal on the public chains and
+        the chain id in every signature otherwise rest on the config alone."""
+        if self.chains_checked:
+            return
+        for name, url, want in (('l2_rpc', self.cfg['l2_rpc'], self.cfg.get('l2_chain_id')),
+                                ('l2_tx_rpc', self.l2_tx, self.cfg.get('l2_chain_id')),
+                                ('eth_rpc', self.cfg['eth_rpc'], self.cfg.get('eth_chain_id'))):
+            got = int(self.rpc(url, 'eth_chainId', []), 16)
+            if want is None or got != int(str(want), 0):
+                raise SystemExit(f'{name} answers chain id {got}, the config says {want}: refusing to relay')
+        self.chains_checked = True
+
+    def deposit_record(self, dep):
+        """(net amount, L2 recipient) of a deposit final on this relayer's Ethereum node, or None. The `Deposited` log carries
+        the net amount (the vault fee is never backing), which is exactly what the token mints."""
+        if dep not in getattr(self, 'deposit_fields', {}) and not getattr(self, 'deposits_read', False):
+            self.deposits()
+        return self.deposit_fields.get(dep)
+
+    def queue_room(self):
+        """Mints the token can still queue (MAX_PENDING - pendingCount); None for a token without the pending cap."""
+        url = self.cfg['l2_rpc']
+        try:
+            return int(self.call(url, self.token, 'MAX_PENDING()'), 16) - int(self.call(url, self.token, 'pendingCount()'), 16)
+        except (RuntimeError, ValueError):
+            return None
+
+    def queued_matches(self, dep, pending):
+        """The queued mint under a real deposit id has the finalized deposit's amount and recipient. A forged mint of a real id
+        (the mint quorum compromised) is left to the guardians' cancel: the relayer never executes it."""
+        want = self.deposit_record(dep)
+        got = (int(pending[66:130], 16), '0x' + pending[2 + 24:2 + 64].lower())
+        if want is None:
+            log(kind='relay-execute', deposit=dep, waiting=True, reason='the deposit is not final on this relayer\'s Ethereum node')
+            return False
+        if got != want:
+            log(kind='alert', severity='critical', id='queued-mint-mismatch', deposit=dep, queued_amount=got[0],
+                queued_recipient=got[1], deposit_amount=want[0], deposit_recipient=want[1],
+                reason='the queued mint differs from the finalized deposit: not executed, left to the guardians\' cancel')
+            return False
+        return True
+
+    def drain_behind(self, head):
+        """After this pass sent the execution of slot `head`: `drain()` calls for the queued mints behind it that the relayer
+        verified. The token credits at most MAX_DRAIN (8) mints behind one execution, so without these a backlog credits 9 per
+        L2 block (8-14 min). Only slots whose queued mint is due, holds its slot under the real deposit id and matches the
+        finalized deposit count; a drain never reaches past them unless the slot where the check stopped cannot credit now."""
+        if self.max_drains <= 0:
+            return
+        url, max_drain = self.cfg['l2_rpc'], 8  # BridgedStablecoinV3.MAX_DRAIN (internal constant)
+        now = int(self.rpc(url, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
+        by_slot = {int(d[2:18], 16): d for d in getattr(self, 'deposit_fields', {})}
+        s, verified, limit = head + 1, 0, max_drain * (self.max_drains + 1)
+        stop_creditable = False
+        while verified < limit:
+            key = '0x' + self.call(url, self.token, 'slotKey(uint64)', s)[2:].rjust(64, '0')[-64:]
+            if int(key, 16) == 0:
+                stop_creditable = self.flag(url, self.token, 'contested(uint64)', s)  # a due candidate could credit
+                break
+            pending = self.call(url, self.token, 'pendingMints(bytes32)', key)
+            amount, ready = int(pending[66:130], 16), int(pending[130:194], 16)
+            if amount == 0 or ready > now:
+                break
+            dep = by_slot.get(s)
+            if dep != key.lower() or (amount, '0x' + pending[2 + 24:2 + 64].lower()) != self.deposit_fields[dep]:
+                stop_creditable = True
+                log(kind='alert', severity='critical', id='queued-mint-mismatch', slot=s, key=key,
+                    reason='a due queued mint behind the head does not match a finalized deposit: no drain reaches it')
+                break
+            verified, s = verified + 1, s + 1
+        extra = verified - max_drain  # the head's own execution credits up to 8 behind it
+        if extra <= 0:
+            return
+        drains = min(self.max_drains, extra // max_drain + (1 if extra % max_drain and not stop_creditable else 0))
+        for _ in range(drains):
+            tx = self.send('l2', self.token, ['drain()'], gas=self.drain_gas)
+            log(kind='relay-drain', head=head, verified=verified, tx=tx)
+
     def relay_mint(self, d):
         dep = '0x' + d.name
-        if not WORD.fullmatch(dep):
+        if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed (or a v1 token's instant mint) is final
             return
         if self.minted(dep):
             self.execute_if_queued(d, dep)
@@ -740,7 +856,7 @@ class Vigia:
         todo = []
         for d in dirs:
             dep = '0x' + d.name
-            if not WORD.fullmatch(dep):
+            if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed is final; the head path still checks the head
                 continue
             if self.minted(dep):
                 self.isolated('relay-execute', dep, lambda d=d, dep=dep: self.execute_if_queued(d, dep))
@@ -762,7 +878,16 @@ class Vigia:
             return
         next_slot = int(self.call(url, self.token, 'nextSlot()'), 16)
         expected, chained = next_slot, 0
+        # MAX_PENDING (agent 229): a mint into a full queue only reverts. Mints already sent and not landed take room too.
+        room = self.queue_room()
+        if room is not None:
+            room -= sum(1 for t in todo if t[3] is None)
+            if room <= 0 and any(t[3] is not None for t in todo):
+                log(kind='alert', severity='critical', id='mint-queue-full', room=room, waiting=sum(1 for t in todo if t[3]),
+                    reason='the token queue is at MAX_PENDING: no mint is sent until executions or guardian cancels free room')
         for nonce, d, dep, sigs in sorted(todo, key=lambda x: x[0]):
+            if sigs is not None and room is not None and room <= 0:
+                break
             if nonce < next_slot:  # a slot below the head of slots: only a free one (a cancelled mint) can be refilled
                 if sigs is None:
                     continue
@@ -780,9 +905,15 @@ class Vigia:
                 if sigs is None:
                     chained += 1
                     continue
-            self.isolated('relay-mint', dep, lambda d=d, dep=dep, sigs=sigs, nonce=nonce, g=chained > 0:
-                          self.send_mint(d, dep, sigs, nonce, g))
+            ok = self.isolated('relay-mint', dep, lambda d=d, dep=dep, sigs=sigs, nonce=nonce, g=chained > 0:
+                               self.send_mint(d, dep, sigs, nonce, g))
+            if ok and room is not None:
+                room -= 1
             if nonce >= next_slot:
+                if not ok:  # the mints behind it go out with a fixed gas limit and could only revert (agent 229)
+                    log(kind='relay-mint', deposit=dep, slot=nonce, stopped=True,
+                        reason='this slot could not be sent: the run of later slots waits for the next pass')
+                    break
                 chained += 1
 
     def execute_head(self):
@@ -824,6 +955,7 @@ class Vigia:
         self.shared.mkdir(parents=True, exist_ok=True)
         sent.write_text(tx + '\n')
         log(kind='relay-head', deposit=dep, slot=head, tx=tx)
+        self.isolated('relay-drain', dep, lambda: self.drain_behind(head))
 
     def send_mint(self, d, dep, sigs, nonce, fixed_gas):
         rc, comb = self.signatario('combine', *sum((['--sig', s] for s in sigs), []), '--out', d / 'mint.call')
@@ -844,9 +976,12 @@ class Vigia:
             if state == 'new':
                 log(kind='relay-release', burn=burn_id, done=True)
             return
-        for _, rnd in self.rounds(d, 60):  # enough time left for the transaction to land
+        # One release in flight per burn (agent 229): a newer round reaching quorum while an older round's transaction is
+        # pending would be a second transaction for one payment, and on Ethereum it queues behind the first and reverts.
+        for _, rnd in self.rounds(d, 0):
             if (rnd / 'sent').exists() and not self.failed(self.cfg['eth_rpc'], rnd / 'sent'):
-                break
+                return
+        for _, rnd in self.rounds(d, 60):  # enough time left for the transaction to land
             certs = self.agreeing(sorted(rnd.glob('*.json')), lambda f, r=rnd: self.release_partial(f, burn_id, r), self.vk)
             if len(certs) < self.vk:
                 continue
@@ -864,7 +999,9 @@ class Vigia:
         url = self.cfg['l2_rpc']
         try:
             pending = self.call(url, self.token, 'pendingMints(bytes32)', dep)
-        except RuntimeError:  # v1 token: no queue
+        except RuntimeError as e:  # v1 token: no queue. A failed read (rate limit, node down) is not one: `executed` is final
+            if not is_revert(e):
+                raise
             (d / 'executed').write_text('v1\n')
             return
         words = [int(pending[2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range(3)]
@@ -875,6 +1012,11 @@ class Vigia:
             (d / 'executed').write_text('done\n')
             return
         if (d / 'execute-sent').exists() and not self.failed(self.l2_tx, d / 'execute-sent'):
+            return
+        head_sent = self.shared / f'head-{dep[2:]}.sent'  # execute_head may have sent it in an earlier pass
+        if head_sent.exists() and not self.failed(self.l2_tx, head_sent):
+            return
+        if not self.queued_matches(dep, pending):
             return
         now = int(self.rpc(url, 'eth_getBlockByNumber', ['latest', False])['timestamp'], 16)
         if now < words[2] or self.flag(url, self.token, 'paused()'):
@@ -894,6 +1036,8 @@ class Vigia:
         tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
         (d / 'execute-sent').write_text(tx + '\n')
         log(kind='relay-execute', deposit=dep, tx=tx)
+        if self.provenance:
+            self.isolated('relay-drain', dep, lambda: self.drain_behind(int(dep[2:18], 16)))
 
     def cancelled_open(self, dep):
         """A cancelled generation not yet reminted. A token without the cancel path has none."""
@@ -1007,9 +1151,18 @@ class Vigia:
         records = self.load_nonces()
         slot = f'{side}:{frm.lower()}'
         nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
-        price = int(self.rpc(url, 'eth_gasPrice', []), 16) * 2
+        quoted, cap = int(self.rpc(url, 'eth_gasPrice', []), 16), self.max_price[side]
+        price = min(quoted * 2, cap)
         if nonce in rec['prices']:  # replacing a transaction that never landed
             price = max(price, rec['prices'][nonce] * 125 // 100)
+        if quoted > cap:  # a lying RPC or a fee spike: never pay above the ceiling (agent 229)
+            log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price, ceiling=cap,
+                nonce=nonce)
+            raise RuntimeError(f'{side} gas price quoted {quoted} is above the ceiling {cap}: not sent')
+        if price > cap:  # a run of replacement bumps stops at the ceiling: a node still holding the old one refuses it, and
+            log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price,
+                ceiling=cap, nonce=nonce)  # a dropped one is filled at the ceiling
+            price = cap
         data = self.cast_out('calldata', *call)
         if gas is None:
             gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
