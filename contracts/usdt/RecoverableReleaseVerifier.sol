@@ -65,8 +65,10 @@ contract RecoverableReleaseVerifier is IReleaseVerifier {
     /// Zero disables `proposeHandoff`.
     uint64 public immutable handoffDelay;
 
-    /// Active successor (zero = this contract's own proof path).
+    /// Active successor (zero = this contract's own proof path), and its code hash at activation: `verifyRelease`
+    /// refuses the successor once its code changes (agent 239).
     address public successor;
+    bytes32 public successorCodehash;
     address public proposedSuccessor;
     bytes32 public proposedCodehash;
     uint64 public activatesAt;
@@ -91,6 +93,7 @@ contract RecoverableReleaseVerifier is IReleaseVerifier {
     error InvalidLifeProof();
     error CheckpointTooOld();
     error HandoffDisabled();
+    error SuccessorCodeChanged();
 
     /// Everything fixed at deployment.
     struct Config {
@@ -147,6 +150,7 @@ contract RecoverableReleaseVerifier is IReleaseVerifier {
     function verifyRelease(address vault, bytes32 releaseId, bytes calldata proof) external view returns (bytes4) {
         address active = successor;
         if (active != address(0)) {
+            if (active.codehash != successorCodehash) revert SuccessorCodeChanged();
             return IReleaseVerifier(active).verifyRelease(vault, releaseId, proof);
         }
         (bytes memory publicValues, bytes memory proofBytes) = abi.decode(proof, (bytes, bytes));
@@ -262,6 +266,7 @@ contract RecoverableReleaseVerifier is IReleaseVerifier {
         ) revert InvalidActivation();
         bytes32 codehash = proposedCodehash;
         successor = pending;
+        successorCodehash = codehash;
         _clearProposal();
         emit SuccessorActivated(pending, codehash);
     }

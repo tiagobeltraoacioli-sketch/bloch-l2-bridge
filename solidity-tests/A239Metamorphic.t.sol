@@ -91,8 +91,10 @@ contract A239MetaFactory is IA239MetaFactory {
     }
 }
 
-/// Agent 239: a real CREATE2 + SELFDESTRUCT metamorphic verifier against `ProvenanceSourceVault`'s one-way switch. The
-/// vault pins the code hash at proposal and re-checks it at activation, never after. Run in isolation so every top-level
+/// Agent 239: a real CREATE2 + SELFDESTRUCT metamorphic verifier against `ProvenanceSourceVault`'s one-way switch. Before
+/// the A239 fix the vault re-checked the code hash at activation and never after, and both tests below ended with the
+/// vault paying 9,000 through the swapped code (commit 60f6fc1). With the fix the swap still happens, and the vault
+/// refuses to call the new code. Run in isolation so every top-level
 /// call is its own transaction, under both forks:
 ///   A239_ISOLATE=true forge test --offline --isolate --evm-version shanghai --match-contract A239Metamorphic
 ///   A239_ISOLATE=true forge test --offline --isolate --evm-version cancun --match-contract A239Metamorphic
@@ -182,8 +184,8 @@ contract A239MetamorphicTest {
             return;
         }
         require(factory.deploy(evil) == m, "same address, other code");
-        vault.releaseWithProof(theft(), "");
-        require(usdc.balanceOf(address(0xBAD)) == 9_000 * U, "pre-Cancun: paid through the swapped verifier");
+        (ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.releaseWithProof, (theft(), bytes(""))));
+        require(!ok && usdc.balanceOf(address(0xBAD)) == 0, "pre-Cancun: the swap happens, the vault refuses the new code");
     }
 
     /// Post-Cancun too: create, propose and self-destruct in ONE transaction; 14 days later create, activate and
@@ -199,7 +201,7 @@ contract A239MetamorphicTest {
         factory.createCallRetire(honest, address(vault), abi.encodeCall(ProvenanceSourceVault.activateVerifier, ()));
         require(vault.verifier() == m && factory.sizeOf(m) == 0, "activated, then deleted");
         require(factory.deploy(evil) == m, "same address, other code");
-        vault.releaseWithProof(theft(), "");
-        require(usdc.balanceOf(address(0xBAD)) == 9_000 * U, "paid through the swapped verifier");
+        (bool ok,) = address(vault).call(abi.encodeCall(ProvenanceSourceVault.releaseWithProof, (theft(), bytes(""))));
+        require(!ok && usdc.balanceOf(address(0xBAD)) == 0, "the swap happens, the vault refuses the new code");
     }
 }

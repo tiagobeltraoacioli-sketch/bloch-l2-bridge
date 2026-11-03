@@ -637,7 +637,10 @@ contract ProvenanceSourceVault {
     ///         Anyone may submit; the committee has no say and cannot disable it.
     function releaseWithProof(Release calldata item, bytes calldata proof) external nonReentrant {
         address active = verifier;
-        if (active == address(0)) revert InvalidProof();
+        // The code hash pinned at proposal is never cleared after activation; code changed since (a CREATE2 + SELFDESTRUCT
+        // redeploy, which after Cancun still works when the code is created and destroyed in one transaction) is refused
+        // rather than trusted (agent 239; the token's mintWithProof does the same since agent 171's F171-4).
+        if (active == address(0) || active.codehash != proposedVerifierCodehash) revert InvalidProof();
         _checkRelease(item);
         bytes32 id = releaseId(item);
         (bool ok, bytes memory data) =

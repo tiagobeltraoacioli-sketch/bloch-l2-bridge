@@ -65,15 +65,16 @@ class Scan(unittest.TestCase):
 
     def test_the_pinned_verifiers_pass(self):
         for path, want in [
+            # 0x03af31ba...b145 at d0ce589/a44f632 (agent 138); this branch's successor code-hash re-check moves it.
             ('out/RecoverableReleaseVerifier.sol/RecoverableReleaseVerifier.json',
-             '0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145'),
+             '0xe1d76cb7de0980f388453ed9f0e225cef4a90cb8d55588fb3779e746c5a8e47e'),
             ('out/SP1ReleaseVerifier.sol/SP1ReleaseVerifier.json',
              '0x37e0624f92673e031131e2c31de74dcc056c5a53c2fa019fe73fcb89c9935498'),
             ('out/SP1VerifierGroth16.sol/SP1Verifier.json', SP1_GROTH16_V610_RUNTIME),
         ]:
             code, _ = art(path)
             s = self.ok(code)
-            self.assertEqual(s['runtimeKeccak'], want, path)  # equals agent 138's runtime keccaks at d0ce589
+            self.assertEqual(s['runtimeKeccak'], want, path)
 
     def test_the_groth16_verifying_key_data_is_not_code(self):
         code, _ = art('out/SP1VerifierGroth16.sol/SP1Verifier.json')

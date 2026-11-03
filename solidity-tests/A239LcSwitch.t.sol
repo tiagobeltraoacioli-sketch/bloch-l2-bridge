@@ -406,10 +406,11 @@ contract A239LcSwitchTest {
 
     // ---------------------------------------------------------------- META: code hash after activation
 
-    /// The vault pins the verifier's code hash only up to `activateVerifier`; `releaseWithProof` calls whatever code is at
-    /// the address afterwards. Code that changes after activation (a metamorphic redeploy, simulated with etch) pays a
-    /// release no burn backs. The token re-checks since 807ac51 (F171-4) and refuses the same trick.
-    function test_META_vaultDoesNotRecheckTheCodeHashButTheTokenDoes() public {
+    /// Before the A239 fix the vault pinned the verifier's code hash only up to `activateVerifier`, and code that changed
+    /// after activation (a metamorphic redeploy, simulated with etch) paid a release no burn backs (commit a79df21: this
+    /// test then asserted the payment). `releaseWithProof` now re-checks the pinned hash, as the token's `mintWithProof`
+    /// has since 807ac51 (F171-4).
+    function test_META_vaultAndTokenRefuseCodeChangedAfterActivation() public {
         fund(4);
         R lc = new R(cfg(digest, 0));
         switchVault(address(lc));
@@ -417,8 +418,8 @@ contract A239LcSwitchTest {
         ProvenanceSourceVault.Release memory theft = ProvenanceSourceVault.Release(
             vault.routeId(), 7, MALLORY, uint64(5_000 * U), keccak256("x"), 1, NET1, vault.chainHeadAt(1)
         );
-        vault.releaseWithProof(theft, "");
-        require(usdc.balanceOf(MALLORY) > 4_990 * U, "vault: swapped code trusted");
+        (bool ok, bytes4 err) = tryRelease(theft, "");
+        require(!ok && err == ProvenanceSourceVault.InvalidProof.selector, "vault: swapped code refused");
 
         A239DepositMintVerifier mv = new A239DepositMintVerifier(vault);
         switchToken(address(mv));
@@ -430,9 +431,9 @@ contract A239LcSwitchTest {
         token.mintWithProof(id, nonce, uint64(1_000 * U), MALLORY, "");
     }
 
-    /// The same gap one level down: RecoverableReleaseVerifier pins its successor's code hash only at activation, and
-    /// `verifyRelease` forwards to whatever code is there later.
-    function test_META_recoverableDoesNotRecheckItsSuccessor() public {
+    /// The same gap one level down, closed the same way: RecoverableReleaseVerifier used to pin its successor's code hash
+    /// only at activation (commit a79df21: this test asserted the payment); `verifyRelease` now refuses changed code.
+    function test_META_recoverableRefusesASuccessorWhoseCodeChanged() public {
         fund(4);
         R lc = new R(cfg(digest, 0));
         switchVault(address(lc));
@@ -445,8 +446,9 @@ contract A239LcSwitchTest {
         ProvenanceSourceVault.Release memory theft = ProvenanceSourceVault.Release(
             vault.routeId(), 7, MALLORY, uint64(5_000 * U), keccak256("x"), 1, NET1, vault.chainHeadAt(1)
         );
-        vault.releaseWithProof(theft, "");
-        require(usdc.balanceOf(MALLORY) > 4_990 * U, "successor's swapped code trusted");
+        (bool ok, bytes4 err) = tryRelease(theft, "");
+        require(!ok && err == ProvenanceSourceVault.InvalidProof.selector, "successor's swapped code refused");
+        require(usdc.balanceOf(MALLORY) == 0, "nothing paid");
     }
 
     // ---------------------------------------------------------------- ORDER: token mint path first (172 decision 2)
@@ -519,6 +521,22 @@ contract A239LcSwitchTest {
         token.executeMint(fake);
         require(token.balanceOf(MALLORY) == 500 * U && heldState(), "the forgery credits after the token switch");
     }
+
+    /// Execution gas of one honest `releaseWithProof` through RecoverableReleaseVerifier (mock SP1), as measured by
+    /// gasleft around the call. Compare with the same test at a commit without the code-hash re-check.
+    function test_GAS_releaseWithProofThroughRecoverable() public {
+        depositAndMint(uint64(1000 * U), ALICE);
+        R lc = new R(cfg(digest, 0));
+        switchVault(address(lc));
+        ProvenanceSourceVault.Release memory r = burn(ALICE, uint64(400 * U));
+        bytes memory proof = proofFor(lc, r);
+        uint256 g = gasleft();
+        vault.releaseWithProof(r, proof);
+        g -= gasleft();
+        emit GasUsed("releaseWithProof via Recoverable", g);
+    }
+
+    event GasUsed(string what, uint256 gas);
 
     // ---------------------------------------------------------------- the R6 predicate agrees with the vault
 

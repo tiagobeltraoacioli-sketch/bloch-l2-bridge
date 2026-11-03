@@ -1,6 +1,6 @@
 {
   "domain": "bloch.bridge.lc-verifier-review.v1",
-  "note": "Expectation for tools/deploy-pontes/verifier_review.py before any proposeVerifier signature on the bUSDC vault. Every TBD-owner value is refused. The release and step pins are agent 130's (agents/130-lc-step-fixed.md); 110's 4d47ca04/0x00d1c59a are superseded. The anchor must be a mainnet checkpoint finalized after the KES bind (BR-9), not the e8699 rehearsal anchor.",
+  "note": "Expectation for tools/deploy-pontes/verifier_review.py before any proposeVerifier signature on the bUSDC vault. Every TBD-owner value is refused. The release and step pins are agent 130's (agents/130-lc-step-fixed.md); 110's 4d47ca04/0x00d1c59a are superseded. The anchor must be a mainnet checkpoint finalized after the KES bind (BR-9), not the e8699 rehearsal anchor. maskedRuntimeKeccak is RecoverableReleaseVerifier with agent 239's successor code-hash re-check; without that commit it is 0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145.",
   "ethereum": {"chainId": 1},
   "vault": "TBD-owner",
   "l2Token": "TBD-owner",
@@ -8,7 +8,7 @@
   "verifier": {
     "contract": "RecoverableReleaseVerifier",
     "artifact": "out/RecoverableReleaseVerifier.sol/RecoverableReleaseVerifier.json",
-    "maskedRuntimeKeccak": "0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145",
+    "maskedRuntimeKeccak": "0xe1d76cb7de0980f388453ed9f0e225cef4a90cb8d55588fb3779e746c5a8e47e",
     "immutables": {
       "programVKey": "0x007d50e2d044585dd42afb636c6a061df51f2af439e0332923704cd8085adc73",
       "stepVKey": "0x00bcf59240fc04a84f33f6a80d07ceddbf02e7145b2176b39f29f149019776e0",
