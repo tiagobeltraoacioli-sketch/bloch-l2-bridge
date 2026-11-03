@@ -1,4 +1,4 @@
-# Phase 2: bloch-l2-bridge at the bridge V3 freeze commit (agent 200)
+# Phase 2: bloch-l2-bridge at the final bridge V3 freeze commit (agent 295)
 A1 contracts/stable/BridgedStablecoinV3.sol
 A1 contracts/stable/BridgedStablecoinV2.sol
 A1 contracts/bridged/SignerMintedToken.sol
@@ -16,7 +16,8 @@ A2 tools/guardiao/sombra.py
 A2 tools/deploy-pontes/vault_pontes.py
 A2 tools/reservas/reservas.py
 A2 tools/signatario-stable/l2_finality.py
-A2 tools/deploy-pontes/key_inventory.py
+A2opt tools/deploy-pontes/key_inventory.py
+A2opt tools/deploy-pontes/verifier_review.py
 A-cfg deployments/mainnet/busdc-mainnet.config.json
 A-cfg deployments/mainnet/busdc-vault-mainnet.config.json
 A-cfg deployments/mainnet/busdc-ops/eth-half.template.json
@@ -26,3 +27,4 @@ A-cfg deployments/mainnet/busdc-keys.inventory.template.json
 A-cfg deployments/mainnet/busdc-ops/signer.template.json
 A-cfg deployments/mainnet/busdc-ops/sombra.template.json
 A-cfg deployments/mainnet/busdc-ops/reservas.template.json
+A-cfg deployments/mainnet/lc-verifier.review.json

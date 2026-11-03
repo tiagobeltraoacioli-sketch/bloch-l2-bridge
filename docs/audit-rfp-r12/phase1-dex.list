@@ -1,4 +1,4 @@
-# Phase 1: postern-dex at RC 4d726aca (contracts identical to d18ab04)
+# Phase 1: postern-dex at the final DEX RC (agent 296; contracts identical to d18ab04)
 A contracts/UniswapV2Pair.sol
 A contracts/UniswapV2Factory.sol
 A contracts/UniswapV2ERC20.sol
@@ -22,11 +22,13 @@ B scripts/staging/sign-and-publish.sh
 B scripts/staging/verify-deployment.mjs
 B scripts/staging/finality-gate.mjs
 B scripts/staging/check-finality-gate-mainnet.mjs
+B scripts/staging/bridge-token-identity.mjs
 B scripts/ops/dex-seed-plan.mjs
 B scripts/ops/dex-ops-lib.mjs
 B scripts/ops/opening-form.mjs
 B-cfg deployments/mainnet/dex-mainnet.config.json
 B-cfg deployments/mainnet/opening-form.json
+B-cfg deployments/mainnet/bridge-token.pin.json
 C scripts/ops/dex-skim-keeper.mjs
 C scripts/ops/dex-monitor.mjs
 C scripts/ops/dex-fee-redeem.mjs
