@@ -8,8 +8,8 @@ it is built from; those stay the detailed technical references:
 | Phase | Detailed package (same repository as the code) | Built by |
 |---|---|---|
 | 1. DEX | `postern-dex` `docs/AUDIT-PACKAGE-DEX.md` at `4d726aca` | agents 179, 196, 199 |
-| 2. Bridge V3 | `bloch-l2-bridge` `docs/AUDIT-SCOPE-BRIDGE-V3.md` at the Phase 2 freeze commit; the earlier RFP `docs/AUDIT-RFP-BRIDGE-V3.md` (`a44b9b0`, superseded by this file) | agents 131, 170, 194, 197, 200 |
-| 3. December L2 program | `bloch-l2-evm` `docs/audit-sparse/AUDIT-PACKAGE.md` (`codex/sparse-audit-pack-r10-20261102`) plus section 5 of this file for forced inclusion and the fallback | agents 115, 137, 161, 215-217 |
+| 2. Bridge V3 | `bloch-l2-bridge` `docs/AUDIT-SCOPE-BRIDGE-V3.md` at the freeze commit `eb5c981`; the earlier RFP `docs/AUDIT-RFP-BRIDGE-V3.md` (`a44b9b0`, superseded by this file) | agents 131, 170, 194, 197, 200 |
+| 3. December L2 program | `bloch-l2-evm` `docs/audit-sparse/AUDIT-PACKAGE.md` (`codex/sparse-audit-pack-r10-20261102`) plus section 5 of this file for forced inclusion and the fallback | agents 115, 137, 161, 215, 216, 217, 219 |
 
 Everything owner-only (prices, market research, shortlist) is in `OWNER-ONLY-PRICE-AND-SHORTLIST.md` in this directory.
 **That file is not part of the RFP and must not be sent.**
@@ -29,7 +29,8 @@ directory: `phase1-dex.manifest.tsv`, `phase2-bridge.manifest.tsv`, `phase3-*.ma
      keys or decide, and the SP1 light-client guests.
   3. **Phase 3, the December L2 program swap:** the new SP1 settlement guest with a sparse state witness, L1 forced
      inclusion (guest and L1 queue), the complete-witness fallback guest, and the rule changes that ride with them
-     (block derivation, fee-vault sweep, a base-fee floor). Rust.
+     (block derivation, fee-vault sweep, a base-fee floor). Rust. Optionally, a small L1 fee on L2 deposits and claims
+     (track 3E).
 - **One engagement, three phases, separate line items and separate reports.** We prefer one firm for all three. We
   accept a split: a Solidity team for Phases 1 and 2 track A, and a zkVM/Rust team for Phase 3 and Phase 2 track B.
 - **Phase 3 is time-critical.** Its review must start on **2026-11-04** (or within days of it) for the L1 gate of
@@ -256,7 +257,7 @@ on two hosts in the pinned container:
 
 | Build | Sparse `PROGRAM_NEXT` | Fallback | Configuration |
 |---|---|---|---|
-| Agent 115, `b772f2d` (sparse guest alone, no forced inclusion) | `78c533fa…7bea` | `3ad3a4f0…53b3` (no forced rule) | `975ec258…` (tag 3) |
+| Agents 115 and 142 (`b772f2d`, `d462647`; no forced inclusion) | `78c533fa…7bea` | `3ad3a4f0…53b3` (no forced rule) | `975ec258…` (tag 3) |
 | Agents 137, 215, 216 (`80cf8a9`, forced inclusion) | `bc35e838…b048` (Keccak `1f744da8…`, BN254 vkey `00d4281e…`) | `7fd7f3c0…5303` (Keccak `d95185a6…`, BN254 vkey `00865f4e…`) | `b4663ab8…` (tag 4) |
 | The December candidate with the floor and the recipient set | after `set-sweep-recipient.py set` | after `set` | after `set` |
 
@@ -441,8 +442,12 @@ release published at least 1,260 epochs (14 days) before it.
 | before the first bridge deposit | | | Final report published | |
 
 If Phase 3 cannot start by about 11-06, the gate moves one week per week of slip: e11950 (12-24, publication 12-10),
-e12580 (12-31, publication 12-17), e13210 (01-07, publication 12-24). The fallback without an external audit is the
-earlier gate e10060 (publication e8800, 11-19), which the owner has not chosen.
+e12580 (12-31, publication 12-17), e13210 (01-07, publication 12-24). The alternative without an external audit is the
+earlier gate e10060 (publication e8800, 11-19).
+
+The L1 node release that carries the December program ("release B") freezes its code before the audit ends. Under
+this timeline only the compiled program identities (`PROGRAM_NEXT`, `PROGRAM_FALLBACK`) and any fix from the audit move
+after the freeze; they are re-pinned after the fix review, and the release is published at e10060.
 
 Phase 1 and Phase 3 can run in parallel only with two teams (a Solidity pair and a zkVM/Rust pair). Phase 2 follows
 Phase 1 on the Solidity side; its track B can follow Phase 3 on the zkVM side.
