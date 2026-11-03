@@ -10,6 +10,15 @@ and agent 191's doc corrections. The signer's L2 binary pins are one open TODO (
 The freeze commit for the external audit is the tip of that branch named in `docs/AUDIT-RFP-BRIDGE-V3.md` (agent 170) and in
 `agents/200-bridge-rc.md`; it replaces `125227b` and `8d988ce`.
 
+**Round 11 release candidate (agent 241):** branch `codex/bridge-rc-r11-20261103`, from agent 200's `eb5c981`, plus agent
+229's relayer review (`70f7fc0`..`97fa835`: F229-1 to F229-8, gas ceilings 50 / 300 gwei as config defaults), agent 239's
+light-client switch readiness (`375943f`..`061ef29`: `verifier_review.py`, the guardian hard alerts and `61b8ca2`, the code-hash
+re-check on every proof release in the vault and `RecoverableReleaseVerifier`) and agent 241's F229-9 (same-nonce
+replacement of a stuck Ethereum release), F229-10 (one primary relayer, staggered backups) and F229-11 (persisted log
+cursor, finalized finished-item record). Only `61b8ca2` changes contracts (vault and RRV hashes in section 2). The freeze
+commit is the tip of this branch named in `agents/241-bridge-rc-final.md`; it replaces `eb5c981`. The signer re-pin to the
+final L2 launch build (agent 230) stays the one allowed post-freeze delta (constants and text only).
+
 The frontend is `postern-dex` `codex/bridge-v3-r7-20261102` @ `f7cdf26`, with agent 176's security fixes (`8d077ce`) and
 the fee and contract-recipient changes on `codex/bridge-frontend-r10-20261102` (agent 200).
 
@@ -116,7 +125,7 @@ pays less than the burn; `feesAccrued` outside backing on every path (deposit, r
 
 | Component | File (lines, last commit) | Key it holds | Role |
 |---|---|---|---|
-| **vigia** (relayer) | `tools/signatario-stable/vigia.py` (1,048, agent 200) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`. Parks unbacked burns (`release-held-provenance`) |
+| **vigia** (relayer and signer driver) | `tools/signatario-stable/vigia.py` (1,502, agents 229 and 241) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`, only when the queued mint matches the finalized deposit, then `drain()`s verified due mints. Parks unbacked burns (`release-held-provenance`). Gas ceilings 50 / 300 gwei; MAX_PENDING room; one relayer per nonce record (flock); chain ids checked against the RPCs. One primary relayer, staggered backups (`relay_role`). Same-nonce replacement of a stuck Ethereum release. Persisted log cursor with rescan on a changed hash; items finished at `finalized` are not read again |
 | **signatario** (Bloch half) | `tools/signatario-stable/signatario.py` (842, `cfc105c`) | L2 mint key (one of 7) | Mints only after Ethereum `finalized`, recomputing the v2 id. Rebuilds the L2 from L1 before certifying a burn. `remint` and `remint --locked` (R2) are manual. Treats `MintDropped` as a cancel (R1) |
 | **eth_half** (Ethereum half of signatario) | `tools/signatario-stable/eth_half.py` (406, `9571c09`) | Ethereum release key (one of 7) | Pins the vault code, uses `finalized` only and recomputes the release digest. With `provenance: true` it refuses a burn whose chain the vault deposits do not back |
 | L2 finality rules | `tools/signatario-stable/l2_finality.py` (317, agent 200 TODO box) | none | Build pins (open TODO: final launch build), HF1 claim-finality, rebuild check |
@@ -300,6 +309,11 @@ It is in scope only for the correctness of what it tells users.
 | S1 | 173 | Medium (fails closed) | Signer pins name v2.1, not the launch build | **Open TODO** (limit 14) | `test_daemons_r10` (signatario-stable), two expected failures |
 | 174-3 | 174 | Low | Relayer gas key on `cast` argv | agent 200: keystore + `LoadCredential=` password; raw keys refused on 700770 and 1 | `test_relayer_key` |
 | Fee | 197 | (feature) | No protocol revenue | `dc27942` and follow-ups: 5/5 bps in the vault | `R197BridgeFee`, `v3fee` |
+| F229-1 to F229-8 | 229 | Medium to Low | Relayer: 9 credits per L2 block, no gas ceiling, blind mints behind a failed head and into a full queue, forged queued mint executed, chain ids from config only, two releases for one burn, two relayers on one record, O(history) relay pass | `90050be`, `c871aee`, `97fa835` | `test_relayer_review` 18, `test_release_paths v3relay` 7 |
+| F229-9 | 229, 241 | Low | A stuck Ethereum release waited 1,800 s and was then re-sent behind its own nonce | Agent 241: same-nonce replacement after 300 s, bounded by the 300 gwei ceiling | `test_relayer_r11` StuckRelease |
+| F229-10 | 229, 241 | Low | Every operator relayed every item (6 of 7 transactions revert) | Agent 241: `relay_role` primary/backup, stagger index x step, own keys and nonce record | `test_relayer_r11` PrimaryBackup |
+| F229-11 | 229, 241 | Low | Signers and feed re-read the whole log history and every item's state each pass | Agent 241: persisted cursor with hash check and rescan; finalized finished-item record cleared on reorg | `test_relayer_r11` ScanCursor, Finished |
+| A239 code hash | 239 | High (switch) | A metamorphic verifier swapped after activation paid 9,000 USDC (also under Cancun) | `61b8ca2`: `releaseWithProof` and RRV re-check the code hash | `A239Metamorphic` (shanghai, cancun), `A239LcSwitch` |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
 

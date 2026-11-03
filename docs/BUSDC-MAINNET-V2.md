@@ -169,6 +169,17 @@ does not exist (every pin, the rebuild and the private settled RPC pass):
 python3 tools/signatario-stable/signatario.py --config /etc/bloch-busdc-signer/signer.json release --burn-tx 0x0000000000000000000000000000000000000000000000000000000000000001 --out /tmp/busdc-dry.json
 ```
 
+Relayers (F229-10, agent 241): one operator runs the primary relayer (`"relay_role": "primary"`); the six others run
+backups (`"relay_role": "backup"`, `relay_backup_index` 1 to 6, distinct). Each relayer has its own L2 and Ethereum gas keys
+and its own nonce record (`relayer_state`); never copy a gas keystore to a second host. List the other six relayers' gas
+addresses in `relay_other_gas_addresses`: a relayer started on one of them refuses to run. A backup acts on an item only after
+its index x `l2_backup_step_s` (1,200 s) on the L2 or x `eth_backup_step_s` (300 s) on Ethereum has passed on its own clock
+since it first saw the item ready, so with a live primary the backups send nothing and pay no gas. `vigia.py relay` refuses
+on chain 700770 until `relay_role` is set. A release of ours that is still in the Ethereum pool after `eth_replace_after_s`
+(300 s) and priced below the current quote is replaced at the same nonce, never above `eth_max_gas_price_gwei` (300; L2
+50); at the ceiling the `release-stuck-at-ceiling` alert fires. Signers and relayers keep their log cursors in
+`scan_state_dir` (default `<shared_dir>/.scan`, must be writable by the service user).
+
 Expected: `"reason": "the burn transaction is not in this L2"`. Then the daemons (`vigia.py sign`,
 `vigia.py relay`, `guardiao.py watch`, `sombra.py watch`, `reservas.py watch`) under the operators' own
 service managers.
@@ -329,6 +340,7 @@ been made on real L2 data.
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |
+| Which operator runs the primary relayer, the backup index (1-6) of each other operator, and every relayer's two gas addresses (F229-10) | relayer `relay_role`, `relay_backup_index`, `relay_other_gas_addresses` |
 | Light-client prover and shadow verifier (after the LC port) | sombra `prover_dir`, `shadow_verifier` |
 | Guardian alert command (pager) | guardiao `alert_command` |
 | Firewall allow-list of operator and relayer IPs for TCP 8787 (`docs/SIG-TRANSPORT.md`) | each operator's host |
@@ -376,7 +388,10 @@ Automation (`vigia.py`, `signatario.py`, `eth_half.py`):
 
 - One item that reverts (a USDC-blacklisted recipient, for example) no longer stops every later mint and release.
 - SHARED is really untrusted now: forged rounds, partials and `done`, `executed` or `sent` files are ignored.
-- A relayed transaction with no receipt after `resend_after_s` is sent again.
+- A relayed transaction with no receipt after `resend_after_s` is sent again. A stuck Ethereum release is replaced at its
+  own nonce after `eth_replace_after_s` (300 s), within `eth_max_gas_price_gwei` (agent 241, F229-9).
+- Signers and relayers read only the blocks after a persisted log cursor, rescanning on a changed hash, and stop reading
+  items finished at the `finalized` level (agent 241, F229-11).
 - A transaction holding several burns (a smart wallet, Multicall3) is certified burn by burn (`--burn-id`).
 - `eth_half.py` refuses while the vault is paused.
 - A signer joins open rounds first and opens at most `max_new_rounds` per pass.
