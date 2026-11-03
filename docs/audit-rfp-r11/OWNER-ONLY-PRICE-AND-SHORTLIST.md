@@ -10,8 +10,9 @@ directory. Every price below is an **estimate by the development team, not a quo
 | 1 DEX tier A | 993 nSLOC of logic (+121 interfaces); about half verbatim Uniswap V2, so the review is diff-focused | `phase1-dex.manifest.tsv` |
 | 1 DEX tier B | 157 nSLOC Solidity + 2,544 JS/shell code lines | same |
 | 1 DEX tier C (optional) | 769 code lines | same |
-| 2 Bridge A1 Solidity | PENDING-P2-A1 nSLOC (1,435 at the earlier freeze `125227b`) | `phase2-bridge.manifest.tsv` |
-| 2 Bridge A2 daemons | PENDING-P2-A2 logical lines (4,710 at `125227b`) | same |
+| 2 Bridge A1 Solidity | 1,496 nSLOC at `eb5c981` (1,435 at `125227b`) | `phase2-bridge.manifest.tsv` |
+| 2 Bridge A2 daemons | 4,846 logical lines at `eb5c981` (4,710 at `125227b`), + 108 optional | same |
+| 2 Bridge C frontend (optional) | 3,162 code lines (`3dae1ed`) | `phase2-bridge-frontend.manifest.tsv` |
 | 2 Bridge B light-client guests | about 3,690 nSLOC Rust (unchanged, `06faae5c`) | earlier RFP section 3 |
 | 3 Sparse guest, primary | 806 nSLOC Rust of guest code (+ pinned build files) | `phase3-sparse.manifest.tsv` |
 | 3 Sparse guest, secondary | 2,979 nSLOC in 11 files, about 190 changed lines since the activated program; diff-focused | same |

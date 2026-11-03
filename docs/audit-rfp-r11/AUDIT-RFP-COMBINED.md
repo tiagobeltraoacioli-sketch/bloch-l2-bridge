@@ -49,7 +49,8 @@ below and reproduces the manifests (section 11.4).
 | Phase | Repository | Commit | Notes |
 |---|---|---|---|
 | 1 | `postern-dex` | **`4d726aca7179885d5c7f1abde0c3bbcefa6b2b4f`** (`codex/dex-rc-r10-20261102`) | Release candidate. Contracts are byte-identical to **`d18ab04f1db68350427362128829f88dba8bac9b`** (`git diff d18ab04 4d726ac -- contracts foundry.toml` is empty); the deploy script and tooling are audited at `4d726ac` |
-| 2 | `bloch-l2-bridge` | **PENDING-P2-FREEZE** (agent 200's freeze commit) | Bridge V3 release candidate with the 5/5 bps vault fee, `MAX_PENDING` = 2,048 and the T = 0 rule |
+| 2 | `bloch-l2-bridge` | **`eb5c981b61cbd6a9668bed8651fbfb839dd00e18`** (`codex/bridge-rc-r10-20261102`) | Bridge V3 release candidate with the 5/5 bps vault fee, `MAX_PENDING` = 2,048 and the T = 0 rule. Replaces the earlier candidates `125227b` and `8d988ce`. **One named post-freeze delta is allowed:** the signer re-pin to the final L2 launch build (constants and text in track A2 only; section 6.2 item 14) |
+| 2 (track C, optional) | `postern-dex` | **`3dae1edd56d018c497a05d23a5468edd803e1ce5`** (`codex/bridge-frontend-r10-20261102`) | Bridge pages of the web frontend: fee wording and net amounts, refusal of L2 recipients with code |
 | 2 (track B) | `bloch-pos` (light-client crates) | **`06faae5c079c9bb91b1d263b444b62342ec93f83`** (`codex/lc-step-fixed-r7-20261102`) | SP1 step and release guests, `bloch-lc-mint-chain`, `bloch-light-client`, `bloch-finality-cert` and the consensus modules they reach |
 | 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **PENDING-P3-L2** (December candidate with forced inclusion, base-fee floor and fallback) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
 | 3 | `bloch-sis-pow` (L1 node) | **PENDING-P3-NATIVE** | Only the forced-inclusion queue and its settlement check (section 5.4) |
@@ -115,7 +116,7 @@ WBLCH backing (I20); deployment exactness (I21).
 8. **Swap fees at the k ceiling** (accepted for launch, section 6.1 item DEX-4): assess the candidate fix "transfer the
    clamped amount to `feeTo` inside `swap`" and propose a better one if it exists. It would be a next-version change.
 
-## 4. Phase 2: the bUSDC bridge V3 (`bloch-l2-bridge` at PENDING-P2-FREEZE)
+## 4. Phase 2: the bUSDC bridge V3 (`bloch-l2-bridge` at `eb5c981`)
 
 ### 4.1 What changed since the earlier RFP (`125227b`)
 
@@ -130,7 +131,76 @@ WBLCH backing (I20); deployment exactness (I21).
 
 ### 4.2 Scope and size
 
-PENDING-P2-TABLE
+Counted at `eb5c981` by `scripts/audit-rfp/manifest.py`; per-file SHA-256 in `phase2-bridge.manifest.tsv`.
+
+**Track A1, Solidity (required).**
+
+| File | Chain | Lines | SLOC | nSLOC (at `125227b`) |
+|---|---|---:|---:|---:|
+| `contracts/stable/BridgedStablecoinV3.sol` | L2 | 258 | 176 | **154** (136) |
+| `contracts/stable/BridgedStablecoinV2.sol` (V3's base) | L2 | 418 | 312 | 286 (286) |
+| `contracts/bridged/SignerMintedToken.sol` (shared abstract core) | L2 | 404 | 312 | 303 (303) |
+| `contracts/usdt/ProvenanceSourceVault.sol` | Ethereum | 858 | 667 | **527** (484) |
+| `contracts/usdt/RecoverableReleaseVerifier.sol` | Ethereum | 283 | 208 | 193 (193) |
+| `contracts/usdt/SP1ReleaseVerifier.sol` | Ethereum | 60 | 36 | 33 (33) |
+| **Total** | | **2,281** | **1,711** | **1,496** (1,435) |
+
+Code hashes at `eb5c981` (forge artifacts, immutables zeroed in the runtime):
+
+| Contract | Creation keccak | Runtime keccak |
+|---|---|---|
+| `BridgedStablecoinV3` | `0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7` (22,658 B) | `0x405c2834bea460d321d8a0590ad4189b19238fd0a96c23297667892f51da9ca7` (18,859 B) |
+| `ProvenanceSourceVault` | `0x42071edaeb0262f6b9f2815ba7e35e59c26e7c566b106b37d1ea16cb6a4e4302` (22,349 B) | `0x2cd01fd3bb673ce569dd8b8c8b1b894eed28309baf221d4d9c036793f9da6889` (18,255 B of 24,576) |
+| `BridgedStablecoinV2` (not the launch token) | `0xc6269b357c36f26aac6302f491659b803ca37f180f455c69aef8ee543239665b` | `0xe92935e6cd5c40f83ef23e199c3fb6c6118ca178732c1b2e78611deec1bdbbbe` |
+
+Creation gas: token (mainnet shape, 7 signers, 3 guardians) **4,822,592** against the L2's `max_tx_gas` of 5,000,000;
+vault (Ethereum) 4,583,238.
+
+Reference only: `contracts/usdt/ContextBoundSourceVault.sol` (the vault does not inherit from it; the verifiers import
+only its `IReleaseVerifier` interface) and `contracts/sp1/ISP1Verifier.sol`.
+
+**Track A2, off-chain daemons that hold keys or decide (required).**
+
+| File | Holds | Lines | SLOC | nSLOC (at `125227b`) |
+|---|---|---:|---:|---:|
+| `tools/guardiao/guardiao.py` | L2 token guardian key, Ethereum vault guardian key | 1,326 | 1,071 | **997** (958) |
+| `tools/signatario-stable/vigia.py` | Relay gas keys (keystores, never in argv on public chains) | 1,048 | 819 | **782** (751) |
+| `tools/signatario-stable/signatario.py` | L2 mint key (1 of 7) | 842 | 675 | 600 (600) |
+| `tools/deploy-pontes/deploy_pontes.py` | Deployer (run by the owner) | 852 | 693 | **579** (558) |
+| `tools/signatario-stable/sigfeed.py` | none (signature transport) | 517 | 421 | 412 (412) |
+| `tools/signatario-stable/bridge_feed.py` | none (release digest) | 445 | 360 | 325 (325) |
+| `tools/signatario-stable/eth_half.py` | Ethereum release key (1 of 7) | 406 | 316 | 279 (279) |
+| `tools/guardiao/sombra.py` | Second Ethereum vault guardian | 389 | 299 | **276** (267) |
+| `tools/deploy-pontes/vault_pontes.py` | Deployer | 354 | 284 | **222** (195) |
+| `tools/reservas/reservas.py` | none (backing monitor) | 288 | 211 | **199** (190) |
+| `tools/signatario-stable/l2_finality.py` | none (L2 finality rules, signer pins) | 317 | 214 | 175 (175) |
+| **Total** | | **6,784** | **5,363** | **4,846** (4,710) |
+| Optional: `tools/deploy-pontes/key_inventory.py` | none (offline deploy gate) | 206 | 156 | 108 |
+
+Configurations pinned by hash (templates with `TBD-owner` addresses): `busdc-mainnet.config.json`,
+`busdc-vault-mainnet.config.json` (`configSha256` `0x1cdc34875923734ba94353f70054dc9e08b98b24af87281eeb25b6fc35173bab`),
+`busdc-keys.inventory.template.json` and the six `busdc-ops/*.template.json`.
+
+Priority inside A2 if the budget is tight: `guardiao.py`, `signatario.py` and `eth_half.py` first, then `vigia.py`, then
+the rest. The smallest useful Phase 2 is A1 plus those three daemons: about 3,370 nSLOC.
+
+**Track B, SP1 light-client guests (required before the vault's switch to the proof path; may follow A).** Unchanged:
+`bloch-pos` at `06faae5c`, about 3,690 nSLOC (release and step guests 28, `bloch-lc-mint-chain` 102,
+`bloch-light-client` 1,682, `bloch-finality-cert` 485, and 1,393 in the consensus modules the guests reach, plus the parts
+of `CommittedState` they use). The firm confirms the reachable surface during scoping. Pinned artifacts: step ELF
+`dc1794712d116424ea49f32268410bc57a7f34832b5570c544c92fb7658f326d`, vkey
+`0x00bcf59240fc04a84f33f6a80d07ceddbf02e7145b2176b39f29f149019776e0`; release ELF
+`38b911a9131ab03c22351013b872144ca4b1cba9e9d4cad934d3891f56edd0c4`, vkey
+`0x007d50e2d044585dd42afb636c6a061df51f2af439e0332923704cd8085adc73`. The fee does not touch the release statement.
+
+**Track C, frontend wording (optional).** `postern-dex` `3dae1ed`: `frontend/src/BridgeLive.tsx` and
+`frontend/src/bridge/{chain,config,limits,recovery,track}.ts`, 3,473 lines, 3,162 code lines. In scope only for whether
+what the page tells a user is correct (held exits, queue position and a full `MAX_PENDING` queue, the fee and net
+amounts, refusal of a mismatched pair or a contract recipient). Not a web-security review.
+
+Out of scope: wGSMH (`WrappedGnB*`), `L2BlochBridge`, Chameleon, `USDTSourceVault`, `BridgedStablecoin` v1,
+`L1ReleaseVerifier`; the vendored `SP1VerifierGroth16` v6.1.0, `Groth16Verifier` and OpenZeppelin files; the SP1 zkVM;
+key ceremonies and host hardening; test harnesses and attack drivers (provided as evidence).
 
 ### 4.3 Invariants
 
@@ -270,7 +340,13 @@ Full text and the tests that assert each one: `AUDIT-SCOPE-BRIDGE-V3.md` section
     together.
 13. **Fee revenue is small and does not change the trust model.** At the launch caps the fee yields at most about $5 a
     day from releases and about $50 from deposits until releases free room. Only `sweepFees` depends on the recipient.
-14. **Signer pins.** PENDING-P2-PINS
+14. **Signer pins (open TODO, fails closed).** `l2_finality.MAINNET_V2` still names the v2.1 L2 binaries, so
+    `check_binaries` refuses the launch build and no release certificate is signed until one follow-up commit pins the
+    final L2 launch build. That commit changes only constants and text (`l2_finality.py`, two test files, four docs and
+    `notes.l2Build` in `busdc-mainnet.config.json`); it is the one post-freeze delta the fix review must cover.
+15. **L-1 of the DEX review (agent 180), bridge side.** A deposit whose L2 recipient is a contract (the pair, router,
+    WBLCH or the token) is credited there and lost to the depositor. The contracts accept it; the bridge page refuses a
+    recipient with code (track C).
 
 ### 6.3 Phase 3, December L2 program
 
@@ -281,10 +357,10 @@ Full text and the tests that assert each one: `AUDIT-SCOPE-BRIDGE-V3.md` section
 | I1-I3 | Cost, build, note | Fixed |
 | K1: a full block is not provable (a 27.7M-gas read-only block is about 800M SP1 gas) | Liveness | Sequencer policy: a 90M SP1-gas budget per block; 96 GiB scope for over-budget deposit or forced-only blocks |
 | K2-K7 | Cost, notes, coverage, host, build | Accepted (package section 5) |
-| K8: Succinct toolchain binaries trusted, not rebuilt from source | Supply chain | PENDING-K8 |
+| K8: Succinct toolchain binaries trusted, not rebuilt from source | Supply chain | Disclosed as a trust assumption; the owner has not asked for a source rebuild (open since report 115). The vendor may comment |
 | K9: the sweep reverts if the recipient rejects a plain value transfer (fees stay in the vaults, no loss) | Design | Depends on the recipient, which must accept plain value on L2 |
 | K10: block derivation implemented twice (complete and sparse) | Maintainability | A test pins the sparse copy (S8) |
-| **Sweep recipient placeholder** `0x…0fee01` | Release gate | PENDING-P3-SWEEP |
+| **Sweep recipient placeholder** `0x…0fee01` | Release gate | The recipient will be the Bloch Inc Safe's L2 address (`TBD-owner`; never a burn address). It is one constant in the configuration commitment and the 37-byte sweep code, so it moves every ELF hash and key. The release build refuses the placeholder. The review may run on the placeholder; the fix review confirms that the final commit differs only in that constant (and in reviewed fixes) and that the pinned container reproduces the final ELFs on two hosts |
 | Forced inclusion review findings (agent 164) R1-R7 | High to Info | PENDING-P3-R164 |
 
 ## 7. Timeline
@@ -398,13 +474,101 @@ Deep invariant run (release gate):
 FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=500 FOUNDRY_INVARIANT_FAILURE_PERSIST_DIR=$(mktemp -d) forge test --offline --match-test '^invariant' --fuzz-seed 1
 ```
 
-`test/V3TokenInvariant.t.sol` returns at once unless `V3_INITCODE` holds the bridge V3 creation code; PENDING-P1-V3.
+`test/V3TokenInvariant.t.sol` returns at once unless `V3_INITCODE` holds the bridge V3 creation code. Against the
+Phase 2 freeze commit's token (init code keccak `0xe560441f…1de7`, from `forge inspect BridgedStablecoinV3 bytecode` at
+`eb5c981`):
+
+```
+V3_INITCODE=$(cat v3-initcode-eb5c981.hex) FOUNDRY_INVARIANT_FAILURE_PERSIST_DIR=$(mktemp -d) forge test --offline --evm-version shanghai --match-contract V3Token
+```
+
+Expected: 5 passed. `test/V3Interaction*.t.sol` (14 tests) compile a vendored copy of the token under
+`test/vendor/bridge-v3/` taken from the earlier bridge tip; with the three files replaced by the `eb5c981` sources they
+also pass (11 + 3). Re-vendoring the copy is a DEX test-only change for the DEX release line.
 
 `node --test scripts/*.test.mjs` is legacy publication tooling, out of scope, and needs Linux.
 
-### 11.2 Phase 2 (`bloch-l2-bridge` at PENDING-P2-FREEZE)
+### 11.2 Phase 2 (`bloch-l2-bridge` at `eb5c981`)
 
-PENDING-P2-TESTS
+Needs forge, anvil and cast 1.7.1, python3 (standard library), and a Rust toolchain for `scripts/tests`.
+
+```
+git checkout eb5c981b61cbd6a9668bed8651fbfb839dd00e18
+```
+
+```
+forge test --offline
+```
+
+Expected: **503 passed, 0 failed, 1 skipped (42 suites).** The fuzz seed is fixed in `foundry.toml`. The new suites:
+`R194T0Rule`, `R194PendingCap` (8), `R194VerifierCodehash` (3), `R197BridgeFee` (14), `R171TokenReview` (22),
+`A172VaultReview` (22), `R10BridgeParams` (12).
+
+Offline Python suites, each from its own tool directory (`python3 -m unittest <module>`). Expected:
+`tools/deploy-pontes`: `test_t0_rule` 8, `test_launch_config` 8, `test_key_inventory` 11 (needs `FOUNDRY_BIN`);
+`tools/guardiao`: `test_daemons_r10` 7, `test_review2` 8; `tools/reservas`: `test_daemons_r10` 2,
+`test_reservas_alerts` 4; `tools/signatario-stable`: `test_daemons_r10` 3 with **2 expected failures** (the signer-pin
+TODO, item 14 of section 6.2), `test_status_v3` 10, `test_sigfeed` 56, `test_relayer_key` 9.
+
+```
+python3 tools/signatario-stable/test_ops_templates.py .
+```
+
+Expected: 10/10.
+
+```
+cd scripts && python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+Expected: 419 passed.
+
+Loopback anvil rehearsals (real deploy tools, real daemons, throwaway keys):
+
+```
+python3 tools/deploy-pontes/rehearse_anvil.py
+```
+
+Expected: **95/95, REHEARSAL OK** (vault with the 5/5 bps fee; measured one commit before the freeze, which differs
+only in a test file and docs).
+
+```
+python3 tools/signatario-stable/test_release_paths.py . v3fee
+```
+
+Expected: **20/20** (the honest release pays 29.985 for a 30 burn; `feesAccrued` equals the fees; supply equals
+`totalLocked`; a third party's `sweepFees` pays only the recipient).
+
+```
+python3 tools/signatario-stable/test_release_paths.py . v3
+```
+
+Expected: 17/17.
+
+```
+python3 tools/guardiao/test_settle_quorum.py .
+```
+
+Expected: 30/30.
+
+```
+AUDIT_PORT_BASE=30980 python3 tools/guardiao/a129_flood_daemon.py . starve
+```
+
+Expected: 1/1. The full list of the other daemon suites and attack drivers is `AUDIT-SCOPE-BRIDGE-V3.md` section 8; they
+were last run at `9f91a56`, not at the freeze commit. Gas: `python3 tools/deploy-pontes/gas_v3.py` and
+`python3 tools/deploy-pontes/creation_gas_v3.py`.
+
+Track C (`postern-dex` at `3dae1ed`), in `frontend/`:
+
+```
+npm ci
+```
+
+```
+npx vitest run
+```
+
+Expected: **310 passed, 1 skipped.**
 
 Track B (`bloch-pos` at `06faae5c`):
 

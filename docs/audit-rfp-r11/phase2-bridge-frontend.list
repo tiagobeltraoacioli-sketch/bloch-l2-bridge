@@ -1,0 +1,7 @@
+# Phase 2 track C (optional): postern-dex bridge pages at 3dae1ed
+C frontend/src/BridgeLive.tsx
+C frontend/src/bridge/chain.ts
+C frontend/src/bridge/config.ts
+C frontend/src/bridge/limits.ts
+C frontend/src/bridge/recovery.ts
+C frontend/src/bridge/track.ts
