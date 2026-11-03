@@ -66,12 +66,13 @@ window, and keeps a database that refuses to sign two different releases for one
 `ETH_HALF=real python3 test_signatario.py <project>` (32 checks) and `ETH_HALF=real python3 test_vigia.py
 <project>` run the suites with it.
 
-**Provisional pin:** `l2_finality.MAINNET_V2` holds the provisional v2.1 settled-RPC and produce-dev hashes, marked by
-`SETTLED_RPC_PIN_PROVISIONAL`, until the owner signs the v2.1 release. Do not deploy signers while it is `True`.
-**The L2 is planned to launch on the next build, not v2.1** (release `bloch-l2-2026-11-02-next-native-78d4921c`, signing target
-`116bfaba…`: follower `cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `e5754d05…`). Against that build `check_binaries`
-refuses every pinned role, so `l2_pins: "mainnet-v2"` fails closed. `MAINNET_V2` must move to the build the owner signs
-before any signer is deployed (code change, not made on this branch).
+**L2 pins:** `l2_finality.MAINNET_V2` (`l2_pins: "mainnet-v2"`) pins the final L2 deposit-only launch build: release
+`bloch-l2-2026-11-03-next-native-78d4921c`, build commit `926d2cf`, signing target (`SHA256SUMS`) `6d3bd628…`: follower `cdf5da5c…50b2`,
+produce-dev `e3f1a290…7f69`, settled-rpc `53e88565…bb0d`. `SETTLED_RPC_PIN_PROVISIONAL` is `False`: these hashes are
+frozen. Install the three binaries only from the release folder whose `SHA256SUMS` carries the owner's signature, then run
+the dry check of `docs/BUSDC-MAINNET-V2.md` 4.6. Any other build is refused with "the <role> binary is not the pinned build": v2.1 (`fb0d5313…`, `18be911a…`)
+and the superseded 17383fe candidate, whose settled-rpc `e5754d05…` lacks agent 195's 15M simulation gas cap and 5 s budget
+(its follower and produce-dev are the same binaries as this release's).
 
 ## Config
 

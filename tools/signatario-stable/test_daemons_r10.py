@@ -12,12 +12,13 @@ import unittest
 
 import l2_finality
 
-# agents/PINS-NEXT.md (agent 65, kit f1c8033, build 17383fe, signing target 116bfaba...): the L2 deposit-only launch build.
-# TODO(launch-build re-pin): agent 195 moves the settled-RPC hash (and the signing target); use the FINAL build's hashes.
+# The FINAL L2 deposit-only launch build (agents/201-kit-final.md, two-host rebuild at 01:47 UTC 2026-11-03): release
+# bloch-l2-2026-11-03-next-native-78d4921c, build commit 926d2cf, signing target (SHA256SUMS) 6d3bd628...
+# Only the settled RPC moved from 17383fe (e5754d05, signing target 116bfaba).
 LAUNCH_BUILD = {
     'follower': 'cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2',
     'produce': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
-    'settled_rpc': 'e5754d05a1d6b217374a652d6959acf1fcd9323703d82226e07aa1d77a1754e8',
+    'settled_rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d',
 }
 
 
@@ -27,9 +28,6 @@ class R10S1SignerPins(unittest.TestCase):
     certificate with "the follower binary is not the pinned build"; one who installs v2.1 to satisfy the pins rebuilds the
     L2 with a producer the launch did not ship."""
 
-    # TODO(launch-build re-pin, l2_finality.py): an expected failure until the follow-up commit pins the final launch build.
-    # unittest counts an unexpected success as a failure, so that commit must update LAUNCH_BUILD and drop both decorators.
-    @unittest.expectedFailure
     def test_the_mainnet_pins_name_the_launch_build(self):
         self.assertEqual(l2_finality.MAINNET_V2['binaries'], LAUNCH_BUILD)
 
@@ -41,7 +39,6 @@ class R10S1SignerPins(unittest.TestCase):
         with self.assertRaises(l2_finality.NotFinal):
             l2_finality.check_binaries({'follower': str(p)}, {'binaries': {'follower': '00' * 32}})
 
-    @unittest.expectedFailure  # TODO(launch-build re-pin), as above
     def test_the_pins_are_no_longer_provisional(self):
         self.assertFalse(l2_finality.SETTLED_RPC_PIN_PROVISIONAL,
                          'l2_finality.py: "Do not deploy signers while this is True"')

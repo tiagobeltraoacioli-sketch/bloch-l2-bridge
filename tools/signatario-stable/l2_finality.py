@@ -4,10 +4,11 @@ Used by signatario.py (release). Pure functions over the native follower's statu
 read-only helpers (binary pins, an optional L1 RPC cross-check). Guardians do not import this module on
 purpose (independent code); they apply the same rule from their own RPC.
 
-The v2.1 L2 build, unsigned, (bloch-l2-evm a39b04e, native 78d4921c) pins:
-  follower     bloch-l2-native-follower  c18752fd...  writes status schema bloch.l2.native-follower-status.v2
-  produce      bloch-l2-produce-dev      fb0d5313...  `reconstruct` rebuilds the L2 from the follower's L1 blocks
-  settled RPC  bloch-l2-settled-rpc      18be911a...  serves `finalized` only from a verified status
+The L2 deposit-only launch build (release bloch-l2-2026-11-03-next-native-78d4921c,
+bloch-l2-evm 926d2cf, native 78d4921c, release SHA256SUMS 6d3bd628...) pins:
+  follower     bloch-l2-native-follower  cdf5da5c...  writes status schema bloch.l2.native-follower-status.v2 or v3
+  produce      bloch-l2-produce-dev      e3f1a290...  `reconstruct` rebuilds the L2 from the follower's L1 blocks
+  settled RPC  bloch-l2-settled-rpc      53e88565...  serves `finalized` only from a verified status
   chain 700770, native network f47d3e49..., L2 genesis 632e45ae...
 
 HF1 claim finality (native params HF1_CLAIM_FINALITY_EPOCH = 7180; transition/l2_claim.rs
@@ -38,29 +39,18 @@ EPOCH_SECONDS = 960
 STATUS_SCHEMA_V2 = 'bloch.l2.native-follower-status.v2'
 STATUS_SCHEMA_V3 = 'bloch.l2.native-follower-status.v3'
 
-# ┌─ TODO(launch-build re-pin, agent 200 RC r10; owner decision 2026-11-02 22:14 UTC on agent 173 S1) ──────────────────────┐
-# │ OPEN, FAILS CLOSED. `MAINNET_V2['binaries']` still name the v2.1 release (c18752fd / fb0d5313 / 18be911a). The L2      │
-# │ deposit-only launch build is 17383fe (agents/PINS-NEXT.md: follower cdf5da5c…, produce e3f1a290…, settled-rpc         │
-# │ e5754d05…), and agent 195 is moving the settled-RPC hash again (15M simulation gas cap, 5 s budget: rpc-limits-r10    │
-# │ a0dd090, new release build after 01:00 UTC 2026-11-03). Until the FINAL launch build is reproduced and signed,         │
-# │ `check_binaries` refuses the launch binaries, so every release certificate is refused: no signer may be deployed.     │
-# │ The one follow-up commit, "signer: pin the final L2 launch build", changes exactly:                                   │
-# │   1. this file: `binaries` = the final build's follower, produce and settled_rpc sha256 (from the signed PINS file); │
-# │      `name` = that build; `SETTLED_RPC_PIN_PROVISIONAL = False`; drop this TODO box;                                │
-# │   2. test_daemons_r10.py: LAUNCH_BUILD = the same three hashes; remove the two `expectedFailure` decorators;         │
-# │   3. test_hf1_finality.py: the "mainnet-v2 pins" check names the new prefixes;                                       │
-# │   4. README.md (signatario-stable), docs/BUSDC-MAINNET-V2.md table row "L2 build" and section 9,                    │
-# │      deployments/mainnet/busdc-mainnet.config.json `notes.l2Build`: the same build and hashes.                       │
-# │ Then run the 4.6 dry check of docs/BUSDC-MAINNET-V2.md on a follower of that build before any signer starts.        │
-# └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-# PROVISIONAL: `binaries` below hold the v2.1 release of agents/PINS-V21.md (unsigned). Set the
-# flag to False once the owner has signed that release and its suites have passed. v2.1 changed two pins, not
-# one: settled_rpc (spool-dos, receipt/latest, and finality closing on a lost follower status) and produce (F2, the flag-day inbox height fix in `reconstruct`).
-# A producer without F2 stops at the first deposit. Do not deploy signers while this is True.
-SETTLED_RPC_PIN_PROVISIONAL = True
+# `binaries` below are the FINAL L2 deposit-only launch build (agents/201-kit-final.md, two-host rebuild at 01:47 UTC
+# 2026-11-03): release bloch-l2-2026-11-03-next-native-78d4921c, build commit 926d2cf, byte-identical on 45.77 and 136.
+# Its SHA256SUMS, sha256 6d3bd62885ca269e50e85b53c8c378a7d86467680563292e784c6f0459258c19, is the owner's signing target
+# and lists exactly these three hashes. They replace the v2.1 pins (c18752fd / fb0d5313 / 18be911a) and the superseded
+# launch candidate 17383fe (settled_rpc e5754d05, without the 15M simulation gas cap; its follower and produce are these).
+# The flag says whether these hashes may still move: False, they are frozen. Signers install the binaries only from the
+# release folder whose SHA256SUMS carries the owner's signature (docs/BUSDC-MAINNET-V2.md 4.6); any other build is
+# refused by `check_binaries`.
+SETTLED_RPC_PIN_PROVISIONAL = False
 
 MAINNET_V2 = {
-    'name': 'bloch-l2-mainnet-v2.1-provisional (L2 a39b04e / native 78d4921c)',
+    'name': 'bloch-l2-2026-11-03-next-native-78d4921c (L2 926d2cf / native 78d4921c)',
     'l2_chain_id': 700770,
     'network_pin': 'f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966',
     'l2_genesis_hash': '632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468',
@@ -70,11 +60,10 @@ MAINNET_V2 = {
     'l2_network_args': ['--rules', 'mainnet', '--domain',
                         '1c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f0733',
                         '--genesis-time', '1786656679'],
-    'binaries': {  # TODO(launch-build re-pin): see the box above SETTLED_RPC_PIN_PROVISIONAL
-        'follower': 'c18752fd4c6942678bcb45d8d36436bcd644b1ee6e48416d67e4999e7c7cf29a',
-        # PROVISIONAL, see SETTLED_RPC_PIN_PROVISIONAL.
-        'produce': 'fb0d531311d4f19a97f0839968146f5737acf57eb313fc93972ec215de950be9',
-        'settled_rpc': '18be911a47f0ab8975e1f079c860adef08dfc43c4b5062eca7b040e2e6eee83f',
+    'binaries': {  # the final launch build, see SETTLED_RPC_PIN_PROVISIONAL
+        'follower': 'cdf5da5cb38b12a483fc8822fa22c2b3e90e9e4c7918ec73814f682bc37550b2',
+        'produce': 'e3f1a290bf60b65702034fb0bc973ab15d1b05b236145c48880cfd2d0f477f69',
+        'settled_rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d',
     },
 }
 PIN_KEYS = ('l2_chain_id', 'network_pin', 'l2_genesis_hash', 'l1_genesis_time', 'hf1_claim_finality_epoch',

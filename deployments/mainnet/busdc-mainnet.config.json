@@ -5,7 +5,7 @@
     "rationale": "docs/BRIDGES-MAINNET.md",
     "units": "1 USDC = 1e6 units (6 decimals)",
     "pilot": "checklist section 6: 10,000 USDC bucket refilled in 24 h, supply <= 100,000 USDC",
-    "l2Build": "L2 mainnet v2.1 build: bloch-l2-evm (build commit `a39b04e`) against native 78d4921c (follower c18752fd, produce-dev fb0d5313, settled-rpc 18be911a; release unsigned); network.genesisHash = the pinned L2 genesis 632e45ae",
+    "l2Build": "L2 deposit-only launch build: release bloch-l2-2026-11-03-next-native-78d4921c, bloch-l2-evm build commit `926d2cf` against native 78d4921c (follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565; SHA256SUMS 6d3bd628, the owner's signing target); network.genesisHash = the pinned L2 genesis 632e45ae",
     "vault": "deploy the Ethereum vault first (busdc-vault-mainnet.config.json, tools/deploy-pontes/vault_pontes.py); its verify output fills ethereum.vault/route/vaultCodeHash/vaultCap/vaultGuard",
     "sequence": "docs/BUSDC-MAINNET-V2.md",
     "TBD-owner": "source.revision; deployer.address (fresh hardware-wallet key, nonce 0, never 0x703a...); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator and .address (7 fresh L2 mint keys from the key ceremony); guardians.set[0..2].operator and .address (3 fresh L2 token guardian keys); ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 3 Ethereum vault guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)",

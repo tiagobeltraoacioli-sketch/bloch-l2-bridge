@@ -79,10 +79,11 @@ def unit():
         s.update(over)
         return s
 
-    check('unit: mainnet-v2 pins are the provisional v2.1 build and chain 700770',
-          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('18be911a')
-          and lf.MAINNET_V2['binaries']['follower'].startswith('c18752fd')
-          and lf.MAINNET_V2['binaries']['produce'].startswith('fb0d5313')
+    check('unit: mainnet-v2 pins are the final launch build and chain 700770',
+          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('53e88565')
+          and lf.MAINNET_V2['binaries']['follower'].startswith('cdf5da5c')
+          and lf.MAINNET_V2['binaries']['produce'].startswith('e3f1a290')
+          and lf.SETTLED_RPC_PIN_PROVISIONAL is False
           and lf.MAINNET_V2['l2_genesis_hash'].startswith('632e45ae') and lf.MAINNET_V2['hf1_claim_finality_epoch'] == 7180)
     check('unit: pins refuse another L2 chain id',
           refused(lf.pins_from_config, {'l2_pins': 'mainnet-v2', 'l2_chain_id': 700771}) is not None)

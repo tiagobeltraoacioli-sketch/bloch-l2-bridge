@@ -6,7 +6,7 @@ The target is branch `codex/bridge-v3-lc-merge-r8-20261102` of `bloch-l2-bridge`
 the constructor, `MAX_PENDING` 2,048, F171-4, 6-of-7 and 3+3 launch config) plus agent 197's protocol fee in the vault
 (5 bps on deposit and 5 bps on release, immutable, section 2.2), agent 173's guardian/sombra/reservas fixes (G1-G5), agent
 174's key ceremony and `key_inventory.py`, the relayer gas keys out of argv, the review suites of agents 171, 172 and 175
-and agent 191's doc corrections. The signer's L2 binary pins are one open TODO (`l2_finality.py`, section 6 limit 14).
+and agent 191's doc corrections. The signer's L2 binary pins name the final launch build `926d2cf` (agent 230, constants and text only; section 6 limit 14).
 The freeze commit for the external audit is the tip of that branch named in `docs/AUDIT-RFP-BRIDGE-V3.md` (agent 170) and in
 `agents/200-bridge-rc.md`; it replaces `125227b` and `8d988ce`.
 
@@ -128,7 +128,7 @@ pays less than the burn; `feesAccrued` outside backing on every path (deposit, r
 | **vigia** (relayer and signer driver) | `tools/signatario-stable/vigia.py` (1,502, agents 229 and 241) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`, only when the queued mint matches the finalized deposit, then `drain()`s verified due mints. Parks unbacked burns (`release-held-provenance`). Gas ceilings 50 / 300 gwei; MAX_PENDING room; one relayer per nonce record (flock); chain ids checked against the RPCs. One primary relayer, staggered backups (`relay_role`). Same-nonce replacement of a stuck Ethereum release. Persisted log cursor with rescan on a changed hash; items finished at `finalized` are not read again |
 | **signatario** (Bloch half) | `tools/signatario-stable/signatario.py` (842, `cfc105c`) | L2 mint key (one of 7) | Mints only after Ethereum `finalized`, recomputing the v2 id. Rebuilds the L2 from L1 before certifying a burn. `remint` and `remint --locked` (R2) are manual. Treats `MintDropped` as a cancel (R1) |
 | **eth_half** (Ethereum half of signatario) | `tools/signatario-stable/eth_half.py` (406, `9571c09`) | Ethereum release key (one of 7) | Pins the vault code, uses `finalized` only and recomputes the release digest. With `provenance: true` it refuses a burn whose chain the vault deposits do not back |
-| L2 finality rules | `tools/signatario-stable/l2_finality.py` (317, agent 200 TODO box) | none | Build pins (open TODO: final launch build), HF1 claim-finality, rebuild check |
+| L2 finality rules | `tools/signatario-stable/l2_finality.py` (agent 230 re-pin) | none | Build pins (final L2 launch build), HF1 claim-finality, rebuild check |
 | Feed and signature transport | `bridge_feed.py` (445, `5299145`), `sigfeed.py` (517, `a68f42a`) | none | Compute the v2 digest and move partial signatures (`docs/SIG-TRANSPORT.md`) |
 | **guardiao** | `tools/guardiao/guardiao.py` (1,326, `7fd93ad` G1-G5) | L2 token guardian (one of 3), Ethereum vault guardian | Raises `mint:` provenance findings and votes cancels (`voteCancelMints`) in earliest-`readyAt` order, at most `cancel_batch` 32 per round (F129-A). Raises `mint-chain`. With `vault_pause_on_mint` on (the default) it pauses the vault. A round's RPC cost does not grow with the queue (F129-B) |
 | **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
@@ -273,9 +273,9 @@ It is in scope only for the correctness of what it tells users.
 13. **Fee revenue is small and does not change the trust model.** At the launch caps the fee yields at most about $5 a day
     from releases (10,000 USDC a day) and about $50 from deposits until releases free room (agent 197). Only
     `sweepFees` depends on the recipient. Integrators and the frontend state "less 0.05% per crossing".
-14. **Signer pins (open TODO).** `l2_finality.MAINNET_V2` still names the v2.1 binaries, so `check_binaries` refuses the
-    launch build and every release certificate is refused until the follow-up commit pins the final L2 launch build
-    (agent 195 moves the settled-RPC hash). Fails closed; see the TODO box in `l2_finality.py`.
+14. **Signer pins (closed by agent 230).** `l2_finality.MAINNET_V2` names the final L2 launch build `926d2cf`
+    (follower `cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `53e88565…`, signing target `6d3bd628…`);
+    `SETTLED_RPC_PIN_PROVISIONAL` is `False`. Constants and text only; the one allowed post-freeze delta.
 12. **Config note.** Fixed on this branch (`cf4d0dc`): `notes.launchDesign` in `busdc-mainnet.config.json` now says a forged mint is cancelled before it credits only while 2 of 3 guardians live **and** the forger queues fewer candidates than the guardians cancel, and states limit 2.
 
 ## 7. Prior findings and their fixes
@@ -306,7 +306,7 @@ It is in scope only for the correctness of what it tells users.
 | F171-2 | 171 | Low | Cancel refund lets up to 2x the bucket through one window | Not changed (evidence, `b1e851d`) | `R194BucketRefund` |
 | V1-V5 | 172 | High (conditional) to Low | Held state covers every later burn; switch as settlement path; proxy code hash; bucket starvation; pause vs exit window | Owner decisions; tests kept as evidence | `A172VaultReview` |
 | G1-G5 | 173 | Low | Guardian round aborted by an Ethereum read; vault pause on one L2 view; RPC keys in logs; same-price resend; soft token-switch alert | `7fd93ad`, `31778b8` | `test_daemons_r10` (guardiao, reservas), `test_mint_switch` |
-| S1 | 173 | Medium (fails closed) | Signer pins name v2.1, not the launch build | **Open TODO** (limit 14) | `test_daemons_r10` (signatario-stable), two expected failures |
+| S1 | 173 | Medium (fails closed) | Signer pins name v2.1, not the launch build | Re-pinned to the final launch build (agent 230, limit 14) | `test_daemons_r10` (signatario-stable) 3/3 |
 | 174-3 | 174 | Low | Relayer gas key on `cast` argv | agent 200: keystore + `LoadCredential=` password; raw keys refused on 700770 and 1 | `test_relayer_key` |
 | Fee | 197 | (feature) | No protocol revenue | `dc27942` and follow-ups: 5/5 bps in the vault | `R197BridgeFee`, `v3fee` |
 | F229-1 to F229-8 | 229 | Medium to Low | Relayer: 9 credits per L2 block, no gas ceiling, blind mints behind a failed head and into a full queue, forged queued mint executed, chain ids from config only, two releases for one burn, two relayers on one record, O(history) relay pass | `90050be`, `c871aee`, `97fa835` | `test_relayer_review` 18, `test_release_paths v3relay` 7 |
@@ -383,7 +383,7 @@ These suites run as unittest modules, from their own tool directory:
   + 22 `A172VaultReview`, + 12 `R10BridgeParams`.
 - Offline Python: `test_t0_rule` 8, `test_launch_config` 8, `test_key_inventory` 11 (with `FOUNDRY_BIN`), guardiao
   `test_daemons_r10` 7 and `test_review2` 8, reservas `test_daemons_r10` 2 and `test_reservas_alerts` 4, signatario-stable
-  `test_daemons_r10` 3 (2 expected failures: the open pin TODO), `test_status_v3` 10, `test_sigfeed` 56, `test_relayer_key`
+  `test_daemons_r10` 3 (3/3 after agent 230's re-pin), `test_status_v3` 10, `test_sigfeed` 56, `test_relayer_key`
   9, `test_ops_templates` 10, `scripts/tests` 419.
 - Anvil: `rehearse_anvil` 95/95; release paths v3 17/17 and v3fee 20/20; `test_settle_quorum` 30/30; a129 starve 1/1.
 - Hashes and gas: section 2 and section 6 limit 4.
