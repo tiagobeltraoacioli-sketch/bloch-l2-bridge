@@ -741,11 +741,68 @@ class Guardian:
             self.log(kind='alert', severity='soft', id='switch-unreadable', reason=str(e)[-200:])
             return
         pid = f'verifier-proposed:{proposed}'
-        for old in [k for k in self.state['problems'] if k.startswith('verifier-proposed:') and (k != pid or not live)]:
+        uid = f'verifier-unsafe:{proposed}'
+        for old in [k for k in self.state['problems']
+                    if k.startswith(('verifier-proposed:', 'verifier-unsafe:')) and (k not in (pid, uid) or not live)]:
             self.clear_problem(old)
         if live and pid not in self.state['problems']:
             self.problem(pid, f'the vault has a live light-client verifier proposal {proposed}, activating from {activates}: '
                               'one way, and guardians cannot stop it')
+        if live and uid not in self.state['problems']:
+            self.review_proposed_code(eth, proposed, uid)
+        self.watch_lc_successor(eth, vault)
+
+    def watch_lc_successor(self, eth, vault):
+        """After the switch, guardians have no power, but RecoverableReleaseVerifier's `recoveryAuthority` can still name a
+        successor with any code (a handoff that no proof stops, or a recovery that a recent step proof stops). A live
+        proposal is critical: holders have only its delay to exit (agent 239). SP1ReleaseVerifier has no such path."""
+        try:
+            active = addr(self.call(eth, vault, 'verifier()')[0])
+            proposed = addr(self.call(eth, active, 'proposedSuccessor()')[0]) if int(active, 16) else None
+            if proposed and int(proposed, 16):
+                kind = {1: 'recovery (a recent step proof stops it: proveLife)', 2: 'handoff (no proof stops it)'}.get(
+                    uint(self.call(eth, active, 'proposalKind()')[0]), 'unknown')
+                activates = uint(self.call(eth, active, 'activatesAt()')[0])
+            else:
+                proposed = None
+        except Unverifiable as e:
+            if 'revert' not in str(e).lower():
+                self.log(kind='alert', severity='soft', id='lc-successor-unreadable', reason=str(e)[-200:])
+            return
+        except (ValueError, IndexError, KeyError) as e:
+            self.log(kind='alert', severity='soft', id='lc-successor-unreadable', reason=str(e)[-200:])
+            return
+        pid, uid = f'lc-successor-proposed:{proposed}', f'lc-successor-unsafe:{proposed}'
+        for old in [k for k in self.state['problems']
+                    if k.startswith(('lc-successor-proposed:', 'lc-successor-unsafe:')) and k not in (pid, uid)]:
+            self.clear_problem(old)
+        if proposed is None:
+            return
+        if pid not in self.state['problems']:
+            self.problem(pid, f'the vault\'s light-client verifier {active} has a {kind} successor proposal {proposed}, '
+                              f'activating from {activates}: review it with verifier_review.py successor; after activation '
+                              'it decides every release')
+        if uid not in self.state['problems']:
+            self.review_proposed_code(eth, proposed, uid)
+
+    def review_proposed_code(self, eth, proposed, uid):
+        """Agent 172 V2 / 239: the vault pins the proposal's code hash, not its behaviour. A proxy (DELEGATECALL, CALLCODE,
+        EIP-1167, an EIP-7702 designator) or a self-destructing or creating contract is a hard alert: the switch signers'
+        own review (`verifier_review.py proposal`) must refuse it, and holders have only the switch delay to leave."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'deploy-pontes'))
+            import verifier_review
+        except ImportError as e:
+            self.problem(uid, f'cannot review the proposed verifier {proposed}: verifier_review.py is missing ({e})')
+            return
+        try:
+            code = verifier_review.parse_hex(self.rpc(eth, 'eth_getCode', [proposed, 'latest']))
+            verifier_review.scan(code)
+        except verifier_review.Refused as e:
+            self.problem(uid, f'the proposed verifier {proposed} fails the review rule: {e}. Do not sign anything for it; '
+                              'holders must exit before it activates')
+        except Unverifiable as e:
+            self.log(kind='alert', severity='soft', id='switch-code-unreadable', reason=str(e)[-200:])
 
     def round(self):
         self.l2_read_failed = self.blind = False

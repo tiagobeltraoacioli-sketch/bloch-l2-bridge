@@ -23,6 +23,8 @@ One reviewed JSON config (deployments/mainnet/busdc-vault-mainnet.config.json, d
             constant, the signer and guardian arrays, committee mode (no verifier, no proposal), no pause.
             Prints the values the L2 token config (`ethereum`) and every eth_half config need: vault,
             routeId, runtime code keccak, cap, deployment search start.
+  verify-verifier ...  the review of a proposed light-client verifier before any switch signature: the same arguments
+            as `verifier_review.py proposal` (agents/172 V2, agents/239). Also `verifier_review.py scan|check|successor`.
 Rehearsal (`--rehearsal` and `ethereum.rehearsal: true`): only chain 31337, any six-decimal token.
 UNAUDITED tooling for an UNAUDITED contract.
 """
@@ -321,6 +323,9 @@ def verify(cfg, norm, url, address, block, unused=False):
 
 def main():
     args = sys.argv[1:]
+    if args and args[0] == 'verify-verifier':
+        import verifier_review
+        raise SystemExit(verifier_review.main(['proposal', *args[1:]]))
     if not args or args[0] not in ('validate', 'args', 'verify'):
         raise SystemExit(__doc__)
     opt = lambda name, default=None: args[args.index(name) + 1] if name in args else default

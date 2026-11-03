@@ -1,0 +1,34 @@
+{
+  "domain": "bloch.bridge.lc-verifier-review.v1",
+  "note": "Expectation for tools/deploy-pontes/verifier_review.py before any proposeVerifier signature on the bUSDC vault. Every TBD-owner value is refused. The release and step pins are agent 130's (agents/130-lc-step-fixed.md); 110's 4d47ca04/0x00d1c59a are superseded. The anchor must be a mainnet checkpoint finalized after the KES bind (BR-9), not the e8699 rehearsal anchor. maskedRuntimeKeccak is RecoverableReleaseVerifier with agent 239's successor code-hash re-check; without that commit it is 0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145.",
+  "ethereum": {"chainId": 1},
+  "vault": "TBD-owner",
+  "l2Token": "TBD-owner",
+  "l2": {"chainId": 700770, "block": "finalized", "tokenDeployBlock": "TBD-owner"},
+  "verifier": {
+    "contract": "RecoverableReleaseVerifier",
+    "artifact": "out/RecoverableReleaseVerifier.sol/RecoverableReleaseVerifier.json",
+    "maskedRuntimeKeccak": "0xe1d76cb7de0980f388453ed9f0e225cef4a90cb8d55588fb3779e746c5a8e47e",
+    "immutables": {
+      "programVKey": "0x007d50e2d044585dd42afb636c6a061df51f2af439e0332923704cd8085adc73",
+      "stepVKey": "0x00bcf59240fc04a84f33f6a80d07ceddbf02e7145b2176b39f29f149019776e0",
+      "stepVKeyWords": "0x20c97a5e132a013f01d57e66dbed7c50a2381778ceda856c92e2533ee0769701",
+      "anchorDigest": "TBD-owner",
+      "l2ChainId": 700770,
+      "l2Token": "TBD-owner",
+      "genesisTime": 1786656679,
+      "epochSeconds": 960,
+      "recoveryAuthority": "TBD-owner",
+      "recoveryDelay": 1209600,
+      "lifeWindow": 259200,
+      "proposalCooldown": 1209600,
+      "handoffDelay": "TBD-owner"
+    }
+  },
+  "sp1Verifier": {
+    "address": "TBD-owner",
+    "runtimeKeccak": "0x9ff01fccb4a61bcfd3914fc30d865acaf01f7a69c793290f22b99010e9b7d29b",
+    "artifact": "out/SP1VerifierGroth16.sol/SP1Verifier.json"
+  },
+  "forbiddenAuthorities": "TBD-owner"
+}
