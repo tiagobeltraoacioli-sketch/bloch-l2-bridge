@@ -377,6 +377,21 @@ These suites run as unittest modules, from their own tool directory:
 - in `tools/guardiao`: `python3 -m unittest test_review2`;
 - in `tools/signatario-stable`: `test_review2`, `test_status_v3` and `test_sigfeed`, then `python3 rehearse_feed.py <repo>`.
 
+### Expected results at the round 11 release candidate (agent 241, Mac, forge 1.7.1)
+
+- forge: **517 passed, 0 failed, 1 skipped** (44 suites): agent 200's 503 + agent 239's 14 (`A239LcSwitch` 12,
+  `A239Metamorphic` 2). `A239_ISOLATE=true forge test --isolate --evm-version {shanghai,cancun} --match-contract
+  A239Metamorphic`: 2/2 under each.
+- Offline Python: as round 10, with signatario-stable `test_daemons_r10` 3/3 (the re-pin removed both expected failures),
+  `test_ops_templates` 13, `test_relayer_r11` 30, `test_relayer_review` 18, `test_verifier_review` 15, guardiao
+  `test_a239_switch_review` 5.
+- Anvil: `rehearse_anvil` 95/95; release paths v3 17, v3fee 20, v3relay 7, v3remint 6, hold 7, reorg 10;
+  `test_settle_quorum` 30; a129 starve 1; `rehearse_feed` 34; `test_relay_nonce` 26, `test_vigia` 26, `test_signatario` 23,
+  `test_bridge_review` 21, `test_hf1_finality` 57; guardiao 32, guardiao_hf1 8, mint_switch 15, mint_cancel 37, mint_hold 4,
+  l2_tx_rpc 26, guard_chain 5, sombra 19.
+- Hashes: only the vault and `RecoverableReleaseVerifier` move (agent 239's `61b8ca2`, section 2). Vault creation on the
+  decided shape (5/5 bps, minDeposit 11): 4,588,637 gas (4,583,238 at `eb5c981`); RRV creation 1,558,219 gas (1,544,149).
+
 ### Expected results at the round 10 release candidate (agent 200, Mac, forge 1.7.1)
 
 - forge: **503 passed, 0 failed, 1 skipped** (42 suites): 433 at `8d988ce`, + 14 `R197BridgeFee`, + 22 `R171TokenReview`,
