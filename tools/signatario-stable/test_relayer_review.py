@@ -106,9 +106,9 @@ class GasPrice(Base):
         doc = json.loads(v.nonce_path.read_text())
         doc['eth:0x70997970c51812dc3a010c7d01b50e0d17dc79c8']['moved'] -= 10**5  # a gap: the nonce is filled again
         v.nonce_path.write_text(json.dumps(doc))
-        with self.assertRaises(RuntimeError):  # 1.25 x 300 gwei is above the ceiling: alert and wait, do not overpay
-            v.send('eth', VAULT, ['release()'])
-        self.assertEqual(len(self.sent), 1)
+        v.send('eth', VAULT, ['release()'])  # 1.25 x 300 gwei is above the ceiling: sent at the ceiling, never above
+        prices = [int(a[a.index('--gas-price') + 1]) for a in self.mktx_args()]
+        self.assertEqual(prices, [300 * GWEI, 300 * GWEI])
 
     def test_control_a_normal_price_is_sent(self):
         v = self.vigia()

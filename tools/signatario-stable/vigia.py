@@ -1155,10 +1155,14 @@ class Vigia:
         price = min(quoted * 2, cap)
         if nonce in rec['prices']:  # replacing a transaction that never landed
             price = max(price, rec['prices'][nonce] * 125 // 100)
-        if quoted > cap or price > cap:  # a lying RPC, a fee spike or a run of bumps: never pay above the ceiling (agent 229)
+        if quoted > cap:  # a lying RPC or a fee spike: never pay above the ceiling (agent 229)
             log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price, ceiling=cap,
                 nonce=nonce)
-            raise RuntimeError(f'{side} gas price {price} (quoted {quoted}) is above the ceiling {cap}: not sent')
+            raise RuntimeError(f'{side} gas price quoted {quoted} is above the ceiling {cap}: not sent')
+        if price > cap:  # a run of replacement bumps stops at the ceiling: a node still holding the old one refuses it, and
+            log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price,
+                ceiling=cap, nonce=nonce)  # a dropped one is filled at the ceiling
+            price = cap
         data = self.cast_out('calldata', *call)
         if gas is None:
             gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
