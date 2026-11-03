@@ -2,7 +2,16 @@
 
 The target is branch `codex/bridge-v3-lc-merge-r8-20261102` of `bloch-l2-bridge`: the V3 launch tip `9f91a56` (`codex/bridge-v3-r7-20261102`) plus `RecoverableReleaseVerifier` with its handoff (agent 103, `2a116fa`, merged unchanged in `4422d13`), its tests on the V3 vault and the anvil release driver (agent 138). The contracts of `9f91a56` are unchanged on it. This document was first written by agent 131 on `codex/bridge-audit-scope-v3-r8-20261102` (`323eddd`, docs only) and extended for the verifier by agent 138.
 
-The frontend is `postern-dex` `codex/bridge-v3-r7-20261102` @ `f7cdf26`.
+**Round 10 release candidate (agent 200):** branch `codex/bridge-rc-r10-20261102`, from agent 194's `8d988ce` (T = 0 in
+the constructor, `MAX_PENDING` 2,048, F171-4, 6-of-7 and 3+3 launch config) plus agent 197's protocol fee in the vault
+(5 bps on deposit and 5 bps on release, immutable, section 2.2), agent 173's guardian/sombra/reservas fixes (G1-G5), agent
+174's key ceremony and `key_inventory.py`, the relayer gas keys out of argv, the review suites of agents 171, 172 and 175
+and agent 191's doc corrections. The signer's L2 binary pins are one open TODO (`l2_finality.py`, section 6 limit 14).
+The freeze commit for the external audit is the tip of that branch named in `docs/AUDIT-RFP-BRIDGE-V3.md` (agent 170) and in
+`agents/200-bridge-rc.md`; it replaces `125227b` and `8d988ce`.
+
+The frontend is `postern-dex` `codex/bridge-v3-r7-20261102` @ `f7cdf26`, with agent 176's security fixes (`8d077ce`) and
+the fee and contract-recipient changes on `codex/bridge-frontend-r10-20261102` (agent 200).
 
 Everything here is **UNAUDITED**. Nothing is deployed. The contracts say "PROTOTYPE, not for deployment".
 
@@ -20,7 +29,10 @@ Sources for the design, the findings and the evidence are the agent reports in `
 
 ## 1. The design in one paragraph
 
-USDC is deposited into `ProvenanceSourceVault` on Ethereum. Each deposit gets an id whose top 8 bytes are its vault nonce, and the vault extends a hash chain over `(depositId, amount, L2 recipient)`.
+USDC is deposited into `ProvenanceSourceVault` on Ethereum. The vault keeps a protocol fee of 5 bps of each deposit aside
+and records the **net** amount. Each deposit gets an id whose top 8 bytes are its vault nonce, and the vault extends a hash
+chain over `(depositId, net amount, L2 recipient)`. A release unlocks the full burned amount and pays it less 5 bps. bUSDC
+stays 1:1 with the locked (net) USDC; fees are held outside the backing and swept to an immutable treasury.
 
 On the L2, 5 of 7 mint keys sign a mint of `BridgedStablecoinV3`:
 - deposit nonce k is slot k;
@@ -39,15 +51,15 @@ Build settings:
 - **`optimizer_runs = 1`**, which was 200 before `9f91a56` (F129-C);
 - forge 1.7.1.
 
-BridgedStablecoinV3 and V2 hashes are agent 194's (`codex/bridge-v3-decisions-r10-20261102`, forge 1.7.1, `forge inspect`); the others are unchanged. Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`); the two verifiers' are from agent 138's run of the same build (`agents/138-evidence/suites/summary.txt`), equal for the other four. Runtime keccaks of the verifiers are of the artifact, with the immutables zeroed; a deployed verifier's code hash covers its immutables (agent 138's anvil code hashes are in its report). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
+BridgedStablecoinV3 and V2 hashes are agent 194's (`codex/bridge-v3-decisions-r10-20261102`, forge 1.7.1, `forge inspect`), reproduced by agent 200 at the release candidate; ProvenanceSourceVault's are agent 200's (fee, agent 197); the others are unchanged. Hashes are the keccak of the forge artifacts at `9f91a56` (`agents/109-evidence/suites-t5/summary.txt`); the two verifiers' are from agent 138's run of the same build (`agents/138-evidence/suites/summary.txt`), equal for the other four. Runtime keccaks of the verifiers are of the artifact, with the immutables zeroed; a deployed verifier's code hash covers its immutables (agent 138's anvil code hashes are in its report). A deployed token's code hash also covers its immutables, so compare deployments with `deploy_pontes.py verify` and `vault_pontes.py verify`.
 
 | Contract | File (lines, last commit) | Chain | Creation keccak (bytes) | Runtime keccak (bytes) |
 |---|---|---|---|---|
 | **BridgedStablecoinV3** | `contracts/stable/BridgedStablecoinV3.sol` (258, agent 194) | L2 700770 | `0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7` (22,658) | `0x405c2834bea460d321d8a0590ad4189b19238fd0a96c23297667892f51da9ca7` (18,859) |
-| **ProvenanceSourceVault** | `contracts/usdt/ProvenanceSourceVault.sol` (791, `9cbde58`) | Ethereum 1 | `0xc0ff8d98a3bfb0b7dc4a243862ab29b7c99a47ea2a4c940dec75e24f1ec82b8c` (20,194) | `0x3ce7684f3a19716933df175db53e297c718125d5ff6c7a693298470a9fae3188` (17,015) |
+| **ProvenanceSourceVault** | `contracts/usdt/ProvenanceSourceVault.sol` (858, agent 197 fee) | Ethereum 1 | `0x42071edaeb0262f6b9f2815ba7e35e59c26e7c566b106b37d1ea16cb6a4e4302` (22,349) | `0x2cd01fd3bb673ce569dd8b8c8b1b894eed28309baf221d4d9c036793f9da6889` (18,255) |
 | BridgedStablecoinV2 (V3's base: cancel, remint, unpause, instant cap, switch) | `contracts/stable/BridgedStablecoinV2.sol` (418, agent 194) | - | `0xc6269b357c36f26aac6302f491659b803ca37f180f455c69aef8ee543239665b` (19,580) | `0xe92935e6cd5c40f83ef23e199c3fb6c6118ca178732c1b2e78611deec1bdbbbe` (15,954) |
-| SignerMintedToken (shared core: k-of-n EIP-712 mint, buckets, queue, guardians, burn) | `contracts/bridged/SignerMintedToken.sol` (399, `24150f1`) | - | abstract | abstract |
-| ContextBoundSourceVault (ProvenanceSourceVault's base) | `contracts/usdt/ContextBoundSourceVault.sol` (609, `b281104`) | - | `0x332f195a6ab7ab806c97f308629eedc61d34c0491b9f2f889d56de48e0071ddd` (15,308) | `0x6e1a3508e1eb3c7e47e3e64f2ae0f8bb53eb319329b5b10c96f71a792c87db00` (12,534) |
+| SignerMintedToken (shared core: k-of-n EIP-712 mint, buckets, queue, guardians, burn) | `contracts/bridged/SignerMintedToken.sol` (404, agent 194, comment only) | - | abstract | abstract |
+| ContextBoundSourceVault (reference only: ProvenanceSourceVault does not inherit from it; agent 170) | `contracts/usdt/ContextBoundSourceVault.sol` (609, `b281104`) | - | `0x332f195a6ab7ab806c97f308629eedc61d34c0491b9f2f889d56de48e0071ddd` (15,308) | `0x6e1a3508e1eb3c7e47e3e64f2ae0f8bb53eb319329b5b10c96f71a792c87db00` (12,534) |
 | SP1ReleaseVerifier | `contracts/usdt/SP1ReleaseVerifier.sol` (60, `dc1d8fc`) | Ethereum | `0x3571805df5f1af321010c4a34be68c4b142d367521b3c076858c966006dda36b` (1,822) | `0x37e0624f92673e031131e2c31de74dcc056c5a53c2fa019fe73fcb89c9935498` (1,448) |
 | **RecoverableReleaseVerifier** (the recommended light-client verifier: recovery and optional handoff) | `contracts/usdt/RecoverableReleaseVerifier.sol` (283, `2a116fa`) | Ethereum | `0x5a5ee586d0d89aed745a48cc49c29186680b2da1acdad3f33829fa2c5331298c` (8,345) | `0x03af31ba2ff6d81528f648678dae5de7479f1a320cf9ea232f9fd1e7f186b145` (6,802) |
 
@@ -78,25 +90,47 @@ Launch parameters are not in a config yet (owner decisions in report 103): the a
 - that the verifier adds no path that bypasses the vault's provenance check, the window bucket or replay protection (the vault checks replay and provenance in `_checkRelease` before calling `verifyRelease`, and the bucket in `_pay` after it);
 - the trust it adds: during a handoff notice holders who distrust the new programs must leave; a lost authority leaves a stopped client locked (report 103).
 
+### 2.2 Protocol fee in the vault (agent 197; owner decision 2026-11-02, revenue middle ground)
+
+- `Provenance.fees = (recipient, depositBps, releaseBps)` is fixed in the constructor; launch values 5 / 5 bps
+  (`deployments/mainnet/busdc-vault-mainnet.config.json`), recipient `TBD-owner`. Each rate is at most `MAX_FEE_BPS` 30;
+  a fee without a recipient, a recipient without a fee, the token or the vault as recipient, and a `minDeposit` whose net
+  is below `l2MinBurn` are refused. `minDeposit` is therefore 11 USDC (`l2MinBurn` 10). No setter, owner or signature.
+- Deposit: `fee = floor(amount * depositBps / 10,000)`; the **net** amount goes into the deposit id, the chain link, the
+  `Deposited` log, `totalLocked` and the cap check. Signers and relayer mint the logged amount, unchanged code.
+- Release: the burn, release id, certificate and proof keep the full burned amount; `totalLocked` and the release bucket
+  drop by it; the recipient receives `amount - floor(amount * releaseBps / 10,000)`.
+- `feesAccrued` is never backing. Deposits, releases and `sweepFees()` refuse while the vault holds less than
+  `totalLocked + feesAccrued`. `sweepFees()` is permissionless and pays only `feeRecipient`; a blacklisted recipient
+  blocks only the sweep.
+- Tools: `vault_pontes.py validate` refuses a mainnet vault with both rates 0, a rate above 30, an undecided recipient, or
+  a recipient that is a signer, guardian, deployer or the token; `verify` checks the three fee immutables.
+- Evidence: `R197BridgeFee.t.sol` (14), `test_BR10_decidedVaultWithFee` (R10BridgeParams), `rehearse_anvil.py` fee-policy
+  checks, and `test_release_paths.py v3fee` (real signers, relayer, guardian and reserves monitor on a 5/5 bps vault, 20/20).
+
+**Questions for the auditor on the fee:** the net-amount chain (deposit id, link and log all on the net); the release that
+pays less than the burn; `feesAccrued` outside backing on every path (deposit, release, queued release, sweep, shortfall);
+`sweepFees` and the recipient; rounding (always in the user's favour); the `minDeposit` net check.
+
 ## 3. Off-chain components in scope
 
 | Component | File (lines, last commit) | Key it holds | Role |
 |---|---|---|---|
-| **vigia** (relayer) | `tools/signatario-stable/vigia.py` (952, `e5160a5`) | Relay gas keys only | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`. Parks unbacked burns (`release-held-provenance`) |
+| **vigia** (relayer) | `tools/signatario-stable/vigia.py` (1,048, agent 200) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`. Parks unbacked burns (`release-held-provenance`) |
 | **signatario** (Bloch half) | `tools/signatario-stable/signatario.py` (842, `cfc105c`) | L2 mint key (one of 7) | Mints only after Ethereum `finalized`, recomputing the v2 id. Rebuilds the L2 from L1 before certifying a burn. `remint` and `remint --locked` (R2) are manual. Treats `MintDropped` as a cancel (R1) |
 | **eth_half** (Ethereum half of signatario) | `tools/signatario-stable/eth_half.py` (406, `9571c09`) | Ethereum release key (one of 7) | Pins the vault code, uses `finalized` only and recomputes the release digest. With `provenance: true` it refuses a burn whose chain the vault deposits do not back |
-| L2 finality rules | `tools/signatario-stable/l2_finality.py` (302, `cc1724e`) | none | Build pins, HF1 claim-finality, rebuild check |
+| L2 finality rules | `tools/signatario-stable/l2_finality.py` (317, agent 200 TODO box) | none | Build pins (open TODO: final launch build), HF1 claim-finality, rebuild check |
 | Feed and signature transport | `bridge_feed.py` (445, `5299145`), `sigfeed.py` (517, `a68f42a`) | none | Compute the v2 digest and move partial signatures (`docs/SIG-TRANSPORT.md`) |
-| **guardiao** | `tools/guardiao/guardiao.py` (1,278, `c67092c`) | L2 token guardian (one of 3), Ethereum vault guardian | Raises `mint:` provenance findings and votes cancels (`voteCancelMints`) in earliest-`readyAt` order, at most `cancel_batch` 32 per round (F129-A). Raises `mint-chain`. With `vault_pause_on_mint` on (the default) it pauses the vault. A round's RPC cost does not grow with the queue (F129-B) |
-| **sombra** | `tools/guardiao/sombra.py` (377, `5299145`) | The second Ethereum vault guardian | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
-| **reservas** | `tools/reservas/reservas.py` (276, `5299145`) | none | Backing monitor; reports `held` (exit 2) |
-| Deploy tools | `tools/deploy-pontes/deploy_pontes.py` (787, `9f91a56`), `vault_pontes.py` (313), `gas_v3.py`, `creation_gas_v3.py`, `rehearse_anvil.py` | Deployer, run by the owner | Pairing checks, including the token genesis head against the vault's. `validate` refuses `tx.gasLimit` above 5,000,000 |
+| **guardiao** | `tools/guardiao/guardiao.py` (1,326, `7fd93ad` G1-G5) | L2 token guardian (one of 3), Ethereum vault guardian | Raises `mint:` provenance findings and votes cancels (`voteCancelMints`) in earliest-`readyAt` order, at most `cancel_batch` 32 per round (F129-A). Raises `mint-chain`. With `vault_pause_on_mint` on (the default) it pauses the vault. A round's RPC cost does not grow with the queue (F129-B) |
+| **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
+| **reservas** | `tools/reservas/reservas.py` (288, `7fd93ad` G3) | none | Backing monitor; reports `held` (exit 2) |
+| Deploy tools | `tools/deploy-pontes/deploy_pontes.py` (852, `c680842`), `vault_pontes.py` (354, fee), `key_inventory.py` (206, agent 174), `gas_v3.py`, `creation_gas_v3.py`, `rehearse_anvil.py` | Deployer, run by the owner | Pairing checks, including the token genesis head against the vault's. `validate` refuses `tx.gasLimit` above 5,000,000 |
 
 **Common rule:** every daemon refuses a `provenance` flag that does not match the contracts.
 
 **Configs:**
 - `deployments/mainnet/busdc-mainnet.config.json`: V3, 5-of-7, switch 6 and 14 d, 3 guardians, 72 h pause and cooldown, `largeMintThreshold` 0, 12 h delay, cap 100,000, bucket 10,000 a day, `tx.gasLimit` 5 M;
-- `deployments/mainnet/busdc-vault-mainnet.config.json`: provenance mode 1, `releaseDelay` 0, no `mintVerifier`, 2 Ethereum guardians.
+- `deployments/mainnet/busdc-vault-mainnet.config.json`: provenance mode 1, `releaseDelay` 0, no `mintVerifier`, 3 Ethereum guardians, `minDeposit` 11 USDC, fee 5/5 bps to `TBD-owner`.
 
 ### 3.1 Light-client release guest (proof path after the switch)
 
@@ -132,6 +166,11 @@ This lives in the `bloch-sis-pow` light-client repo, and its own review is a pre
 - shows "waiting for deposit #k" for a mint queued behind an earlier deposit;
 - refuses a pair that does not match.
 
+Round 10 (`codex/bridge-frontend-r10-20261102`, agent 200, on agent 176's `8d077ce`): the page pins the vault's fee rates,
+refuses a vault that reads otherwise, shows "less 0.05% per crossing" with the exact net amount of each deposit and
+release, checks the cap and supply on net amounts, and refuses an L2 deposit recipient that has code (agent 180 L-1: a
+deposit to the pair or another contract is captured or stuck, and the mint chain binds the recipient).
+
 It is in scope only for the correctness of what it tells users.
 
 ## 4. Trust model (launch parameters)
@@ -142,7 +181,8 @@ It is in scope only for the correctness of what it tells users.
 | Switch threshold | **6 of 7** | Token unpause, locked remint and locked replace, proposing the one-way mint or vault verifier switch (14 d delay) | - |
 | Ethereum release keys | 7, threshold **5** | Certify a release, within the bucket (10,000 plus 10,000 a day) | Pay a burn whose chain does not match the vault (`ProvenanceMismatch`) |
 | L2 token guardians | **3**; cancel quorum `g/2+1` = 2 | Cancel queued mints; pause the token (72 h, 72 h cooldown) | Credit, mint or move funds |
-| Ethereum vault guardians | 2 (guardiao, sombra) | Pause the vault (72 h) | Move funds |
+| Ethereum vault guardians | **3** (one per guardian operator; `vault_pontes.py validate` requires 3 on mainnet) | Pause the vault (72 h) | Move funds |
+| Fee recipient | 1, immutable (`TBD-owner`) | Receive swept fees | Touch backing, change a rate |
 | **T** (`largeMintThreshold`) | **0** | Every mint queues for 12 h and stays cancellable | - |
 
 **What is claimed:**
@@ -204,7 +244,7 @@ It is in scope only for the correctness of what it tells users.
    - One more guardian costs 4,870,301, one more signer 4,868,079, and a 32-byte name 4,867,371.
    - The contract maximum (16 signers, 7 guardians), at 5,422,799, **does not fit**.
    - `max_tx_gas` caps the gas used by exempt senders too, so the limit cannot be raised. Freeze the shape.
-   - Vault creation is 4,253,838.
+   - Vault creation (Ethereum, no 5 M limit) is 4,583,238 gas for the mainnet shape with the 5/5 bps fee (4,582,997 with no fee; agent 200, `scratchpad/a200/vault_gas.py`); runtime 18,255 bytes of 24,576.
 5. **`vault_pause_on_mint` trade-off.**
    - Each fresh forgery pauses the vault again: up to 2 x 72 h, then 72 h open.
    - A false `mint:` finding also closes the vault.
@@ -221,6 +261,12 @@ It is in scope only for the correctness of what it tells users.
     - Most daemon scripts use 2-of-3 quorums and 1 guardian. The gas runs and the browser run use 5 of 7.
     - **No real-L2 run** was done.
 11. **`mintedTotal`** is a `uint64`, so it overflows after 1.8e13 USDC lifetime (Info).
+13. **Fee revenue is small and does not change the trust model.** At the launch caps the fee yields at most about $5 a day
+    from releases (10,000 USDC a day) and about $50 from deposits until releases free room (agent 197). Only
+    `sweepFees` depends on the recipient. Integrators and the frontend state "less 0.05% per crossing".
+14. **Signer pins (open TODO).** `l2_finality.MAINNET_V2` still names the v2.1 binaries, so `check_binaries` refuses the
+    launch build and every release certificate is refused until the follow-up commit pins the final L2 launch build
+    (agent 195 moves the settled-RPC hash). Fails closed; see the TODO box in `l2_finality.py`.
 12. **Config note.** Fixed on this branch (`cf4d0dc`): `notes.launchDesign` in `busdc-mainnet.config.json` now says a forged mint is cancelled before it credits only while 2 of 3 guardians live **and** the forger queues fewer candidates than the guardians cancel, and states limit 2.
 
 ## 7. Prior findings and their fixes
@@ -244,6 +290,16 @@ It is in scope only for the correctness of what it tells users.
 | F129-B | 129 | Medium | The guardian round cost grew with the queue | `c67092c`: log-derived state, one scan per round | `a129_flood_daemon.py` flood; limit 2 |
 | F129-C | 129 | Low | Creation gas was 4.96 M, with no room for any shape change | `9f91a56`: `optimizer_runs` 1, internal bookkeeping; `validate` refuses `gasLimit` above 5 M | `creation_gas_v3.py` |
 | F129-D, F129-E | 129 | Info | Test gap for the resumed scan; `_vacate` in the replace is dead code | Test added; `_vacate` kept (an equivalent mutant) | `A129FinalV3` |
+| F129-B cap | 175, 194 | Medium | Unbounded forged candidates could outrun the cancels | `e307924`: `MAX_PENDING` 2,048 | `R194PendingCap` |
+| F171-5 | 171 | Medium | Nothing enforced T = 0 | `53da88c`: V3 constructor and `validate` refuse T != 0 | `R194T0Rule`, `R171` F5, `R10BridgeParams` |
+| F171-1 | 171 | Low | Runbook said 5 of 7 unpause the token | `8eb58fe`: 6 of 7 | `R171` F1, `TokenUnpauseQuorum` |
+| F171-4 | 171 | Info | `mintWithProof` did not re-check the verifier code hash | `807ac51` | `R194VerifierCodehash`, `R171` F4 |
+| F171-2 | 171 | Low | Cancel refund lets up to 2x the bucket through one window | Not changed (evidence, `b1e851d`) | `R194BucketRefund` |
+| V1-V5 | 172 | High (conditional) to Low | Held state covers every later burn; switch as settlement path; proxy code hash; bucket starvation; pause vs exit window | Owner decisions; tests kept as evidence | `A172VaultReview` |
+| G1-G5 | 173 | Low | Guardian round aborted by an Ethereum read; vault pause on one L2 view; RPC keys in logs; same-price resend; soft token-switch alert | `7fd93ad`, `31778b8` | `test_daemons_r10` (guardiao, reservas), `test_mint_switch` |
+| S1 | 173 | Medium (fails closed) | Signer pins name v2.1, not the launch build | **Open TODO** (limit 14) | `test_daemons_r10` (signatario-stable), two expected failures |
+| 174-3 | 174 | Low | Relayer gas key on `cast` argv | agent 200: keystore + `LoadCredential=` password; raw keys refused on 700770 and 1 | `test_relayer_key` |
+| Fee | 197 | (feature) | No protocol revenue | `dc27942` and follow-ups: 5/5 bps in the vault | `R197BridgeFee`, `v3fee` |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
 
@@ -306,6 +362,17 @@ These suites run as unittest modules, from their own tool directory:
 - in `tools/reservas`: `python3 -m unittest test_reservas_alerts`;
 - in `tools/guardiao`: `python3 -m unittest test_review2`;
 - in `tools/signatario-stable`: `test_review2`, `test_status_v3` and `test_sigfeed`, then `python3 rehearse_feed.py <repo>`.
+
+### Expected results at the round 10 release candidate (agent 200, Mac, forge 1.7.1)
+
+- forge: **503 passed, 0 failed, 1 skipped** (42 suites): 433 at `8d988ce`, + 14 `R197BridgeFee`, + 22 `R171TokenReview`,
+  + 22 `A172VaultReview`, + 12 `R10BridgeParams`.
+- Offline Python: `test_t0_rule` 8, `test_launch_config` 8, `test_key_inventory` 11 (with `FOUNDRY_BIN`), guardiao
+  `test_daemons_r10` 7 and `test_review2` 8, reservas `test_daemons_r10` 2 and `test_reservas_alerts` 4, signatario-stable
+  `test_daemons_r10` 3 (2 expected failures: the open pin TODO), `test_status_v3` 10, `test_sigfeed` 56, `test_relayer_key`
+  9, `test_ops_templates` 10, `scripts/tests` 419.
+- Anvil: `rehearse_anvil` 95/95; release paths v3 17/17 and v3fee 20/20; `test_settle_quorum` 30/30; a129 starve 1/1.
+- Hashes and gas: section 2 and section 6 limit 4.
 
 ### Expected results at `9f91a56`
 

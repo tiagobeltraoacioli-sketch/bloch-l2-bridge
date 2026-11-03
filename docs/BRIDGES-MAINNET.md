@@ -19,7 +19,9 @@ is never reused (`docs/BUSDC-MAINNET-V2.md`, section 4.5). Mainnet L2 chain id *
 | Bloch Inc | Safe v1.4.1, 3-of-5 hardware wallets (`deployer.fundedBy.safe`) | none on the bridges: it only funds the deployer's gas; `verify` checks it holds no role |
 | Relayers (vigia `relay`) | anyone, gas keys only | none: they submit what k signers authorized |
 
-There is no treasury, owner or fee recipient in either bridge.
+There is no owner in either bridge. Since round 10 the bUSDC V3 vault (`ProvenanceSourceVault`, `docs/AUDIT-SCOPE-BRIDGE-V3.md`
+2.2) has an immutable fee recipient (protocol treasury, `TBD-owner`): 5 bps of each deposit and of each release,
+fixed in its constructor, swept by anyone to that address only. This page's V2 tables predate it.
 
 ## 2. Initial parameters (start small, raise by redeploy)
 
