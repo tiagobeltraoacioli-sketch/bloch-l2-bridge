@@ -196,6 +196,47 @@ class OrderedMints(Base):
         self.assertEqual(sends, [(5, False), (6, True), (7, True)])
 
 
+class History(Base):
+    """F229-8: every pass re-reads every deposit ever relayed (minted, pendingMints, mintCancels, lastRemint: about 4 eth_calls
+    and 4 `cast` processes each), although an executed mint is final."""
+
+    def test_executed_history_costs_no_chain_reads(self):
+        v = self.vigia()
+        dirs = []
+        for s in range(200):
+            d = self.d / 'shared' / 'mint' / dep_id(s)[2:]
+            d.mkdir(parents=True)
+            (d / 'executed').write_text('done\n')
+            dirs.append(d)
+        calls = []
+        v.call = lambda url, to, sig, *a: calls.append(sig) or '0x' + word(0)
+        v.relay_mints_in_order(dirs)
+        self.assertLess(len(calls), 10, f'{len(calls)} chain reads for 200 executed deposits')
+
+    def test_control_a_queued_mint_is_still_read(self):
+        v = self.vigia()
+        d = self.d / 'shared' / 'mint' / dep_id(1)[2:]
+        d.mkdir(parents=True)
+        calls = []
+        v.call = lambda url, to, sig, *a: calls.append(sig) or '0x' + word(1)
+        v.execute_if_queued = lambda d, dep: calls.append('execute_if_queued')
+        v.relay_mints_in_order([d])
+        self.assertIn('execute_if_queued', calls)
+
+
+    def test_a_failed_read_never_marks_a_mint_executed(self):
+        v = self.vigia()
+        d = self.d / 'shared' / 'mint' / dep_id(2)[2:]
+        d.mkdir(parents=True)
+
+        def call(url, to, sig, *a):
+            raise RuntimeError("eth_call: {'code': -32005, 'message': 'rate limited'}")
+        v.call = call
+        with self.assertRaises(RuntimeError):
+            v.execute_if_queued(d, dep_id(2))
+        self.assertFalse((d / 'executed').exists())
+
+
 class ForgedQueuedMint(Base):
     """F229-4: `execute_if_queued` executes whatever is queued under a real deposit id; `execute_head` compares it with the
     finalized deposit first."""

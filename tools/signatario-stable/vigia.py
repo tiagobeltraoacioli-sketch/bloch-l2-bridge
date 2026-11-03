@@ -826,7 +826,7 @@ class Vigia:
 
     def relay_mint(self, d):
         dep = '0x' + d.name
-        if not WORD.fullmatch(dep):
+        if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed (or a v1 token's instant mint) is final
             return
         if self.minted(dep):
             self.execute_if_queued(d, dep)
@@ -856,7 +856,7 @@ class Vigia:
         todo = []
         for d in dirs:
             dep = '0x' + d.name
-            if not WORD.fullmatch(dep):
+            if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed is final; the head path still checks the head
                 continue
             if self.minted(dep):
                 self.isolated('relay-execute', dep, lambda d=d, dep=dep: self.execute_if_queued(d, dep))
@@ -999,7 +999,9 @@ class Vigia:
         url = self.cfg['l2_rpc']
         try:
             pending = self.call(url, self.token, 'pendingMints(bytes32)', dep)
-        except RuntimeError:  # v1 token: no queue
+        except RuntimeError as e:  # v1 token: no queue. A failed read (rate limit, node down) is not one: `executed` is final
+            if not is_revert(e):
+                raise
             (d / 'executed').write_text('v1\n')
             return
         words = [int(pending[2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range(3)]
