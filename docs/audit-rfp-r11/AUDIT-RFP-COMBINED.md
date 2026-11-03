@@ -242,7 +242,25 @@ statement) or **a forced transaction is silently dropped**.
 
 ### 5.2 Programs at the December fork
 
-PENDING-P3-PROGRAMS
+| Role | Program | Witness | Rules | Status in this audit |
+|---|---|---|---|---|
+| Activated today (`PROGRAM`) | `settlement_v3_mainnet` (complete guest crate), ELF `203114bf…c473` | complete | v1 (configuration `8ec1c804…`) | Live; not in scope |
+| **Next (`PROGRAM_NEXT`)** | **`settlement_v3_mainnet_sparse`** (`guest-sparse` crate) | **sparse** | next rules with forced inclusion (configuration tag 4) | **In scope** |
+| **Fallback (`PROGRAM_FALLBACK`, inert rollback gate)** | **`settlement_v3_mainnet`** of the new `guest-fallback` crate (agent 216) | complete, with the forced list as a fifth input | the same configuration as `PROGRAM_NEXT` | **In scope** (new; replaces the earlier fallback `3ad3a4f0`, which had no forced rule) |
+| Reference | `settlement_v3_mainnet_v1_sparse` | sparse | v1 | Differential reference only |
+
+**ELF hashes.** Since agent 217's release gate, **no next-rules guest compiles until the owner sets the fee-sweep
+recipient**, so the final hashes and keys exist only after that one command (section 6.3). For orientation, the last
+builds before the gate, with the old placeholder recipient and without the base-fee floor, each reproduced byte for byte
+on two hosts in the pinned container:
+
+| Build | Sparse `PROGRAM_NEXT` | Fallback | Configuration |
+|---|---|---|---|
+| Agent 115, `b772f2d` (sparse guest alone, no forced inclusion) | `78c533fa…7bea` | `3ad3a4f0…53b3` (no forced rule) | `975ec258…` (tag 3) |
+| Agents 137, 215, 216 (`80cf8a9`, forced inclusion) | `bc35e838…b048` (Keccak `1f744da8…`, BN254 vkey `00d4281e…`) | `7fd7f3c0…5303` (Keccak `d95185a6…`, BN254 vkey `00865f4e…`) | `b4663ab8…` (tag 4) |
+| The December candidate with the floor and the recipient set | after `set-sweep-recipient.py set` | after `set` | after `set` |
+
+The fix review must confirm the final hashes from the pinned container at the fixed commit, on two hosts.
 
 ### 5.3 Scope and size
 
@@ -370,7 +388,7 @@ Full text and the tests that assert each one: `AUDIT-SCOPE-BRIDGE-V3.md` section
 | K8: Succinct toolchain binaries trusted, not rebuilt from source | Supply chain | Disclosed as a trust assumption; the owner has not asked for a source rebuild (open since report 115). The vendor may comment |
 | K9: the sweep reverts if the recipient rejects a plain value transfer (fees stay in the vaults, no loss) | Design | Depends on the recipient, which must accept plain value on L2 |
 | K10: block derivation implemented twice (complete and sparse) | Maintainability | A test pins the sparse copy (S8) |
-| **Sweep recipient placeholder** `0x…0fee01` | Release gate | The recipient will be the Bloch Inc Safe's L2 address (`TBD-owner`; never a burn address). It is one constant in the configuration commitment and the 37-byte sweep code, so it moves every ELF hash and key. The release build refuses the placeholder. The review may run on the placeholder; the fix review confirms that the final commit differs only in that constant (and in reviewed fixes) and that the pinned container reproduces the final ELFs on two hosts |
+| **Sweep recipient** (`MAINNET_FEE_SWEEP_RECIPIENT: Option<Address> = None`, `TBD-owner`) | Release gate | The recipient will be the Bloch Inc Safe's L2 address (never a burn address). It is one constant in the configuration commitment and the 37-byte sweep code, so it moves every next-rules ELF hash and key. **Since agent 217 no next-rules guest compiles while it is unset** (a compile-time assert in the three guest binaries; both container scripts and `build-release.sh` refuse; `ChainSpec::validate` refuses zero, `0x01`-`0x0a`, the predeploy range, the EIP-4788 contract and the old placeholder `0x…0fee01`). The owner sets it with one command (`set-sweep-recipient.py set`), which commits both trees. The review runs on the source; the final ELF hashes exist only after that command, and the fix review confirms they come from the pinned container at the fixed commit |
 | Forced inclusion review (agent 164) R1-R6 | High to Low | Fixed in the code under audit (section 5.4 table); the 7 review tests pass |
 | R1-note: the forced listing is keyed on the configuration (identity 3), not on the program key | Medium (open) | A fallback ELF with the same configuration built from a tree without the forced code would pass the compile-time check. Mitigated by building the fallback from the forced tree (S21); we ask the auditor whether to key the listing on the program identity as well |
 | R7: `MAX_PER_SETTLEMENT` (16) never binds (the 300k gas cap stops at 14 transfers) | Info | Kept as a guard |
