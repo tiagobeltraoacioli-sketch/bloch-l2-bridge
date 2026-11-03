@@ -45,5 +45,37 @@ class SwitchReview(Base):
         self.assertIn('SELFDESTRUCT', self.alerts[1][1])
 
 
+class LcSuccessor(Base):
+    """After the switch: a successor proposal on the active RecoverableReleaseVerifier is critical, and its code is reviewed."""
+
+    def stub(self, code, proposed):
+        lc = 'cd' * 20
+        self.view = {'proposedVerifier()': '00' * 32, 'verifierProposalLive()': '00' * 32, 'verifier()': '00' * 12 + lc,
+                     'proposedSuccessor()': '00' * 12 + proposed, 'proposalKind()': '00' * 31 + '02',
+                     'activatesAt()': f'{T0:064x}'}
+        self.g.call = lambda url, to, sig, *a, block='latest': [self.view[sig]]
+        self.g.rpc = lambda url, method, params: '0x' + code.hex() if method == 'eth_getCode' else None
+        self.alerts = []
+        real = self.g.problem
+        self.g.problem = lambda pid, detail: (self.alerts.append((pid, detail)), real(pid, detail))
+
+    def test_a_handoff_to_a_proxy_is_two_hard_alerts_and_clears(self):
+        p = 'ef' * 20
+        self.stub(PROXY, p)
+        self.g.watch_switch()
+        self.g.watch_switch()
+        self.assertEqual([a for a, _ in self.alerts], [f'lc-successor-proposed:0x{p}', f'lc-successor-unsafe:0x{p}'])
+        self.assertIn('handoff (no proof stops it)', self.alerts[0][1])
+        self.view['proposedSuccessor()'] = '00' * 32
+        self.g.watch_switch()
+        self.assertEqual(self.g.state['problems'], {})
+
+    def test_control_no_verifier_no_alert(self):
+        self.stub(CLEAN, '00' * 20)
+        self.view['verifier()'] = '00' * 32
+        self.g.watch_switch()
+        self.assertEqual(self.alerts, [])
+
+
 if __name__ == '__main__':
     unittest.main()
