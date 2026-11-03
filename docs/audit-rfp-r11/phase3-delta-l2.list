@@ -1,0 +1,20 @@
+# Phase 3b: bloch-l2-evm December candidate (agent 219), guest-compiled files changed or added since b772f2d
+new src/forced_inclusion.rs
+new src/forced_complete.rs
+new integrations/sp1-execution/guest-fallback/src/bin/settlement_v3_mainnet.rs
+new-build integrations/sp1-execution/guest-fallback/Cargo.toml
+new-build integrations/sp1-execution/guest-fallback/Cargo.lock
+new-build integrations/sp1-execution/guest-fallback/build-container.sh
+changed src/chainspec.rs
+changed src/proof_statement.rs
+changed src/sparse_witness.rs
+changed src/executor.rs
+changed src/node_execution/select.rs
+changed src/transactions.rs
+changed src/lib.rs
+changed integrations/sp1-execution/guest-sparse/src/bin/settlement_v3_mainnet_sparse.rs
+changed integrations/sp1-execution/guest-sparse/src/bin/settlement_v3_mainnet_sparse_eager.rs
+changed integrations/sp1-execution/guest/src/bin/settlement_v3_mainnet.rs
+changed-build integrations/sp1-execution/guest-sparse/build-container.sh
+changed-build integrations/sp1-execution/guest/build-container.sh
+changed-build Cargo.toml

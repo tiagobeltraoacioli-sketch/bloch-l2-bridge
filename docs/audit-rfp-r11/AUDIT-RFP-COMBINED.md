@@ -52,8 +52,8 @@ below and reproduces the manifests (section 11.4).
 | 2 | `bloch-l2-bridge` | **`eb5c981b61cbd6a9668bed8651fbfb839dd00e18`** (`codex/bridge-rc-r10-20261102`) | Bridge V3 release candidate with the 5/5 bps vault fee, `MAX_PENDING` = 2,048 and the T = 0 rule. Replaces the earlier candidates `125227b` and `8d988ce`. **One named post-freeze delta is allowed:** the signer re-pin to the final L2 launch build (constants and text in track A2 only; section 6.2 item 14) |
 | 2 (track C, optional) | `postern-dex` | **`3dae1edd56d018c497a05d23a5468edd803e1ce5`** (`codex/bridge-frontend-r10-20261102`) | Bridge pages of the web frontend: fee wording and net amounts, refusal of L2 recipients with code |
 | 2 (track B) | `bloch-pos` (light-client crates) | **`06faae5c079c9bb91b1d263b444b62342ec93f83`** (`codex/lc-step-fixed-r7-20261102`) | SP1 step and release guests, `bloch-lc-mint-chain`, `bloch-light-client`, `bloch-finality-cert` and the consensus modules they reach |
-| 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **PENDING-P3-L2** (December candidate with forced inclusion, base-fee floor and fallback) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
-| 3 | `bloch-sis-pow` (L1 node) | **PENDING-P3-NATIVE** | Only the forced-inclusion queue and its settlement check (section 5.4) |
+| 3 | `bloch-l2-evm` | **`b772f2d9f570d2293ce95a837d61bae50f9cffa8`** (sparse guest, base of the review) and **`a058b25d10daa88082cc418944df4f57d03b47f0`** (`codex/fork-candidate-l2-r11-20261103`, the December candidate with forced inclusion, the fallback guest, the base-fee floor and the sweep-recipient gate) | The review starts on `b772f2d`; the delta to the December candidate is listed file by file in section 5.3 |
+| 3 | `bloch-sis-pow` (L1 node) | **`5399d34c8d1589fde7f64a27b839f782e675807b`** (`codex/fork-candidate-native-r11-20261103`) | Only the forced-inclusion queue and its settlement check (section 5.4), and optionally the L1 crossing fee (track 3E) |
 
 Build settings:
 
@@ -264,7 +264,27 @@ The fix review must confirm the final hashes from the pinned container at the fi
 
 ### 5.3 Scope and size
 
-PENDING-P3-TABLE
+Counted by `scripts/audit-rfp/manifest.py`. Manifests: `phase3-sparse.manifest.tsv` (at `b772f2d`; identical file
+hashes to the sparse package's `SCOPE-MANIFEST.txt`), `phase3-delta-l2.manifest.tsv` (at `a058b25`) and
+`phase3-forced-native.manifest.tsv` (at `5399d34c`).
+
+| Track | What | Size | Review mode |
+|---|---|---|---|
+| **3A primary** | `src/sparse_witness.rs`, `src/sparse_view.rs`, the three `guest-sparse` entry points, the pinned build (`Cargo.toml`, `Cargo.lock`, `Dockerfile`, `build-container.sh`) at `b772f2d` | **806 nSLOC** Rust (1,302 lines) + build files | All of it |
+| **3A secondary** | 11 core files the sparse path changed or newly relies on (`proof_statement.rs`, `chainspec.rs`, `executor.rs`, `lifecycle.rs`, `node_execution/mod.rs`, `stateroot.rs`, `state.rs`, `serde_bounded.rs`, `head.rs`, `lib.rs`, `Cargo.toml`) | 2,979 nSLOC; about 190 changed lines since the activated program | The diff from `2034701` and the named functions |
+| **3B forced inclusion and fallback, L2** (new since `b772f2d`) | `src/forced_inclusion.rs` (417 lines), `src/forced_complete.rs` (291), the `guest-fallback` crate (entry point 58 lines, `Cargo.toml`, `Cargo.lock`, `build-container.sh`) | **347 nSLOC** new | All of it |
+| **3B changed core** (since `b772f2d`) | `chainspec.rs` +329/-11 (base-fee floor, sweep-recipient gate, `validate`, forced bounds), `node_execution/select.rs` +135, `proof_statement.rs` +97, `sparse_witness.rs` +83, `executor.rs` +38, `transactions.rs` +17, `lib.rs` +8, the three next-rules entry points (release-gate assert) | about 720 changed lines | The diff from `b772f2d` |
+| **3C forced inclusion, L1 queue** | `transition/l2_forced.rs` (307 lines, 218 nSLOC, wire `0x1C`), `pub mod forced` in `l2_settlement.rs` (416 lines, 276 nSLOC), and the hooks in `l2_settlement.rs`, `hard_forks.rs`, `params.rs`, `transition.rs`, `local_cache.rs`, `wire_alloc.rs` | about 1,340 added lines in 7 files (494 nSLOC in the two units) | The two units in full; the hooks as a diff from `27f195d7` |
+| 3A/3B context | 17 core files compiled into the guests, unchanged (`mpt.rs`, `withdrawal.rs`, `proving.rs`, `native_settlement.rs`, ...) | 3,487 nSLOC | Read as needed; a finding there affects the activated guest too |
+| **3E (optional) L1 crossing fee** | `l2_revenue.rs` (182 lines), `transition/l2_deposit.rs` and `l2_claim.rs` (+75 lines), gate and parameters: a deposit pays `clamp(5 bps, 5,000 sat, 1 BLCH)` on top of the amount and a claim releases the leaf less the same fee, to one compiled treasury; the inbox record and outbox leaf are unchanged, so no guest moves. Inert gate `L2_REVENUE_EPOCH`; the coordinator ties it to the program swap | about 330 added lines | Include if it ships in December |
+
+Out of scope: the host export path (`execution-artifact`, `reth-execution` `proof_export.rs`, `bloch-l2-produce-dev`),
+the settler and prover kit, the SP1 host tools, the native node's RPC and CLI (`getl2settlement.forced`,
+`bloch-pos l2-forced`), SP1 itself, and the rest of the L1 node. A bug in any of them can stop settlement; none of them
+can make the guest accept a wrong transition or the L1 accept a statement that skips a due record.
+
+Release rule for the vendor to verify: anything added to the core crate without a `std` guard moves every guest ELF;
+the final tree must reproduce the reviewed ELFs in the pinned container, or the guest-input diff must be reviewed.
 
 ### 5.4 Forced inclusion: the rule in one paragraph
 
@@ -648,7 +668,63 @@ cargo test --release --locked --features serde --test next_consensus_rules --tes
 
 Expected: 3 and 3 passed.
 
-PENDING-P3-CANDIDATE-TESTS
+At the December candidate (`bloch-l2-evm` `a058b25`). The counts below were measured on the component branches that
+the candidate merges (agents 215, 216, 217); agent 219 reruns them on the integrated tip. While the sweep recipient is
+unset, tests that need the next rules run on `ChainSpec::mainnet_next_or_rehearsal()` (a throwaway rehearsal recipient
+that can never be released).
+
+```
+cargo test --release --locked --lib --features sparse-witness
+```
+
+Expected: 185 passed, 0 failed (agent 217: includes the review suites `review_a` 7 and `review_b` 7 and the
+sweep-recipient gate tests).
+
+```
+cargo test --release --locked --lib --features sparse-witness,forced-complete
+```
+
+Expected: 186 passed, 0 failed (agent 216: includes the 9 `forced_complete` tests, among them "complete and sparse
+statements byte-identical").
+
+```
+cargo test --release --locked --features serde,sparse-witness --lib forced
+```
+
+```
+cargo test --release --locked --features serde,sparse-witness --test forced_inclusion
+```
+
+Expected: 13 passed and 4 passed (agent 215), including the record and inbox-hash golden vector shared with the L1.
+
+```
+cargo test --release --locked --lib
+```
+
+Expected: 122 passed (feature off).
+
+L1 side (`bloch-sis-pow` `5399d34c`, Rust 1.98.1 for the test suites, `+1.94.1 check --locked` for the release
+toolchain):
+
+```
+cargo test --release -p bloch-pos-committee --lib
+```
+
+Expected: 775 passed, 0 failed, 11 ignored (agent 216 at `8af435a6`; includes agent 164's 7 review tests and agent
+215's drain-bound, pricing, golden-vector and treasury tests).
+
+```
+cargo test --release -p bloch-pos-committee --lib --features local-state-cache
+```
+
+Expected: 783 passed, 0 failed.
+
+```
+cargo test --release -p bloch-pos-node --bin bloch-pos
+```
+
+Expected: 748 passed, 0 failed, 25 ignored (agent 215 at `a77831e5`). Two ML-KEM mesh tests are known to be flaky in
+full parallel runs and pass alone with `--test-threads 1`.
 
 Reproducible ELF build (Linux x86_64, Docker, about 24 GiB for the container):
 

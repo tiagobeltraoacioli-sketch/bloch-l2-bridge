@@ -17,9 +17,9 @@ directory. Every price below is an **estimate by the development team, not a quo
 | 3 Sparse guest, primary | 806 nSLOC Rust of guest code (+ pinned build files) | `phase3-sparse.manifest.tsv` |
 | 3 Sparse guest, secondary | 2,979 nSLOC in 11 files, about 190 changed lines since the activated program; diff-focused | same |
 | 3 Context | 3,487 nSLOC, read as needed | same |
-| 3 Forced inclusion, L2 | PENDING-P3-FORCED-L2 | `phase3-forced-l2.manifest.tsv` |
-| 3 Forced inclusion, L1 queue | PENDING-P3-FORCED-NATIVE | `phase3-forced-native.manifest.tsv` |
-| 3 Base-fee floor, fallback guest | about 60 changed lines; a fallback guest entry point over the shared core | section 5.3 of the RFP |
+| 3 Forced inclusion and fallback, L2 | 347 nSLOC new + about 720 changed lines (floor, gate, forced paths) | `phase3-delta-l2.manifest.tsv` |
+| 3 Forced inclusion, L1 queue | 494 nSLOC in two units + hooks, about 1,340 added lines | `phase3-forced-native.manifest.tsv` |
+| 3E L1 crossing fee (optional) | about 330 added lines | same |
 
 ## 2. Public reference figures (collected 2026-11-02 by agent 170; not re-verified this round)
 
