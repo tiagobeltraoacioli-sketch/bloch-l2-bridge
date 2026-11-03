@@ -371,7 +371,16 @@ Full text and the tests that assert each one: `AUDIT-SCOPE-BRIDGE-V3.md` section
 | K9: the sweep reverts if the recipient rejects a plain value transfer (fees stay in the vaults, no loss) | Design | Depends on the recipient, which must accept plain value on L2 |
 | K10: block derivation implemented twice (complete and sparse) | Maintainability | A test pins the sparse copy (S8) |
 | **Sweep recipient placeholder** `0x…0fee01` | Release gate | The recipient will be the Bloch Inc Safe's L2 address (`TBD-owner`; never a burn address). It is one constant in the configuration commitment and the 37-byte sweep code, so it moves every ELF hash and key. The release build refuses the placeholder. The review may run on the placeholder; the fix review confirms that the final commit differs only in that constant (and in reviewed fixes) and that the pinned container reproduces the final ELFs on two hosts |
-| Forced inclusion review findings (agent 164) R1-R7 | High to Info | PENDING-P3-R164 |
+| Forced inclusion review (agent 164) R1-R6 | High to Low | Fixed in the code under audit (section 5.4 table); the 7 review tests pass |
+| R1-note: the forced listing is keyed on the configuration (identity 3), not on the program key | Medium (open) | A fallback ELF with the same configuration built from a tree without the forced code would pass the compile-time check. Mitigated by building the fallback from the forced tree (S21); we ask the auditor whether to key the listing on the program identity as well |
+| R7: `MAX_PER_SETTLEMENT` (16) never binds (the 300k gas cap stops at 14 transfers) | Info | Kept as a guard |
+| R7: an envelope whose `maxFeePerGas` is below the L2 base fee is skipped and consumed; a settler that fills earlier blocks can raise the base fee 12.5% per block | Low | Documented for wallets (set a generous `maxFeePerGas`; only the base fee is paid). Not changed |
+| R7: envelopes live only in L1 block bodies; the native DA retention rule does not cover them | Low | A rebuilder after a deep refill or checkpoint sync needs those bodies. Open |
+| R7: the local-cache restore does not cross-check the forced anchor against the source anchor | Info | The state cannot produce a mismatch; a corrupted cache could |
+| Refund outputs have no dust floor (a 1-sat refund is possible) | Info | Open |
+| A registered-key DA batch can evict `0x1C` envelopes from a full mempool (agent 143) | Low | Open; node mempool policy, outside consensus |
+| The ordinary L1 fee of a `0x1C` transaction stays in the L1 fee market (only the surcharge goes to the treasury) | Design | Owner decision (it pays proposers to include forced transactions) |
+| Treasury `FORCED_INCLUSION_TREASURY = None` (`TBD-owner`) | Release gate | Without it the queue is never enabled and the arming rule refuses at compile time; setting it moves the native binary, not the guest |
 
 ## 7. Timeline
 
