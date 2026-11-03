@@ -591,7 +591,51 @@ against `sp1/EXPECTED-ELFS.txt` and `sp1/EXPECTED-ELFS-V3.txt` (step ELF `dc1794
 
 ### 11.3 Phase 3 (`bloch-l2-evm`, `bloch-sis-pow`)
 
-PENDING-P3-TESTS
+Library and integration tests, any OS (`bloch-l2-evm`, Rust 1.94.1 pinned by `rust-toolchain.toml`).
+
+At the sparse guest commit `b772f2d` (the base of the review; agent 115, reproduced by agent 161):
+
+```
+cargo test --release --locked --lib --features sparse-witness
+```
+
+Expected: 165 passed, 0 failed (166 on the package branch `codex/sparse-audit-pack-r10-20261102`, which adds the S8
+sparse-path test).
+
+```
+cargo test --release --locked --lib
+```
+
+Expected: 115 passed (feature off: the gate leaves the other programs alone).
+
+```
+REVIEW_SCALE=40 cargo test --release --locked --lib --features sparse-witness review::
+```
+
+Expected: 24 passed in about 11 to 12 minutes on 6 cores (200 fuzz chains of 250 blocks, about 135,000 transactions,
+33,313 node removals, 160,000 random tries).
+
+```
+cargo test --release --locked --features serde --test next_consensus_rules --test l2_security_timestamp_binding
+```
+
+Expected: 3 and 3 passed.
+
+PENDING-P3-CANDIDATE-TESTS
+
+Reproducible ELF build (Linux x86_64, Docker, about 24 GiB for the container):
+
+```
+integrations/sp1-execution/guest-sparse/build-container.sh /tmp/sparse-elf <commit>
+```
+
+```
+cat /tmp/sparse-elf/SHA256SUMS
+```
+
+The expected hashes per commit are in section 5.2. Execute-only differential on stored settler artifacts:
+`bloch-evm-sp1-sparse-diff WORK_DIR ELF_DIR`. A real Groth16 proof of one block takes about 370 s and 29 GiB on a
+32-thread host; it is optional for the auditor.
 
 ### 11.4 Checking the scope manifests
 
