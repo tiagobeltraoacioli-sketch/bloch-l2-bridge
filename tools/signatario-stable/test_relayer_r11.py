@@ -111,7 +111,7 @@ class StuckRelease(Base):
 
     def test_no_replacement_when_the_ceiling_leaves_no_valid_bump(self):
         v = self.vigia()
-        base, _ = self.setup_round(v, old_price=290 * GWEI, quote=200 * GWEI)
+        base, _ = self.setup_round(v, old_price=290 * GWEI, quote=295 * GWEI)
         with Logs() as logs:
             v.relay_release(base)
         self.assertEqual(self.sent_txs(), [])
@@ -145,7 +145,8 @@ class StuckRelease(Base):
         v = self.vigia()
         base, _ = self.setup_round(v, quote=400 * GWEI)
         with Logs() as logs:
-            v.relay_release(base)
+            with self.assertRaises(RuntimeError):  # `isolated` logs it in the daemon
+                v.relay_release(base)
         self.assertEqual(self.sent_txs(), [])
         self.assertIn('gas-price-ceiling', logs.ids())
 

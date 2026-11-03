@@ -36,6 +36,19 @@ amount (net of the vault fee, as the `Deposited` log states it) and recipient. B
 `drain()` for the queued mints it verified the same way, so a backlog credits in one L2 block instead of 9 per block. A release
 is not sent for one round while another round's release is still in flight.
 
+Relay roles, replacement and scan state (agent 241, F229-9..11). One operator's relayer is `relay_role: "primary"` and
+acts at once; every other operator's is `"backup"` with `relay_backup_index` 1, 2, ... and its own gas keys and nonce record.
+A backup acts on an item only after index x `l2_backup_step_s` (default 1200: one L2 block of up to 14 min plus passes) or x
+`eth_backup_step_s` (default 300: the replacement window, about 25 Ethereum blocks) has passed on its own clock since it first
+saw the item ready; the first sighting is persisted next to its nonce record. The role is required on chain 700770, and
+`relay_other_gas_addresses` (the other relayers' gas addresses) makes a backup refuse a gas key another relayer uses. A release
+of ours still in the Ethereum pool after `eth_replace_after_s` (default 300) and priced below the current quote is replaced at
+its own nonce, by the newest live round with a quorum, at up to `eth_max_gas_price_gwei`; `release-stuck-at-ceiling` is alerted
+when the ceiling leaves no 10% bump. `deposits()` and `burns()` keep a log cursor in `scan_state_dir` (default
+SHARED/.scan): only blocks after it are read; a changed hash at the cursor, a finalized head below it, a changed key or
+`scan_full_every_s` (default 86400) rescans from the start. Items minted or released at the `finalized` level are recorded
+there and not read again; a reorg of that chain clears its record.
+
 Relay nonces. An L2 block lands only every 8-14 min, so `latest` stands still across many passes, and several relayed
 transactions share it. One relayer per gas key keeps its own record of the next nonce, and sends at the highest of `latest`,
 `pending` (where the endpoint has it) and that record. A nonce the chain has not reached for `resend_after_s` is a gap, so the
@@ -196,6 +209,19 @@ class Vigia:
         self.drain_gas = int(self.cfg.get('drain_gas_limit', 2_000_000))
         self.chains_checked = False
         self.relayer_lock = None
+        # F229-9: a stuck Ethereum release is replaced at its own nonce after this long (agent 241).
+        self.replace_after = int(self.cfg.get('eth_replace_after_s', 300))
+        # F229-10: one primary relayer; the other operators' relayers are staggered backups (agent 241).
+        self.role = self.cfg.get('relay_role')
+        self.backup_index = self.cfg.get('relay_backup_index')
+        self.backup_step = {side: int(self.cfg.get(f'{side}_backup_step_s', default))
+                            for side, default in (('l2', 1200), ('eth', 300))}
+        self.backup_seen = set()
+        # F229-11: persisted log cursors and the record of items finished at the finalized level (agent 241).
+        self.scan_dir = Path(self.cfg.get('scan_state_dir', self.shared / '.scan'))
+        self.scan_full_every = int(self.cfg.get('scan_full_every_s', 86400))
+        self.mode = 'sign'
+        self._finished = None
         self.design_checked = False
         if self.cfg.get('l2_pins') and not self.cfg.get('feed'):
             raise SystemExit('a mainnet config needs a `feed` block: shared_dir alone is a local rehearsal mode')
@@ -274,6 +300,8 @@ class Vigia:
         self.check_signer_sets()
         self.open_deps, self.open_burns = [], []
 
+        done = self.finished()
+
         def classify(item, finished, kind, bucket):
             if finished(item):
                 self.feed.retire(kind, item)
@@ -281,14 +309,17 @@ class Vigia:
                 bucket.append(item)
 
         def classify_burn(b):
-            if self.released(b['burn_id']):
+            if self.release_finished(b['burn_id']):
                 self.feed.retire('release', b['burn_id'])
             elif not self.parked(b):  # asked again when it can be paid
                 self.open_burns.append(b['burn_id'])
+        # Items recorded as finished at the finalized level were retired when recorded: no read, no retire (F229-11).
         for dep in deposits:
-            self.isolated('feed', dep, lambda dep=dep: classify(dep, self.minted, 'mint', self.open_deps))
+            if dep not in done['mint']:
+                self.isolated('feed', dep, lambda dep=dep: classify(dep, self.mint_finished, 'mint', self.open_deps))
         for b in burns:
-            self.isolated('feed', b['burn_id'], lambda b=b: classify_burn(b))
+            if b['burn_id'] not in done['release']:
+                self.isolated('feed', b['burn_id'], lambda b=b: classify_burn(b))
         self.feed.sync(self.open_deps, self.open_burns)
 
     def recent(self, path):
@@ -456,21 +487,131 @@ class Vigia:
         except ValueError:
             return rc, {'reason': 'no JSON from signatario.py: ' + err.strip()[-300:]}
 
-    def logs(self, url, address, topics, from_block):
+    # ── persisted scan state (F229-11, agent 241) ─────────────────────────────
+    def scan_file(self, name):
+        me = re.sub(r'[^A-Za-z0-9_.-]', '_', str(self.me))
+        return self.scan_dir / f'{self.mode}-{me}-{name}.json'
+
+    def scan_load(self, name):
+        try:
+            doc = json.loads(self.scan_file(name).read_text())
+            return doc if isinstance(doc, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def scan_save(self, name, doc):
+        path = self.scan_file(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        tmp.write_text(json.dumps(doc))
+        tmp.replace(path)
+
+    def finished(self):
+        """Items finished at the `finalized` level: 'mint' (minted on the L2) and 'release' (released by the vault)."""
+        if self._finished is None:
+            doc = self.scan_load('finished') or {}
+            self._finished = {k: set(v) if isinstance(v, list) else set() for k, v in
+                              ((k, doc.get(k)) for k in ('mint', 'release'))}
+        return self._finished
+
+    def finish(self, kind, item):
+        self.finished()[kind].add(item)
+        self.scan_save('finished', {k: sorted(v) for k, v in self._finished.items()})
+
+    def forget_finished(self, kind, why):
+        if self.finished()[kind]:
+            log(kind='scan-rescan', cleared=kind, count=len(self._finished[kind]), reason=why)
+            self._finished[kind] = set()
+            self.scan_save('finished', {k: sorted(v) for k, v in self._finished.items()})
+
+    def call_at(self, url, to, sig, tag, *args):
+        data = self.cast_out('calldata', sig, *[str(a) for a in args])
+        return self.rpc(url, 'eth_call', [{'to': to, 'data': data}, tag])
+
+    def final_flag(self, url, to, sig, *args):
+        """The flag at the `finalized` level; any failure is False (the item is simply read again next pass)."""
+        try:
+            return int(self.call_at(url, to, sig, 'finalized', *args), 16) != 0
+        except Exception:  # noqa: BLE001 - a missed record costs a read, never a decision
+            return False
+
+    def mint_finished(self, dep):
+        """Minted on the L2 (the decision is `minted()` at latest, as before); recorded once final, then never read again."""
+        if dep in self.finished()['mint']:
+            return True
+        if not self.minted(dep):
+            return False
+        if self.final_flag(self.cfg['l2_rpc'], self.token, 'minted(bytes32)', dep):
+            self.finish('mint', dep)
+        return True
+
+    def release_finished(self, burn_id):
+        if burn_id in self.finished()['release']:
+            return True
+        if not self.released(burn_id):
+            return False
+        if self.final_flag(self.cfg['eth_rpc'], self.vault, 'releasedBurn(bytes32)', burn_id):
+            self.finish('release', burn_id)
+        return True
+
+    @staticmethod
+    def slim(entry):
+        return {k: entry[k] for k in ('topics', 'data', 'transactionHash', 'blockNumber', 'blockHash', 'logIndex') if k in entry}
+
+    def logs(self, url, address, topics, from_block, name=None, chain=None):
+        """Logs up to the `finalized` head. With `name`, a persisted cursor (F229-11): the range already scanned, the hash of
+        its last block and the logs found. A pass reads only the blocks after the cursor. The whole range is read again when
+        the block at the cursor has another hash (a reorg, a reset L2, a resynced or different node), when the finalized head
+        is below the cursor, when the address, topics or start block changed, when the cursor is unreadable, and every
+        `scan_full_every_s` (default 1 day). A rescan for a changed hash also clears this chain's finished-item record."""
         final = self.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
         if final is None or int(from_block) > int(final['number'], 16):
             return []  # contract newer than the finalized head: nothing final yet (and an inverted range errors)
-        found, end = [], int(final['number'], 16)
-        for lo in range(int(from_block), end + 1, self.log_chunk):  # nodes cap the block range of one query
+        end, end_hash = int(final['number'], 16), final['hash'].lower()
+        key = [address.lower(), [t.lower() if isinstance(t, str) else t for t in topics], int(from_block)]
+        start, kept, now = int(from_block), [], time.time()
+        cur = self.scan_load(name) if name else None
+        full_t = now
+        if cur and cur.get('key') == key:
+            try:
+                to, to_hash, full_t = int(cur['to']), str(cur['hash']).lower(), float(cur['full_t'])
+                old = [self.slim(e) for e in cur['logs']]
+            except (KeyError, TypeError, ValueError, AttributeError):
+                to, old = None, None
+            if to is None:
+                full_t = now
+            elif now - full_t >= self.scan_full_every:
+                full_t = now
+                log(kind='scan-rescan', scan=name, reason='periodic full rescan')
+            elif end < to:
+                full_t = now
+                log(kind='scan-rescan', scan=name, cursor=to, finalized=end, reason='the finalized head is below the cursor')
+                if chain:
+                    self.forget_finished(chain, f'{name}: finalized head below the cursor')
+            else:
+                block = final if end == to else self.rpc(url, 'eth_getBlockByNumber', [hex(to), False])
+                if block is not None and str(block.get('hash', '')).lower() == to_hash:
+                    start, kept = to + 1, old
+                else:
+                    full_t = now
+                    log(kind='scan-rescan', scan=name, cursor=to, reason='the block at the cursor has another hash')
+                    if chain:
+                        self.forget_finished(chain, f'{name}: the block at the cursor changed')
+        found = []
+        for lo in range(start, end + 1, self.log_chunk):  # nodes cap the block range of one query
             found += self.rpc(url, 'eth_getLogs', [{'address': address, 'topics': topics, 'fromBlock': hex(lo),
                                                     'toBlock': hex(min(lo + self.log_chunk - 1, end))}])
+        found = kept + [self.slim(e) for e in found]
+        if name:
+            self.scan_save(name, {'key': key, 'to': end, 'hash': end_hash, 'full_t': full_t, 'logs': found})
         return found
 
     def deposits(self):
         """Deposited logs of the vault route up to the Ethereum `finalized` head (discovery only). Their fields are kept for
         the pass: (amount, L2 recipient) by deposit id."""
         topic = self.cast_out('keccak', DEPOSITED).lower()
-        logs = self.logs(self.cfg['eth_rpc'], self.vault, [topic, None, self.route], self.cfg.get('vault_from_block', 0))
+        logs = self.logs(self.cfg['eth_rpc'], self.vault, [topic, None, self.route], self.cfg.get('vault_from_block', 0),
+                         name='deposits', chain='release')
         self.deposit_fields = {l['topics'][1].lower(): (int(l['data'][2 + 128:2 + 192], 16), '0x' + l['data'][-40:].lower())
                                for l in logs}
         self.deposits_read = True
@@ -481,7 +622,8 @@ class Vigia:
         topic = self.cast_out('keccak', self.burned_sig).lower()
         self.log_status_age()
         try:
-            logs = self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0))
+            logs = self.logs(self.cfg['l2_rpc'], self.token, [topic], self.cfg.get('token_from_block', 0),
+                             name='burns', chain='mint')
         except LevelClosed as e:
             # Unavailable, not "no burns": the last list stays open, so mints and relaying of held certificates carry on.
             # New burns wait, and signing them is refused anyway. After a restart here the list starts empty, and what
@@ -595,7 +737,9 @@ class Vigia:
     def burn_done(self, d, burn_id):
         """The vault decides. A `done` file is only a record of it, and is removed when the vault disagrees."""
         marker = d / 'done'
-        if self.released(burn_id):
+        if burn_id in self.finished()['release']:  # released at the finalized level (F229-11)
+            return 'known'
+        if self.release_finished(burn_id):
             new = not marker.exists()
             if new:
                 d.mkdir(parents=True, exist_ok=True)
@@ -641,7 +785,7 @@ class Vigia:
 
     def sign_mint(self, dep):
         out = self.shared / 'mint' / dep[2:] / f'{self.me}.json'
-        if self.minted(dep) or (out.exists() and self.mint_partial(out, dep) is not None):
+        if self.mint_finished(dep) or (out.exists() and self.mint_partial(out, dep) is not None):
             return
         out.parent.mkdir(parents=True, exist_ok=True)
         rc, res = self.signatario('mint', '--deposit-id', dep, '--out', out)
@@ -712,10 +856,13 @@ class Vigia:
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_round(self):
         self.new_pass()
+        self.mode = 'relay'
         if self.mainnet and not self.cfg.get('l2_tx_rpc'):
             raise SystemExit('chain 700770 needs `l2_tx_rpc` to relay: a read-only l2_rpc refuses transactions')
+        self.check_relay_role()
         self.claim_relayer()
         self.check_chain_ids()
+        self.backup_seen = set()
         self.check_design()
         if self.feed:
             self.sync(self.deposits(), self.burns())
@@ -730,6 +877,74 @@ class Vigia:
         rel_dir = self.shared / 'release'
         for d in sorted(rel_dir.glob('*')) if rel_dir.exists() else []:
             self.isolated('relay-release', d.name, lambda d=d: self.relay_release(d))
+        self.prune_backup_clock()
+
+    # ── primary and backups (F229-10, agent 241) ─────────────────────────────
+    def check_relay_role(self):
+        """One primary relayer; every other operator runs a backup with its own gas keys and its own nonce record, staggered by
+        `relay_backup_index`. On chain 700770 the role must be set. A backup refuses to start on a gas key named in
+        `relay_other_gas_addresses` (the primary's and the other backups' gas addresses): one key on two hosts would sign the
+        same nonces, and the per-host lock (F229-7) cannot see the other host."""
+        if self.role is None and not self.mainnet:
+            self.role = 'primary'  # rehearsals: a single relayer
+        if self.role not in ('primary', 'backup'):
+            raise SystemExit(f'relay_role must be "primary" or "backup" (got {self.role!r}): one primary relayer, the other '
+                             'operators are staggered backups (F229-10)')
+        if self.role == 'backup':
+            try:
+                self.backup_index = int(self.backup_index)
+            except (TypeError, ValueError):
+                raise SystemExit('a backup relayer needs relay_backup_index (1, 2, ...): its stagger') from None
+            if self.backup_index < 1:
+                raise SystemExit('relay_backup_index starts at 1')
+        others = {str(a).lower() for a in self.cfg.get('relay_other_gas_addresses', []) or []}
+        if others:
+            for side in ('l2', 'eth'):
+                own = self.cast_out('wallet', 'address', *self.relayer_wallet(side)).lower()
+                if own in others:
+                    raise SystemExit(f'the {side} gas key {own} is listed in relay_other_gas_addresses: every relayer needs '
+                                     'its own gas key and nonce record')
+
+    def backup_clock_path(self):
+        return self.nonce_path.with_name(self.nonce_path.name + '.backup.json')
+
+    def backup_clock(self):
+        try:
+            doc = json.loads(self.backup_clock_path().read_text())
+            return {str(k): float(v) for k, v in doc.items()} if isinstance(doc, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def backup_due(self, side, key):
+        """The primary acts at once. A backup acts on an item only after `relay_backup_index` x the side's step
+        (`l2_backup_step_s` 1200, `eth_backup_step_s` 300) has passed on its own clock since it first saw the item ready to
+        relay; the first sighting is persisted, so a restart does not shorten the wait."""
+        if self.role != 'backup':
+            return True
+        self.backup_seen.add(key)
+        clock, now = self.backup_clock(), time.time()
+        first = clock.get(key)
+        if first is None or first > now:
+            clock[key] = first = now
+            self.backup_clock_path().parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.backup_clock_path().with_name(self.backup_clock_path().name + '.tmp')
+            tmp.write_text(json.dumps(clock))
+            tmp.replace(self.backup_clock_path())
+        wait = self.backup_index * self.backup_step[side]
+        if now - first < wait:
+            log(kind='relay-backup', item=key, waiting_s=int(wait - (now - first)), index=self.backup_index)
+            return False
+        log(kind='relay-backup', item=key, acting=True, waited_s=int(now - first), index=self.backup_index)
+        return True
+
+    def prune_backup_clock(self):
+        """Items not ready this pass (relayed, finished, or no longer relayable) leave the clock."""
+        if self.role != 'backup' or not self.backup_clock_path().exists():
+            return
+        clock = {k: v for k, v in self.backup_clock().items() if k in self.backup_seen}
+        tmp = self.backup_clock_path().with_name(self.backup_clock_path().name + '.tmp')
+        tmp.write_text(json.dumps(clock))
+        tmp.replace(self.backup_clock_path())
 
     def claim_relayer(self):
         """One relayer per nonce record: two processes on one `relayer_state` would read the same record and sign the same
@@ -842,6 +1057,8 @@ class Vigia:
         if rc:
             log(kind='relay-mint', deposit=dep, error=comb.get('reason'))
             return
+        if not self.backup_due('l2', f'mint:{dep}'):
+            return
         tx = self.send('l2', self.token, comb['call'])
         (d / 'sent').write_text(tx + '\n')
         log(kind='relay-mint', deposit=dep, tx=tx)
@@ -905,6 +1122,10 @@ class Vigia:
                 if sigs is None:
                     chained += 1
                     continue
+            if not self.backup_due('l2', f'mint:{dep}'):
+                if nonce >= next_slot:
+                    break  # the run waits with its first slot
+                continue
             ok = self.isolated('relay-mint', dep, lambda d=d, dep=dep, sigs=sigs, nonce=nonce, g=chained > 0:
                                self.send_mint(d, dep, sigs, nonce, g))
             if ok and room is not None:
@@ -951,6 +1172,8 @@ class Vigia:
         if now < ready or self.flag(url, self.token, 'paused()') or not self.flag(url, self.token, 'isCreditHead(bytes32)', dep):
             log(kind='relay-head', deposit=dep, slot=head, waiting_until=ready)
             return
+        if not self.backup_due('l2', f'exec:{dep}'):
+            return
         tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
         self.shared.mkdir(parents=True, exist_ok=True)
         sent.write_text(tx + '\n')
@@ -978,9 +1201,21 @@ class Vigia:
             return
         # One release in flight per burn (agent 229): a newer round reaching quorum while an older round's transaction is
         # pending would be a second transaction for one payment, and on Ethereum it queues behind the first and reverts.
-        for _, rnd in self.rounds(d, 0):
+        # Every round with a `sent` file counts, an expired one too: its transaction still holds its nonce (agent 241).
+        for rnd in sorted(d.glob('r-*'), reverse=True):
             if (rnd / 'sent').exists() and not self.failed(self.cfg['eth_rpc'], rnd / 'sent'):
+                self.replace_stuck_release(d, burn_id, rnd)
                 return
+        live = self.quorum_release(d, burn_id)
+        if live is None or not self.backup_due('eth', f'release:{burn_id}'):
+            return
+        rnd, call = live
+        tx = self.send('eth', self.vault, call)
+        (rnd / 'sent').write_text(tx + '\n')
+        log(kind='relay-release', burn=burn_id, round=rnd.name, tx=tx)
+
+    def quorum_release(self, d, burn_id):
+        """(round, combined call) of the newest live round with `vault_threshold` real certificates, or None."""
         for _, rnd in self.rounds(d, 60):  # enough time left for the transaction to land
             certs = self.agreeing(sorted(rnd.glob('*.json')), lambda f, r=rnd: self.release_partial(f, burn_id, r), self.vk)
             if len(certs) < self.vk:
@@ -989,10 +1224,48 @@ class Vigia:
             if rc:
                 log(kind='relay-release', burn=burn_id, round=rnd.name, error=comb.get('reason'))
                 continue
-            tx = self.send('eth', self.vault, comb['call'])
-            (rnd / 'sent').write_text(tx + '\n')
-            log(kind='relay-release', burn=burn_id, round=rnd.name, tx=tx)
-            break
+            return rnd, comb['call']
+        return None
+
+    def replace_stuck_release(self, d, burn_id, rnd):
+        """F229-9 (agent 241). A release of ours still in the Ethereum pool after `eth_replace_after_s` (default 300 s), priced
+        below the node's current quote, is replaced at the SAME nonce: by the newest live round with a quorum (its own round if
+        still live, else a newer one, since the stuck one would only revert after its validUntil). The price is 2x the quote,
+        at least 1.25x the stuck one, never above `eth_max_gas_price_gwei`; when the ceiling leaves less than the 10% bump a
+        node needs, nothing is sent and `release-stuck-at-ceiling` is alerted. Only one transaction can land per nonce, and the
+        vault refuses a second payment anyway."""
+        sent, url = rnd / 'sent', self.cfg['eth_rpc']
+        try:
+            age = time.time() - sent.stat().st_mtime
+        except OSError:
+            return
+        if age < self.replace_after:
+            return
+        old_tx = sent.read_text().strip()
+        tx = self.rpc(url, 'eth_getTransactionByHash', [old_tx])
+        if not tx or tx.get('blockNumber'):
+            return  # unknown (failed() handles a lost one) or mined (its receipt decides)
+        frm = self.cast_out('wallet', 'address', *self.relayer_wallet('eth')).lower()
+        if str(tx.get('from', '')).lower() != frm:
+            log(kind='relay-replace', burn=burn_id, tx=old_tx, skipped=True, reason='not sent by this relayer\'s gas key')
+            return
+        nonce, old_price = int(tx['nonce'], 16), int(tx['gasPrice'], 16)
+        quoted = int(self.rpc(url, 'eth_gasPrice', []), 16)
+        if old_price >= quoted:
+            return  # priced at the market: waiting, not stuck
+        live = self.quorum_release(d, burn_id)
+        if live is None:
+            log(kind='relay-replace', burn=burn_id, tx=old_tx, waiting=True, reason='no live round with a quorum to replace it with')
+            return
+        new_rnd, call = live
+        new_tx = self.send('eth', self.vault, call, replace=(nonce, old_price))
+        if new_tx is None:
+            return
+        (new_rnd / 'sent').write_text(new_tx + '\n')
+        if new_rnd != rnd:
+            sent.unlink(missing_ok=True)
+        log(kind='relay-replace', burn=burn_id, nonce=nonce, replaced=old_tx, tx=new_tx, round=new_rnd.name,
+            old_price=old_price, quoted=quoted, age_s=int(age))
 
     def execute_if_queued(self, d, dep):
         """v1.1 large mints wait `largeMintDelay` in a queue; anyone executes them afterwards."""
@@ -1032,6 +1305,8 @@ class Vigia:
                 log(kind='relay-execute', deposit=dep, slot=slot, waiting_for_slot=head,
                     reason='an earlier slot has not credited' if holder or self.flag(url, self.token, 'contested(uint64)', head)
                     else 'the head slot is empty: a cancelled mint waits for its remint')
+            return
+        if not self.backup_due('l2', f'exec:{dep}'):
             return
         tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
         (d / 'execute-sent').write_text(tx + '\n')
@@ -1143,18 +1418,44 @@ class Vigia:
                              f'use {side}_relayer_keystore and {side}_relayer_password_file')
         return ['--private-key', Path(private_file(raw, 'relayer key')).read_text().strip()]
 
-    def send(self, side, to, call, gas=None):
+    def replacement_record(self, url, frm, rec, nonce):
+        """The nonce record for a same-nonce replacement (F229-9): the nonce must still be unconfirmed, and `next` never moves
+        back."""
+        latest = self.tx_count(url, frm, 'latest')
+        if nonce < latest:
+            raise RuntimeError(f'nonce {nonce} is already confirmed (latest {latest}): nothing to replace')
+        try:
+            prices = {int(n): int(p) for n, p in dict(rec.get('prices', {})).items() if int(n) >= latest}
+            nxt = max(int(rec.get('next', nonce + 1)), nonce + 1)
+            moved = float(rec.get('moved', time.time()))
+        except (TypeError, ValueError, AttributeError):
+            prices, nxt, moved = {}, nonce + 1, time.time()
+        return {'next': nxt, 'latest': latest, 'moved': moved, 'prices': prices}
+
+    def send(self, side, to, call, gas=None, replace=None):
+        """Sign and send. `replace=(nonce, price)` replaces our own pending transaction at that nonce (F229-9); it returns None
+        when the gas ceiling leaves no valid bump."""
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         wallet = self.relayer_wallet(side)
         frm = self.cast_out('wallet', 'address', *wallet)
         records = self.load_nonces()
         slot = f'{side}:{frm.lower()}'
-        nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
+        if replace is not None:
+            nonce, stuck_price = int(replace[0]), int(replace[1])
+            rec = self.replacement_record(url, frm, records.get(slot) or {}, nonce)
+            rec['prices'][nonce] = max(rec['prices'].get(nonce, 0), stuck_price)
+        else:
+            nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
         quoted, cap = int(self.rpc(url, 'eth_gasPrice', []), 16), self.max_price[side]
         price = min(quoted * 2, cap)
         if nonce in rec['prices']:  # replacing a transaction that never landed
             price = max(price, rec['prices'][nonce] * 125 // 100)
+        if replace is not None and quoted <= cap and min(price, cap) * 100 < rec['prices'][nonce] * 110:
+            log(kind='alert', severity='critical', id='release-stuck-at-ceiling', side=side, nonce=nonce, quoted=quoted,
+                stuck_price=rec['prices'][nonce], ceiling=cap,
+                reason='a 10% replacement bump would exceed the gas ceiling: the release waits in the pool')
+            return None
         if quoted > cap:  # a lying RPC or a fee spike: never pay above the ceiling (agent 229)
             log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price, ceiling=cap,
                 nonce=nonce)

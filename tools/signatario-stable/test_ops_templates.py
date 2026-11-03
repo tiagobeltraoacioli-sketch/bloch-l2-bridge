@@ -44,6 +44,14 @@ for name in ('signer.template.json', 'relayer.template.json'):
     except l2_finality.NotFinal as e:
         check(f'control, {name} without l2_pins: refused on chain 700770', 'needs l2_pins' in e.reason, e.reason)
 
+# F229-10 (agent 241): one primary relayer and staggered backups; the role is an owner input and the relayer refuses without it.
+r = json.loads((ops / 'relayer.template.json').read_text())
+check('relayer.template.json: relay_role is an owner input (refused until set)', str(r.get('relay_role', '')).startswith('TBD-owner'),
+      r.get('relay_role'))
+check('relayer.template.json: gas ceilings 50 / 300 gwei (config defaults)',
+      (r.get('l2_max_gas_price_gwei'), r.get('eth_max_gas_price_gwei')) == (50, 300))
+check('relayer.template.json: same-nonce release replacement after 300 s', r.get('eth_replace_after_s') == 300)
+
 # Owner decision 2026-11-02 (agent 175, agent 194): guardians pause the vault on an evidenced forged mint; signers' Ethereum
 # halves do not hold releases (redundant with the V3 pair, and it would also hold honest releases).
 g = json.loads((ops / 'guardiao.template.json').read_text())

@@ -1,4 +1,4 @@
-# bUSDC V3 relayer (vigia.py relay): holds only the L2 and Ethereum gas keys, no bridge authority. Any number may run.
+# bUSDC V3 relayer (vigia.py relay): holds only the L2 and Ethereum gas keys, no bridge authority. One primary per bridge; the other operators run staggered backups (relay_role, F229-10).
 # Keys: encrypted keystores (mode 0600, owned by bloch-relayer) under /etc/bloch-busdc-relayer; their passwords are
 # passed as systemd credentials, never on a command line. Create them as in docs/BRIDGE-V3-KEY-CEREMONY.md 3.5.
 [Unit]
