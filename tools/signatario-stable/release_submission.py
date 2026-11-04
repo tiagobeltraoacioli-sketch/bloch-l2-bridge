@@ -287,6 +287,13 @@ class ReleaseJournal:
                 identity = ('transactionHash', 'from', 'to', 'blockNumber', 'blockHash', 'status')
                 if type(confirmed) is not dict or any(confirmed.get(key) != receipt[key] for key in identity):
                     return 'unknown'
+                final_again = self.rpc('eth_getBlockByNumber', ['finalized', False])
+                require(type(final_again) is dict and WORD.fullmatch(final_again.get('hash', '').lower()),
+                        'finalized block identity is missing')
+                final_again_number = quantity(final_again.get('number'))
+                if (final_again_number < final_number or (final_again_number == final_number
+                        and final_again['hash'].lower() != finalized['hash'].lower())):
+                    return 'unknown'
                 anchors = {number: block_hash, final_number: finalized['hash'].lower()}
                 for height, expected in anchors.items():
                     current = self.rpc('eth_getBlockByNumber', [hex(height), False])

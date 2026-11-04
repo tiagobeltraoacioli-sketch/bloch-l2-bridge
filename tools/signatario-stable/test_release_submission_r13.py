@@ -472,6 +472,10 @@ class ReleaseSubmission(Base):
             if key == item[0]['hash']:
                 return None if changed == 'receipt' and calls[key] > 1 else dict(receipt)
             if key == 'finalized':
+                if calls[key] > 1 and changed == 'finalized-regression':
+                    return {'number': '0xa', 'hash': receipt['blockHash']}
+                if calls[key] > 1 and changed == 'finalized-tag-hash':
+                    return {'number': '0xb', 'hash': '0x' + 'e3' * 32}
                 return dict(finalized)
             if key == '0xa':
                 return {'number': key, 'hash': '0x' + 'cc' * 32 if changed == 'receipt-block' and calls[key] > 1
@@ -496,6 +500,12 @@ class ReleaseSubmission(Base):
 
     def test_finalized_anchor_replaced_during_checks_does_not_free_an_attempt(self):
         self.reorg_during_finality('finalized-block')
+
+    def test_finality_regression_does_not_free_a_still_canonical_attempt(self):
+        self.reorg_during_finality('finalized-regression')
+
+    def test_changed_finalized_tag_does_not_free_an_attempt(self):
+        self.reorg_during_finality('finalized-tag-hash')
 
 
 if __name__ == '__main__':
