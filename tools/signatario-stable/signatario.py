@@ -245,7 +245,25 @@ class Ctx:
                     out = json.loads(r.read())
             except OSError as e:
                 refuse('L2 RPC eth_call unreachable', url=url, error=str(e))
-            self._version = '2' if 'result' in out and len(out['result']) == 66 else '1'
+            except ValueError:
+                refuse('L2 RPC token-version query returned invalid JSON')
+            if type(out) is not dict or ('result' in out) == ('error' in out):
+                refuse('L2 RPC token-version query returned an invalid response')
+            if 'result' in out:
+                value = out['result']
+                if not isinstance(value, str) or not re.fullmatch(r'0x[0-9a-fA-F]{64}', value):
+                    refuse('L2 RPC token-version query returned an invalid ABI word')
+                self._version = '2'
+            else:
+                error = out['error']
+                # V1 lacks this view. Only its explicit EVM revert identifies
+                # that legacy ABI; a node error must not skip the verifier gate.
+                if (type(error) is not dict or type(error.get('code')) is not int
+                        or error['code'] not in (3, -32000, -32015)
+                        or not isinstance(error.get('message'), str)
+                        or not re.match(r'^execution reverted(?:$|[:\s])', error['message'], re.IGNORECASE)):
+                    refuse('L2 RPC token-version query failed', error=error)
+                self._version = '1'
         return self._version
 
     def cap_check(self, url, amount):
