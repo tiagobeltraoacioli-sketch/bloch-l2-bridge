@@ -97,3 +97,13 @@ with `l2_pins`, and `l2_tx_rpc`, required to relay on chain 700770: L2 sends go 
 `sigfeed.py`, `bridge_feed.py`; adversarial tests in `test_sigfeed.py` (`python3 -m unittest test_sigfeed`),
 loopback rehearsal in `rehearse_feed.py <foundry project>`. Release certificates are grouped in rounds sharing one Ethereum anchor (`--context`). Test:
 `python3 test_vigia.py <foundry project>` (two anvils, `BridgedStablecoinV2`, 26 checks).
+
+The discovery cursors under `scan_state_dir` (default `shared_dir/.scan`) retain
+finalized log ranges between passes. A periodic full scan still checks the old
+cursor's block hash. A missing or malformed cursor, changed scan configuration,
+reorganized cursor block, or finalized head below the scanned range discards the
+affected chain's finished-item cache. The signer then reads those items again.
+A scan also rechecks its finalized end block after fetching logs; if that block
+changed or lost finality, it refuses the pass without publishing a mixed cursor.
+Run the offline recovery regressions from this directory with
+`python3 -m unittest test_scan_recovery_r13 test_relayer_r11 test_relayer_review`.

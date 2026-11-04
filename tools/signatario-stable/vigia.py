@@ -97,6 +97,7 @@ reverts or breaks never stops the others. Development tool; UNAUDITED.
 """
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -573,44 +574,63 @@ class Vigia:
         its last block and the logs found. A pass reads only the blocks after the cursor. The whole range is read again when
         the block at the cursor has another hash (a reorg, a reset L2, a resynced or different node), when the finalized head
         is below the cursor, when the address, topics or start block changed, when the cursor is unreadable, and every
-        `scan_full_every_s` (default 1 day). A rescan for a changed hash also clears this chain's finished-item record."""
+        `scan_full_every_s` (default 1 day). Lost continuity clears this chain's finished-item record, even when a periodic
+        rescan is due. The end block is checked again before publishing the scan, so a mid-scan reorg cannot mix branches."""
         final = self.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
         if final is None or int(from_block) > int(final['number'], 16):
+            if chain:
+                self.forget_finished(chain, f'{name}: finalized range is unavailable')
             return []  # contract newer than the finalized head: nothing final yet (and an inverted range errors)
         end, end_hash = int(final['number'], 16), final['hash'].lower()
         key = [address.lower(), [t.lower() if isinstance(t, str) else t for t in topics], int(from_block)]
         start, kept, now = int(from_block), [], time.time()
         cur = self.scan_load(name) if name else None
         full_t = now
+        invalidated = 'missing or changed scan context'
         if cur and cur.get('key') == key:
             try:
                 to, to_hash, full_t = int(cur['to']), str(cur['hash']).lower(), float(cur['full_t'])
                 old = [self.slim(e) for e in cur['logs']]
+                if (type(cur['to']) is not int or to < int(from_block) or not WORD.fullmatch(to_hash)
+                        or not math.isfinite(full_t) or not 0 <= full_t <= now or not isinstance(cur['logs'], list)):
+                    raise ValueError('invalid persisted scan cursor')
             except (KeyError, TypeError, ValueError, AttributeError):
                 to, old = None, None
             if to is None:
                 full_t = now
-            elif now - full_t >= self.scan_full_every:
-                full_t = now
-                log(kind='scan-rescan', scan=name, reason='periodic full rescan')
+                invalidated = 'invalid scan cursor'
             elif end < to:
                 full_t = now
                 log(kind='scan-rescan', scan=name, cursor=to, finalized=end, reason='the finalized head is below the cursor')
-                if chain:
-                    self.forget_finished(chain, f'{name}: finalized head below the cursor')
+                invalidated = 'finalized head below the cursor'
             else:
                 block = final if end == to else self.rpc(url, 'eth_getBlockByNumber', [hex(to), False])
                 if block is not None and str(block.get('hash', '')).lower() == to_hash:
-                    start, kept = to + 1, old
+                    invalidated = None
+                    if now - full_t >= self.scan_full_every:
+                        full_t = now
+                        log(kind='scan-rescan', scan=name, reason='periodic full rescan')
+                    else:
+                        start, kept = to + 1, old
                 else:
                     full_t = now
                     log(kind='scan-rescan', scan=name, cursor=to, reason='the block at the cursor has another hash')
-                    if chain:
-                        self.forget_finished(chain, f'{name}: the block at the cursor changed')
+                    invalidated = 'the block at the cursor changed'
+        if invalidated and chain:
+            self.forget_finished(chain, f'{name}: {invalidated}')
         found = []
         for lo in range(start, end + 1, self.log_chunk):  # nodes cap the block range of one query
             found += self.rpc(url, 'eth_getLogs', [{'address': address, 'topics': topics, 'fromBlock': hex(lo),
                                                     'toBlock': hex(min(lo + self.log_chunk - 1, end))}])
+        if start <= end:
+            after = self.rpc(url, 'eth_getBlockByNumber', ['finalized', False])
+            canonical = (after if after is not None and int(after['number'], 16) == end
+                         else self.rpc(url, 'eth_getBlockByNumber', [hex(end), False]))
+            if (after is None or int(after['number'], 16) < end or canonical is None
+                    or str(canonical.get('hash', '')).lower() != end_hash):
+                if chain:
+                    self.forget_finished(chain, f'{name}: finalized chain changed during log scan')
+                raise RuntimeError('finalized chain changed during log scan; retry on the next pass')
         found = kept + [self.slim(e) for e in found]
         if name:
             self.scan_save(name, {'key': key, 'to': end, 'hash': end_hash, 'full_t': full_t, 'logs': found})
