@@ -179,6 +179,10 @@ on chain 700770 until `relay_role` is set. A release of ours that is still in th
 (300 s) and priced below the current quote is replaced at the same nonce, never above `eth_max_gas_price_gwei` (300; L2
 50); at the ceiling the `release-stuck-at-ceiling` alert fires. Signers and relayers keep their log cursors in
 `scan_state_dir` (default `<shared_dir>/.scan`, must be writable by the service user).
+These files are diagnostic snapshots, not attestations from a peer. Each daemon
+rebuilds discovery and completed-item assertions after restart, then reuses only
+its own checked observations while their canonical checkpoint remains valid.
+Shared `executed` markers cannot suppress mint or queue recovery after rollback.
 
 Expected: `"reason": "the burn transaction is not in this L2"`. Then the daemons (`vigia.py sign`,
 `vigia.py relay`, `guardiao.py watch`, `sombra.py watch`, `reservas.py watch`) under the operators' own

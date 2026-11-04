@@ -17,6 +17,8 @@ recipient (agent 200).
 v3relay: agent 229's relayer review on the v3fee pair: A229_DEPOSITS (default 20) due mints all credit in the one L2 block after
 one relay pass (the relayer sends `drain()` behind the head it verified), and with the queue at MAX_PENDING (pendingCount set
 with anvil_setStorageAt) the relayer sends no mint at all and alerts, then relays as soon as there is room.
+v3mintreorg: execution-only and whole-mint snapshot rollbacks leave shared completion files behind; the relayer must
+recover the queue/mint, credit exactly once and preserve the fee-adjusted backing after missing-transaction expiry.
 """
 import json
 import os
@@ -43,12 +45,12 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay'))
-if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay'):
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg'):
     LARGE = 0  # the launch default T = 0
 # v3fee (agent 200): the same launch scenario with the decided protocol fee in the vault, 5 bps on deposit and 5 bps on
 # release to a throwaway recipient; every amount below is the exact net amount, and the fee is never backing.
-FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] in ('v3fee', 'v3relay') else 0
+FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] in ('v3fee', 'v3relay', 'v3mintreorg') else 0
 FEE_SINK = '0x' + 'fe' * 20
 
 
@@ -553,9 +555,63 @@ def s_v3relay(net):
           view('nextSlot()(uint64)'))
 
 
+def s_v3mintreorg(net):
+    """Reopen a completed V3 mint after execution-only and whole-mint rollbacks."""
+    amount = 20 * U
+    expected = net_of(amount)
+    # Keep the production recovery path, but expire missing test transactions
+    # immediately so this isolated regression does not sleep for thirty minutes.
+    for path in net.cfgs:
+        config = json.loads(path.read_text())
+        config['resend_after_s'] = 0
+        path.write_text(json.dumps(config))
+    net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(amount), '0x' + '00' * 12 + net.alice[2:])
+    net.mine(net.eth)
+    for i in (0, 1):
+        net.vigia(i, 'sign')
+    before_mint = out(CAST, 'rpc', 'evm_snapshot', '--rpc-url', net.l2).strip('"')
+    net.vigia(2, 'relay')
+    net.warp(net.l2, DELAY + 1)
+    before_execute = out(CAST, 'rpc', 'evm_snapshot', '--rpc-url', net.l2).strip('"')
+    net.vigia(2, 'relay')
+    net.mine(net.l2)
+    net.vigia(2, 'relay')
+    directory = next((net.work / 'shared' / 'mint').glob('*'))
+    view = lambda signature, *args: int(net.view(net.l2, net.token, signature, *args))
+    check('mint rollback: setup credited the finalized mint', view('balanceOf(address)(uint256)', net.alice) == expected)
+    check('mint rollback: a shared execution marker exists', (directory / 'executed').is_file())
+
+    sh(CAST, 'rpc', 'evm_revert', before_execute, '--rpc-url', net.l2)
+    check('execution rollback: credit disappeared but the mint is queued',
+          view('balanceOf(address)(uint256)', net.alice) == 0 and view('pendingSupply()(uint256)') == expected)
+    lines = net.vigia(2, 'relay')
+    check('execution rollback: relay re-executes despite the old marker',
+          view('balanceOf(address)(uint256)', net.alice) == expected
+          and any(line.get('kind') in ('relay-execute', 'relay-head') and line.get('tx') for line in lines), lines)
+    net.mine(net.l2)
+    net.vigia(2, 'relay')
+
+    sh(CAST, 'rpc', 'evm_revert', before_mint, '--rpc-url', net.l2)
+    check('mint rollback: the entire mint and credit disappeared',
+          view('balanceOf(address)(uint256)', net.alice) == 0 and view('pendingSupply()(uint256)') == 0)
+    lines = net.vigia(2, 'relay')
+    check('mint rollback: relay resubmits the retained valid partials',
+          view('pendingSupply()(uint256)') == expected
+          and any(line.get('kind') == 'relay-mint' and line.get('tx') for line in lines), lines)
+    net.warp(net.l2, DELAY + 1)
+    net.vigia(2, 'relay')
+    check('mint rollback: recovered exactly one credit and preserved backing',
+          view('totalSupply()(uint256)') == expected
+          and view('balanceOf(address)(uint256)', net.alice) == expected
+          and int(net.view(net.eth, net.vault, 'totalLocked()(uint64)')) == expected)
+    again = net.vigia(2, 'relay')
+    check('mint rollback: another pass sends no duplicate transaction', not any(line.get('tx') for line in again), again)
+
+
 def main():
     project = Path(sys.argv[1]).resolve()
-    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3, 'v3relay': s_v3relay}[sys.argv[2]]
+    scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3,
+                'v3relay': s_v3relay, 'v3mintreorg': s_v3mintreorg}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:

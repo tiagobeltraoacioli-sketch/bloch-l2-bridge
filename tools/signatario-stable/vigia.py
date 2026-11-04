@@ -45,9 +45,10 @@ saw the item ready; the first sighting is persisted next to its nonce record. Th
 of ours still in the Ethereum pool after `eth_replace_after_s` (default 300) and priced below the current quote is replaced at
 its own nonce, by the newest live round with a quorum, at up to `eth_max_gas_price_gwei`; `release-stuck-at-ceiling` is alerted
 when the ceiling leaves no 10% bump. `deposits()` and `burns()` keep a log cursor in `scan_state_dir` (default
-SHARED/.scan): only blocks after it are read; a changed hash at the cursor, a finalized head below it, a changed key or
-`scan_full_every_s` (default 86400) rescans from the start. Items minted or released at the `finalized` level are recorded
-there and not read again; a reorg of that chain clears its record.
+SHARED/.scan): within one process, only blocks after its own checked cursor are read; a changed hash at the cursor,
+a finalized head below it, changed file bytes or `scan_full_every_s` (default 86400) rescans from the start. Restart
+rebuilds the cursor and completed-item assertions from the chain. Disk records never attest to completion. In-memory
+minted, released and executed observations skip item reads only while their finalized checkpoint remains canonical.
 
 Relay nonces. An L2 block lands only every 8-14 min, so `latest` stands still across many passes, and several relayed
 transactions share it. One relayer per gas key keeps its own record of the next nonce, and sends at the highest of `latest`,
@@ -104,6 +105,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -225,6 +227,9 @@ class Vigia:
         self.backup_seen = set()
         # F229-11: persisted log cursors and the record of items finished at the finalized level (agent 241).
         self.scan_dir = Path(self.cfg.get('scan_state_dir', self.shared / '.scan'))
+        # SHARED is not an authority. Only snapshots written by this process
+        # after chain reads may accelerate a later pass; restart rebuilds them.
+        self._scan_digests = {}
         self.scan_full_every = int(self.cfg.get('scan_full_every_s', 86400))
         self.mode = 'sign'
         self._finished = None
@@ -504,7 +509,10 @@ class Vigia:
         if self.scan_file(name) is None:
             return None
         try:
-            doc = json.loads(self.scan_file(name).read_text())
+            raw = self.scan_file(name).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != self._scan_digests.get(name):
+                return None
+            doc = json.loads(raw)
             return doc if isinstance(doc, dict) else None
         except (OSError, ValueError):
             return None
@@ -514,34 +522,27 @@ class Vigia:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-        tmp.write_text(json.dumps(doc))
-        tmp.replace(path)
+        raw = json.dumps(doc).encode()
+        fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+        tmp = Path(temporary)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                output.write(raw)
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        self._scan_digests[name] = hashlib.sha256(raw).hexdigest()
 
     def finished(self):
         """Finished items bound to their actual read checkpoint and contract, checked once per pass.
 
         A discovery cursor can be older than a flag's finalized read. It cannot
-        stand in for this checkpoint. Legacy ID-only records are re-read.
+        stand in for this checkpoint. No shared file restores these assertions
+        after a restart; even a valid-looking hash cannot prove a flag was read.
         """
         if self._finished is None:
-            doc = self.scan_load('finished') or {}
-            self._finished = {'mint': set(), 'release': set()}
+            self._finished = {'mint': set(), 'release': set(), 'executed': set()}
             self._finished_anchors, self._finished_contexts, self._finished_checked = {}, {}, set()
-            if doc.get('schema') == 2:
-                for kind in self._finished:
-                    entry = doc.get(kind)
-                    if not isinstance(entry, dict):
-                        continue
-                    anchor, items = entry.get('anchor'), entry.get('items')
-                    if (not isinstance(anchor, dict) or type(anchor.get('number')) is not int
-                            or anchor['number'] < 0 or not isinstance(anchor.get('hash'), str)
-                            or not WORD.fullmatch(anchor['hash']) or not isinstance(items, list)
-                            or not all(isinstance(item, str) and WORD.fullmatch(item) for item in items)):
-                        continue
-                    self._finished[kind] = set(items)
-                    self._finished_anchors[kind] = anchor
-                    self._finished_contexts[kind] = entry.get('context')
         changed = False
         for kind, items in self._finished.items():
             if not items or kind in self._finished_checked:
@@ -558,7 +559,7 @@ class Vigia:
         return self._finished
 
     def finished_context(self, kind):
-        side, contract = ('l2', self.token) if kind == 'mint' else ('eth', self.vault)
+        side, contract = ('eth', self.vault) if kind == 'release' else ('l2', self.token)
         context = [self.cfg.get(f'{side}_rpc'), self.cfg.get(f'{side}_chain_id'), contract.lower(), self.route]
         return hashlib.sha256(json.dumps(context, separators=(',', ':')).encode()).hexdigest()
 
@@ -576,7 +577,7 @@ class Vigia:
         """A failed checkpoint read disables the optimization; it grants no operation."""
         if not isinstance(anchor, dict):
             return False
-        url = self.cfg['l2_rpc' if kind == 'mint' else 'eth_rpc']
+        url = self.cfg['eth_rpc' if kind == 'release' else 'l2_rpc']
         try:
             final = self.final_anchor(self.rpc(url, 'eth_getBlockByNumber', ['finalized', False]))
             if final['number'] < anchor['number']:
@@ -604,11 +605,12 @@ class Vigia:
         self.save_finished()
 
     def forget_finished(self, kind, why):
-        if self.finished()[kind]:
-            log(kind='scan-rescan', cleared=kind, count=len(self._finished[kind]), reason=why)
-            self._finished[kind] = set()
-            self._finished_anchors.pop(kind, None)
-            self.save_finished()
+        for affected in (('mint', 'executed') if kind == 'mint' else (kind,)):
+            if self.finished()[affected]:
+                log(kind='scan-rescan', cleared=affected, count=len(self._finished[affected]), reason=why)
+                self._finished[affected] = set()
+                self._finished_anchors.pop(affected, None)
+                self.save_finished()
 
     def call_at(self, url, to, sig, tag, *args):
         data = self.cast_out('calldata', sig, *[str(a) for a in args])
@@ -1158,11 +1160,12 @@ class Vigia:
 
     def relay_mint(self, d):
         dep = '0x' + d.name
-        if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed (or a v1 token's instant mint) is final
+        if not WORD.fullmatch(dep) or dep in self.finished()['executed']:
             return
         if self.minted(dep):
             self.execute_if_queued(d, dep)
             return
+        (d / 'executed').unlink(missing_ok=True)
         if self.committee_retired():
             return
         if (d / 'sent').exists() and not self.failed(self.l2_tx, d / 'sent'):
@@ -1190,11 +1193,12 @@ class Vigia:
         todo = []
         for d in dirs:
             dep = '0x' + d.name
-            if not WORD.fullmatch(dep) or (d / 'executed').exists():  # executed is final; the head path still checks the head
+            if not WORD.fullmatch(dep) or dep in self.finished()['executed']:
                 continue
             if self.minted(dep):
                 self.isolated('relay-execute', dep, lambda d=d, dep=dep: self.execute_if_queued(d, dep))
                 continue
+            (d / 'executed').unlink(missing_ok=True)
             if self.committee_retired():
                 continue
             live = (d / 'sent').exists() and not self.failed(self.l2_tx, d / 'sent')
@@ -1384,23 +1388,60 @@ class Vigia:
         log(kind='relay-replace', burn=burn_id, nonce=nonce, replaced=old_tx, tx=new_tx, round=new_rnd.name,
             old_price=old_price, quoted=quoted, age_s=int(age))
 
+    def remember_execution(self, dep):
+        """Cache a completed mint only after all views agree at one finalized hash.
+
+        The shared `executed` marker is never evidence. Cancelled generations
+        and queued mints are not executions, even though minted() remains true.
+        """
+        url = self.cfg['l2_rpc']
+        try:
+            anchor = self.final_anchor(self.rpc(url, 'eth_getBlockByNumber', ['finalized', False]))
+            tag = {'blockHash': anchor['hash'], 'requireCanonical': True}
+            read = lambda signature: self.call_at(url, self.token, signature, tag, dep)
+            if int(read('minted(bytes32)'), 16) != 1:
+                return
+            try:
+                pending = read('pendingMints(bytes32)')
+            except RuntimeError as error:
+                if self.provenance or not is_revert(error):
+                    return
+            else:
+                if not re.fullmatch(r'0x[0-9a-fA-F]{192}', pending) or int(pending[66:130], 16) != 0:
+                    return
+                try:
+                    cancels = int(read('mintCancels(bytes32)'), 16)
+                    if cancels > int(read('lastRemint(bytes32)'), 16):
+                        return
+                except RuntimeError as error:
+                    if self.provenance or not is_revert(error):
+                        return  # legacy tokens without cancellation have no open generation
+            if self.finished_anchor_current('executed', anchor):
+                self.finish('executed', dep, anchor)
+        except Exception:  # noqa: BLE001 - an unavailable cache proof costs fresh reads
+            return
+
     def execute_if_queued(self, d, dep):
         """v1.1 large mints wait `largeMintDelay` in a queue; anyone executes them afterwards."""
         url = self.cfg['l2_rpc']
         try:
             pending = self.call(url, self.token, 'pendingMints(bytes32)', dep)
-        except RuntimeError as e:  # v1 token: no queue. A failed read (rate limit, node down) is not one: `executed` is final
+        except RuntimeError as e:  # v1 token: no queue. A failed read is not evidence of execution.
             if not is_revert(e):
                 raise
             (d / 'executed').write_text('v1\n')
+            self.remember_execution(dep)
             return
         words = [int(pending[2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range(3)]
         if words[1] == 0:  # executed, never queued, or cancelled by the guardians
             if self.cancelled_open(dep):
+                (d / 'executed').unlink(missing_ok=True)
                 log(kind='relay-execute', deposit=dep, cancelled=True, reason='the guardians cancelled this mint; recovery is signatario.py remint')
                 return
             (d / 'executed').write_text('done\n')
+            self.remember_execution(dep)
             return
+        (d / 'executed').unlink(missing_ok=True)
         if (d / 'execute-sent').exists() and not self.failed(self.l2_tx, d / 'execute-sent'):
             return
         head_sent = self.shared / f'head-{dep[2:]}.sent'  # execute_head may have sent it in an earlier pass

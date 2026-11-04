@@ -101,7 +101,10 @@ loopback rehearsal in `rehearse_feed.py <foundry project>`. Release certificates
 directory containing `forge`, `cast` and `anvil`; the default is `~/.foundry/bin`.
 
 The discovery cursors under `scan_state_dir` (default `shared_dir/.scan`) retain
-finalized log ranges between passes. A periodic full scan still checks the old
+finalized log ranges between passes of one daemon process. A disk snapshot is
+reused only while its bytes match the digest of that process's verified write.
+Restart rebuilds the range from RPC; disk snapshots cannot prove completeness.
+A periodic full scan still checks the old
 cursor's block hash. A missing or malformed cursor, changed scan configuration,
 reorganized cursor block, or finalized head below the scanned range discards the
 affected chain's finished-item cache. The signer then reads those items again.
@@ -111,11 +114,19 @@ Finished-item records separately bind the actual finalized block used for the
 flag read and the configured contract, route, chain ID and endpoint. The state
 query uses an [EIP-1898 block-hash selector](https://eips.ethereum.org/EIPS/eip-1898)
 with `requireCanonical: true`, then rechecks finality and canonical identity.
-The cache checkpoint is revalidated once per chain on every pass, including
-after a restart; this also detects reorgs above the older discovery cursor.
-Legacy ID-only records, malformed records and unavailable finality cause fresh
-item reads. Endpoints without hash selectors retain ordinary operation but do
-not populate this optimization. Keep the cache in the operator's private local
-state directory, alongside the other local daemon records.
+The cache checkpoint is revalidated once per kind on every pass; this also
+detects reorgs above the older discovery cursor. Completed-item assertions are
+held in memory and rebuilt after restart. A valid block hash in a shared file
+does not authenticate its list of completed IDs. Unavailable finality causes
+fresh item reads. Endpoints without hash selectors retain ordinary operation
+but do not populate this optimization.
+
+`executed` files are observations only. The relay checks current mint/queue
+state again unless this process has verified completion at a still-canonical
+finalized hash. A queued or cancelled generation cannot populate that cache.
+After a rollback removes a mint or its execution, the existing missing-transaction
+expiry and nonce-recovery rules apply; a leftover marker cannot suppress retry.
+`test_release_paths.py <project> v3mintreorg` exercises both rollbacks on isolated
+Anvil chains and verifies exactly one recovered credit with unchanged backing.
 Run the offline recovery regressions from this directory with
-`python3 -m unittest test_scan_recovery_r13 test_relayer_r11 test_relayer_review`.
+`python3 -m unittest test_execution_recovery_r13 test_scan_recovery_r13 test_relayer_r11 test_relayer_review`.

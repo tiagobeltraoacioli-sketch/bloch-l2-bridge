@@ -289,11 +289,12 @@ class ScanCursor(ScanBase):
 
     def test_a_second_pass_reads_only_the_new_blocks(self):
         eth = Chain(100_000, [deposit_log(0, 5), deposit_log(1, 99_999)])
-        self.assertEqual(len(self.vigia_on(eth).deposits()), 2)
+        v = self.vigia_on(eth)
+        self.assertEqual(len(v.deposits()), 2)
         self.assertEqual(len(eth.get_logs), 11)
         eth.head, eth.get_logs = 100_005, []
         eth.logs.append(deposit_log(2, 100_003))
-        got = self.vigia_on(eth).deposits()  # a new process: the cursor is on disk
+        got = v.deposits()  # only a cursor observed by this process is authoritative
         self.assertEqual(eth.get_logs, [(100_001, 100_005)], 'only the blocks after the cursor are read')
         self.assertEqual(got, [dep_id(0), dep_id(1), dep_id(2)])
 
@@ -307,11 +308,12 @@ class ScanCursor(ScanBase):
 
     def test_a_different_hash_at_the_cursor_rescans_from_the_start(self):
         eth = Chain(100_000, [deposit_log(0, 5), deposit_log(1, 99_999)])
-        self.vigia_on(eth).deposits()
+        v = self.vigia_on(eth)
+        v.deposits()
         eth.salt, eth.head, eth.get_logs = 'b', 100_002, []  # another chain under the cursor (a reorg, a resynced node)
         eth.logs = [deposit_log(0, 5)]
         with Logs() as logs:
-            got = self.vigia_on(eth).deposits()
+            got = v.deposits()
         self.assertEqual(got, [dep_id(0)], 'the reorged-out deposit is dropped')
         self.assertEqual(eth.get_logs[0][0], 0)
         self.assertIn('scan-rescan', [r.get('kind') for r in logs.records])
@@ -381,9 +383,11 @@ class Finished(ScanBase):
 
     def test_finished_items_cost_no_reads_on_the_next_pass(self):
         deps = [dep_id(i) for i in range(200)]
-        self.feed_vigia().sync(deps, self.burns(50))
+        w = self.feed_vigia()
+        w.sync(deps, self.burns(50))
         self.assertEqual(len(self.reads), 250)
-        w = self.feed_vigia()  # a new process
+        w.new_pass()
+        self.reads.clear()
         w.sync(deps, self.burns(50))
         self.assertEqual(self.reads, [], f'{len(self.reads)} reads for 250 items finished at the finalized level')
         self.assertEqual(w.open_deps, [])

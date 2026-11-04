@@ -197,21 +197,29 @@ class OrderedMints(Base):
 
 
 class History(Base):
-    """F229-8: every pass re-reads every deposit ever relayed (minted, pendingMints, mintCancels, lastRemint: about 4 eth_calls
-    and 4 `cast` processes each), although an executed mint is final."""
+    """Finalized execution observations accelerate later passes; shared markers cannot prove them."""
 
-    def test_executed_history_costs_no_chain_reads(self):
+    def test_observed_execution_history_costs_only_one_checkpoint_read(self):
+        from test_relayer_r11 import Chain
         v = self.vigia()
+        chain = Chain(100, [])
+        v.rpc = lambda url, method, params: chain.answer(method, params)
+        values = {'minted(bytes32)': '0x' + word(1), 'pendingMints(bytes32)': '0x' + word(0) * 3,
+                  'mintCancels(bytes32)': '0x' + word(0), 'lastRemint(bytes32)': '0x' + word(0)}
+        v.call_at = lambda url, to, sig, tag, *args: values[sig]
         dirs = []
         for s in range(200):
             d = self.d / 'shared' / 'mint' / dep_id(s)[2:]
             d.mkdir(parents=True)
             (d / 'executed').write_text('done\n')
             dirs.append(d)
+            v.remember_execution(dep_id(s))
+        self.assertEqual(len(v.finished()['executed']), 200)
         calls = []
         v.call = lambda url, to, sig, *a: calls.append(sig) or '0x' + word(0)
+        v.new_pass()
         v.relay_mints_in_order(dirs)
-        self.assertLess(len(calls), 10, f'{len(calls)} chain reads for 200 executed deposits')
+        self.assertEqual(calls, [], f'{len(calls)} item reads for 200 finalized executions')
 
     def test_control_a_queued_mint_is_still_read(self):
         v = self.vigia()
