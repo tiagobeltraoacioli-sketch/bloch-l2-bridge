@@ -256,8 +256,10 @@ class Vigia:
         if self._version is None:
             try:
                 out = self.call(self.cfg['l2_rpc'], self.token, 'availableToMint()')
-                if out not in ('0x', ''):  # an empty answer is a token this view does not show yet, not a version
-                    self._version = '2' if len(out) == 66 else '1'
+                if isinstance(out, str) and WORD.fullmatch(out):
+                    self._version = '2'
+                # Empty or malformed data cannot identify a legacy token. Only
+                # an explicit selector revert below distinguishes V1.
             except RuntimeError as e:
                 if is_revert(e):
                     self._version = '1'
@@ -482,10 +484,16 @@ class Vigia:
 
     def committee_retired(self):
         """The token's one-way mint switch is active: `mint` reverts for good, and only proofs mint."""
-        try:
-            return self.flag(self.cfg['l2_rpc'], self.token, 'verifier()')
-        except RuntimeError:
-            return False  # a token without the switch, or a failed read: a retired `mint` only reverts
+        if not self.provenance:
+            version = self.token_version()
+            if version == '1':
+                return False  # V1 has no retirement switch
+            if version != '2':
+                raise RuntimeError('mint committee state unavailable: token version is unknown')
+        value = self.call(self.cfg['l2_rpc'], self.token, 'verifier()')
+        if not isinstance(value, str) or not re.fullmatch(r'0x0{24}[0-9a-fA-F]{40}', value):
+            raise RuntimeError('mint committee state unavailable: invalid verifier address')
+        return int(value, 16) != 0
 
     def minted(self, deposit_id):
         return self.flag(self.cfg['l2_rpc'], self.token, 'minted(bytes32)', deposit_id)
@@ -890,9 +898,14 @@ class Vigia:
         self.check_design()
         deposits, burns = self.deposits(), self.burns()
         self.sync(deposits, burns)
-        if not self.committee_retired():
-            for dep in deposits:
-                self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
+        def sign_mints():
+            if not self.committee_retired():
+                for dep in deposits:
+                    self.isolated('mint', dep, lambda dep=dep: self.sign_mint(dep))
+
+        # A verifier read outage pauses mint signing, while independent burns
+        # can still receive release certificates in this pass.
+        self.isolated('mint', 'committee', sign_mints)
         self.opened = 0
         # Every certificate rebuilds the L2 from L1 (41 s measured on the v2 binaries with 186,671 L1 blocks, and
         # growing), while a round can be joined for only ~15 min. Rounds other signers opened come first, and a pass

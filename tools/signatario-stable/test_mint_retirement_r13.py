@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import signatario
+import test_relayer_review as review
+from test_relayer_review import Base, dep_id
 
 
 DIGEST = '0x' + '11' * 32
@@ -87,6 +89,88 @@ class MintRetirement(unittest.TestCase):
                         self.invoke(ctx, signatario.cmd_mint, path)
                     ctx.run.assert_not_called()
                     self.assertFalse(path.exists())
+
+
+class DaemonRetirement(Base):
+    def prepared(self, ordered=True, slot=0):
+        daemon = self.vigia(provenance=ordered)
+        directories = review.OrderedMints.setup_slots(self, daemon, [slot], slot)
+        del daemon.committee_retired  # use the production probe, not the ordering fixture's stub
+        daemon._version = '2'
+        original = daemon.call
+
+        def call(url, to, signature, *args):
+            if signature == 'verifier()':
+                raise RuntimeError('eth_call: rate limited')
+            return original(url, to, signature, *args)
+
+        daemon.call = call
+        daemon.signatario = Mock(return_value=(0, {'call': ['mint()']}))
+        daemon.send = Mock(return_value='0x' + 'aa' * 32)
+        daemon.send_mint = Mock()
+        return daemon, directories
+
+    def test_unavailable_verifier_never_reaches_either_mint_submission_path(self):
+        for ordered in (False, True):
+            with self.subTest(ordered=ordered):
+                daemon, directories = self.prepared(ordered, int(ordered))
+                with self.assertRaisesRegex(RuntimeError, 'rate limited'):
+                    if ordered:
+                        daemon.relay_mints_in_order(directories)
+                    else:
+                        daemon.relay_mint(directories[0])
+                daemon.signatario.assert_not_called()
+                daemon.send.assert_not_called()
+                daemon.send_mint.assert_not_called()
+
+    def test_sign_round_pauses_mint_but_continues_independent_release_signing(self):
+        daemon, _ = self.prepared()
+        burn = {'burn_id': DEPOSIT}
+        daemon.deposits, daemon.burns = Mock(return_value=[dep_id(0)]), Mock(return_value=[burn])
+        daemon.sync, daemon.sign_mint, daemon.sign_release = Mock(), Mock(), Mock()
+        daemon.sign_round()
+        daemon.sign_mint.assert_not_called()
+        self.assertEqual(daemon.sign_release.call_count, 2)
+
+    def test_relay_round_pauses_mint_but_continues_queued_execution_and_releases(self):
+        daemon, _ = self.prepared()
+        directory = daemon.shared / 'release' / DEPOSIT[2:]
+        directory.mkdir(parents=True)
+        daemon.claim_relayer, daemon.check_chain_ids = Mock(), Mock()
+        daemon.execute_head, daemon.relay_release = Mock(), Mock()
+        daemon.relay_round()
+        daemon.send_mint.assert_not_called()
+        daemon.execute_head.assert_called_once()
+        daemon.relay_release.assert_called_once_with(directory)
+
+    def test_v1_compatibility_does_not_probe_a_nonexistent_switch(self):
+        daemon = self.vigia(provenance=False)
+        daemon._version = '1'
+        daemon.call = Mock(side_effect=RuntimeError('execution reverted'))
+        self.assertFalse(daemon.committee_retired())
+        daemon.call.assert_not_called()
+
+    def test_unknown_version_cannot_enable_committee_submission(self):
+        daemon = self.vigia(provenance=False)
+        daemon.token_version = Mock(return_value=None)
+        daemon.call = Mock(return_value='0x' + '00' * 32)
+        with self.assertRaisesRegex(RuntimeError, 'version'):
+            daemon.committee_retired()
+        daemon.call.assert_not_called()
+
+    def test_malformed_verifier_and_version_answers_do_not_enable_submission(self):
+        for value in ('0x0', '0x' + 'ff' * 32, '0x' + '00' * 33, None):
+            with self.subTest(value=value):
+                daemon = self.vigia()
+                daemon._version = '2'
+                daemon.call = Mock(return_value=value)
+                with self.assertRaisesRegex(RuntimeError, 'verifier'):
+                    daemon.committee_retired()
+        daemon = self.vigia(provenance=False)
+        daemon.call = Mock(return_value='0x01')
+        with self.assertRaisesRegex(RuntimeError, 'version'):
+            daemon.committee_retired()
+        self.assertIsNone(daemon._version)
 
 
 if __name__ == '__main__':

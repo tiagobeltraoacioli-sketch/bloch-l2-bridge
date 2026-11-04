@@ -143,6 +143,15 @@ verifier before accessing the signing key or writing a certificate. A pending
 proposal still permits committee signing; activation retires it. Invalid or
 unavailable verifier reads stop signing. The original V1 token has no switch.
 `test_release_paths.py <project> v3retiredcli` exercises that transition on Anvil.
+The daemon also refuses to submit committee mints when verifier state is unknown
+or malformed. That failure pauses the mint work for the pass; independent release
+work and execution of already queued mints can continue. An unknown or malformed
+daemon version probe is not evidence that a token uses the legacy V1 interface.
+
+Transport limitation: the daemon's current urllib client still reads RPC bodies
+without a size limit, and its 60-second timeout applies to individual I/O waits,
+not the entire exchange. It does not strictly validate JSON-RPC response IDs or
+envelopes. Those transport changes are outside this journal/retirement patch.
 
 Ethereum release submissions have a private write-ahead journal. Before RPC
 publication, the relayer durably saves the signed bytes and their hash under
