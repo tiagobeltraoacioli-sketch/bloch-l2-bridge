@@ -143,6 +143,8 @@ publication, the relayer durably saves the signed bytes and their hash under
 `relayer_submission_dir` (default: `.relayer-submissions` beside `shared_dir`).
 Keep this directory on the relayer's own durable disk, outside SHARED transport;
 directories require mode `0700` and files `0600`. Preserve it across restarts.
+Directory entries and their ancestors are flushed before publication as well as
+the signed files; any flush failure stops the send.
 Records are partitioned by chain ID and gas signer; changing the vault or route
 cannot bypass an unresolved nonce. A context mismatch or malformed record stops
 that account until the operator reconciles its signed transaction on the original
@@ -151,6 +153,12 @@ The same private account lock also covers the signed nonce index. After a reorg
 rewinds the chain nonce, another burn cannot reuse an archived release's nonce
 while that release awaits recovery. Older private archives are verified and
 indexed before the first new send; conflicting archives stop for reconciliation.
+A constant-size high-water mark also prevents a missing index file from making
+an older nonce appear free. A missing entry at or below the highest reserved
+nonce stops for operator reconciliation, including gaps previously occupied by
+unrelated transactions. Schema-1 indexes migrate under the account lock; the new
+marker is published only after all archives, index records and pending bytes
+have been verified and indexed.
 
 A lost reply, generic RPC error, `nonce too low`, or `already known` never frees
 the reservation. Recovery validates the exact saved signed bytes, recovered

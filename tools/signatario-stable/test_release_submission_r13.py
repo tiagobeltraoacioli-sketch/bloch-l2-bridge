@@ -2,6 +2,9 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+
+from release_submission import ReleaseJournal
 
 from test_relayer_review import Base, GWEI
 from test_relayer_r11 import BURN
@@ -325,6 +328,136 @@ class ReleaseSubmission(Base):
 
     def test_archive_write_failure_after_rpc_recovers_without_another_submission(self):
         self.interrupted_write('after')
+
+    def test_missing_nonce_index_after_rollback_cannot_reassign_a_reserved_nonce(self):
+        daemon, journal, original = self.reserved()
+        journal.accept(original)
+        journal.nonce_path(0).unlink()
+        self.sent_transactions.clear()
+        original_cast = daemon.cast_out
+        other_burn = '0x' + 'ee' * 32
+
+        def cast(*args):
+            value = original_cast(*args)
+            return value[:-64] + other_burn[2:] if args[0] == 'calldata' else value
+
+        daemon.cast_out = cast
+        with self.assertRaisesRegex(RuntimeError, 'missing.*nonce|nonce.*missing'):
+            daemon.send('eth', daemon.vault, ['release()'], release_id=other_burn)
+        self.assertEqual(len(self.mktx_args()), 1)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_account_directory_entries_are_flushed_before_broadcast(self):
+        daemon, directory, _ = self.ready()
+        events, original_rpc = [], daemon.rpc
+        original_sync = ReleaseJournal._sync
+
+        def sync(path):
+            events.append(('sync', Path(path).resolve()))
+            original_sync(path)
+
+        def rpc(url, method, params):
+            if method == 'eth_sendRawTransaction':
+                events.append(('send', None))
+            return original_rpc(url, method, params)
+
+        daemon.rpc = rpc
+        with patch.object(ReleaseJournal, '_sync', side_effect=sync):
+            daemon.relay_release(directory)
+        before_send = events[:events.index(('send', None))]
+        self.assertIn(('sync', self.d.resolve()), before_send)
+        self.assertIn(('sync', (self.d / '.relayer-submissions').resolve()), before_send)
+
+    def test_directory_flush_failure_prevents_signing_and_broadcast(self):
+        daemon, directory, _ = self.ready()
+        original_sync = ReleaseJournal._sync
+
+        def fail_parent(path):
+            if Path(path).resolve() == self.d.resolve():
+                raise OSError('injected parent flush failure')
+            original_sync(path)
+
+        with patch.object(ReleaseJournal, '_sync', side_effect=fail_parent):
+            with self.assertRaisesRegex(OSError, 'parent flush'):
+                daemon.relay_release(directory)
+        self.assertEqual(self.mktx_args(), [])
+        self.assertEqual(self.sent, [])
+        # mkdir succeeded before the failed flush. Retrying must still flush
+        # the existing entry rather than treating existence as durability.
+        with patch.object(ReleaseJournal, '_sync', side_effect=fail_parent):
+            with self.assertRaisesRegex(OSError, 'parent flush'):
+                daemon.relay_release(directory)
+        daemon.relay_release(directory)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_legacy_index_without_archive_is_included_in_the_high_water_mark(self):
+        _, journal, item = self.reserved()
+        journal.accept(item)
+        journal.accepted(BURN).unlink()
+        marker = journal.account / 'nonce-index.json'
+        journal.write(marker, {'schema': 1})
+        with journal.lock():
+            self.assertEqual(journal.index_highest(), 0)
+        journal.nonce_path(0).unlink()
+        with journal.lock():
+            with self.assertRaisesRegex(RuntimeError, 'missing nonce'):
+                journal.check_nonce(0, '0x' + 'ee' * 32)
+
+    def test_interrupted_migration_never_publishes_a_complete_marker(self):
+        _, journal, item = self.reserved()
+        journal.accept(item)
+        journal.nonce_path(0).unlink()
+        marker = journal.account / 'nonce-index.json'
+        journal.write(marker, {'schema': 1})
+        original = journal.write
+
+        def fail(path, record):
+            if path == journal.nonce_path(0):
+                raise OSError('interrupted index migration')
+            original(path, record)
+
+        with patch.object(journal, 'write', side_effect=fail):
+            with self.assertRaisesRegex(OSError, 'index migration'):
+                with journal.lock():
+                    self.fail('incomplete migration must not acquire a usable reservation')
+        self.assertEqual(json.loads(marker.read_bytes()), {'schema': 1})
+        with journal.lock():
+            self.assertEqual(journal.read(journal.nonce_path(0))[0], item[0])
+            self.assertEqual(journal.index_highest(), 0)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_high_water_flush_failure_keeps_raw_without_broadcast(self):
+        daemon, directory, _ = self.ready()
+        original = ReleaseJournal.write
+
+        def fail(journal, path, record):
+            if path.name == 'nonce-index.json' and record.get('highest') == 0:
+                raise OSError('high-water flush failed')
+            original(journal, path, record)
+
+        with patch.object(ReleaseJournal, 'write', fail):
+            with self.assertRaisesRegex(OSError, 'high-water flush'):
+                daemon.relay_release(directory)
+        self.assertTrue(self.pending().exists())
+        reserved = json.loads(self.pending().read_bytes())
+        self.assertEqual(self.sent, [])
+        daemon, directory, _ = self.ready()
+        daemon.relay_release(directory)
+        self.assertEqual(len(self.mktx_args()), 1)
+        self.assertEqual(list(self.sent_transactions), [reserved['hash']])
+
+    def test_malformed_index_metadata_cannot_release_a_reservation(self):
+        _, journal, _ = self.reserved()
+        marker = journal.account / 'nonce-index.json'
+        for value in ({'schema': True}, {'schema': 2, 'highest': True}, {'schema': 2, 'highest': -2},
+                      {'schema': 2, 'highest': 2**64}, {'schema': 2, 'highest': 0.0}, {'schema': 2}):
+            with self.subTest(value=value):
+                journal.write(marker, value)
+                with self.assertRaisesRegex(RuntimeError, 'unrecognized nonce index'):
+                    with journal.lock():
+                        self.fail('invalid metadata accepted')
+                self.assertTrue(journal.pending.exists())
+        self.assertEqual(len(self.sent), 1)
 
 
 if __name__ == '__main__':

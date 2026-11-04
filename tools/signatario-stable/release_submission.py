@@ -57,12 +57,21 @@ class ReleaseJournal:
         self._directory(self.account)
         self.pending = self.account / 'pending.json'
 
-    @staticmethod
-    def _directory(path):
+    @classmethod
+    def _directory(cls, path):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = path.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077,
                 'submission directory must be private, owned and not a symlink')
+        # File/directory fsync below cannot persist this directory's name in its
+        # parent. Flush ancestors too, including on retry after a failed mkdir
+        # flush: an existing directory may still be awaiting that durability.
+        parent = path.resolve().parent
+        while True:
+            cls._sync(parent)
+            if parent == parent.parent:
+                break
+            parent = parent.parent
 
     def accepted(self, burn):
         require(isinstance(burn, str) and WORD.fullmatch(burn), 'invalid burn identity')
@@ -94,29 +103,44 @@ class ReleaseJournal:
     def nonce_path(self, nonce):
         return self.account / f'nonce-{nonce}.json'
 
+    def index_highest(self):
+        raw = self.read_file(self.account / 'nonce-index.json')
+        if raw is None:
+            return None
+        marker = strict_json(raw)
+        if type(marker) is dict and set(marker) == {'schema'} and type(marker['schema']) is int and marker['schema'] == 1:
+            return None
+        require(type(marker) is dict and set(marker) == {'schema', 'highest'}
+                and type(marker['schema']) is int and marker['schema'] == 2
+                and type(marker['highest']) is int and -1 <= marker['highest'] < 2**64,
+                'unrecognized nonce index; operator reconciliation required')
+        return marker['highest']
+
     def ensure_nonce_index(self):
         """Migrate older private archives before allowing any new account nonce.
 
         The marker is local durability metadata, never execution evidence. Every
         indexed value is still the complete verified signed transaction.
         """
-        marker = self.account / 'nonce-index.json'
-        raw = self.read_file(marker)
-        if raw is not None:
-            require(strict_json(raw) == {'schema': 1}, 'unrecognized nonce index; operator reconciliation required')
+        if self.index_highest() is not None:
             return
-        paths = sorted(path for path in self.account.glob('*.json') if re.fullmatch(r'[0-9a-f]{64}\.json', path.name))
+        paths = sorted(path for path in self.account.glob('*.json')
+                       if re.fullmatch(r'(?:[0-9a-f]{64}|nonce-(?:0|[1-9][0-9]*))\.json', path.name))
         paths.append(self.pending)
+        highest = -1
         for path in paths:
             item = self.read(path)
             if item is None:
                 continue
-            if path != self.pending:
-                require(path.stem == item[0]['burn'][2:], 'archive filename does not match the signed burn')
             nonce = quantity(item[1]['nonce'])
+            if path.name.startswith('nonce-'):
+                require(path == self.nonce_path(nonce), 'nonce index does not match its signed transaction')
+            elif path != self.pending:
+                require(path.stem == item[0]['burn'][2:], 'archive filename does not match the signed burn')
             self.check_nonce(nonce, item[0]['burn'])
             self.write(self.nonce_path(nonce), item[0])
-        self.write(marker, {'schema': 1})
+            highest = max(highest, nonce)
+        self.write(self.account / 'nonce-index.json', {'schema': 2, 'highest': highest})
 
     def check_nonce(self, nonce, burn):
         prior = self.read(self.nonce_path(nonce))
@@ -124,6 +148,20 @@ class ReleaseJournal:
             require(quantity(prior[1]['nonce']) == nonce, 'nonce index does not match its signed transaction')
             require(prior[0]['burn'] == burn,
                     'nonce is reserved for another signed release; recover that release before reusing it')
+        else:
+            highest = self.index_highest()
+            require(highest is None or nonce > highest,
+                    'missing nonce reservation below the durable high-water mark; operator reconciliation required')
+
+    def reserve_nonce(self, item):
+        record, tx = item
+        nonce = quantity(tx['nonce'])
+        self.check_nonce(nonce, record['burn'])
+        self.write(self.nonce_path(nonce), record)
+        highest = self.index_highest()
+        require(highest is not None, 'nonce index migration required before submission')
+        if nonce > highest:
+            self.write(self.account / 'nonce-index.json', {'schema': 2, 'highest': nonce})
 
     @staticmethod
     def _sync(directory):
@@ -200,6 +238,7 @@ class ReleaseJournal:
         require(WORD.fullmatch(tx_hash) and record['hash'] == tx_hash, 'raw transaction hash mismatch')
         for field in ('nonce', 'gas', 'gasPrice'):
             quantity(tx.get(field))
+        require(quantity(tx['nonce']) < 2**64, 'transaction nonce exceeds uint64')
         return record, tx
 
     def make(self, raw, burn, calldata):
@@ -259,15 +298,14 @@ class ReleaseJournal:
         record, tx = item
         # Neither this acknowledgement nor the archive asserts successful execution.
         self.write(self.accepted(record['burn']), record)
-        self.write(self.nonce_path(quantity(tx['nonce'])), record)
+        self.reserve_nonce(item)
         self.acknowledge(tx)
         self.remove(self.pending)
 
     def broadcast(self, item):
         record, tx = item
         require(quantity(tx['gasPrice']) <= self.max_price, 'reserved transaction exceeds the current gas ceiling')
-        self.check_nonce(quantity(tx['nonce']), record['burn'])
-        self.write(self.nonce_path(quantity(tx['nonce'])), record)
+        self.reserve_nonce(item)
         result = self.rpc('eth_sendRawTransaction', [record['raw']])
         require(isinstance(result, str) and result.lower() == record['hash'],
                 'broadcast response did not return the signed transaction hash; outcome remains unknown')
