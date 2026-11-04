@@ -61,6 +61,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -299,6 +300,16 @@ class Ctx:
                                              recipient))
         return self.keccak('0x1901' + domain[2:] + struct[2:])
 
+    def check_mint_committee(self, url):
+        """V2/V3 manual signing stops when the one-way proof verifier is active."""
+        if self.contract_version(url) == '1':
+            return  # the original V1 token has no retirement switch
+        value = self.call(url, 'verifier()(address)')
+        if not isinstance(value, str) or not re.fullmatch(r'0x0{24}[0-9a-fA-F]{40}', value):
+            refuse('the token returned an invalid mint verifier address')
+        if int(value, 16):
+            refuse('the mint committee is retired; use the proof mint path', verifier='0x' + value[-40:].lower())
+
     def deposit_id(self, route, nonce, sender, amount, pq):
         """ContextBoundSourceVault.depositId; ProvenanceSourceVault's (provenance) puts the nonce in the top 8 bytes."""
         if not self.provenance:
@@ -368,10 +379,10 @@ def cmd_mint(ctx, args):
     deposit_id = hex32(option(args, '--deposit-id'), 'deposit id')
     out = Path(option(args, '--out'))
     url = ctx.cfg['l2_rpc']
-    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
-
-    # L2: the right contract, not minted, within the caps
+    # L2: the right contract and an active committee, before deposit work or key access.
     ctx.check_contract(url)
+    ctx.check_mint_committee(url)
+    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
     if ctx.word(ctx.call(url, 'minted(bytes32)(bool)', deposit_id)):
         refuse('this deposit is already minted', deposit_id=deposit_id)
     ctx.cap_check(url, amount)
@@ -412,8 +423,9 @@ def cmd_remint(ctx, args):
     out = Path(option(args, '--out'))
     locked = '--locked' in args
     url = ctx.cfg['l2_rpc']
-    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
     ctx.check_contract(url)
+    ctx.check_mint_committee(url)
+    dep, nonce, amount, recipient = verified_deposit(ctx, deposit_id)
     generation = ctx.word(ctx.call(url, 'mintCancels(bytes32)(uint64)', deposit_id))
     replace = False
     if generation == 0:
@@ -839,4 +851,5 @@ def main():
     commands[cmd](ctx, args)
 
 
-main()
+if __name__ == '__main__':
+    main()

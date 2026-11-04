@@ -21,6 +21,8 @@ v3mintreorg: execution-only and whole-mint snapshot rollbacks leave shared compl
 recover the queue/mint, credit exactly once and preserve the fee-adjusted backing after missing-transaction expiry.
 v3uncertain: Ethereum accepts a signed release but its reply is lost; a restarted relayer recovers that same pending
 transaction, including after deletion of the advisory shared marker, and pays exactly once after mining.
+v3retiredcli: a real one-way verifier activation retires manual mint, remint and locked-remint signing;
+a pending proposal still allows committee signatures, and refusals preserve the signer database.
 """
 import json
 import os
@@ -47,8 +49,8 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain'))
-if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain'):
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain', 'v3retiredcli'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain', 'v3retiredcli'):
     LARGE = 0  # the launch default T = 0
 # v3fee (agent 200): the same launch scenario with the decided protocol fee in the vault, 5 bps on deposit and 5 bps on
 # release to a throwaway recipient; every amount below is the exact net amount, and the fee is never backing.
@@ -679,10 +681,63 @@ def s_v3uncertain(net):
           and int(out(CAST, 'nonce', sender, '--rpc-url', net.eth)) == nonce + 1, lines)
 
 
+def s_v3retiredcli(net):
+    """Exercise the real manual CLI before and after an actual verifier switch."""
+    net.deposit_and_mint(20 * U)
+    cancelled = '0x' + next((net.work / 'shared' / 'mint').glob('*')).name
+    pending = out(CAST, 'call', net.token, 'pendingMints(bytes32)(address,uint64,uint64)', cancelled,
+                  '--rpc-url', net.l2).splitlines()
+    recipient, amount, ready_at = (line.split()[0] for line in pending)
+    receipt = net.send(net.l2, GUARD_KEY, net.token, 'voteCancelMint(bytes32,address,uint64,uint64)',
+                       cancelled, recipient, amount, ready_at)
+    check('manual retirement: a real cancelled mint is eligible for remint', receipt['status'] == '0x1'
+          and net.view(net.l2, net.token, 'mintCancels(bytes32)(uint64)', cancelled) == '1')
+    receipt = net.send(net.eth, ALICE_KEY, net.vault, 'deposit(uint64,bytes32)', str(5 * U),
+                       '0x' + '00' * 12 + net.alice[2:])
+    fresh = next(log['topics'][1] for log in receipt['logs'] if log['address'].lower() == net.vault)
+    net.mine(net.eth)
+    verifier = net.create(net.l2, 'solidity-tests/MintSwitch.t.sol:HashMintVerifier')
+    codehash = out(CAST, 'keccak', out(CAST, 'code', verifier, '--rpc-url', net.l2))
+    latest = json.loads(out(CAST, 'block', 'latest', '--json', '--rpc-url', net.l2))
+    until = str(int(latest['timestamp'], 16) + 3600)
+    digest = net.view(net.l2, net.token, 'mintSwitchDigest(bool,address,bytes32,uint64,uint256)(bytes32)',
+                      'false', verifier, codehash, '0', until)
+    signatures = '0x' + ''.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', key, digest)[2:]
+                               for _, key in net.signers)
+    receipt = net.send(net.l2, DEPLOYER, net.token, 'proposeVerifier(address,uint64,uint256,bytes)',
+                       verifier, '0', until, signatures)
+    check('manual retirement: proposal is pending while the committee remains active', receipt['status'] == '0x1'
+          and int(net.view(net.l2, net.token, 'verifier()(address)'), 16) == 0)
+
+    def manual(command, deposit, name, locked=False):
+        destination = net.work / (name + '.json')
+        result = sh(sys.executable, HERE / 'signatario.py', '--config', net.cfgs[0], command,
+                    '--deposit-id', deposit, '--out', destination, *(['--locked'] if locked else []), ok=False)
+        return result.returncode, json.loads(result.stdout), destination
+
+    paths = [('mint', fresh, False), ('remint', cancelled, False), ('remint', cancelled, True)]
+    for command, deposit, locked in paths:
+        rc, result, destination = manual(command, deposit, f'before-{command}-{locked}', locked)
+        check(f'manual retirement: pending proposal permits {command} locked={locked}',
+              rc == 0 and result.get('signed') is True and destination.exists(), result.get('reason', ''))
+    net.warp(net.l2, 1209601)
+    receipt = net.send(net.l2, DEPLOYER, net.token, 'activateVerifier()')
+    check('manual retirement: verifier is active on chain', receipt['status'] == '0x1'
+          and net.view(net.l2, net.token, 'verifier()(address)').lower() == verifier)
+    database = Path(json.loads(net.cfgs[0].read_text())['db'])
+    before = database.read_bytes()
+    for command, deposit, locked in paths:
+        rc, result, destination = manual(command, deposit, f'after-{command}-{locked}', locked)
+        check(f'manual retirement: active verifier refuses {command} locked={locked}',
+              rc == 1 and result.get('signed') is False and 'committee is retired' in result.get('reason', '')
+              and not destination.exists() and database.read_bytes() == before, result.get('reason', ''))
+
+
 def main():
     project = Path(sys.argv[1]).resolve()
     scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3,
-                'v3relay': s_v3relay, 'v3mintreorg': s_v3mintreorg, 'v3uncertain': s_v3uncertain}[sys.argv[2]]
+                'v3relay': s_v3relay, 'v3mintreorg': s_v3mintreorg, 'v3uncertain': s_v3uncertain,
+                'v3retiredcli': s_v3retiredcli}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:

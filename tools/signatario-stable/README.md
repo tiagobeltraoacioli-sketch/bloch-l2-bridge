@@ -138,6 +138,12 @@ the first refused slot. A later pass can retry; the daemon does not automaticall
 raise its configured gas-price ceiling or treat a fee quote as inclusion.
 `test_l2_admission_r13` also checks head-change and capacity refusals.
 
+Manual `mint`, `remint` and `remint --locked` check the V2/V3 token's active
+verifier before accessing the signing key or writing a certificate. A pending
+proposal still permits committee signing; activation retires it. Invalid or
+unavailable verifier reads stop signing. The original V1 token has no switch.
+`test_release_paths.py <project> v3retiredcli` exercises that transition on Anvil.
+
 Ethereum release submissions have a private write-ahead journal. Before RPC
 publication, the relayer durably saves the signed bytes and their hash under
 `relayer_submission_dir` (default: `.relayer-submissions` beside `shared_dir`).
