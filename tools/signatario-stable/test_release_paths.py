@@ -30,7 +30,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-BIN = Path.home() / '.foundry/bin'
+BIN = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin'))
 CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
 DEPLOYER = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
 OTHER_DEV = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
