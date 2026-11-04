@@ -130,3 +130,10 @@ expiry and nonce-recovery rules apply; a leftover marker cannot suppress retry.
 Anvil chains and verifies exactly one recovered credit with unchanged backing.
 Run the offline recovery regressions from this directory with
 `python3 -m unittest test_execution_recovery_r13 test_scan_recovery_r13 test_relayer_r11 test_relayer_review`.
+
+An L2 admission refusal (`-32000`, `data.kind: sequencer-fee-underpriced`) is
+logged with its transaction-specific fee requirements. It does not advance the
+relayer nonce or write a `sent`/`executed` marker, and later mint slots wait for
+the first refused slot. A later pass can retry; the daemon does not automatically
+raise its configured gas-price ceiling or treat a fee quote as inclusion.
+`test_l2_admission_r13` also checks head-change and capacity refusals.

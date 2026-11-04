@@ -203,7 +203,8 @@ class History(Base):
         from test_relayer_r11 import Chain
         v = self.vigia()
         chain = Chain(100, [])
-        v.rpc = lambda url, method, params: chain.answer(method, params)
+        checkpoint_reads = []
+        v.rpc = lambda url, method, params: checkpoint_reads.append((method, params)) or chain.answer(method, params)
         values = {'minted(bytes32)': '0x' + word(1), 'pendingMints(bytes32)': '0x' + word(0) * 3,
                   'mintCancels(bytes32)': '0x' + word(0), 'lastRemint(bytes32)': '0x' + word(0)}
         v.call_at = lambda url, to, sig, tag, *args: values[sig]
@@ -218,8 +219,10 @@ class History(Base):
         calls = []
         v.call = lambda url, to, sig, *a: calls.append(sig) or '0x' + word(0)
         v.new_pass()
+        checkpoint_reads.clear()
         v.relay_mints_in_order(dirs)
         self.assertEqual(calls, [], f'{len(calls)} item reads for 200 finalized executions')
+        self.assertEqual(checkpoint_reads, [('eth_getBlockByNumber', ['finalized', False])])
 
     def test_control_a_queued_mint_is_still_read(self):
         v = self.vigia()

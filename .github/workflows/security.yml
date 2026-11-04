@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - name: Offline relayer and persisted scan recovery regressions
         working-directory: tools/signatario-stable
-        run: python3 -m unittest -v test_execution_recovery_r13 test_scan_recovery_r13 test_relayer_r11 test_relayer_review
+        run: python3 -m unittest -v test_l2_admission_r13 test_execution_recovery_r13 test_scan_recovery_r13 test_relayer_r11 test_relayer_review
 
   bitcoin-regtest:
     runs-on: ubuntu-24.04
