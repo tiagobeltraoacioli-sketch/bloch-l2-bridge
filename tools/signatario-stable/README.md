@@ -105,5 +105,15 @@ reorganized cursor block, or finalized head below the scanned range discards the
 affected chain's finished-item cache. The signer then reads those items again.
 A scan also rechecks its finalized end block after fetching logs; if that block
 changed or lost finality, it refuses the pass without publishing a mixed cursor.
+Finished-item records separately bind the actual finalized block used for the
+flag read and the configured contract, route, chain ID and endpoint. The state
+query uses an [EIP-1898 block-hash selector](https://eips.ethereum.org/EIPS/eip-1898)
+with `requireCanonical: true`, then rechecks finality and canonical identity.
+The cache checkpoint is revalidated once per chain on every pass, including
+after a restart; this also detects reorgs above the older discovery cursor.
+Legacy ID-only records, malformed records and unavailable finality cause fresh
+item reads. Endpoints without hash selectors retain ordinary operation but do
+not populate this optimization. Keep the cache in the operator's private local
+state directory, alongside the other local daemon records.
 Run the offline recovery regressions from this directory with
 `python3 -m unittest test_scan_recovery_r13 test_relayer_r11 test_relayer_review`.

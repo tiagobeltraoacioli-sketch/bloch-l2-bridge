@@ -368,7 +368,7 @@ class Finished(ScanBase):
     """F229-11: `sync()` reads minted() / released() for every item ever seen, on every pass."""
 
     def feed_vigia(self, final=True, eth=None, l2=None):
-        v = self.vigia_on(eth or Chain(10, []), l2)
+        v = self.vigia_on(eth or Chain(10, []), l2 or Chain(10, []))
         v.feed, v.signers_checked = FakeFeed(), True
         self.reads = []
         v.minted = lambda dep: self.reads.append(('minted', dep)) or True

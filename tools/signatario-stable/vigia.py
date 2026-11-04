@@ -96,6 +96,7 @@ neither a wrong signature or payment nor a stopped bridge (deleting partials sti
 reverts or breaks never stops the others. Development tool; UNAUDITED.
 """
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -518,33 +519,116 @@ class Vigia:
         tmp.replace(path)
 
     def finished(self):
-        """Items finished at the `finalized` level: 'mint' (minted on the L2) and 'release' (released by the vault)."""
+        """Finished items bound to their actual read checkpoint and contract, checked once per pass.
+
+        A discovery cursor can be older than a flag's finalized read. It cannot
+        stand in for this checkpoint. Legacy ID-only records are re-read.
+        """
         if self._finished is None:
             doc = self.scan_load('finished') or {}
-            self._finished = {k: set(v) if isinstance(v, list) else set() for k, v in
-                              ((k, doc.get(k)) for k in ('mint', 'release'))}
+            self._finished = {'mint': set(), 'release': set()}
+            self._finished_anchors, self._finished_contexts, self._finished_checked = {}, {}, set()
+            if doc.get('schema') == 2:
+                for kind in self._finished:
+                    entry = doc.get(kind)
+                    if not isinstance(entry, dict):
+                        continue
+                    anchor, items = entry.get('anchor'), entry.get('items')
+                    if (not isinstance(anchor, dict) or type(anchor.get('number')) is not int
+                            or anchor['number'] < 0 or not isinstance(anchor.get('hash'), str)
+                            or not WORD.fullmatch(anchor['hash']) or not isinstance(items, list)
+                            or not all(isinstance(item, str) and WORD.fullmatch(item) for item in items)):
+                        continue
+                    self._finished[kind] = set(items)
+                    self._finished_anchors[kind] = anchor
+                    self._finished_contexts[kind] = entry.get('context')
+        changed = False
+        for kind, items in self._finished.items():
+            if not items or kind in self._finished_checked:
+                continue
+            self._finished_checked.add(kind)
+            if (self._finished_contexts.get(kind) != self.finished_context(kind)
+                    or not self.finished_anchor_current(kind, self._finished_anchors.get(kind))):
+                log(kind='scan-rescan', cleared=kind, count=len(items), reason='finished checkpoint is no longer valid')
+                items.clear()
+                self._finished_anchors.pop(kind, None)
+                changed = True
+        if changed:
+            self.save_finished()
         return self._finished
 
-    def finish(self, kind, item):
-        self.finished()[kind].add(item)
-        self.scan_save('finished', {k: sorted(v) for k, v in self._finished.items()})
+    def finished_context(self, kind):
+        side, contract = ('l2', self.token) if kind == 'mint' else ('eth', self.vault)
+        context = [self.cfg.get(f'{side}_rpc'), self.cfg.get(f'{side}_chain_id'), contract.lower(), self.route]
+        return hashlib.sha256(json.dumps(context, separators=(',', ':')).encode()).hexdigest()
+
+    @staticmethod
+    def final_anchor(block):
+        if (not isinstance(block, dict) or not isinstance(block.get('hash'), str)
+                or not WORD.fullmatch(block['hash'])):
+            raise ValueError('invalid finalized block identity')
+        number = int(block['number'], 16)
+        if number < 0:
+            raise ValueError('invalid finalized block number')
+        return {'number': number, 'hash': block['hash'].lower()}
+
+    def finished_anchor_current(self, kind, anchor):
+        """A failed checkpoint read disables the optimization; it grants no operation."""
+        if not isinstance(anchor, dict):
+            return False
+        url = self.cfg['l2_rpc' if kind == 'mint' else 'eth_rpc']
+        try:
+            final = self.final_anchor(self.rpc(url, 'eth_getBlockByNumber', ['finalized', False]))
+            if final['number'] < anchor['number']:
+                return False
+            canonical = (final if final['number'] == anchor['number'] else
+                         self.final_anchor(self.rpc(url, 'eth_getBlockByNumber', [hex(anchor['number']), False])))
+            return canonical == anchor
+        except Exception:  # noqa: BLE001 - missing proof of continuity only costs fresh item reads
+            return False
+
+    def save_finished(self):
+        self.scan_save('finished', {'schema': 2, **{
+            kind: {'context': self._finished_contexts.get(kind), 'anchor': self._finished_anchors.get(kind),
+                   'items': sorted(items)} for kind, items in self._finished.items()}})
+
+    def finish(self, kind, item, anchor):
+        items = self.finished()[kind]
+        previous = self._finished_anchors.get(kind)
+        if items and previous != anchor and not self.finished_anchor_current(kind, previous):
+            items.clear()
+        self._finished_anchors[kind] = anchor
+        self._finished_contexts[kind] = self.finished_context(kind)
+        self._finished_checked.add(kind)
+        items.add(item)
+        self.save_finished()
 
     def forget_finished(self, kind, why):
         if self.finished()[kind]:
             log(kind='scan-rescan', cleared=kind, count=len(self._finished[kind]), reason=why)
             self._finished[kind] = set()
-            self.scan_save('finished', {k: sorted(v) for k, v in self._finished.items()})
+            self._finished_anchors.pop(kind, None)
+            self.save_finished()
 
     def call_at(self, url, to, sig, tag, *args):
         data = self.cast_out('calldata', sig, *[str(a) for a in args])
         return self.rpc(url, 'eth_call', [{'to': to, 'data': data}, tag])
 
     def final_flag(self, url, to, sig, *args):
-        """The flag at the `finalized` level; any failure is False (the item is simply read again next pass)."""
+        """Return the exact finalized checkpoint of a true flag, or None to re-read next pass.
+
+        EIP-1898 binds the state read to this hash, including across an ABA reorg.
+        An endpoint without hash selectors simply cannot populate this cache.
+        """
         try:
-            return int(self.call_at(url, to, sig, 'finalized', *args), 16) != 0
+            anchor = self.final_anchor(self.rpc(url, 'eth_getBlockByNumber', ['finalized', False]))
+            value = self.call_at(url, to, sig, {'blockHash': anchor['hash'], 'requireCanonical': True}, *args)
+            kind = 'mint' if sig == 'minted(bytes32)' else 'release'
+            if int(value, 16) == 1 and self.finished_anchor_current(kind, anchor):
+                return anchor
         except Exception:  # noqa: BLE001 - a missed record costs a read, never a decision
-            return False
+            pass
+        return None
 
     def mint_finished(self, dep):
         """Minted on the L2 (the decision is `minted()` at latest, as before); recorded once final, then never read again."""
@@ -552,8 +636,9 @@ class Vigia:
             return True
         if not self.minted(dep):
             return False
-        if self.final_flag(self.cfg['l2_rpc'], self.token, 'minted(bytes32)', dep):
-            self.finish('mint', dep)
+        anchor = self.final_flag(self.cfg['l2_rpc'], self.token, 'minted(bytes32)', dep)
+        if anchor is not None:
+            self.finish('mint', dep, anchor)
         return True
 
     def release_finished(self, burn_id):
@@ -561,8 +646,9 @@ class Vigia:
             return True
         if not self.released(burn_id):
             return False
-        if self.final_flag(self.cfg['eth_rpc'], self.vault, 'releasedBurn(bytes32)', burn_id):
-            self.finish('release', burn_id)
+        anchor = self.final_flag(self.cfg['eth_rpc'], self.vault, 'releasedBurn(bytes32)', burn_id)
+        if anchor is not None:
+            self.finish('release', burn_id, anchor)
         return True
 
     @staticmethod
@@ -792,6 +878,7 @@ class Vigia:
     # ── sign ─────────────────────────────────────────────────────────────────
     def new_pass(self):
         self.parked_now, self.chain_cache = {}, {}
+        self._finished_checked = set()
         self.deposits_read = False
 
     def sign_round(self):
