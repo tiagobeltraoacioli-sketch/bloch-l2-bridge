@@ -171,7 +171,10 @@ the reservation. Recovery validates the exact saved signed bytes, recovered
 signer, chain, vault, route and burn, then checks the transaction hash and
 canonical receipt. An unknown outcome can only retransmit those same bytes at
 the same fee, within the current ceiling. A reverted receipt permits a fresh
-attempt only after finality. Existing bounded replacement rules still apply to
+attempt only after finality, with a matching receipt and canonical block hashes
+read again before releasing the attempt. Inconsistent observations keep the
+original bytes reserved. These separate RPC reads do not constitute an atomic
+chain snapshot. Existing bounded replacement rules still apply to
 a known pending release. The journal and SHARED `sent` marker never prove a
 release executed; current chain state remains the authority. A reservation whose
 nonce was consumed by an unrelated transaction requires operator reconciliation.

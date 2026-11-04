@@ -459,6 +459,44 @@ class ReleaseSubmission(Base):
                 self.assertTrue(journal.pending.exists())
         self.assertEqual(len(self.sent), 1)
 
+    def reorg_during_finality(self, changed):
+        _, journal, item = self.reserved()
+        journal.accept(item)
+        receipt = self.receipt(journal, item, status=0)
+        finalized = {'number': '0xb', 'hash': '0x' + 'b2' * 32}
+        calls = {}
+
+        def rpc(url, params):
+            key = params[0]
+            calls[key] = calls.get(key, 0) + 1
+            if key == item[0]['hash']:
+                return None if changed == 'receipt' and calls[key] > 1 else dict(receipt)
+            if key == 'finalized':
+                return dict(finalized)
+            if key == '0xa':
+                return {'number': key, 'hash': '0x' + 'cc' * 32 if changed == 'receipt-block' and calls[key] > 1
+                        else receipt['blockHash']}
+            if key == '0xb':
+                return {'number': key, 'hash': '0x' + 'dd' * 32 if changed == 'finalized-block' and calls[key] > 1
+                        else finalized['hash']}
+            self.fail('unexpected read: ' + str(params))
+
+        self.answers['eth_getTransactionReceipt'] = rpc
+        self.answers['eth_getBlockByNumber'] = rpc
+        self.assertEqual(journal.resume(BURN), item[0]['hash'], 'mixed observations must not free a new attempt')
+        self.assertTrue(journal.accepted(BURN).exists())
+        self.assertEqual(len(self.mktx_args()), 1)
+        self.assertEqual(len(self.sent), 2, 'only the previously signed bytes may be rebroadcast')
+
+    def test_receipt_removed_during_finality_checks_does_not_free_an_attempt(self):
+        self.reorg_during_finality('receipt')
+
+    def test_stale_receipt_over_a_replaced_block_does_not_free_an_attempt(self):
+        self.reorg_during_finality('receipt-block')
+
+    def test_finalized_anchor_replaced_during_checks_does_not_free_an_attempt(self):
+        self.reorg_during_finality('finalized-block')
+
 
 if __name__ == '__main__':
     unittest.main()

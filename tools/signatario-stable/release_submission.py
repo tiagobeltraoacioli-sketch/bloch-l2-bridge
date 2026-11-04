@@ -280,6 +280,19 @@ class ReleaseJournal:
                 if (type(final_block) is not dict or final_block.get('hash', '').lower() != finalized['hash'].lower()
                         or quantity(final_block.get('number')) != final_number):
                     return 'unknown'
+                # These RPCs are separate observations. A reorg during them
+                # must not combine an old reverted receipt with a new chain
+                # and thereby authorize another signed attempt.
+                confirmed = self.rpc('eth_getTransactionReceipt', [record['hash']])
+                identity = ('transactionHash', 'from', 'to', 'blockNumber', 'blockHash', 'status')
+                if type(confirmed) is not dict or any(confirmed.get(key) != receipt[key] for key in identity):
+                    return 'unknown'
+                anchors = {number: block_hash, final_number: finalized['hash'].lower()}
+                for height, expected in anchors.items():
+                    current = self.rpc('eth_getBlockByNumber', [hex(height), False])
+                    if (type(current) is not dict or current.get('hash', '').lower() != expected
+                            or quantity(current.get('number')) != height):
+                        return 'unknown'
             return 'success' if status else 'reverted'
         tx = self.rpc('eth_getTransactionByHash', [record['hash']])
         if tx is None:
