@@ -9,6 +9,7 @@ MAX_PENDING, a head mint that cannot be sent, a forged queued mint under a real 
 when a newer round reaches quorum, and two relayers on one nonce record. The anvil half (real contracts) is
 `test_release_paths.py <project> v3relay`.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,15 +24,26 @@ sys.path.insert(0, str(HERE))
 import vigia  # noqa: E402
 
 STUB = r'''#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 with open(os.environ['A229_ARGV_LOG'], 'a') as f:
     f.write(json.dumps(sys.argv[1:]) + '\n')
 if sys.argv[1:3] == ['wallet', 'address']:
     print('0x70997970c51812dc3a010c7d01b50e0d17dc79c8')
 elif sys.argv[1] == 'mktx':
-    print('0x02f8')
+    args = sys.argv[2:]
+    value = lambda name: hex(int(args[args.index(name) + 1]))
+    tx = {'signer': '0x70997970c51812dc3a010c7d01b50e0d17dc79c8', 'type': '0x0',
+          'chainId': value('--chain'), 'nonce': value('--nonce'), 'gasPrice': value('--gas-price'),
+          'gas': value('--gas-limit'), 'to': args[-2], 'input': args[-1], 'value': '0x0'}
+    print('0x' + json.dumps(tx, sort_keys=True).encode().hex())
+elif sys.argv[1] == 'decode-transaction':
+    raw = bytes.fromhex(sys.argv[2][2:])
+    print(json.dumps({**json.loads(raw), 'hash': '0x' + hashlib.sha256(raw).hexdigest()}))
 elif sys.argv[1] == 'calldata':
-    print('0x' + sys.argv[2].split('(')[0].encode().hex())
+    if sys.argv[2].split('(')[0] == 'release':
+        print('0x12345678' + 'cc' * 32 + '00' * 96 + '5b' * 32)
+    else:
+        print('0x' + sys.argv[2].split('(')[0].encode().hex())
 elif sys.argv[1] == 'keccak':
     print('0x' + '00' * 32)
 else:
@@ -62,6 +74,7 @@ class Base(unittest.TestCase):
         (self.d / 'raw.key').write_text('0x' + '59' * 32 + '\n')
         (self.d / 'raw.key').chmod(0o600)
         self.sent = []
+        self.sent_transactions = {}
         self.answers = {'eth_getTransactionCount': '0x0', 'eth_gasPrice': hex(GWEI), 'eth_estimateGas': '0x5208',
                         'eth_chainId': hex(31337)}
 
@@ -78,7 +91,15 @@ class Base(unittest.TestCase):
         def rpc(url, method, params):
             if method == 'eth_sendRawTransaction':
                 self.sent.append(url)
-                return '0x' + ('%064x' % len(self.sent))
+                raw = bytes.fromhex(params[0][2:])
+                tx = json.loads(raw)
+                tx_hash = '0x' + hashlib.sha256(raw).hexdigest()
+                self.sent_transactions[tx_hash] = {**tx, 'from': tx['signer'], 'hash': tx_hash, 'blockNumber': None}
+                return tx_hash
+            if method == 'eth_getTransactionByHash' and method not in self.answers:
+                return self.sent_transactions.get(params[0])
+            if method == 'eth_getTransactionReceipt' and method not in self.answers:
+                return None
             a = self.answers[method]
             return a(url, params) if callable(a) else a
         v.rpc = rpc
@@ -263,7 +284,7 @@ class ForgedQueuedMint(Base):
         v.flag = lambda url, to, sig, *a: sig == 'isCreditHead(bytes32)'
         self.answers['eth_getBlockByNumber'] = {'timestamp': hex(int(time.time())), 'number': '0x10'}
         sends = []
-        v.send = lambda side, to, call, gas=None: sends.append(call) or '0x' + '12' * 32
+        v.send = lambda side, to, call, gas=None, **kwargs: sends.append(call) or '0x' + '12' * 32
         return d, dep, sends
 
     def test_a_forged_queued_mint_of_a_real_deposit_is_not_executed(self):
@@ -298,7 +319,7 @@ class ReleaseRounds(Base):
         v.agreeing = lambda files, check, k: files[:k]
         v.signatario = lambda *a: (0, {'call': ['release()']})
         sends = []
-        v.send = lambda side, to, call, gas=None: sends.append(call) or '0x' + '12' * 32
+        v.send = lambda side, to, call, gas=None, **kwargs: sends.append(call) or '0x' + '12' * 32
         v.relay_release(base)
         self.assertEqual(sends, [], 'a newer round was sent while the older round\'s release is still pending')
 
@@ -314,7 +335,7 @@ class ReleaseRounds(Base):
         v.agreeing = lambda files, check, k: files[:k]
         v.signatario = lambda *a: (0, {'call': ['release()']})
         sends = []
-        v.send = lambda side, to, call, gas=None: sends.append(call) or '0x' + '12' * 32
+        v.send = lambda side, to, call, gas=None, **kwargs: sends.append(call) or '0x' + '12' * 32
         v.relay_release(rnd.parent)
         self.assertEqual(sends, [['release()']])
 

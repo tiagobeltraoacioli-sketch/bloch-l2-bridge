@@ -19,6 +19,8 @@ one relay pass (the relayer sends `drain()` behind the head it verified), and wi
 with anvil_setStorageAt) the relayer sends no mint at all and alerts, then relays as soon as there is room.
 v3mintreorg: execution-only and whole-mint snapshot rollbacks leave shared completion files behind; the relayer must
 recover the queue/mint, credit exactly once and preserve the fee-adjusted backing after missing-transaction expiry.
+v3uncertain: Ethereum accepts a signed release but its reply is lost; a restarted relayer recovers that same pending
+transaction, including after deletion of the advisory shared marker, and pays exactly once after mining.
 """
 import json
 import os
@@ -45,12 +47,12 @@ BOB = '0x' + 'b0' * 20
 ETH_CHAIN, L2_CHAIN = 11155111, 700771
 U = 10**6
 LARGE, DELAY = 500 * U, 43200
-V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg'))
-if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg'):
+V3 = os.environ.get('V3') == '1' or (len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain'))
+if len(sys.argv) > 2 and sys.argv[2] in ('v3', 'v3remint', 'v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain'):
     LARGE = 0  # the launch default T = 0
 # v3fee (agent 200): the same launch scenario with the decided protocol fee in the vault, 5 bps on deposit and 5 bps on
 # release to a throwaway recipient; every amount below is the exact net amount, and the fee is never backing.
-FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] in ('v3fee', 'v3relay', 'v3mintreorg') else 0
+FEE_BPS = 5 if len(sys.argv) > 2 and sys.argv[2] in ('v3fee', 'v3relay', 'v3mintreorg', 'v3uncertain') else 0
 FEE_SINK = '0x' + 'fe' * 20
 
 
@@ -608,10 +610,79 @@ def s_v3mintreorg(net):
     check('mint rollback: another pass sends no duplicate transaction', not any(line.get('tx') for line in again), again)
 
 
+def s_v3uncertain(net):
+    """Use real signatures and a real accepted pending release, losing only its RPC reply."""
+    from vigia import Vigia
+
+    amount = 20 * U
+    net.deposit_and_mint(amount)
+    net.warp(net.l2, DELAY + 1)
+    net.vigia(2, 'relay')
+    burn_amount = net_of(amount)
+    net.burn(ALICE_KEY, burn_amount)
+    net.mine(net.l2)
+    for index in (0, 1):
+        net.vigia(index, 'sign')
+    burn = net.burn_id(1)
+    directory = net.work / 'shared' / 'release' / burn[2:]
+    sender = out(CAST, 'wallet', 'address', '--private-key', DEPLOYER)
+    nonce = int(out(CAST, 'nonce', sender, '--rpc-url', net.eth))
+    sh(CAST, 'rpc', 'evm_setAutomine', 'false', '--rpc-url', net.eth)
+    daemon = Vigia(net.cfgs[2])
+    original, submitted = daemon.rpc, []
+
+    def lose_reply(url, method, params):
+        result = original(url, method, params)
+        if url == net.eth and method == 'eth_sendRawTransaction':
+            submitted.append(result)
+            raise OSError('test: Ethereum accepted the transaction, then the connection closed')
+        return result
+
+    daemon.rpc = lose_reply
+    lost = False
+    try:
+        daemon.relay_release(directory)
+    except OSError:
+        lost = True
+    journals = list((net.work / '.relayer-submissions').glob('*/pending.json'))
+    check('uncertain release: accepted reply is lost after a durable private reservation',
+          lost and len(submitted) == 1 and len(journals) == 1 and not list(directory.glob('*/sent')))
+    tx = submitted[0]
+    record = json.loads(journals[0].read_text())
+    decoded = json.loads(out(CAST, 'decode-transaction', record['raw']))
+    if isinstance(decoded, str):
+        decoded = json.loads(decoded)
+    check('uncertain release: the saved bytes recover the actual signer, nonce and hash',
+          decoded['signer'].lower() == sender.lower() and int(decoded['nonce'], 16) == nonce
+          and decoded['hash'].lower() == tx and record['hash'] == tx)
+    lines = net.vigia(2, 'relay')  # a genuinely new process
+    markers = list(directory.glob('*/sent'))
+    check('uncertain release: restart recovers the original pending hash without allocating a second nonce',
+          len(markers) == 1 and markers[0].read_text().strip() == tx
+          and int(out(CAST, 'nonce', sender, '--block', 'pending', '--rpc-url', net.eth)) == nonce + 1
+          and not journals[0].exists(), lines)
+    markers[0].unlink()
+    lines = net.vigia(2, 'relay')
+    check('uncertain release: deleting the SHARED marker cannot trigger a duplicate release',
+          markers[0].read_text().strip() == tx
+          and int(out(CAST, 'nonce', sender, '--block', 'pending', '--rpc-url', net.eth)) == nonce + 1, lines)
+    net.mine(net.eth, 1)
+    sh(CAST, 'rpc', 'evm_setAutomine', 'true', '--rpc-url', net.eth)
+    receipt = json.loads(out(CAST, 'receipt', tx, '--rpc-url', net.eth, '--json'))
+    check('uncertain release: the original transaction pays once and preserves fee-adjusted backing',
+          receipt['status'] == '0x1' and net.released(burn) and net.bob() == net_of(burn_amount)
+          and int(net.view(net.eth, net.vault, 'totalLocked()(uint64)')) == 0)
+    net.mine(net.eth)
+    lines = net.vigia(2, 'relay')
+    check('uncertain release: a subsequent pass sends no duplicate transaction',
+          not any(line.get('kind') == 'relay-release' and line.get('tx') for line in lines)
+          and int(out(CAST, 'nonce', sender, '--rpc-url', net.eth)) == nonce + 1, lines)
+
+
 def main():
     project = Path(sys.argv[1]).resolve()
     scenario = {'reorg': s_reorg, 'hold': s_hold, 'v3': s_v3, 'v3remint': s_v3remint, 'v3fee': s_v3,
-                'v3relay': s_v3relay, 'v3mintreorg': s_v3mintreorg}[sys.argv[2]]
+                'v3relay': s_v3relay, 'v3mintreorg': s_v3mintreorg, 'v3uncertain': s_v3uncertain}[sys.argv[2]]
     work = Path(tempfile.mkdtemp(prefix='release-paths-'))
     net = None
     try:

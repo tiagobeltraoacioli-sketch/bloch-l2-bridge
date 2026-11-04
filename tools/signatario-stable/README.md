@@ -137,3 +137,31 @@ relayer nonce or write a `sent`/`executed` marker, and later mint slots wait for
 the first refused slot. A later pass can retry; the daemon does not automatically
 raise its configured gas-price ceiling or treat a fee quote as inclusion.
 `test_l2_admission_r13` also checks head-change and capacity refusals.
+
+Ethereum release submissions have a private write-ahead journal. Before RPC
+publication, the relayer durably saves the signed bytes and their hash under
+`relayer_submission_dir` (default: `.relayer-submissions` beside `shared_dir`).
+Keep this directory on the relayer's own durable disk, outside SHARED transport;
+directories require mode `0700` and files `0600`. Preserve it across restarts.
+Records are partitioned by chain ID and gas signer; changing the vault or route
+cannot bypass an unresolved nonce. A context mismatch or malformed record stops
+that account until the operator reconciles its signed transaction on the original
+chain. Do not delete an uncertain reservation to force a new nonce.
+The same private account lock also covers the signed nonce index. After a reorg
+rewinds the chain nonce, another burn cannot reuse an archived release's nonce
+while that release awaits recovery. Older private archives are verified and
+indexed before the first new send; conflicting archives stop for reconciliation.
+
+A lost reply, generic RPC error, `nonce too low`, or `already known` never frees
+the reservation. Recovery validates the exact saved signed bytes, recovered
+signer, chain, vault, route and burn, then checks the transaction hash and
+canonical receipt. An unknown outcome can only retransmit those same bytes at
+the same fee, within the current ceiling. A reverted receipt permits a fresh
+attempt only after finality. Existing bounded replacement rules still apply to
+a known pending release. The journal and SHARED `sent` marker never prove a
+release executed; current chain state remains the authority. A reservation whose
+nonce was consumed by an unrelated transaction requires operator reconciliation.
+Use one relayer process and nonce state per gas key, as for the existing nonce
+lock. `test_release_submission_r13` covers hostile records and receipt/reorg
+cases; `test_release_paths.py <project> v3uncertain` uses real Anvil transactions
+and separate daemon processes to recover a lost accepted reply and pay once.

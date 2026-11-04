@@ -96,6 +96,7 @@ accept; `done`, `executed` and `sent` are only records, and the chain decides. A
 neither a wrong signature or payment nor a stopped bridge (deleting partials still only delays). One item that
 reverts or breaks never stops the others. Development tool; UNAUDITED.
 """
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import json
@@ -112,6 +113,7 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bridge_feed  # noqa: E402
+from release_submission import ReleaseJournal, quantity as journal_quantity  # noqa: E402
 
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED = 'Burned(bytes32,uint64,address,uint64,address)'
@@ -1331,7 +1333,7 @@ class Vigia:
         if live is None or not self.backup_due('eth', f'release:{burn_id}'):
             return
         rnd, call = live
-        tx = self.send('eth', self.vault, call)
+        tx = self.send('eth', self.vault, call, release_id=burn_id)
         (rnd / 'sent').write_text(tx + '\n')
         log(kind='relay-release', burn=burn_id, round=rnd.name, tx=tx)
 
@@ -1379,7 +1381,7 @@ class Vigia:
             log(kind='relay-replace', burn=burn_id, tx=old_tx, waiting=True, reason='no live round with a quorum to replace it with')
             return
         new_rnd, call = live
-        new_tx = self.send('eth', self.vault, call, replace=(nonce, old_price))
+        new_tx = self.send('eth', self.vault, call, replace=(nonce, old_price), release_id=burn_id)
         if new_tx is None:
             return
         (new_rnd / 'sent').write_text(new_tx + '\n')
@@ -1590,13 +1592,64 @@ class Vigia:
             prices, nxt, moved = {}, nonce + 1, time.time()
         return {'next': nxt, 'latest': latest, 'moved': moved, 'prices': prices}
 
-    def send(self, side, to, call, gas=None, replace=None):
+    def release_journal(self, frm, selector):
+        """This private reservation survives a lost reply; SHARED markers remain advisory."""
+        url = self.cfg['eth_rpc']
+        context = {'chainId': int(self.cfg['eth_chain_id']), 'signer': frm.lower(),
+                   'vault': self.vault, 'route': self.route}
+
+        def decode(raw):
+            decoded = json.loads(self.cast_out('decode-transaction', raw))
+            # Foundry 1.7 wraps the decoded object in a JSON string.
+            return json.loads(decoded) if isinstance(decoded, str) else decoded
+
+        def acknowledge(tx):
+            # Only an exact RPC hash, matching transaction or canonical receipt
+            # reaches this callback. An exception alone never advances a nonce.
+            records = self.load_nonces()
+            slot = f'eth:{frm.lower()}'
+            latest = self.tx_count(url, frm, 'latest')
+            old = records.get(slot) or {}
+            try:
+                nxt = int(old.get('next', latest))
+                prices = {int(n): int(p) for n, p in dict(old.get('prices', {})).items() if int(n) >= latest}
+                moved = float(old.get('moved', time.time())) if int(old.get('latest', latest)) == latest else time.time()
+            except (ValueError, TypeError, AttributeError):
+                nxt, prices, moved = latest, {}, time.time()
+            if not latest <= nxt <= latest + self.max_inflight:
+                nxt = latest
+            nonce = journal_quantity(tx['nonce'])
+            if nonce >= latest:
+                prices[nonce] = journal_quantity(tx['gasPrice'])
+            records[slot] = {'next': max(nxt, latest, nonce + 1), 'latest': latest, 'moved': moved,
+                             'prices': {str(n): p for n, p in prices.items()}}
+            self.save_nonces(records)
+
+        return ReleaseJournal(self.cfg.get('relayer_submission_dir', self.shared.parent / '.relayer-submissions'),
+                              context, selector, decode, lambda method, params: self.rpc(url, method, params),
+                              acknowledge, self.max_price['eth'])
+
+    def send(self, side, to, call, gas=None, replace=None, release_id=None):
         """Sign and send. `replace=(nonce, price)` replaces our own pending transaction at that nonce (F229-9); it returns None
         when the gas ceiling leaves no valid bump."""
+        with ExitStack() as locks:
+            return self.send_locked(side, to, call, gas, replace, release_id, locks)
+
+    def send_locked(self, side, to, call, gas, replace, release_id, locks):
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         wallet = self.relayer_wallet(side)
         frm = self.cast_out('wallet', 'address', *wallet)
+        data = self.cast_out('calldata', *call)
+        journal = None
+        if release_id is not None:
+            if side != 'eth' or to.lower() != self.vault:
+                raise RuntimeError('a release reservation must target the configured Ethereum vault')
+            journal = self.release_journal(frm, data[:10])
+            locks.enter_context(journal.lock())
+            prior = journal.resume(release_id, replace)
+            if prior is not None:
+                return prior
         records = self.load_nonces()
         slot = f'{side}:{frm.lower()}'
         if replace is not None:
@@ -1605,6 +1658,8 @@ class Vigia:
             rec['prices'][nonce] = max(rec['prices'].get(nonce, 0), stuck_price)
         else:
             nonce, rec = self.next_nonce(url, frm, records.get(slot) or {}, side)
+        if journal is not None:
+            journal.check_nonce(nonce, release_id)
         quoted, cap = int(self.rpc(url, 'eth_gasPrice', []), 16), self.max_price[side]
         price = min(quoted * 2, cap)
         if nonce in rec['prices']:  # replacing a transaction that never landed
@@ -1622,11 +1677,17 @@ class Vigia:
             log(kind='alert', severity='critical', id='gas-price-ceiling', side=side, quoted=quoted, wanted=price,
                 ceiling=cap, nonce=nonce)  # a dropped one is filled at the ceiling
             price = cap
-        data = self.cast_out('calldata', *call)
         if gas is None:
             gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
         raw = self.cast_out('mktx', *wallet, '--chain', str(chain), '--nonce', str(nonce),
                             '--gas-limit', str(gas), '--gas-price', str(price), '--legacy', to, data)
+        if journal is not None:
+            item = journal.make(raw, release_id, data)
+            if any(journal_quantity(item[1][field]) != value for field, value in
+                   (('nonce', nonce), ('gas', gas), ('gasPrice', price))):
+                raise RuntimeError('signed release differs from its prepared nonce or gas budget')
+            journal.write(journal.pending, item[0])
+            return journal.broadcast(item)
         tx = self.rpc(url, 'eth_sendRawTransaction', [raw])
         # Only an accepted transaction moves the record: a refused one leaves its nonce free for the next item.
         rec['prices'][nonce] = price

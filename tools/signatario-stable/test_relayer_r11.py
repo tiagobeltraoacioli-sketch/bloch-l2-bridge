@@ -166,7 +166,7 @@ class PrimaryBackup(Base):
         v.signatario = lambda *a: (0, {'call': ['release()']})
         v.failed = lambda url, f: False
         sends = []
-        v.send = lambda side, to, call, gas=None, replace=None: sends.append((side, call)) or '0x' + '12' * 32
+        v.send = lambda side, to, call, gas=None, replace=None, **kwargs: sends.append((side, call)) or '0x' + '12' * 32
         return rnd.parent, sends
 
     def test_a_backup_waits_its_stagger_then_relays(self):
