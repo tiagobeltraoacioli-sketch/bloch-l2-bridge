@@ -256,10 +256,11 @@ python3 tools/deploy-pontes/key_inventory.py check --inventory deployments/mainn
 python3 tools/deploy-pontes/vault_pontes.py validate --config deployments/mainnet/busdc-vault-mainnet.config.json --token-config deployments/mainnet/busdc-mainnet.config.json
 ```
 ```
-grep -i -c -E '703a12b45fa1|a64b47b03d5f' deployments/mainnet/busdc-mainnet.config.json deployments/mainnet/busdc-vault-mainnet.config.json
+python3 tools/deploy-pontes/legacy_digests.py scan deployments/mainnet/busdc-mainnet.config.json deployments/mainnet/busdc-vault-mainnet.config.json
 ```
 
-The first must print `"decision": "ok"` with `"signaturesChecked": true`. The third must print `0` for both files.
+The first must print `"decision": "ok"` with `"signaturesChecked": true`. The third must end with
+`0 of 2 file(s) hold a refused address` (all 22 retired addresses are checked, by digest).
 Then continue with `BUSDC-MAINNET-V2.md` 4.1 (`deploy_pontes.py validate` needs the vault fields from 4.4 too).
 
 What `key_inventory.py check` refuses: a role count outside policy (7, 7, 3, 3, 1, 1, at least 1 relayer key per

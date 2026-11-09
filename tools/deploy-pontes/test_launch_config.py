@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -74,6 +75,21 @@ class LaunchConfig(unittest.TestCase):
         with mock.patch.dict(os.environ, {'BLOCH_BRIDGE_REFUSE_SHA256': 'not-a-digest'}):
             with self.assertRaises(ValueError):
                 ld.is_legacy(a)
+
+    def test_scan_names_the_file_and_not_the_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad, good = Path(tmp) / 'bad.json', Path(tmp) / 'good.json'
+            bad.write_text(json.dumps({'signer': '0x' + STAND_INS[0][2:].upper(), 'other': fresh(5)}))
+            good.write_text(json.dumps({'signer': fresh(6)}))
+            self.assertEqual(ld.scan([bad, good]), {str(bad): [STAND_INS[0]]})
+            done = subprocess.run([sys.executable, str(HERE / 'legacy_digests.py'), 'scan', str(bad), str(good)],
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn('1 of 2 file(s)', done.stdout)
+            self.assertNotIn(STAND_INS[0][10:], done.stdout)
+            done = subprocess.run([sys.executable, str(HERE / 'legacy_digests.py'), 'scan', str(good)],
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0)
 
     def test_no_committed_address_is_left_in_the_mainnet_configs(self):
         for f in (TOKEN_CFG, VAULT_CFG, WGNB_CFG):

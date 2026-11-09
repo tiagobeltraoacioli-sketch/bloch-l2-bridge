@@ -9,10 +9,14 @@ The list stores sha256(lowercase 0x-prefixed address) and not the addresses (own
 
 BLOCH_BRIDGE_REFUSE_SHA256 (comma-separated sha256 hex digests) adds entries to the list for one process. It can only
 add refusals, never remove one; the rehearsals use it with a throwaway address.
+
+  legacy_digests.py scan FILE...     exit 0 if no file holds a refused address, exit 1 and the file names otherwise
+                                     (the addresses found are printed cut to their first 6 hex characters).
 """
 import hashlib
 import os
 import re
+import sys
 
 LEGACY_ADDRESS_SHA256 = frozenset((
     '013d65f84ad91c53e02432ff0df9a5201b969e6746f121fb33d446ac3db1b1ef',
@@ -61,3 +65,24 @@ def legacy_among(addresses):
     """The refused addresses among `addresses`, lowercased and sorted."""
     digests = refused_digests()
     return sorted({str(a).lower() for a in addresses if address_digest(a) in digests})
+
+
+def scan(paths):
+    """{path: count} of refused addresses found in each file."""
+    found = {}
+    for path in paths:
+        with open(path, errors='replace') as f:
+            hits = legacy_among(set(re.findall(r'0x[0-9a-fA-F]{40}', f.read())))
+        if hits:
+            found[str(path)] = hits
+    return found
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3 or sys.argv[1] != 'scan':
+        raise SystemExit(__doc__)
+    result = scan(sys.argv[2:])
+    for name, hits in result.items():
+        print(f'{name}: {len(hits)} refused address(es): ' + ', '.join(a[:8] + '...' for a in hits))
+    print(f'{len(result)} of {len(sys.argv) - 2} file(s) hold a refused address')
+    raise SystemExit(1 if result else 0)
