@@ -580,23 +580,29 @@ contract R306HeldStateSettlementTest {
     }
 
     /// Review F4: the code-hash pin covers the burn verifier's code, not its storage. A RecoverableReleaseVerifier with a
-    /// successor proposed (or active) is refused at deployment and at every registration; one for another token is
-    /// refused at deployment.
-    function test_EVIDENCE_aBurnVerifierWithASuccessorProposedIsRefused() public {
+    /// successor proposed or active is refused at deployment. At registration a pending proposal changes nothing (its
+    /// authority must not be able to freeze claims by proposing); an ACTIVE successor stops burn claims.
+    function test_EVIDENCE_aBurnVerifierWithAnActiveSuccessorIsRefused() public {
         Incident memory x = incident();
         R lc = new R(rcfg());
         H.Config memory c = config(x);
         c.burnVerifier = address(lc);
         c.attestThreshold = 0;
         H h = new H(c);
+        bytes memory heldProof = lcProof(lc, x.held);
+        bytes memory cleanProof = lcProof(lc, x.clean);
         AcceptAll hostile = new AcceptAll();
         vm.prank(AUTHORITY);
         lc.proposeSuccessor(address(hostile));
         require(lc.proposedSuccessor() == address(hostile), "proposed");
         require(!tryDeploy(c), "deployment refuses a verifier with a proposal pending");
         switchVault(address(h));
-        (bool ok, bytes4 err) = tryRegister(h, x.held, lcProof(lc, x.held));
-        require(!ok && err == H.BurnVerifierChanged.selector, "registration stops while a successor is proposed or active");
+        h.registerBurn(x.held, heldProof);
+        lc.activateSuccessor();
+        require(lc.successor() == address(hostile), "active");
+        (bool ok, bytes4 err) = tryRegister(h, x.clean, cleanProof);
+        require(!ok && err == H.BurnVerifierChanged.selector, "an active successor stops burn claims");
+        require(claimDeposit(h, x.carol) == net(x.carol.net), "displaced deposits need no burn evidence and still pay");
         R.Config memory other = rcfg();
         other.l2Token = address(0xBEEF);
         c.burnVerifier = address(new R(other));

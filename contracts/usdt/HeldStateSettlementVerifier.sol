@@ -18,7 +18,10 @@ import {IProvenanceReleaseVerifier, ProvenanceSourceVault} from "./ProvenanceSou
 ///            released). Paid in full, unchanged, from `fullBudget`.
 ///         2. Displaced deposits: real deposits whose L2 slot a forged credit took (`displacedNonces`, at most
 ///            `MAX_DISPLACED`). The token credits in slot order and a slot credits once, so such a deposit can never be
-///            minted; its sender holds no bUSDC and the vault's own records identify it. Paid in full (the net deposit) to
+///            minted; its sender holds no bUSDC and the vault's own records identify it. NOTHING ON-CHAIN CHECKS THAT A
+///            LISTED NONCE IS DISPLACED (this contract cannot read the L2): the snapshot must show, at finalized L2
+///            state, `mintCount > nonce` and a credited mint in that slot that is not the vault's deposit. A listed
+///            nonce that is uncredited or honestly credited would be paid twice. Paid in full (the net deposit) to
 ///            the depositor's Ethereum address, from `fullBudget`. A deposit whose slot the token has NOT yet credited is
 ///            not in this class: it can still be minted on the L2 (by the committee, or by proof, by anyone), so a refund
 ///            here would pay it twice (agent 306's review, F1 and F2). Its mint is counted in `heldSupply` and it exits
@@ -241,9 +244,11 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
         if (vault.releasedNonce(burn.nonce) || vault.releasedBurn(burn.nativeBurn)) revert AlreadyClaimed();
         bytes32 realId = vault.releaseId(burn);
         if (burnVerifier != address(0)) {
-            // The code hash pins the verifier's code, not its storage: a RecoverableReleaseVerifier that was handed off, or
-            // has a successor proposed, no longer proves burns under the pinned program (agent 306's review, F4).
-            if (burnVerifier.codehash != burnVerifierCodehash || _handedOff(burnVerifier)) revert BurnVerifierChanged();
+            // The code hash pins the verifier's code, not its storage: a RecoverableReleaseVerifier with an ACTIVE successor
+            // no longer proves burns under the pinned program (agent 306's review, F4). A proposal alone does not change
+            // what it verifies, so it does not stop registration: otherwise its authority could freeze every claim by
+            // proposing. Once a successor is active, burn claims stop for good (docs/HELD-STATE-SETTLEMENT.md section 6).
+            if (burnVerifier.codehash != burnVerifierCodehash || _hasSuccessor(burnVerifier)) revert BurnVerifierChanged();
             (bool ok, bytes memory data) = burnVerifier.staticcall(
                 abi.encodeCall(IProvenanceReleaseVerifier.verifyRelease, (address(vault), realId, evidence))
             );
@@ -280,11 +285,15 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
 
     // ------------------------------------------------------------------------------------------------ internals
 
-    /// True if `v` reports an active or proposed successor (RecoverableReleaseVerifier). A verifier without these views
-    /// (SP1ReleaseVerifier, which is immutable) is not handed off.
+    /// True if `v` reports an active successor (RecoverableReleaseVerifier). A verifier without the view
+    /// (SP1ReleaseVerifier, which is immutable) has none.
+    function _hasSuccessor(address v) private view returns (bool) {
+        return _nonZeroView(v, abi.encodeWithSignature("successor()"));
+    }
+
+    /// Deployment is stricter: a verifier with a successor active or proposed is refused.
     function _handedOff(address v) private view returns (bool) {
-        return _nonZeroView(v, abi.encodeWithSignature("successor()"))
-            || _nonZeroView(v, abi.encodeWithSignature("proposedSuccessor()"));
+        return _hasSuccessor(v) || _nonZeroView(v, abi.encodeWithSignature("proposedSuccessor()"));
     }
 
     /// False only if `v` reports an `l2Token()` other than `token`.

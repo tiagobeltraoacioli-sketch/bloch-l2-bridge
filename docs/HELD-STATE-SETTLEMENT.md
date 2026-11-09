@@ -117,8 +117,14 @@ rule for any switch), and the committee release path is retired.
 - **A deposit not yet minted needs a working mint path to exit:** the committee keeps minting real deposits until every
   slot is credited, or the token is on proofs. If neither is possible, those depositors cannot claim.
 - **A displaced deposit is refunded net of the deposit fee and of the release fee** (about 0.1% in total).
-- **Light-client mode refuses a burn verifier with a successor active or proposed** (review F4), at deployment and at
-  every registration, and one that names another L2 token. The pin covers code, not storage.
+- **Light-client mode and the burn verifier's successor** (review F4): deployment refuses a verifier with a successor
+  active or proposed, or one that names another L2 token. Registration refuses once a successor is **active** (the pin
+  covers code, not storage); a pending proposal does not stop it, so the authority cannot freeze claims by proposing.
+  If a successor does activate during the wind-down, burn claims stop for good and only displaced deposits and already
+  registered items still pay. Prefer the immutable `SP1ReleaseVerifier`, or committee mode, for a settlement.
+- **Nothing on-chain checks that a listed nonce is displaced.** The contract cannot read the L2. Reviewers of the
+  14-day proposal must check, at finalized L2 state, that `mintCount` is above each listed nonce and that the mint
+  credited in that slot is not the vault's deposit. A wrongly listed nonce is paid twice.
 - **Small settled items can delay a window-sized one** (review F5; the vault's known limit 7): an item equal to the
   release window needs a full bucket, and every smaller payment pushes it back. Large holders burn in parts.
 - **Rounding dust** (below one unit per held claim) stays locked in the vault.
@@ -154,4 +160,5 @@ A separate reviewer read both Phase 2B contracts at `a19b80e` and left six demon
 `codex/bridge-r14-review-20261109` (`f1c96e1`, `solidity-tests/R306VerifierReview.t.sol`; they pass against the flawed
 draft). F1 and F2 (High, a refunded tail deposit minted and claimed again) are fixed by removing the refundable tail;
 F4 (Low) by the successor and token checks on the burn verifier; F5 (Low) is the vault's own bucket behaviour, listed
-above. The fixes are asserted in `R306HeldStateSettlement`. The review has not been repeated on the fixed code.
+above. The fixes are asserted in `R306HeldStateSettlement`. A second, read-only review of the fixes found the first form of the F4 fix too strict (a proposal alone froze
+every burn claim); the paragraph above describes the corrected rule. It confirmed F1, F2, F4 and F6 closed.
