@@ -31,6 +31,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from legacy_digests import is_legacy  # noqa: E402
+
 DOMAIN = 'bloch.bridge.key-inventory.v1'
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
 CAST = str(FOUNDRY / 'cast')
@@ -55,21 +58,9 @@ GUARDIAN_ROLES = ('l2-token-guardian', 'eth-vault-guardian')
 HOT_ROLES = SIGNER_ROLES + GUARDIAN_ROLES + ('l2-relayer-gas', 'eth-relayer-gas')
 COLD_ROLES = ('bloch-inc-safe-owner', 'recovery-authority-owner', 'recovery-authority')
 
-# Committed to deployments/mainnet/*.config.json on 2026-10-14 (commits d3f8a1f, 0315afd). Who holds these keys is not
-# recorded, and they were generated in one place, so a threshold over them means nothing. Never reuse them by default.
-LEGACY = {a.lower() for a in (
-    '0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b', '0xa64b47b03d5F1a7a961fE98597c01E471D4b504A',
-    '0xa981e9A6fbb32626c6dd56b167860BCc7496E441', '0x181d1331163F9486C8153B38d7C4A43F18CEfDe9',
-    '0x5bDB78421B38494040fcb504F79c99CD411Ea3a0', '0x91EC58A2aCf42Ac2FF1B592D8fD37033C2Bdc82D',
-    '0x494856914ACC0f370A17227A51B830ADbF3A7E60', '0x811f46cc76c71f045c0291bA4aCf46080322AaE9',
-    '0x3D800a0023b8CA3284b0D13513661F36A96B0A63', '0xDb5Ef90964ED561bF592D88a065e5f61248cc375',
-    '0xC8578A95df5c948a5F09844Bf3A75F7Aa4fCd6e7', '0xB473Fa954CAB70a2132263f8b78FAbF236103c90',
-    '0xb908e883581Ca4beE5061DaFc479B59A1Aa42741', '0x38b887B1f00fA03A7924F222110c1b096e236783',
-    '0x372e8A729B67842E135E517dA9E9A1AE05B48522', '0x35b1d46862D43b454DeB145FFa7B44B8fa46CEA8',
-    '0x39fbD26d0864E710E107d96CF1c97f7697DA9838', '0xc4552D49cA8E94960b43A95e3Df64a22C8d86cCA',
-    '0x80403e894B6D06f18a32040B3D4b80812584D726', '0x399849A60901965C3787172598bD2eEBCb72faad',
-    '0x3F6043Ae9BB695463A67751c8083E329B60BF6e8', '0xdCC271d790FC2a6140B30A962E6d6FEbd0d72F1F',
-)}
+# The 22 addresses committed to deployments/mainnet/*.config.json on 2026-10-14 (commits d3f8a1f, 0315afd): who holds
+# these keys is not recorded, and they were generated in one place, so a threshold over them means nothing. Never reuse
+# them by default. legacy_digests.py holds their sha256 digests, not the addresses (agent 235).
 
 
 class Refused(Exception):
@@ -117,7 +108,7 @@ def check(inv, token_cfg=None, vault_cfg=None, allow_legacy=(), skip_signatures=
         a = addr.lower()
         refuse(a not in seen, f'{a} holds two roles ({seen.get(a)} and {role}): one key, one role')
         seen[a] = role
-        refuse(a not in LEGACY or a in allow,
+        refuse(not is_legacy(a) or a in allow,
                f'{a} ({role}) is a committed 2026-10-14 address; replace it, or name it with --allow-legacy-address '
                'only after its operator confirms generating and holding it')
         refuse(k['custody'] in ROLES[role][2], f'{a}: custody {k["custody"]} not allowed for {role} {sorted(ROLES[role][2])}')

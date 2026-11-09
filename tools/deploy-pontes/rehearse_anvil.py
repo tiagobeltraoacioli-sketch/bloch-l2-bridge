@@ -20,6 +20,7 @@
 Prints PASS/FAIL per check and exits 1 on any failure.
 """
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -421,8 +422,12 @@ def main():
                 needle='Ethereum vault guardians')
         refused('[policy] mainnet unpause/switch quorum 5 of 7 refused (owner decision: 6 of 7)',
                 lambda c: c['mintSwitch'].update(threshold=5), needle='6 of 7')
-        refused('[policy] a committed 2026-10-14 deployer (0x703a...) refused',
-                lambda c: c['deployer'].update(address='0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b'), needle='2026-10-14')
+        # The refusal list holds digests only (legacy_digests.py): a throwaway address stands in for a retired one.
+        retired = '0x' + 'e4' * 20
+        os.environ['BLOCH_BRIDGE_REFUSE_SHA256'] = hashlib.sha256(retired.encode()).hexdigest()
+        refused('[policy] an address on the 2026-10-14 refusal list as deployer refused',
+                lambda c: c['deployer'].update(address=retired), needle='2026-10-14')
+        del os.environ['BLOCH_BRIDGE_REFUSE_SHA256']
         refused('[policy] T > 0 refused (owner decision: T = 0)',
                 lambda c: c['limits'].update(largeMintThreshold=100 * 10**6), needle='largeMintThreshold must be 0')
         refused('[policy] unsorted vault guardians refused',

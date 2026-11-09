@@ -8,8 +8,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import key_inventory as ki
+from launch_fixture import private_retired, stand_in_retired
 
 ROLES = [('l2-mint-signer', 7, 'hot-keystore', 'signer-op'), ('eth-release-signer', 7, 'hot-keystore', 'signer-op'),
          ('l2-token-guardian', 3, 'hot-keystore', 'guard-op'), ('eth-vault-guardian', 3, 'hot-keystore', 'guard-op'),
@@ -69,11 +71,14 @@ class Offline(unittest.TestCase):
         self.assertIn('role=l2-mint-signer index=3 operator=op3 address=0x' + 'ab' * 20 + ' date=2026-11-02', m)
 
     def test_legacy(self):
-        inv = copy.deepcopy(self.inv)
-        self.role(inv, 'l2-token-deployer')[0]['address'] = '0x703a12b45fa13892ED8D03995218b2ea9D7f0F3b'
-        self.refused('committed 2026-10-14', inv=inv, tok=configs(inv)[0], vau=configs(inv)[1])
-        tok, vau = configs(inv)
-        self.assertEqual(self.ok(inv=inv, tok=tok, vau=vau, allow=['0x703a12b45fa13892ed8d03995218b2ea9d7f0f3b'])['decision'], 'ok')
+        samples = private_retired()[:2] + stand_in_retired(1)[0]
+        with mock.patch.dict(os.environ, {'BLOCH_BRIDGE_REFUSE_SHA256': stand_in_retired(1)[1]}):
+            for a in samples:
+                inv = copy.deepcopy(self.inv)
+                self.role(inv, 'l2-token-deployer')[0]['address'] = '0x' + a[2:].upper()
+                self.refused('committed 2026-10-14', inv=inv, tok=configs(inv)[0], vau=configs(inv)[1])
+                tok, vau = configs(inv)
+                self.assertEqual(self.ok(inv=inv, tok=tok, vau=vau, allow=[a])['decision'], 'ok')
 
     def test_reuse_across_roles(self):
         inv = copy.deepcopy(self.inv)

@@ -6,7 +6,9 @@ busdc-vault-mainnet.config.json, with vault guardians that match the token confi
 """
 import copy
 import json
+import os
 from pathlib import Path
+import re
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -51,3 +53,25 @@ def rehearsal(cfg):
     cfg = copy.deepcopy(cfg)
     cfg['network'].update(name='bloch-l2-local-rehearsal', chainId=31337, rehearsal=True)
     return cfg
+
+
+def private_retired():
+    """The 22 retired addresses from the private list, or [] where it is absent. The list is never committed: the tools
+    hold sha256 digests only (legacy_digests.py). BLOCH_RETIRED_ADDRESSES_FILE names a file of addresses; the default
+    is the `[retired-address]` section of the private publish denylist (BLOCH_PUBLISH_DENYLIST or its default path)."""
+    named = os.environ.get('BLOCH_RETIRED_ADDRESSES_FILE')
+    path = Path(named or os.environ.get('BLOCH_PUBLISH_DENYLIST') or Path.home() / '.config/bloch-publish-safety/denylist.conf')
+    if not path.is_file():
+        return []
+    text = path.read_text()
+    if not named:
+        m = re.search(r'^\[retired-address\]\n(.*?)(?=^\[|\Z)', text, re.M | re.S)
+        text = m.group(1) if m else ''
+    return sorted({a.lower() for a in re.findall(r'0x[0-9a-fA-F]{40}', text)})
+
+
+def stand_in_retired(n=3):
+    """Throwaway addresses and the BLOCH_BRIDGE_REFUSE_SHA256 value that makes the tools refuse them like a retired one."""
+    import legacy_digests
+    addrs = [fresh(0x900 + i) for i in range(n)]
+    return addrs, ','.join(legacy_digests.address_digest(a) for a in addrs)

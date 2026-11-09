@@ -41,7 +41,8 @@ USDC_MAINNET = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 ETH_MAINNET, REHEARSAL_CHAIN = 1, 31337
 POLICY_SIGNERS, POLICY_THRESHOLD = 7, 5
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deploy_pontes import LEGACY_ADDRESSES, POLICY_GUARDIANS, POLICY_SWITCH_THRESHOLD  # noqa: E402
+from deploy_pontes import POLICY_GUARDIANS, POLICY_SWITCH_THRESHOLD  # noqa: E402
+from legacy_digests import legacy_among  # noqa: E402
 MAX_SIGNERS, MAX_GUARDIANS = 16, 7
 MIN_SWITCH_DELAY = 7 * 86400
 MIN_PAUSE, MAX_PAUSE = 3600, 14 * 86400
@@ -202,7 +203,7 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_addr(dep['fundedBy']['safe']), 'deployer.fundedBy.safe is undecided (Bloch Inc Safe address)')
     refuse(dep['fundedBy']['safe'].lower() not in signers + guardians + [dep['address'].lower()],
            'the Safe must hold no role and must not be the deployer')
-    legacy = sorted(LEGACY_ADDRESSES & set(signers + guardians + [dep['address'].lower(), dep['fundedBy']['safe'].lower()]))
+    legacy = legacy_among(signers + guardians + [dep['address'], dep['fundedBy']['safe']])
     refuse(not legacy, f'committed 2026-10-14 address(es) with no recorded holder: {legacy}; use fresh keys '
                        '(docs/BRIDGE-V3-KEY-CEREMONY.md)')
     if provenance and v['provenance']['fees']['recipient'] is not None:
