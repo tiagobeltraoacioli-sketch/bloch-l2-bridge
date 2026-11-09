@@ -1,0 +1,11 @@
+# Phase 3c: bloch-sis-pow December candidate (agent 219), forced-inclusion queue and the L1 crossing fee
+forced crates/bloch-pos-committee/src/transition/l2_forced.rs
+forced-host crates/bloch-pos-committee/src/l2_settlement.rs
+forced-host crates/bloch-pos-committee/src/hard_forks.rs
+forced-host crates/bloch-pos-committee/src/params.rs
+forced-host crates/bloch-pos-committee/src/transition.rs
+forced-host crates/bloch-pos-committee/src/transition/local_cache.rs
+forced-host crates/bloch-pos-committee/src/wire_alloc.rs
+revenue crates/bloch-pos-committee/src/l2_revenue.rs
+revenue-host crates/bloch-pos-committee/src/transition/l2_claim.rs
+revenue-host crates/bloch-pos-committee/src/transition/l2_deposit.rs

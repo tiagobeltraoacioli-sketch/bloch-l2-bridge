@@ -1,0 +1,14 @@
+forced	307	245	218	34c72a4904cf078f2383cc22e9b34394031b9fae3f6a157516d9fcf943f5fe8b	crates/bloch-pos-committee/src/transition/l2_forced.rs
+forced-host	3125	1148	1075	e1a274141075a15a9cc4b4ccf5c13009eec8f3085d88598d8f1a2cbfe278f17c	crates/bloch-pos-committee/src/l2_settlement.rs
+forced-host	679	249	140	e25b7ae8205e32fd59e6e90a3cb984be1ce18de46204f393d4edb942e447a981	crates/bloch-pos-committee/src/hard_forks.rs
+forced-host	3698	23	23	d98f7ab69b96c28c5dfbd4fa878ec0bc7b5a115ab1752c9164f58fa0a4eab5b4	crates/bloch-pos-committee/src/params.rs
+forced-host	18787	3386	2777	7f76a51b5804945dea5543fe91bb72ef3aff37358aba549f897765c69108412c	crates/bloch-pos-committee/src/transition.rs
+forced-host	502	450	440	936c7cb1e77184ddd924afe724f9af09397d5a0e3a60a4970ad7689f8814817c	crates/bloch-pos-committee/src/transition/local_cache.rs
+forced-host	320	130	67	479f05d1d27c60a21a6d9e891c173a5b56f0a52f4b5af77111e83542adef7692	crates/bloch-pos-committee/src/wire_alloc.rs
+revenue	182	43	43	4478f54cd734881ab3cf6f935efe714b64d55a2af0a18905df592ae5eece9f1c	crates/bloch-pos-committee/src/l2_revenue.rs
+revenue-host	571	427	384	f6484e6e1417b88efe0c02d25ac47252027e6a1edf8534267e4fc9abc6120315	crates/bloch-pos-committee/src/transition/l2_claim.rs
+revenue-host	267	222	197	4e5ae763383a3adefd1ad2df9603b7047c50e8cceb9775e251b47ae1a9dc79f3	crates/bloch-pos-committee/src/transition/l2_deposit.rs
+# total forced	307	245	218
+# total forced-host	27111	5386	4522
+# total revenue	182	43	43
+# total revenue-host	838	649	581
