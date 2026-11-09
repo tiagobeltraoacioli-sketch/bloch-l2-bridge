@@ -1,7 +1,7 @@
 # Light-client mint verifier (`EthereumMintVerifier`)
 
 Status: **UNAUDITED, not deployed.** Audit Phase 2B. Contract `contracts/stable/EthereumMintVerifier.sol`, tests
-`solidity-tests/A276MintVerifier.t.sol` (26). Written by agent 276 (round 12, uncommitted) and finished by agent 306.
+`solidity-tests/A276MintVerifier.t.sol` (28). Written by agent 276 (round 12, uncommitted) and finished by agent 306.
 
 The SP1 program this contract verifies (section 4) **does not exist yet**. Until it exists, is reproduced on two hosts
 and is audited, the token's mint switch has no target and the vault's light-client switch stays NO-GO
@@ -163,9 +163,12 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 
 ## 9. Tests
 
-`forge test --match-contract A276MintVerifier`: 26 tests on the mainnet-shaped pair with mock SP1 (the test builds the
+`forge test --match-contract A276MintVerifier`: 28 tests on the mainnet-shaped pair with mock SP1 (the test builds the
 public values from the vault's real `Deposited` log): honest mint, forged claim, tampered words (fuzz), duplicate,
 wrong vault, wrong chain or anchor, wrong token, stale and future finality, token-first order, queue drain, guardian
 pause, handoff, the token's code-hash pin, gas.
+
+Mutation spot-check (round 14): 13 single-line mutants of the contract all fail the suite; the fuzz test passes at
+20,000 runs.
 
 Not done: the SP1 program; a real proof; a `verifier_review.py` mode for a mint-verifier proposal.

@@ -482,6 +482,28 @@ contract A276MintVerifierTest {
         require(!ok2 && err == EMV.PublicValuesMismatch.selector, "zero block hash");
     }
 
+    /// The deposit id's top 8 bytes are its nonce: public values that disagree are refused as malformed, before the mint
+    /// hash is compared.
+    function test_FORGED_theIdPrefixMustBeTheNonce() public {
+        EMV mv = newVerifier();
+        Dep memory d = deposit(uint64(1000 * U), ALICE);
+        bytes32[13] memory w = words(pvFor(mv, d, freshSlot()));
+        w[6] = bytes32(uint256(d.nonce) + 1);
+        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "nonce word against the id prefix");
+    }
+
+    /// A finalized slot at the anchor is refused even when it is inside the age window (an anchor one hour old).
+    function test_STALE_aSlotAtTheAnchorIsRefusedInsideTheAgeWindow() public {
+        anchorSlot = slotAt(block.timestamp - 1 hours);
+        EMV mv = newVerifier();
+        Dep memory d = deposit(uint64(1000 * U), ALICE);
+        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot)));
+        require(!ok && err == EMV.StaleProof.selector, "at the anchor");
+        (ok,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot + 1)));
+        require(ok, "the first slot after the anchor passes");
+    }
+
     // ---------------------------------------------------------------- duplicate
 
     function test_DUPLICATE_eachDepositMintsOnce() public {
