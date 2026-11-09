@@ -142,6 +142,9 @@ rule for any switch), and the committee release path is retired.
 switch 6 of 7 and 14 d, T = 0, window 10,000 a day, fee 5/5 bps, 3 vault guardians). Gas: `registerBurn` with 6
 attestations under 250,000; `releaseWithProof` of a settled item under 200,000 (`test_GAS_registerAndRelease`).
 
+Mutation spot-check (round 14): 10 single-line mutants of the contract (each guard or budget rule removed or
+inverted) all fail the suite. The fuzz test passes at 20,000 runs.
+
 Not done: a run with real signer daemons, an operator tool that computes the snapshot, and a `verifier_review.py` mode
 for a settlement proposal (the existing `proposal` mode refuses any held state by design).
 

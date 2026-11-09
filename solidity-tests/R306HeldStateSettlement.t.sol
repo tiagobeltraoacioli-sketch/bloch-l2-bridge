@@ -618,6 +618,12 @@ contract R306HeldStateSettlementTest {
         );
         h.registerBurn(fake, "");
         require(h.sharedUsed() == x.sharedBudget && h.fullUsed() == 0, "the whole shared budget, and only it");
+        // a second claim under the same burn nonce (another burn id) is refused before any budget is touched: the
+        // vault would refuse its payment (`releasedNonce`), so it must not be charged
+        fake.nativeBurn = keccak256("same nonce, another burn id");
+        fake.amount = uint64(1 * U);
+        (bool dup, bytes4 dupErr) = tryRegister(h, fake, "");
+        require(!dup && dupErr == H.AlreadyClaimed.selector, "one claim per burn nonce");
         fake.nonce = 1001;
         fake.nativeBurn = keccak256("invented burn 2");
         fake.amount = uint64(1 * U);
