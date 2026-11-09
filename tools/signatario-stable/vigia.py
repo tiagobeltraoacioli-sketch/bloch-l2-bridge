@@ -179,6 +179,8 @@ class Vigia:
     # Defaults for the round 11 state (agent 241), also for objects built without __init__ (test models).
     replace_after, role, backup_index, backup_step = 300, None, None, {'l2': 1200, 'eth': 300}
     scan_dir, scan_full_every, mode, _finished = None, 86400, 'sign', None
+    # Round 13 state, for the same objects: without a config the token's version is probed, never assumed.
+    provenance, _version = False, None
 
     def __init__(self, cfg_path):
         self.cfg_path = Path(cfg_path)
