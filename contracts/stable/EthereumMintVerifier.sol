@@ -148,6 +148,9 @@ contract EthereumMintVerifier is IMintVerifier {
                 || c.anchorBlockRoot == 0 || c.anchorSyncCommitteeRoot == 0 || c.secondsPerSlot == 0
                 || c.maxProofAge < MIN_PROOF_AGE || c.maxProofAge > MAX_PROOF_AGE
                 || uint256(c.anchorSlot) * c.secondsPerSlot + c.beaconGenesisTime > type(uint64).max
+                // The clock must be usable: a zero genesis or an anchor in the future deploys a verifier that refuses
+                // every honest proof, behind a one-way switch (agent 306's review, F6).
+                || c.beaconGenesisTime == 0 || uint256(c.anchorSlot) * c.secondsPerSlot + c.beaconGenesisTime > block.timestamp
                 || (c.handoffAuthority == address(0)) != (c.handoffDelay == 0)
                 || (c.handoffDelay != 0 && c.handoffDelay < MIN_HANDOFF_DELAY)
                 || c.handoffAuthority == c.l2Token || c.handoffAuthority == address(this)

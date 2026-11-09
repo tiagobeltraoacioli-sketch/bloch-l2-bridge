@@ -1,7 +1,7 @@
 # Light-client mint verifier (`EthereumMintVerifier`)
 
 Status: **UNAUDITED, not deployed.** Audit Phase 2B. Contract `contracts/stable/EthereumMintVerifier.sol`, tests
-`solidity-tests/A276MintVerifier.t.sol` (25). Written by agent 276 (round 12, uncommitted) and finished by agent 306.
+`solidity-tests/A276MintVerifier.t.sol` (26). Written by agent 276 (round 12, uncommitted) and finished by agent 306.
 
 The SP1 program this contract verifies (section 4) **does not exist yet**. Until it exists, is reproduced on two hosts
 and is audited, the token's mint switch has no target and the vault's light-client switch stays NO-GO
@@ -95,6 +95,22 @@ Build and review requirements, as for the release guest: reproducible container 
 vkey equal), execute-only runs with cycle counts for the honest case and each refusal, fixtures made with locally
 generated BLS keys, then one real Groth16 proof verified on anvil through this contract.
 
+### 4.1 Open design question before the program is written (review F3, Medium)
+
+The contract is stateless: every proof restarts from the one deployment checkpoint, and the public values carry no
+sync-committee period, committee root or link to an earlier accepted proof. Two consequences follow (inferred; no
+program exists to measure):
+
+- Soundness rests on every sync committee since the anchor: two thirds of any one past committee, whose keys cannot be
+  slashed, could sign a forged branch, and `maxProofAge` does not bound that because a forged branch can name any slot.
+- The proving cost grows with each period since the anchor (about 27 hours each), and with the handoff off the anchor
+  can never advance.
+
+The remedy changes the ABI: commit the period and the committee root in the public values and keep the latest accepted
+checkpoint on-chain (advanced by proofs, never by signatures), so that a proof starts from a recent stored committee.
+**Decide this before the program is written; the 13-word layout of section 3 is therefore a draft, not a pin.** The
+constructor already refuses a zero beacon genesis time and an anchor in the future (review F6).
+
 ## 5. Handoff (optional)
 
 With `handoffAuthority` zero the verifier is immutable. Its mint path then ends at the first Ethereum fork that changes
@@ -147,7 +163,7 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 
 ## 9. Tests
 
-`forge test --match-contract A276MintVerifier`: 25 tests on the mainnet-shaped pair with mock SP1 (the test builds the
+`forge test --match-contract A276MintVerifier`: 26 tests on the mainnet-shaped pair with mock SP1 (the test builds the
 public values from the vault's real `Deposited` log): honest mint, forged claim, tampered words (fuzz), duplicate,
 wrong vault, wrong chain or anchor, wrong token, stale and future finality, token-first order, queue drain, guardian
 pause, handoff, the token's code-hash pin, gas.

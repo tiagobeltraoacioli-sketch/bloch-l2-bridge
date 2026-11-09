@@ -315,6 +315,21 @@ contract A276MintVerifierTest {
         require(mv.PUBLIC_VALUES_LEN() == 416, "13 words");
     }
 
+    /// Review F6: a clock that would refuse every honest proof does not deploy.
+    function test_CONFIG_refusesAnUnusableClock() public {
+        EMV.Config memory c = cfg(address(0), 0);
+        c.beaconGenesisTime = 0;
+        try new EMV(c) {
+            revert("zero beacon genesis deployed");
+        } catch {}
+        c = cfg(address(0), 0);
+        c.anchorSlot = slotAt(block.timestamp + 1 days);
+        try new EMV(c) {
+            revert("an anchor in the future deployed");
+        } catch {}
+        new EMV(cfg(address(0), 0));
+    }
+
     function test_CONFIG_refusesAnotherTokensVaultRouteOrChain() public {
         EMV.Config memory c = cfg(address(0), 0);
         c.vault = address(0xDEAD);

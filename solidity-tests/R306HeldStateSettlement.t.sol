@@ -31,7 +31,8 @@ interface R306Vm {
 ///   Alice burns 100 (CLEAN: before the forgery, not yet released).
 ///   slot 2  Carol deposits 2,000; 5 mint keys credit a forged 500 for Mallory into her slot (DISPLACED).
 ///   slot 3  Dave deposits 1,000, minted after the forgery (real tokens, but every later burn is HELD).
-///   slot 4  Erin deposits 1,500, never minted (the UNMINTED tail: the token stopped at mintCount 4).
+///   slot 4  Erin deposits 1,500; her mint is queued, not yet credited (the token stopped at mintCount 4). She is NOT
+///           refundable: her mint can still credit, so it is counted in the held supply and she exits as a held burn.
 ///   Alice burns 300 after the forgery (HELD). Deposits are closed by 5 of 7.
 contract R306HeldStateSettlementTest {
     R306Vm constant vm = R306Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
@@ -71,6 +72,7 @@ contract R306HeldStateSettlementTest {
         ProvenanceSourceVault.Release held;
         Dep carol;
         Dep erin;
+        bytes32 erinMint;
         uint64 fullBudget;
         uint64 sharedBudget;
         uint64 heldSupply;
@@ -195,13 +197,14 @@ contract R306HeldStateSettlementTest {
         token.executeMint(forged);
         depositAndMint(DAVE, uint64(1000 * U));
         x.erin = deposit(ERIN, uint64(1500 * U));
+        x.erinMint = queueMint(x.erin);
         x.held = burn(ALICE, uint64(300 * U));
         setControls(false, true);
         require(token.mintCount() == 4 && vault.depositCount() == 5, "the token stopped before Erin's slot");
         // The snapshot arithmetic of docs/HELD-STATE-SETTLEMENT.md, from public chain data only.
-        x.fullBudget = x.clean.amount + x.carol.net + x.erin.net;
+        x.fullBudget = x.clean.amount + x.carol.net;
         x.sharedBudget = vault.totalLocked() - x.fullBudget;
-        x.heldSupply = uint64(token.totalSupply()) + x.held.amount;
+        x.heldSupply = uint64(token.totalSupply()) + x.held.amount + x.erin.net; // credited + burned-held + queued
         require(x.heldSupply == x.sharedBudget + FORGED, "the shortfall is exactly the forged supply");
     }
 
@@ -209,8 +212,7 @@ contract R306HeldStateSettlementTest {
         uint64[] memory displaced = new uint64[](1);
         displaced[0] = x.carol.nonce;
         c = H.Config(
-            vault, address(token), vault.depositCount(), x.fullBudget, x.sharedBudget, x.heldSupply, x.erin.nonce,
-            displaced, address(0), 6
+            vault, address(token), vault.depositCount(), x.fullBudget, x.sharedBudget, x.heldSupply, displaced, address(0), 6
         );
     }
 
@@ -313,11 +315,8 @@ contract R306HeldStateSettlementTest {
         c.heldSupply = 0;
         require(!tryDeploy(c), "no held supply");
         c = config(x);
-        c.unmintedFrom = c.snapshotDepositCount + 1;
-        require(!tryDeploy(c), "tail beyond the snapshot");
-        c = config(x);
-        c.displacedNonces[0] = x.erin.nonce;
-        require(!tryDeploy(c), "a displaced nonce inside the tail");
+        c.displacedNonces[0] = c.snapshotDepositCount;
+        require(!tryDeploy(c), "a displaced nonce past the snapshot");
         c = config(x);
         c.displacedNonces = new uint64[](2);
         c.displacedNonces[0] = 2;
@@ -359,15 +358,21 @@ contract R306HeldStateSettlementTest {
         require(backed(), "backing");
     }
 
-    function test_DISPLACED_theDisplacedAndTheUnmintedTailAreRefunded() public {
+    function test_DISPLACED_theDisplacedDepositIsRefundedAndAQueuedOneIsNot() public {
         Incident memory x = incident();
         H h = settle(x);
         require(claimDeposit(h, x.carol) == net(x.carol.net), "Carol: her net deposit less the release fee");
-        require(claimDeposit(h, x.erin) == net(x.erin.net), "Erin (tail): her net deposit less the release fee");
-        require(h.fullUsed() == x.carol.net + x.erin.net, "full budget");
+        // Erin's slot is not credited yet, but her mint can still credit (review F1, F2): no refund.
+        (bool no, bytes4 why) = tryDisplaced(h, x.erin.nonce, x.erin.sender, x.erin.net, x.erin.pq);
+        require(!no && why == H.InvalidClaim.selector, "a deposit that can still be minted is not refundable");
+        require(h.fullUsed() == x.carol.net, "full budget");
         (bool ok, bytes4 err) = tryDisplaced(h, x.carol.nonce, x.carol.sender, x.carol.net, x.carol.pq);
         require(!ok && err == H.AlreadyClaimed.selector, "once");
-        require(token.balanceOf(CAROL) == 0 && token.balanceOf(ERIN) == 0, "they never held bUSDC");
+        require(token.balanceOf(CAROL) == 0, "Carol never held bUSDC");
+        // Erin exits as a held burn: her mint credits, she burns, and she is paid at the shared rate, once.
+        token.executeMint(x.erinMint);
+        ProvenanceSourceVault.Release memory e = burn(ERIN, x.erin.net);
+        require(claimBurn(h, e) == net(h.heldPayout(x.erin.net)), "Erin at the shared rate");
         require(backed(), "backing");
     }
 
@@ -418,8 +423,9 @@ contract R306HeldStateSettlementTest {
         uint64 lockedBefore = vault.totalLocked();
         claimBurn(h, x.clean);
         claimDeposit(h, x.carol);
-        claimDeposit(h, x.erin);
         claimBurn(h, x.held);
+        token.executeMint(x.erinMint);
+        claimBurn(h, burn(ERIN, x.erin.net));
         ProvenanceSourceVault.Release memory a = burn(ALICE, uint64(token.balanceOf(ALICE)));
         ProvenanceSourceVault.Release memory d = burn(DAVE, uint64(token.balanceOf(DAVE)));
         ProvenanceSourceVault.Release memory m = burn(MALLORY, uint64(token.balanceOf(MALLORY)));
@@ -430,7 +436,7 @@ contract R306HeldStateSettlementTest {
         claimBurn(h, d);
         claimBurn(h, m);
         require(h.fullUsed() == x.fullBudget, "the full budget is exact");
-        require(h.sharedUsed() <= x.sharedBudget && x.sharedBudget - h.sharedUsed() < 4, "shared: dust only, 4 claims");
+        require(h.sharedUsed() <= x.sharedBudget && x.sharedBudget - h.sharedUsed() < 5, "shared: dust only, 5 claims");
         require(vault.totalLocked() == lockedBefore - h.fullUsed() - h.sharedUsed(), "locked");
         require(backed(), "backing");
         uint256 fees = vault.feesAccrued();
@@ -447,22 +453,25 @@ contract R306HeldStateSettlementTest {
     /// is never touched by a held claim, and the vault pays nothing beyond the two budgets.
     function test_BUDGET_supplyCreditedAfterTheSnapshotCannotOverdraw() public {
         Incident memory x = incident();
-        bytes32 late = forge(4, uint64(1000 * U), keccak256("queued before the snapshot"));
+        bytes32 late = forge(5, uint64(1000 * U), keccak256("queued before the snapshot"));
         H h = settle(x);
-        token.executeMint(late);
+        uint256 supplyBefore = token.totalSupply();
+        token.executeMint(x.erinMint); // credits Erin's slot and drains the forged mint queued behind it
+        if (token.totalSupply() == supplyBefore + x.erin.net) token.executeMint(late);
+        require(token.totalSupply() == supplyBefore + x.erin.net + 1000 * U, "the late forgery credited");
         ProvenanceSourceVault.Release memory a = burn(ALICE, uint64(token.balanceOf(ALICE)));
         ProvenanceSourceVault.Release memory d = burn(DAVE, uint64(token.balanceOf(DAVE)));
         ProvenanceSourceVault.Release memory m = burn(MALLORY, uint64(token.balanceOf(MALLORY)));
         claimBurn(h, m);
         claimBurn(h, x.held);
         claimBurn(h, d);
+        claimBurn(h, burn(ERIN, x.erin.net));
         (bool ok, bytes4 err) = tryRegister(h, a, attest(h, a, 6));
         require(!ok && err == H.BudgetExhausted.selector, "the last held claim finds the shared budget used");
         require(h.sharedUsed() <= x.sharedBudget && h.fullUsed() == 0, "bounds");
         claimBurn(h, x.clean);
         claimDeposit(h, x.carol);
-        claimDeposit(h, x.erin);
-        require(h.fullUsed() == x.fullBudget, "clean and unminted claims are still paid in full");
+        require(h.fullUsed() == x.fullBudget, "clean and displaced claims are still paid in full");
         require(backed(), "backing");
     }
 
@@ -570,6 +579,30 @@ contract R306HeldStateSettlementTest {
         require(!ok && err == H.BurnVerifierChanged.selector, "code hash re-checked on every registration");
     }
 
+    /// Review F4: the code-hash pin covers the burn verifier's code, not its storage. A RecoverableReleaseVerifier with a
+    /// successor proposed (or active) is refused at deployment and at every registration; one for another token is
+    /// refused at deployment.
+    function test_EVIDENCE_aBurnVerifierWithASuccessorProposedIsRefused() public {
+        Incident memory x = incident();
+        R lc = new R(rcfg());
+        H.Config memory c = config(x);
+        c.burnVerifier = address(lc);
+        c.attestThreshold = 0;
+        H h = new H(c);
+        AcceptAll hostile = new AcceptAll();
+        vm.prank(AUTHORITY);
+        lc.proposeSuccessor(address(hostile));
+        require(lc.proposedSuccessor() == address(hostile), "proposed");
+        require(!tryDeploy(c), "deployment refuses a verifier with a proposal pending");
+        switchVault(address(h));
+        (bool ok, bytes4 err) = tryRegister(h, x.held, lcProof(lc, x.held));
+        require(!ok && err == H.BurnVerifierChanged.selector, "registration stops while a successor is proposed or active");
+        R.Config memory other = rcfg();
+        other.l2Token = address(0xBEEF);
+        c.burnVerifier = address(new R(other));
+        require(!tryDeploy(c), "a burn verifier for another token");
+    }
+
     /// The worst burn verifier (one that accepts every claim, as an RRV whose authority handed it off to hostile code):
     /// invented burns drain what the budgets allow and nothing more, and an invented "clean" burn cannot be built for
     /// more than the full budget.
@@ -675,7 +708,9 @@ contract R306HeldStateSettlementTest {
         Incident memory x = incident();
         H h = settle(x);
         claimDeposit(h, x.carol);
-        claimDeposit(h, x.erin);
+        claimBurn(h, x.clean);
+        claimBurn(h, x.held);
+        claimBurn(h, burn(DAVE, uint64(token.balanceOf(DAVE))));
         ProvenanceSourceVault.Release memory a = burn(ALICE, uint64(token.balanceOf(ALICE)));
         h.registerBurn(a, attest(h, a, 6));
         (ProvenanceSourceVault.Release memory item,) = h.settledBurn(a);

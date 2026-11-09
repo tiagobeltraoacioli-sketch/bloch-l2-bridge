@@ -1,7 +1,7 @@
 # Held-state settlement (`HeldStateSettlementVerifier`)
 
 Status: **UNAUDITED, not deployed.** Audit Phase 2B. Contract `contracts/usdt/HeldStateSettlementVerifier.sol`,
-tests `solidity-tests/R306HeldStateSettlement.t.sol` (20). Written by agent 278 (round 12 draft) and agent 306.
+tests `solidity-tests/R306HeldStateSettlement.t.sol` (21). Written by agent 278 (round 12 draft) and agent 306.
 
 This is a contingency. It is deployed only after an incident, from that incident's numbers. It is written and audited
 before launch so that it is not improvised afterwards (agent 172, decision 1).
@@ -30,8 +30,14 @@ Three classes. The budgets are fixed in the constructor, from a snapshot taken w
 | Class | Who | Paid | Budget | Evidence |
 |---|---|---|---|---|
 | Clean burn | A burn made before the forged credit and not yet released (its state matches the vault) | In full | `fullBudget` | Evidence of the burn (below) |
-| Unminted deposit | A deposit the token never credited: its slot was taken by the forged credit (`displacedNonces`, at most 16), or the token never reached it (every nonce from `unmintedFrom`) | The net deposit, to the depositor's Ethereum address | `fullBudget` | The vault's own deposit chain (`depositMatches`) |
+| Displaced deposit | A deposit whose L2 slot a forged credit took (`displacedNonces`, at most 16). It can never be minted: the token credits in slot order, once per slot | The net deposit, to the depositor's Ethereum address | `fullBudget` | The vault's own deposit chain (`depositMatches`) |
 | Held burn | Every other burn of the token | `amount * sharedBudget / heldSupply`, rounded down | `sharedBudget` | Evidence of the burn |
+
+**A deposit the token has not credited yet is not refundable.** Its mint can still be queued and credited on the L2
+(by the committee, or by anyone with a proof after the token's switch, and a proof mint cannot be cancelled), so a
+refund here would pay it twice. Its amount is counted in `heldSupply`; the depositor mints, burns and exits as a held
+burn. An earlier draft refunded this tail in full; the independent review showed the double payment (F1, F2: 2,860 USDC
+for a 1,500 USDC deposit) and the class was removed.
 
 Every held burn gets the same rate, whatever its order. The forged supply cannot be told apart from real supply, so
 the shortfall is shared pro rata. The alternative, first come first served, lets whoever exits first take full value and
@@ -49,11 +55,10 @@ mint committee has stopped signing. All amounts are in token units (6 decimals).
 | Value | How to compute it |
 |---|---|
 | `snapshotDepositCount` | `vault.depositCount()`. The constructor refuses any other value |
-| `unmintedFrom` | `token.mintCount()` at the snapshot: the first slot the token never credited |
-| `displacedNonces` | Slots below `unmintedFrom` whose credited mint is not the vault's deposit of that nonce (compare each `Minted` log with `vault.depositMatches`) |
-| `fullBudget` | Sum of the amounts of the clean burns not yet released, plus the sum of the net amounts of the unminted deposits |
+| `displacedNonces` | Slots below `token.mintCount()` whose credited mint is not the vault's deposit of that nonce (compare each `Minted` log with `vault.depositMatches`) |
+| `fullBudget` | Sum of the amounts of the clean burns not yet released, plus the sum of the net amounts of the displaced deposits |
 | `sharedBudget` | `vault.totalLocked() - fullBudget` |
-| `heldSupply` | `token.totalSupply()` plus the amounts of the held burns already made (burned, not released). Add the amount of every mint still queued on the token that the guardians have not cancelled |
+| `heldSupply` | `token.totalSupply()` plus the amounts of the held burns already made (burned, not released). Add the amount of every mint still queued on the token, and the net amount of every real deposit not yet credited (nonces from `token.mintCount()` up to the snapshot): each of them can still become supply |
 
 With these values, `heldSupply - sharedBudget` is the forged supply. The constructor checks `fullBudget + sharedBudget
 <= totalLocked`, the deposit count, that deposits are closed and that the vault has not switched.
@@ -107,9 +112,15 @@ rule for any switch), and the committee release path is retired.
 - **Deposits after the snapshot are outside the settlement.** Five signers can reopen deposits. While deposits are open,
   registration is refused (`DepositsOpen`); approved items still pay. USDC deposited after the snapshot is not in any
   budget and stays locked. Operators keep deposits closed; the frontend refuses a closed vault.
-- **Mints after the snapshot dilute nobody beyond the budgets,** but the last held claims are refused (section 3).
-  Operators cancel every queued mint before the snapshot.
-- **An unminted deposit is refunded net of the deposit fee and of the release fee** (about 0.1% in total).
+- **Supply that appears after the snapshot and is not in `heldSupply`** (a new forged mint) does not raise what the
+  vault pays, but the held claims then become first come, first served and the last are refused (section 3).
+- **A deposit not yet minted needs a working mint path to exit:** the committee keeps minting real deposits until every
+  slot is credited, or the token is on proofs. If neither is possible, those depositors cannot claim.
+- **A displaced deposit is refunded net of the deposit fee and of the release fee** (about 0.1% in total).
+- **Light-client mode refuses a burn verifier with a successor active or proposed** (review F4), at deployment and at
+  every registration, and one that names another L2 token. The pin covers code, not storage.
+- **Small settled items can delay a window-sized one** (review F5; the vault's known limit 7): an item equal to the
+  release window needs a full bucket, and every smaller payment pushes it back. Large holders burn in parts.
 - **Rounding dust** (below one unit per held claim) stays locked in the vault.
 - **Wind-down time:** at least `sharedBudget / windowLimit` days (10 days for a full vault at launch values).
 - No owner, setter, upgrade or self-destruct. Nothing can be changed after deployment; a wrong snapshot needs a new
@@ -119,17 +130,25 @@ rule for any switch), and the committee release path is retired.
 
 - The settled held item: can any registered item be paid for more than `heldPayout`, twice, or to another recipient?
 - `claimedBurn` / `claimedNonce` against the vault's `releasedBurn` / `releasedNonce`, and the synthetic nonce range of
-  unminted deposits (`DISPLACED_NONCE_FLAG`).
-- The class boundary: can a held burn be registered as clean, or an already minted deposit as unminted?
+  displaced deposits (`DISPLACED_NONCE_FLAG`).
+- The class boundary: can a held burn be registered as clean, or a deposit that is, or can still be, minted as displaced?
 - `_checkAttestation`: ordering, malleability (`HALF_ORDER`), signer set read from the vault.
 - The budgets under every order of claims, with supply that appears after the snapshot.
 - The constructor's snapshot checks, and what the 14-day notice lets a reader verify.
 
 ## 8. Tests
 
-`forge test --match-contract R306HeldStateSettlement`: 20 tests on the mainnet-shaped vault and V3 token (5 of 7,
+`forge test --match-contract R306HeldStateSettlement`: 21 tests on the mainnet-shaped vault and V3 token (5 of 7,
 switch 6 of 7 and 14 d, T = 0, window 10,000 a day, fee 5/5 bps, 3 vault guardians). Gas: `registerBurn` with 6
 attestations under 250,000; `releaseWithProof` of a settled item under 200,000 (`test_GAS_registerAndRelease`).
 
 Not done: a run with real signer daemons, an operator tool that computes the snapshot, and a `verifier_review.py` mode
 for a settlement proposal (the existing `proposal` mode refuses any held state by design).
+
+## 9. Independent review (round 14)
+
+A separate reviewer read both Phase 2B contracts at `a19b80e` and left six demonstrations on
+`codex/bridge-r14-review-20261109` (`f1c96e1`, `solidity-tests/R306VerifierReview.t.sol`; they pass against the flawed
+draft). F1 and F2 (High, a refunded tail deposit minted and claimed again) are fixed by removing the refundable tail;
+F4 (Low) by the successor and token checks on the burn verifier; F5 (Low) is the vault's own bucket behaviour, listed
+above. The fixes are asserted in `R306HeldStateSettlement`. The review has not been repeated on the fixed code.

@@ -16,10 +16,13 @@ import {IProvenanceReleaseVerifier, ProvenanceSourceVault} from "./ProvenanceSou
 ///         What it pays, in three classes, each fixed at deployment from a public snapshot taken with deposits closed:
 ///         1. Clean burns: burns whose mint-chain state matches the vault (made before the forged credit and not yet
 ///            released). Paid in full, unchanged, from `fullBudget`.
-///         2. Unminted deposits: real deposits the L2 token never credited. Either a forged credit took their slot
-///            (`displacedNonces`, at most `MAX_DISPLACED`), or they are the tail the token had not reached at the snapshot
-///            (every deposit nonce from `unmintedFrom` on). Their senders hold no bUSDC; the vault's own records identify
-///            them. Paid in full (the net deposit) to the depositor's Ethereum address, from `fullBudget`.
+///         2. Displaced deposits: real deposits whose L2 slot a forged credit took (`displacedNonces`, at most
+///            `MAX_DISPLACED`). The token credits in slot order and a slot credits once, so such a deposit can never be
+///            minted; its sender holds no bUSDC and the vault's own records identify it. Paid in full (the net deposit) to
+///            the depositor's Ethereum address, from `fullBudget`. A deposit whose slot the token has NOT yet credited is
+///            not in this class: it can still be minted on the L2 (by the committee, or by proof, by anyone), so a refund
+///            here would pay it twice (agent 306's review, F1 and F2). Its mint is counted in `heldSupply` and it exits
+///            as a held burn.
 ///         3. Held burns: every other burn of the token. Their bUSDC is fungible with the forged supply, so the shortfall is
 ///            shared pro rata: each is paid `amount * sharedBudget / heldSupply` (rounded down, never above `amount`),
 ///            from `sharedBudget`. The rate is the same for every held burn, whatever its order.
@@ -39,7 +42,7 @@ import {IProvenanceReleaseVerifier, ProvenanceSourceVault} from "./ProvenanceSou
 ///           burn's real release id under a settlement-only domain. These are per-claim signatures during the wind-down,
 ///           as committee releases are today; no checkpoint is ever signed.
 ///
-///         Unminted deposits need no evidence beyond the vault itself: their nonces are fixed here, and the vault's deposit
+///         Displaced deposits need no evidence beyond the vault itself: their nonces are fixed here, and the vault's deposit
 ///         chain proves the sender, the net amount and the L2 recipient.
 ///
 ///         The vault's own rules still apply to every settled item: route, one payment per burn nonce and per burn id,
@@ -52,7 +55,7 @@ import {IProvenanceReleaseVerifier, ProvenanceSourceVault} from "./ProvenanceSou
 ///         have activated this contract and its deposits to be closed (`depositsEnabled == false`).
 /// @dev STATUS: UNAUDITED. Not for deployment before the external audit (Phase 2B of the combined RFP).
 contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
-    /// Synthetic release nonces of unminted deposits: this bit plus the deposit nonce. L2 burn nonces are a counter and
+    /// Synthetic release nonces of displaced deposits: this bit plus the deposit nonce. L2 burn nonces are a counter and
     /// never reach it; `registerBurn` refuses a burn nonce with it set.
     uint64 public constant DISPLACED_NONCE_FLAG = uint64(1) << 63;
     uint256 public constant MAX_DISPLACED = 16;
@@ -80,9 +83,6 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
     uint64 public immutable sharedBudget;
     /// bUSDC that can still be burned into a held claim at the snapshot (see docs/HELD-STATE-SETTLEMENT.md).
     uint64 public immutable heldSupply;
-    /// Deposits with nonce `unmintedFrom` and above (below `snapshotDepositCount`) were never credited on the L2: the
-    /// token's `mintCount` at the snapshot. Equal to `snapshotDepositCount` when the token credited every slot.
-    uint64 public immutable unmintedFrom;
     /// Light-client mode: the burn evidence verifier and its code hash at deployment (zero in committee mode).
     address public immutable burnVerifier;
     bytes32 public immutable burnVerifierCodehash;
@@ -105,7 +105,6 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
         uint64 fullBudget;
         uint64 sharedBudget;
         uint64 heldSupply;
-        uint64 unmintedFrom;
         uint64[] displacedNonces;
         address burnVerifier;
         uint8 attestThreshold;
@@ -139,7 +138,6 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
                 || v.depositCount() != c.snapshotDepositCount || c.heldSupply == 0
                 || uint256(c.fullBudget) + c.sharedBudget > v.totalLocked()
                 || uint256(c.fullBudget) + c.sharedBudget == 0 || c.displacedNonces.length > MAX_DISPLACED
-                || c.unmintedFrom > c.snapshotDepositCount
         ) revert InvalidConfiguration();
         if (c.burnVerifier == address(0)) {
             if (c.attestThreshold < v.switchThreshold() || c.attestThreshold > v.signerCount()) {
@@ -147,14 +145,14 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
             }
         } else if (
             c.attestThreshold != 0 || c.burnVerifier.code.length == 0 || c.burnVerifier == address(v)
-                || c.burnVerifier == address(this)
+                || c.burnVerifier == address(this) || _handedOff(c.burnVerifier) || !_sameToken(c.burnVerifier, c.l2Token)
         ) {
             revert InvalidConfiguration();
         }
         uint64 previous;
         for (uint256 i; i < c.displacedNonces.length; ++i) {
             uint64 n = c.displacedNonces[i];
-            if ((i != 0 && n <= previous) || n >= c.unmintedFrom) revert InvalidConfiguration();
+            if ((i != 0 && n <= previous) || n >= c.snapshotDepositCount) revert InvalidConfiguration();
             previous = n;
             isDisplaced[n] = true;
             displacedNonces.push(n);
@@ -166,7 +164,6 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
         fullBudget = c.fullBudget;
         sharedBudget = c.sharedBudget;
         heldSupply = c.heldSupply;
-        unmintedFrom = c.unmintedFrom;
         burnVerifier = c.burnVerifier;
         burnVerifierCodehash = c.burnVerifier == address(0) ? bytes32(0) : c.burnVerifier.codehash;
         attestThreshold = c.attestThreshold;
@@ -244,7 +241,9 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
         if (vault.releasedNonce(burn.nonce) || vault.releasedBurn(burn.nativeBurn)) revert AlreadyClaimed();
         bytes32 realId = vault.releaseId(burn);
         if (burnVerifier != address(0)) {
-            if (burnVerifier.codehash != burnVerifierCodehash) revert BurnVerifierChanged();
+            // The code hash pins the verifier's code, not its storage: a RecoverableReleaseVerifier that was handed off, or
+            // has a successor proposed, no longer proves burns under the pinned program (agent 306's review, F4).
+            if (burnVerifier.codehash != burnVerifierCodehash || _handedOff(burnVerifier)) revert BurnVerifierChanged();
             (bool ok, bytes memory data) = burnVerifier.staticcall(
                 abi.encodeCall(IProvenanceReleaseVerifier.verifyRelease, (address(vault), realId, evidence))
             );
@@ -258,17 +257,14 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
         settledId = _approve(item, kind, burn.amount);
     }
 
-    /// @notice Registers unminted deposit `depositNonce` (a displaced one, or one of the tail from `unmintedFrom`), stated
-    ///         as its `Deposited` log (sender, net amount, L2 recipient). Paid in full to `sender`.
+    /// @notice Registers displaced deposit `depositNonce`, stated as its `Deposited` log (sender, net amount, L2
+    ///         recipient). Paid in full to `sender`.
     function registerDisplaced(uint64 depositNonce, address sender, uint64 amount, bytes32 pqRecipientHash)
         external
         returns (bytes32 settledId)
     {
         _requireOpen();
-        if (
-            !(isDisplaced[depositNonce] || (depositNonce >= unmintedFrom && depositNonce < snapshotDepositCount))
-                || amount == 0 || sender == address(0)
-        ) revert InvalidClaim();
+        if (!isDisplaced[depositNonce] || amount == 0 || sender == address(0)) revert InvalidClaim();
         bytes32 id = vault.depositId(depositNonce, sender, amount, pqRecipientHash);
         if (!vault.depositMatches(depositNonce, id, amount, address(uint160(uint256(pqRecipientHash))))) {
             revert InvalidClaim();
@@ -283,6 +279,24 @@ contract HeldStateSettlementVerifier is IProvenanceReleaseVerifier {
     }
 
     // ------------------------------------------------------------------------------------------------ internals
+
+    /// True if `v` reports an active or proposed successor (RecoverableReleaseVerifier). A verifier without these views
+    /// (SP1ReleaseVerifier, which is immutable) is not handed off.
+    function _handedOff(address v) private view returns (bool) {
+        return _nonZeroView(v, abi.encodeWithSignature("successor()"))
+            || _nonZeroView(v, abi.encodeWithSignature("proposedSuccessor()"));
+    }
+
+    /// False only if `v` reports an `l2Token()` other than `token`.
+    function _sameToken(address v, address token) private view returns (bool) {
+        (bool ok, bytes memory data) = v.staticcall(abi.encodeWithSignature("l2Token()"));
+        return !ok || data.length != 32 || abi.decode(data, (address)) == token;
+    }
+
+    function _nonZeroView(address v, bytes memory call) private view returns (bool) {
+        (bool ok, bytes memory data) = v.staticcall(call);
+        return ok && data.length == 32 && abi.decode(data, (uint256)) != 0;
+    }
 
     function _requireOpen() private view {
         if (vault.verifier() != address(this)) revert NotActive();
