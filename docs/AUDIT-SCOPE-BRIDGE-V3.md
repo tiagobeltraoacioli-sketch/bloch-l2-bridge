@@ -141,8 +141,8 @@ of the light-client switch named by agents 172 and 239 are audited before they a
 
 | Contract | File (lines) | Chain | Creation keccak (bytes) | Runtime keccak (bytes, immutables zeroed) | Specification | Tests |
 |---|---|---|---|---|---|---|
-| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (368) | L2 700770 | `0xe40b8cb155c9e743903659ab31fa188aca7a18b3bb17ffb27eb3a6e983127f73` (9,866) | `0xbfedc25a5381c14d67d286c5f408aca9f5a5a9a69202afb466be9c9689f8f056` (7,332) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (26) |
-| **HeldStateSettlementVerifier** | `contracts/usdt/HeldStateSettlementVerifier.sol` (347) | Ethereum 1 | `0x5ba5989b7d89cde6eb4a7a07cd44c50149cc6404952c48f6d29c0f6752209dac` (12,795) | `0x2a26d905cea3733ec9d0e85ea731fab5380bae2a82c43c3334930f73484ef409` (9,101) | `docs/HELD-STATE-SETTLEMENT.md` | `R306HeldStateSettlement` (21) |
+| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (368) | L2 700770 | `0xe40b8cb155c9e743903659ab31fa188aca7a18b3bb17ffb27eb3a6e983127f73` (9,866) | `0xbfedc25a5381c14d67d286c5f408aca9f5a5a9a69202afb466be9c9689f8f056` (7,332) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (28) |
+| **HeldStateSettlementVerifier** | `contracts/usdt/HeldStateSettlementVerifier.sol` (356) | Ethereum 1 | `0x9c0e4cc7d7641393dd5b98ba2d9fcf2024dfd29300d53e80fd0b78234cf2fa66` (12,749) | `0xf9d72d599313970c30a0cb0f2623fba97ca8953d9c2c7320aab61594708a0592` (9,043) | `docs/HELD-STATE-SETTLEMENT.md` | `R306HeldStateSettlement` (21) |
 
 - `EthereumMintVerifier` is the `IMintVerifier` the token switches to, once, in place of its mint committee. It checks
   an SP1 proof that the vault emitted `Deposited` in a finalized Ethereum block and binds the proven log to the token's
@@ -159,7 +159,7 @@ The questions for the auditor on each are in its specification (sections 8 and 7
 
 | Component | File (lines, last commit) | Key it holds | Role |
 |---|---|---|---|
-| **vigia** (relayer and signer driver) | `tools/signatario-stable/vigia.py` (1,734, agents 229 and 241, round 13) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`, only when the queued mint matches the finalized deposit, then `drain()`s verified due mints. Parks unbacked burns (`release-held-provenance`). Gas ceilings 50 / 300 gwei; MAX_PENDING room; one relayer per nonce record (flock); chain ids checked against the RPCs. One primary relayer, staggered backups (`relay_role`). Same-nonce replacement of a stuck Ethereum release. Persisted log cursor with rescan on a changed hash; items finished at `finalized` are not read again. Round 13: completion caches are dropped when scan continuity is lost and rebuilt from chain observations bound to canonical read checkpoints; an L2 admission refusal is verified against the retry state; committee mint work stops when the token's verifier state is unavailable |
+| **vigia** (relayer and signer driver) | `tools/signatario-stable/vigia.py` (1,736, agents 229 and 241, round 13) | Relay gas keys only (encrypted keystores; never in argv on chains 700770 and 1) | Reads the 8-field V3 `Burned` log and builds the v2 release tuple. Relays mints in slot order as consecutive nonces, sends candidates for contested slots and executes only at `isCreditHead`, only when the queued mint matches the finalized deposit, then `drain()`s verified due mints. Parks unbacked burns (`release-held-provenance`). Gas ceilings 50 / 300 gwei; MAX_PENDING room; one relayer per nonce record (flock); chain ids checked against the RPCs. One primary relayer, staggered backups (`relay_role`). Same-nonce replacement of a stuck Ethereum release. Persisted log cursor with rescan on a changed hash; items finished at `finalized` are not read again. Round 13: completion caches are dropped when scan continuity is lost and rebuilt from chain observations bound to canonical read checkpoints; an L2 admission refusal is verified against the retry state; committee mint work stops when the token's verifier state is unavailable |
 | **release_submission** (new in round 13) | `tools/signatario-stable/release_submission.py` (374, `6d772b1`..`f281026`) | none (it stores signed transactions, mode 0600) | Journal of signed Ethereum releases: the exact signed transaction is written and fsynced before it is broadcast, locked by chain and signer; a lost reply or an RPC error keeps the reservation and cannot allocate a second nonce for the same burn; a reverted attempt is freed only after its receipt and the finality anchor are read again at canonical finality; a durable nonce high-water mark survives a lost index |
 | **signatario** (Bloch half) | `tools/signatario-stable/signatario.py` (873, `cfc105c`, round 13) | L2 mint key (one of 7) | Mints only after Ethereum `finalized`, recomputing the v2 id. Rebuilds the L2 from L1 before certifying a burn. `remint` and `remint --locked` (R2) are manual. Treats `MintDropped` as a cancel (R1). Round 13: manual mint, remint and locked remint are refused once the token's verifier is active, before any key is read; an ambiguous token-version answer is refused and never cached as V1 |
 | **eth_half** (Ethereum half of signatario) | `tools/signatario-stable/eth_half.py` (406, `9571c09`) | Ethereum release key (one of 7) | Pins the vault code, uses `finalized` only and recomputes the release digest. With `provenance: true` it refuses a burn whose chain the vault deposits do not back |
@@ -354,10 +354,11 @@ It is in scope only for the correctness of what it tells users.
 | R13 admission | round 13 | Low | An L2 admission refusal left the retry state unchecked | `137f08d` | `test_l2_admission_r13` 2 |
 | R13 release journal | round 13 | Medium | A lost RPC reply after a signed Ethereum release could allocate a second nonce for the same burn; an index lost in a crash could reassign a nonce; a reverted attempt was freed on one receipt read | `6d772b1`, `cd68f14`, `5bb9e09`, `f281026`: `release_submission.py` | `test_release_submission_r13` 31, `test_release_paths v3uncertain` |
 | R13 retirement | round 13 | Medium | Manual mint, remint and locked-remint certificates were still signed after the token's committee was retired; an unreadable or ambiguous verifier state was treated as "no verifier" or as a V1 token | `6ed435c`, `a2b7716`, `bb9abe0` | `test_mint_retirement_r13` 10, `test_cli_version_r13` 5, `test_release_paths v3retiredcli` |
+| R14 model | 306 | Info (test) | Since round 13 the guardian suite `test_mint_switch` failed: its relayer model, built without `__init__`, lacked the new `provenance` and version state | Round 14: class defaults in `Vigia` (`9e8d6cc`) | `test_mint_switch` 15 |
 | 235 lists | 235, 306 | Info (publication) | The refusal lists published the 22 retired addresses | Round 14: `legacy_digests.py` holds sha256 digests; refusals unchanged | `test_launch_config` (11; the private-list test runs where the list is present), `test_key_inventory` |
 | R306 review F1, F2 | 306 (independent review) | High (Phase 2B draft) | A deposit of the "unminted tail" was refunded in full and could then still be minted on the L2 and claimed again as a held burn (2,860 USDC for a 1,500 deposit) | Round 14: the refundable tail is removed; only deposits displaced by a forged credit are refunded | `R306HeldStateSettlement` `test_DISPLACED_theDisplacedDepositIsRefundedAndAQueuedOneIsNot`; demonstrations on `codex/bridge-r14-review-20261109` `f1c96e1` |
-| R306 review F3 | 306 (independent review) | Medium (design, open) | `EthereumMintVerifier` is stateless: every proof restarts from the deployment checkpoint, so soundness rests on every past sync committee | **Open**: to decide before the program is written (`docs/LC-MINT-VERIFIER.md` 4.1) | demonstration only |
-| R306 review F4, F6 | 306 (independent review) | Low, Info | The settlement's burn-verifier pin did not cover a handed-off `RecoverableReleaseVerifier`; the mint verifier deployed with an unusable clock | Round 14: successor and token checks; constructor clock check | `test_EVIDENCE_aBurnVerifierWithASuccessorProposedIsRefused`, `test_CONFIG_refusesAnUnusableClock` |
+| R306 review F3 | 306 (independent review) | Medium (design, open) | `EthereumMintVerifier` is stateless: every proof restarts from the deployment checkpoint, so soundness rests on every past sync committee | **Open**: to decide before the program is written (`docs/LC-MINT-VERIFIER.md` 4.1) | `R306VerifierReview` `test_F3_*` (passes while the behaviour exists) |
+| R306 review F4, F6 | 306 (independent review) | Low, Info | The settlement's burn-verifier pin did not cover a handed-off `RecoverableReleaseVerifier`; the mint verifier deployed with an unusable clock | Round 14: successor and token checks; constructor clock check | `test_EVIDENCE_aBurnVerifierWithAnActiveSuccessorIsRefused`, `test_CONFIG_refusesAnUnusableClock` |
 | R306 paid burn | 306 | Medium (Phase 2B draft) | In light-client evidence mode anyone could register every burn the vault had already paid and exhaust the settlement's full-payment budget | Round 14: `registerBurn` refuses a burn with `releasedNonce` or `releasedBurn` set | `R306HeldStateSettlement` `test_BUDGET_aBurnTheVaultAlreadyPaidCannotUseABudget` |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
@@ -421,6 +422,32 @@ These suites run as unittest modules, from their own tool directory:
 - in `tools/reservas`: `python3 -m unittest test_reservas_alerts`;
 - in `tools/guardiao`: `python3 -m unittest test_review2`;
 - in `tools/signatario-stable`: `test_review2`, `test_status_v3` and `test_sigfeed`, then `python3 rehearse_feed.py <repo>`.
+
+### Expected results at the round 14 freeze (agent 306, Mac, forge 1.7.1, Python 3.9)
+
+Commands: `forge test --offline`; each unittest module from its own tool directory (`python3 -m unittest <module>`);
+the anvil scripts as listed above, plus the three round 13 modes `test_release_paths.py . v3mintreorg|v3uncertain|v3retiredcli`.
+
+- forge: **568 passed, 0 failed, 1 skipped** (47 suites): the round 11 517, + `A276MintVerifier` 28,
+  + `R306HeldStateSettlement` 21, + `R306VerifierReview` 2. `A239Metamorphic` with `--isolate` under shanghai and cancun:
+  2/2 each. The whole suite also passes at 2,000 fuzz runs (`--fuzz-runs 2000`), and the two fuzz tests of the new
+  suites at 20,000.
+- Offline Python (all OK): deploy-pontes `test_key_inventory` 11, `test_launch_config` 11 (1 skipped where the private
+  list of retired addresses is absent), `test_t0_rule` 8; guardiao `test_a239_switch_review` 5, `test_daemons_r10` 7,
+  `test_review2` 8; reservas `test_daemons_r10` 2, `test_reservas_alerts` 4; signatario-stable `test_cli_version_r13` 5,
+  `test_daemons_r10` 3, `test_execution_recovery_r13` 11, `test_l2_admission_r13` 2, `test_mint_retirement_r13` 10,
+  `test_preflight_signer` 12, `test_relayer_key` 9, `test_relayer_r11` 30, `test_relayer_review` 18,
+  `test_release_submission_r13` 31, `test_review2` 21 (3 skipped), `test_scan_recovery_r13` 13, `test_sigfeed` 56,
+  `test_status_v3` 10; `test_ops_templates` 13; `test_verifier_review` 15; `scripts/tests` 419.
+- Anvil: `rehearse_anvil` 95/95; release paths v3 17, v3fee 20, v3relay 7, v3remint 6, hold 7, reorg 10, v3mintreorg 8,
+  v3uncertain 6, v3retiredcli 9; `rehearse_feed` 34; `test_relay_nonce` 26, `test_vigia` 26, `test_signatario` 23,
+  `test_bridge_review` 21, `test_hf1_finality` 57; `test_settle_quorum` 30; a129 starve 1; guardiao 32, guardiao_hf1 8,
+  mint_switch 15, mint_cancel 37, mint_hold 4, l2_tx_rpc 26, guard_chain 5, sombra 19.
+- Other suites: `test_reservas` 16; gnb signer 15 and vigia 16; stable signer and vigia with `ETH_HALF=real` 34 and 26;
+  reorg with `V3=1` 10; a111 6; a123 drop 5, cancel 4, remint 4, reorg 3, zero 1; a129 control 1; `gas_v3` and
+  `creation_gas_v3` (figures in section 6, limit 4). Controls that fail by design: `d6_provenance_daemons` 18/19;
+  `audit_v3_daemons` fails D3 in every mode, and mode `off` also fails the vault-pause check.
+- Hashes: no launch contract moved against round 11 (section 2). The two Phase 2B contracts are in section 2.3.
 
 ### Expected results at the round 11 release candidate (agent 241, Mac, forge 1.7.1)
 

@@ -2,6 +2,11 @@
 
 Status: draft for the owner, prepared 2026-11-03 (round 11). **Nothing in this package has been sent to any firm.**
 
+**Round 14 (2026-11-09), bridge only:** the Phase 2 commit, sizes, hashes and test counts in this file still name
+`eb5c981`. They are replaced by `PHASE2-BRIDGE-FREEZE-R14.md` in this directory, which also adds Phase 2B (the mint
+verifier and the held-state settlement verifier). Phases 1 and 3 must be recounted by their own areas before sending;
+the owner-only price file has not been updated for Phase 2B.
+
 This is the single document a firm needs to quote. It replaces, for the purpose of sending, the three separate packages
 it is built from; those stay the detailed technical references:
 

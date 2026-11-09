@@ -5,3 +5,4 @@ B-doc docs/LC-MINT-VERIFIER.md
 B-doc docs/HELD-STATE-SETTLEMENT.md
 B-test solidity-tests/A276MintVerifier.t.sol
 B-test solidity-tests/R306HeldStateSettlement.t.sol
+B-test solidity-tests/R306VerifierReview.t.sol
