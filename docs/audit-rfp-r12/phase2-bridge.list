@@ -1,4 +1,4 @@
-# Phase 2: bloch-l2-bridge at the final bridge V3 freeze commit (agent 295)
+# Phase 2: bloch-l2-bridge at the round 14 bridge V3 freeze commit (agent 306)
 A1 contracts/stable/BridgedStablecoinV3.sol
 A1 contracts/stable/BridgedStablecoinV2.sol
 A1 contracts/bridged/SignerMintedToken.sol
@@ -8,16 +8,19 @@ A1 contracts/usdt/SP1ReleaseVerifier.sol
 A2 tools/guardiao/guardiao.py
 A2 tools/signatario-stable/vigia.py
 A2 tools/signatario-stable/signatario.py
+A2 tools/signatario-stable/release_submission.py
 A2 tools/deploy-pontes/deploy_pontes.py
 A2 tools/signatario-stable/sigfeed.py
 A2 tools/signatario-stable/bridge_feed.py
 A2 tools/signatario-stable/eth_half.py
 A2 tools/guardiao/sombra.py
 A2 tools/deploy-pontes/vault_pontes.py
+A2 tools/deploy-pontes/legacy_digests.py
 A2 tools/reservas/reservas.py
 A2 tools/signatario-stable/l2_finality.py
 A2opt tools/deploy-pontes/key_inventory.py
 A2opt tools/deploy-pontes/verifier_review.py
+A2opt tools/signatario-stable/preflight_signer.py
 A-cfg deployments/mainnet/busdc-mainnet.config.json
 A-cfg deployments/mainnet/busdc-vault-mainnet.config.json
 A-cfg deployments/mainnet/busdc-ops/eth-half.template.json

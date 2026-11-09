@@ -184,7 +184,9 @@ rebuilds discovery and completed-item assertions after restart, then reuses only
 its own checked observations while their canonical checkpoint remains valid.
 Shared `executed` markers cannot suppress mint or queue recovery after rollback.
 
-Expected: `"reason": "the burn transaction is not in this L2"`. Then the daemons (`vigia.py sign`,
+Expected: `"reason": "the burn transaction is not in this L2"`. `tools/signatario-stable/preflight_signer.py` runs this
+dry check together with the config, key-file, own-Ethereum-node, binary-pin and relayer-role checks, and must end with
+`OK` on every signer host (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3). Then the daemons (`vigia.py sign`,
 `vigia.py relay`, `guardiao.py watch`, `sombra.py watch`, `reservas.py watch`) under the operators' own
 service managers.
 
