@@ -130,7 +130,9 @@ class PreflightSigner(unittest.TestCase):
         report = self.host.run()
         self.assertEqual(self.failed(report), [])
         self.assertTrue(any(r['group'] == 'dry' and r['result'] == 'pass' for r in report.rows))
-        self.assertFalse(any(r['result'] == 'warn' for r in report.rows))
+        # Off Linux the filesystem type of the journal directory cannot be read: that one check is a warning there.
+        self.assertFalse(any(r['result'] == 'warn' and (Path('/proc/mounts').exists() or 'survives a reboot' not in r['check'])
+                             for r in report.rows))
 
     def test_the_committed_templates_fail_on_every_tbd_value(self):
         self.host.signer = json.loads((TEMPLATES / 'signer.template.json').read_text())
@@ -223,6 +225,49 @@ class PreflightSigner(unittest.TestCase):
         host = Host(tempfile.mkdtemp(dir=self.tmp.name))
         host.relayer.update(relay_role='primary', relay_backup_index=None)
         self.assertEqual(self.failed(host.run('--skip-dry-release')), [])
+
+    def test_relayer_decided_values_and_journal_directory(self):
+        """Review R310-7: the relayer config gets the decided values and the release journal directory is checked."""
+        for key, bad in (('l2_chain_id', 31337), ('eth_chain_id', 11155111), ('source_chain_id', 5), ('provenance', False),
+                         ('threshold', 4), ('vault_threshold', 6), ('l2_pins', 'devnet'), ('provenance', 1)):
+            host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+            host.relayer[key] = bad
+            self.assertFails(host.run('--skip-dry-release'), f'relayer {key} is')
+        # The journal inside SHARED (it would travel with the shared transport).
+        host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        host.relayer['relayer_submission_dir'] = host.relayer['shared_dir'] + '/.journal'
+        self.assertFails(host.run('--skip-dry-release'), 'outside shared_dir')
+        # An existing journal open to others, or not a directory.
+        host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        journal = Path(host.relayer['shared_dir']).parent / '.relayer-submissions'
+        journal.mkdir(mode=0o755)
+        journal.chmod(0o755)
+        self.assertFails(host.run('--skip-dry-release'), 'private directory of this user')
+        journal.chmod(0o700)
+        self.assertEqual(self.failed(host.run('--skip-dry-release')), [])
+        # A parent that does not exist and cannot be created by this check: reported against the nearest existing one.
+        host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        locked = Path(host.relayer['shared_dir']).parent / 'locked'
+        locked.mkdir(mode=0o500)
+        self.addCleanup(locked.chmod, 0o700)
+        host.relayer['relayer_submission_dir'] = str(locked / 'journal')
+        if os.geteuid() != 0:
+            self.assertFails(host.run('--skip-dry-release'), 'can be created')
+
+    def test_journal_on_a_volatile_filesystem_is_refused(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (root / 'run/relayer').mkdir(parents=True)
+        (root / 'var/relayer/signatures').mkdir(parents=True)
+        mounts = root / 'mounts'
+        mounts.write_text(f'/dev/sda1 / ext4 rw 0 0\ntmpfs {os.path.realpath(root)}/run tmpfs rw 0 0\n')
+        self.assertEqual(pf.filesystem_type(root / 'run/relayer', mounts), 'tmpfs')
+        self.assertEqual(pf.filesystem_type(root / 'var/relayer', mounts), 'ext4')
+        self.assertIsNone(pf.filesystem_type(root, root / 'no-such-mounts'))
+        for where, fails in (('run/relayer/journal', True), ('var/relayer/.relayer-submissions', False)):
+            report = pf.Report()
+            pf.check_journal(report, {'shared_dir': str(root / 'var/relayer/signatures'),
+                                      'relayer_submission_dir': str(root / where)}, mounts)
+            self.assertEqual(any('survives a reboot' in r['check'] for r in report.failed), fails, where)
 
     def test_dry_release_must_refuse_for_the_one_reason(self):
         for kwargs, why in (({'reason': 'the settled_rpc binary is not the pinned build'}, 'another refusal'),

@@ -203,7 +203,11 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(is_addr(dep['fundedBy']['safe']), 'deployer.fundedBy.safe is undecided (Bloch Inc Safe address)')
     refuse(dep['fundedBy']['safe'].lower() not in signers + guardians + [dep['address'].lower()],
            'the Safe must hold no role and must not be the deployer')
-    legacy = legacy_among(signers + guardians + [dep['address'], dep['fundedBy']['safe']])
+    # Every address the config names, the immutable fee treasury included (review R310-2): a retired address there
+    # would receive the bridge fee for the life of the vault.
+    fee_recipient = v['provenance']['fees']['recipient'] if provenance else None
+    legacy = legacy_among(signers + guardians + [dep['address'], dep['fundedBy']['safe']]
+                          + ([str(fee_recipient)] if is_addr(fee_recipient) else []))
     refuse(not legacy, f'committed 2026-10-14 address(es) with no recorded holder: {legacy}; use fresh keys '
                        '(docs/BRIDGE-V3-KEY-CEREMONY.md)')
     if provenance and v['provenance']['fees']['recipient'] is not None:

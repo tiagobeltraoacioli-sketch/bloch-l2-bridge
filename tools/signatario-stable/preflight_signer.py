@@ -17,8 +17,11 @@ Checks:
   ethereum   eth_rpc is this operator's own node: a loopback or private address (BR-7). --allow-remote-eth-rpc turns
              this into a warning.
   binaries   follower, produce-dev and settled-rpc are the pinned launch build (sha256, l2_finality.MAINNET_V2).
-  relayer    (with --relayer-config) relay_role primary or backup, a backup index 1 to 6, six other relayers' gas
-             addresses, gas ceilings at most 50 gwei (L2) and 300 gwei (Ethereum), encrypted keystores.
+  relayer    (with --relayer-config) the decided values (chain ids 700770 and 1, thresholds 5 and 5, l2_pins
+             mainnet-v2, provenance true); relay_role primary or backup, a backup index 1 to 6, six other relayers'
+             gas addresses, gas ceilings at most 50 gwei (L2) and 300 gwei (Ethereum), encrypted keystores; the
+             release journal directory (relayer_submission_dir, default .relayer-submissions beside shared_dir) is
+             outside shared_dir, on a disk that survives a reboot (not tmpfs), and private if it exists already.
   dry        the signer's dry release, `signatario.py --config SIGNER.json release --burn-tx 0x00..01 --out TMP`, must
              refuse for one reason only: "the burn transaction is not in this L2". Any other refusal means a pin, the
              rebuild or the private settled RPC failed, and is printed.
@@ -41,6 +44,9 @@ DRY_BURN = '0x' + '00' * 31 + '01'
 DRY_REASON = 'the burn transaction is not in this L2'
 DECIDED_SIGNER = {'l2_chain_id': 700770, 'source_chain_id': 1, 'eth_chain_id': 1, 'threshold': 5, 'vault_threshold': 5,
                   'l2_pins': 'mainnet-v2', 'l2_source': 'rebuild', 'provenance': True}
+DECIDED_RELAYER = {'l2_chain_id': 700770, 'source_chain_id': 1, 'eth_chain_id': 1, 'threshold': 5, 'vault_threshold': 5,
+                   'l2_pins': 'mainnet-v2', 'provenance': True}
+VOLATILE_FS = {'tmpfs', 'ramfs', 'devtmpfs'}
 DECIDED_ETH_HALF = {'eth_chain_id': 1, 'provenance': True, 'release_hold': False}
 MAX_L2_GWEI, MAX_ETH_GWEI = 50, 300
 
@@ -161,9 +167,51 @@ def check_eth_half(report, cfg, cfg_path, signer_cfg, allow_remote):
                cfg.get('keystore') != signer_cfg.get('keystore'), '')
 
 
+def filesystem_type(path, mounts='/proc/mounts'):
+    """Filesystem type of the mount that holds `path` (Linux), or None when it cannot be read."""
+    try:
+        rows = [line.split() for line in Path(mounts).read_text().splitlines()]
+    except OSError:
+        return None
+    target, best = os.path.realpath(path), ('', None)
+    for row in rows:
+        if len(row) < 3:
+            continue
+        mount = row[1].replace('\\040', ' ')
+        if (target == mount or target.startswith(mount.rstrip('/') + '/')) and len(mount) >= len(best[0]):
+            best = (mount, row[2])
+    return best[1]
+
+
+def check_journal(report, cfg, mounts='/proc/mounts'):
+    """The private release journal (review R310-7): lost at a reboot, a lost reply can send a second release."""
+    shared = Path(str(cfg.get('shared_dir', '')))
+    journal = Path(str(cfg.get('relayer_submission_dir') or shared.parent / '.relayer-submissions'))
+    inside = shared.resolve() == journal.resolve() or shared.resolve() in journal.resolve().parents
+    report.add('relayer', 'relayer_submission_dir is outside shared_dir', not inside, str(journal))
+    existing = journal
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    fs = filesystem_type(existing, mounts)
+    report.add('relayer', 'relayer_submission_dir is on a disk that survives a reboot (not tmpfs)',
+               fs not in VOLATILE_FS, f'{existing}: {fs or "filesystem type not readable on this system"}',
+               warning=fs is None)
+    if journal.exists():
+        info = journal.lstat()
+        report.add('relayer', 'relayer_submission_dir is a private directory of this user',
+                   stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077, str(journal))
+    else:
+        report.add('relayer', 'relayer_submission_dir can be created (its parent is writable)',
+                   existing.is_dir() and os.access(existing, os.W_OK | os.X_OK), str(existing))
+
+
 def check_relayer(report, cfg, cfg_path):
     left = undecided(cfg)
     report.add('relayer', 'relayer config has no TBD-owner value', not left, ', '.join(left))
+    for key, want in DECIDED_RELAYER.items():
+        report.add('relayer', f'relayer {key} is {want!r}', cfg.get(key) == want and type(cfg.get(key)) is type(want),
+                   repr(cfg.get(key)))
+    check_journal(report, cfg)
     role = cfg.get('relay_role')
     report.add('relayer', 'relay_role is primary or backup', role in ('primary', 'backup'), repr(role))
     if role == 'backup':

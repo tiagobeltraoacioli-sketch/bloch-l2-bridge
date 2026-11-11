@@ -124,5 +124,37 @@ class R310JournalWedge(review.Base):
         self.assertEqual(again, first, 'unknown outcome below finality: only the reserved bytes are repeated')
 
 
+class R310StuckReservation(review.Base):
+    """R310-4: a reservation the node keeps refusing stops the key's releases; that must be a critical alert."""
+    ready, pending, reserved = r13.ReleaseSubmission.ready, r13.ReleaseSubmission.pending, r13.ReleaseSubmission.reserved
+
+    def test_R310_4_the_third_refusal_of_the_reserved_bytes_is_a_critical_alert(self):
+        daemon, journal, original = self.reserved()
+        self.sent_transactions.clear()          # the node no longer knows the reserved transaction
+        plain = daemon.rpc
+
+        def refusing(url, method, params):
+            if method == 'eth_sendRawTransaction':
+                raise RuntimeError('replacement transaction underpriced')
+            return plain(url, method, params)
+
+        daemon.rpc = refusing
+        alerts = []
+        for attempt in range(1, 5):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaisesRegex(RuntimeError, 'underpriced'):
+                daemon.send('eth', daemon.vault, ['release()'], release_id=BURN)
+            found = [json.loads(line) for line in out.getvalue().splitlines() if 'release-reservation-stuck' in line]
+            self.assertEqual(len(found), 1 if attempt >= 3 else 0, f'attempt {attempt}')
+            alerts += found
+        self.assertEqual([(a['severity'], a['nonce'], a['burn'], a['tx'], a['failures']) for a in alerts],
+                         [('critical', 0, BURN, original[0]['hash'], 3), ('critical', 0, BURN, original[0]['hash'], 4)])
+        self.assertTrue(journal.read(journal.pending), 'the reservation stands')
+        # The node accepts the same bytes again: the counter is cleared.
+        daemon.rpc = plain
+        self.assertEqual(daemon.send('eth', daemon.vault, ['release()'], release_id=BURN), original[0]['hash'])
+        self.assertFalse((journal.account / 'stuck.json').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

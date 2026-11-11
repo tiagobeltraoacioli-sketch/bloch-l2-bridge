@@ -1,5 +1,5 @@
-"""Round 15 independent review (agent 310): deploy-tool demonstrations against 1aef47c.
-Each test PASSES while the defect exists.
+"""Round 15 review finding R310-2 (agent 310), fixed by agent 314: the reviewer's demonstration (dded5c2) with the
+last assertion turned around.
 
   python3 -m unittest -v test_r310_review
 """
@@ -16,9 +16,9 @@ from launch_fixture import filled, filled_vault, stand_in_retired  # noqa: E402
 
 
 class R310FeeRecipientNotRefused(unittest.TestCase):
-    """R310-2: the refusal list ("refused in every role") does not cover the vault's immutable fee recipient."""
+    """R310-2: the refusal list ("refused in every role") covers the vault's immutable fee recipient too."""
 
-    def test_R310_2_a_refused_address_is_accepted_as_the_immutable_fee_treasury(self):
+    def test_R310_2_a_refused_address_is_refused_as_the_immutable_fee_treasury(self):
         addrs, env = stand_in_retired()
         os.environ['BLOCH_BRIDGE_REFUSE_SHA256'] = env
         self.addCleanup(os.environ.pop, 'BLOCH_BRIDGE_REFUSE_SHA256', None)
@@ -30,7 +30,10 @@ class R310FeeRecipientNotRefused(unittest.TestCase):
             vp.validate(control, False, tok)
         cfg = filled_vault(tok)
         cfg['vault']['provenance']['fees']['recipient'] = addrs[0]
-        vp.validate(cfg, False, tok)                        # ... but passes mainnet validation as the fee treasury
+        with self.assertRaisesRegex(vp.Refused, 'no recorded holder'):   # ... and as the fee treasury
+            vp.validate(cfg, False, tok)
+        cfg['vault']['provenance']['fees']['recipient'] = '0x' + '7e' * 20
+        vp.validate(cfg, False, tok)                        # a fresh treasury passes
 
 
 if __name__ == '__main__':

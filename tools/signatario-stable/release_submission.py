@@ -18,11 +18,13 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 
 
 WORD = re.compile(r'0x[0-9a-f]{64}')
 HEX = re.compile(r'0x(?:[0-9a-f]{2})+')
 MAX_RECORD = 128 * 1024
+STUCK_AFTER = 3  # failed repeats of one reservation before the critical alert (review R310-4)
 
 
 def require(ok, message):
@@ -402,6 +404,32 @@ class ReleaseJournal:
         self.accept(item)
         return record['hash']
 
+    def repeat(self, item):
+        """Broadcast reserved bytes whose outcome is unknown. A node that keeps refusing them stops every release of
+        this account (the reservation comes first), so the third failure in a row is a critical alert (R310-4)."""
+        record, tx = item
+        marker = self.account / 'stuck.json'
+        try:
+            result = self.broadcast(item)
+        except Exception as error:
+            count, first = 0, time.time()
+            try:
+                old = strict_json(self.read_file(marker) or b'null')
+                if type(old) is dict and old.get('hash') == record['hash']:
+                    count, first = int(old['count']), float(old['first'])
+            except (ValueError, TypeError, KeyError, RuntimeError):
+                pass
+            count += 1
+            self.write(marker, {'hash': record['hash'], 'count': count, 'first': first})
+            if count >= STUCK_AFTER:
+                self.alert(kind='alert', severity='critical', id='release-reservation-stuck',
+                           nonce=quantity(tx['nonce']), burn=record['burn'], tx=record['hash'], failures=count,
+                           age_s=int(time.time() - first), error=str(error)[:200],
+                           reason='the node refuses the reserved release; no other release of this key is sent')
+            raise
+        self.remove(marker)
+        return result
+
     def resume(self, burn, replace=None):
         """Reconcile the account's one uncertain send before permitting another nonce.
 
@@ -427,7 +455,7 @@ class ReleaseJournal:
                         self.retire(pending, reason)
                         pending = None
                     else:
-                        self.broadcast(pending)
+                        self.repeat(pending)
                         outcome = 'pending'
             else:
                 self.accept(pending)
@@ -446,7 +474,7 @@ class ReleaseJournal:
                 self.retire(prior, reason)
                 return None
             self.write(self.pending, prior[0])
-            return self.broadcast(prior)
+            return self.repeat(prior)
         if replace is not None and outcome == 'pending':
             require(quantity(prior[1]['nonce']) == int(replace[0]), 'replacement nonce mismatch')
             return None

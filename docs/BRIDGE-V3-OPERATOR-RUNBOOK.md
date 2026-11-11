@@ -56,6 +56,16 @@ while the node knows neither the transaction nor a receipt of it. Nothing to do:
 `retired-<nonce>.json`. More than one such alert a day means this relayer's Ethereum node loses transactions: check
 the node and `eth_rpc`.
 
+A reserved release that the node keeps refusing (for example `replacement transaction underpriced`, or a gas
+ceiling lowered below the reserved price) is repeated before any other release of that gas key. The third refusal in
+a row raises the critical alert `release-reservation-stuck` (review R310-4) with the nonce, the burn, the transaction
+hash and the node's error. The backups keep paying meanwhile. What to do: read the error; restore the gas ceiling if
+it was lowered, or wait for the older transaction at that nonce to be mined; the reservation then settles by itself.
+
+The journal directory (`relayer_submission_dir`, default `.relayer-submissions` beside `shared_dir`) must be on the
+relayer's own durable disk, outside `shared_dir`, private to the service user, and kept across restarts and
+upgrades. `preflight_signer.py --relayer-config` checks it (review R310-7).
+
 If a relayer still stops with `nonce is reserved for another signed release`, its reserved transaction is neither
 paid elsewhere at the finalized level nor gone from the node: wait for finality (about 15 minutes); do not edit the
 journal by hand.
