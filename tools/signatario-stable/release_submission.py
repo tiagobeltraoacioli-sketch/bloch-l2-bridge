@@ -2,6 +2,12 @@
 
 These records reserve an already signed transaction, never attest to execution.
 Every recovered raw transaction is decoded and its signer/chain/call rebound.
+
+A reservation is retired (archived in `retired-<nonce>.json`, its nonce free again) only on finalized chain facts,
+and only while the node knows neither the transaction nor a receipt of it (review R310-1, round 15):
+- `released-elsewhere`: the vault shows its burn released at the finalized level (another relayer paid it). The old
+  bytes can then only revert; the vault refuses a second payment of a burn.
+- `nonce-consumed`: the account's finalized transaction count is above its nonce, so it can never be included.
 """
 from contextlib import contextmanager
 import fcntl
@@ -43,11 +49,15 @@ def strict_json(raw):
 
 
 class ReleaseJournal:
-    def __init__(self, directory, context, selector, decode, rpc, acknowledge, max_price):
+    def __init__(self, directory, context, selector, decode, rpc, acknowledge, max_price, released=None,
+                 alert=None):
         self.directory = Path(directory)
         self.context, self.selector = context, selector.lower()
         self.decode, self.rpc, self.acknowledge = decode, rpc, acknowledge
         self.max_price = max_price
+        # released(burn) -> True only when the vault shows the burn released at the FINALIZED level. Without it
+        # (older callers) no reservation is ever retired for a burn finished elsewhere.
+        self.released, self.alert = released, alert or (lambda **fields: None)
         # A route/vault configuration change must not bypass the same account's
         # uncertain nonce. The complete context remains bound inside the record.
         identity = {key: context[key] for key in ('chainId', 'signer')}
@@ -142,15 +152,75 @@ class ReleaseJournal:
             highest = max(highest, nonce)
         self.write(self.account / 'nonce-index.json', {'schema': 2, 'highest': highest})
 
+    def retired_path(self, nonce):
+        return self.account / f'retired-{nonce}.json'
+
+    def retired(self, nonce):
+        """The retirement history of a nonce (a list), or None when nothing was ever retired at it."""
+        raw = self.read_file(self.retired_path(nonce))
+        if raw is None:
+            return None
+        marker = strict_json(raw)
+        require(type(marker) is dict and set(marker) == {'schema', 'nonce', 'records'}
+                and type(marker['schema']) is int and marker['schema'] == 1
+                and type(marker['nonce']) is int and marker['nonce'] == nonce and type(marker['records']) is list
+                and all(type(entry) is dict and set(entry) == {'burn', 'hash', 'reason'}
+                        and all(isinstance(value, str) for value in entry.values()) for entry in marker['records']),
+                'unrecognized retirement record; operator reconciliation required')
+        return marker['records']
+
+    def spent(self, item):
+        """Why a reserved transaction can never pay, from finalized chain facts, or None while it still might.
+
+        Only for a transaction the node does not know at all (no receipt, not in the pool): one that is pending or
+        mined keeps its reservation and is settled by `resume`.
+        """
+        record, tx = item
+        try:
+            if self.observe(item) != 'unknown':
+                return None
+            reason = None
+            if self.released is not None and self.released(record['burn']):
+                reason = 'released-elsewhere'
+            else:
+                count = quantity(self.rpc('eth_getTransactionCount', [self.context['signer'], 'finalized']))
+                if count > quantity(tx['nonce']):
+                    reason = 'nonce-consumed'
+            # The reads above are separate observations: the transaction must still be unknown after them.
+            if reason is None or self.observe(item) != 'unknown':
+                return None
+            return reason
+        except Exception:  # noqa: BLE001 - a failed read retires nothing: the reservation stands as before
+            return None
+
+    def retire(self, item, reason):
+        """Archive a spent reservation and free its nonce. The signed bytes are dropped: they can never pay."""
+        record, tx = item
+        nonce = quantity(tx['nonce'])
+        history = self.retired(nonce) or []
+        history.append({'burn': record['burn'], 'hash': record['hash'], 'reason': reason})
+        # The tombstone is written first: a crash between the steps leaves a reservation that retires again.
+        self.write(self.retired_path(nonce), {'schema': 1, 'nonce': nonce, 'records': history[-64:]})
+        for path in (self.nonce_path(nonce), self.accepted(record['burn']), self.pending):
+            held = self.read(path)
+            if held is not None and held[0]['hash'] == record['hash']:
+                self.remove(path)
+        self.alert(kind='alert', severity='warning', id='release-reservation-orphaned', nonce=nonce,
+                   burn=record['burn'], tx=record['hash'], reason=reason)
+
     def check_nonce(self, nonce, burn):
         prior = self.read(self.nonce_path(nonce))
         if prior is not None:
             require(quantity(prior[1]['nonce']) == nonce, 'nonce index does not match its signed transaction')
-            require(prior[0]['burn'] == burn,
-                    'nonce is reserved for another signed release; recover that release before reusing it')
-        else:
+            if prior[0]['burn'] != burn:
+                reason = self.spent(prior)
+                require(reason is not None,
+                        'nonce is reserved for another signed release; recover that release before reusing it')
+                self.retire(prior, reason)
+                prior = None
+        if prior is None:
             highest = self.index_highest()
-            require(highest is None or nonce > highest,
+            require(highest is None or nonce > highest or self.retired(nonce) is not None,
                     'missing nonce reservation below the durable high-water mark; operator reconciliation required')
 
     def reserve_nonce(self, item):
@@ -352,11 +422,16 @@ class ReleaseJournal:
                     self.accept(previous)
                     pending, outcome = previous, prior_outcome
                 else:
-                    self.broadcast(pending)
-                    outcome = 'pending'
+                    reason = self.spent(pending)
+                    if reason is not None:  # never repeat bytes that can no longer pay (R310-1)
+                        self.retire(pending, reason)
+                        pending = None
+                    else:
+                        self.broadcast(pending)
+                        outcome = 'pending'
             else:
                 self.accept(pending)
-            if pending[0]['burn'] == burn and replace is None and outcome != 'reverted':
+            if pending is not None and pending[0]['burn'] == burn and replace is None and outcome != 'reverted':
                 return pending[0]['hash']
         prior = self.read_accepted(burn)
         if prior is None:
@@ -366,6 +441,10 @@ class ReleaseJournal:
             self.remove(self.accepted(burn))
             return None
         if outcome == 'unknown':
+            reason = self.spent(prior)
+            if reason is not None:  # its nonce went to another transaction: a new one is needed (R310-1)
+                self.retire(prior, reason)
+                return None
             self.write(self.pending, prior[0])
             return self.broadcast(prior)
         if replace is not None and outcome == 'pending':

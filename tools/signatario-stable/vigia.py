@@ -1640,9 +1640,13 @@ class Vigia:
                              'prices': {str(n): p for n, p in prices.items()}}
             self.save_nonces(records)
 
+        def released(burn):
+            # Finalized level only (F229-11): `release_finished` records the burn there once its flag is final.
+            return self.release_finished(burn) and burn in self.finished()['release']
+
         return ReleaseJournal(self.cfg.get('relayer_submission_dir', self.shared.parent / '.relayer-submissions'),
                               context, selector, decode, lambda method, params: self.rpc(url, method, params),
-                              acknowledge, self.max_price['eth'])
+                              acknowledge, self.max_price['eth'], released=released, alert=log)
 
     def send(self, side, to, call, gas=None, replace=None, release_id=None):
         """Sign and send. `replace=(nonce, price)` replaces our own pending transaction at that nonce (F229-9); it returns None

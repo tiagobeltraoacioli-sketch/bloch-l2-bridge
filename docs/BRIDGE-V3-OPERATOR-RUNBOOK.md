@@ -45,6 +45,21 @@ and priced below the current quote is replaced at the same nonce, never above th
 alert is `release-stuck-at-ceiling`: wait, or the owner raises the ceiling in the config of the primary. The ceilings
 are an owner input if they change; `preflight_signer.py` refuses values above 50 and 300.
 
+### 2.3a A release reservation left behind (review R310-1, round 15)
+
+Each relayer keeps a private journal of the Ethereum release it signed per nonce (`.relayer-submissions/`). When a
+backup relayer pays a burn whose transaction from this relayer left the pool unmined, the journal retires that
+reservation by itself and logs the warning alert `release-reservation-orphaned` (`reason: released-elsewhere`, or
+`nonce-consumed` when the old bytes were mined after the nonce had been reused). It does so only when the vault shows
+the burn released at the finalized level, or the account's finalized transaction count is past the nonce, and only
+while the node knows neither the transaction nor a receipt of it. Nothing to do: the history stays in
+`retired-<nonce>.json`. More than one such alert a day means this relayer's Ethereum node loses transactions: check
+the node and `eth_rpc`.
+
+If a relayer still stops with `nonce is reserved for another signed release`, its reserved transaction is neither
+paid elsewhere at the finalized level nor gone from the node: wait for finality (about 15 minutes); do not edit the
+journal by hand.
+
 ### 2.4 Two L2 views before a vault pause (BR-6; agent 173, G2)
 
 With `vault_pause_on_mint` true (decided), a forged mint also pauses the vault for 72 h. Before it sends that pause the
