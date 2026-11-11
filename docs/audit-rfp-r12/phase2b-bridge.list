@@ -10,3 +10,4 @@ B-test solidity-tests/R310SettlementReview.t.sol
 B-tool tools/deploy-pontes/settlement_snapshot.py
 B-test tools/deploy-pontes/test_settlement_snapshot.py
 B-test tools/deploy-pontes/test_settlement_review.py
+B-test solidity-tests/R310SecondPass.t.sol
