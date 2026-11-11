@@ -27,10 +27,12 @@ The on-chain state is the consensus specification's `LightClientStore`, reduced 
 
 | Field | Meaning |
 |---|---|
-| `headSlot` | slot of the latest finalized beacon header accepted |
+| `headSlot` | the highest finalized slot recorded (the newest store) |
 | `headRoot` | `hash_tree_root(BeaconBlockHeader)` of that header |
 | `currentSyncCommitteeRoot` | `hash_tree_root(SyncCommittee)` of the committee of `period(headSlot)` |
 | `nextSyncCommitteeRoot` | the committee of `period(headSlot) + 1`, or zero while not yet learned |
+| `storeAt[slot]` | digest (header root, current committee root, next committee root) of **every** store recorded: the anchor and the result of each accepted step. What a STEP proof may start from |
+| `checkpointAt[slot]` | digest (header root, current committee root) of the same stores: what a successor may be anchored at (section 5) |
 | `executionBlockHashAt[slot]` | execution block hash of the finalized header each accepted step reached; written once, never overwritten; zero for every other slot, the anchor included |
 
 `period(slot) = slot / 8192` (32 slots x 256 epochs).
@@ -38,9 +40,8 @@ The on-chain state is the consensus specification's `LightClientStore`, reduced 
 Two statements, two entry points:
 
 - **STEP** (`advance(publicValues, proofBytes)`, permissionless, state-changing): "the Ethereum light client, started
-  from exactly the stored store, reached this newer finalized header and this store". The contract requires the proof
-  to start from the *latest* stored store, never an older one, so a forgery needs two thirds of the committee that is
-  current (or next) at the head, not of any committee since deployment.
+  from exactly this store, reached this newer finalized header and this store". The start must be a store the
+  contract recorded and at most `maxStepGap` old; the header reached must be at most `maxHeadLag` old (rules below).
 - **MINT** (`verifyMint`, a `view`; the launch token calls it by `STATICCALL`, so it cannot write): "the vault's
   `Deposited` log is in an execution block that is a stored finalized execution block, or one of its ancestors by
   the parent-hash chain". It may name **any** stored block (a finalized block stays final), so a mint proof is never
@@ -52,15 +53,39 @@ Why two statements and not one proof per mint that carries its own step: `verify
 proof would either restart from a fixed checkpoint (F3) or race with every other advance; and N deposits finalized
 under one header need one step and N cheap inclusion proofs.
 
-Wall-clock rules (the L2 clock against the beacon clock `beaconGenesisTime + slot * secondsPerSlot`):
+### 2.1 Which steps are accepted (second-pass review R310-2P-1, coordinator decision 2026-11-11)
 
-- `advance` refuses a new head more than `MAX_CLOCK_SKEW` (15 minutes) in the future.
-- `advance` refuses when the stored head is older than `maxStepGap` (immutable, 2 to 30 days; proposed 14 days). A
-  light client that has been offline for longer than about the weak-subjectivity period must not resume from its old
-  committee: exited validators' keys are cheap. After that gap the proof path can only continue through the handoff
-  (section 5); with the handoff disabled it ends. Stored blocks stay usable for mints. **Consequence: somebody must
-  advance at least once per `maxStepGap`.** Anyone can (operators run the prover; a depositor can); it is a proof,
-  not a signature.
+The first round-15 design accepted a step only from the latest store and to a head of any age. The reviewer showed
+that a party landing a minimal (one-epoch) step in every L2 block made every honest proof revert and let the head age
+past `maxStepGap`, ending the proof path for good. The rules now, all against the L2 clock and the beacon clock
+`beaconGenesisTime + slot * secondsPerSlot`:
+
+1. **Fresh head.** The finalized header a step reaches is at most `maxHeadLag` old (immutable, 2 hours to 7 days and
+   at most half of `maxStepGap`; proposed 1 day) and at most `MAX_CLOCK_SKEW` (15 minutes) in the future. Every
+   accepted step therefore leaves a store that stays a valid start for at least half the gap, and a flood of minimal
+   steps can only do the provers' work: it cannot hold the head back.
+2. **Any recorded start.** A proof starts from any store in `storeAt` that is at most `maxStepGap` old, not only
+   from the newest. An honest proof is never invalidated because somebody else advanced first. Soundness is as
+   before: a forgery needs two thirds of a committee that was current or next within the last `maxStepGap`, never of
+   an older one (a light client offline for longer than about the weak-subjectivity period must not resume from its
+   old committee: exited validators' keys are cheap).
+3. **One record per slot; the head only moves forward.** A proof that reaches a slot above the head moves the head.
+   One that reaches a lower, unrecorded slot is recorded beside the head: its block serves mints and it is a valid
+   start. One that reaches a recorded slot is refused (`AlreadyRecorded`), harmlessly: what it proves is here.
+
+Why this technique for the race, and not a queue, a bond or a privileged prover: the start store is already a public
+value of the program, so accepting any recorded start needs no program change, no new trust and no new state beyond
+one word per step; a race then costs the loser nothing (its step still lands, or its slot is already recorded).
+
+**A lapse, exactly.** If nobody at all lands a step for `maxStepGap` (a real outage of every prover, of Ethereum
+finality or of the L2 for that long), every recorded store is too old to start from and `advance` is closed for
+good. Then: blocks already stored keep minting; deposits in later blocks wait (they are not lost: their USDC is in
+the vault and they mint once the path continues); burns and releases are unaffected. The path continues only through
+the handoff (section 5): the authority proposes a successor on a checkpoint it names, and anyone activates it after
+`handoffDelay`. **For that reason a `handoffAuthority` is mandatory: the constructor refuses a deployment without
+one**, so a lapse is never terminal. A griefer cannot cause a lapse; it takes the absence of every honest prover for
+the whole gap. Operators alert long before (runbook 2.8). **Consequence: somebody must land a step at least once per
+`maxStepGap`.** Anyone can; it is a proof, not a signature.
 
 On-chain redundancy against a program defect (cheap, checked in `advance`), with `pp = period(prevSlot)` and
 `pn = period(newSlot)`:
@@ -221,13 +246,13 @@ state indices, no 8,192-slot limit, no new SSZ code) and P2 (STEP word 11 = the 
 verified by the library's own execution-branch check; MINT word 3 = that hash). Both accepted: the mint program then
 holds no consensus code at all. Further layout changes are made only through `agents/R15-CROSS-AREA.md`.
 
-## 5. Handoff (optional)
+## 5. Handoff (mandatory authority)
 
-With `handoffAuthority` zero the verifier is immutable. Its mint path then ends at the first Ethereum fork that changes
-the light-client rules: deposits made after that could not be minted, and the token's switch is already spent.
+Without a handoff the mint path would end for good at the first Ethereum fork that changes the light-client rules, or
+at a lapse (section 2.1), with the token's switch already spent. The constructor therefore refuses a zero
+`handoffAuthority` (second-pass review R310-2P-1; the first round-15 design allowed it).
 
-With `handoffAuthority` set, the authority may propose a successor verifier for the same token, pinned to its code
-hash. Anyone activates it after `handoffDelay` (at least 14 days) and within 30 days. Until then this contract keeps
+The authority may propose a successor verifier for the same token, pinned to its code hash. Anyone activates it after `handoffDelay` (at least 14 days) and within 30 days. Until then this contract keeps
 verifying. The successor's code hash is re-checked on every mint.
 
 While this light client is alive (`canAdvance()`: no successor, the store younger than `maxStepGap`) the authority
@@ -237,10 +262,17 @@ endorsed handoff): `proposeSuccessor` requires the successor to answer `anchorSl
 the deployment anchor or the head of any step) on the same beacon chain. A successor program for new Ethereum rules
 is therefore deployed on a checkpoint proven here, and anyone can advance it during the notice. Only when the store
 is older than `maxStepGap` (the proof path has already ended) may the authority propose a successor on a checkpoint
-of its own choosing: that is the recovery from a gap, with the same notice.
+of its own choosing: that is the recovery from a lapse, with the same notice.
 
-A successor is arbitrary code (its answers are part of the code the 14-day review reads; the code hash is pinned). With the handoff on, the authority can, after the notice, install a verifier that
-accepts any mint. The trust is the authority's, with `handoffDelay` of notice in which holders can exit. This is the
+The anchor is read at proposal **and again at activation** (second-pass review R310-2P-2), so a successor that
+answers an accepted checkpoint at proposal and another afterwards does not activate while the light client is alive.
+The rule binds what the successor answers. It is a guarantee when the successor is a reviewed build of this contract
+(its anchor is immutable; `verifier_review.py mint-verifier` run on the successor checks the code against the pinned
+artifact and reads the anchor back); for any other code it is a declaration, and the 14-day review must read what
+that code does with its anchor.
+
+A successor is arbitrary code (its answers are part of the code the 14-day review reads; the code hash is pinned).
+The authority can, after the notice, install a verifier that accepts any mint. The trust is the authority's, with `handoffDelay` of notice in which holders can exit. This is the
 same trade as `RecoverableReleaseVerifier`'s handoff (agent 239, item 6). The authority should be the same cold
 multisig as `recoveryAuthority`, disjoint from every hot key.
 
@@ -267,7 +299,10 @@ python3 tools/deploy-pontes/verifier_review.py mint-verifier --expect mint-verif
 
 The beacon endpoints are the operators' own nodes (standard beacon API, GET only). At least one must serve the
 light-client bootstrap (`/eth/v1/beacon/light_client/bootstrap/{root}`): the tool hashes the 512 keys itself and
-checks the committee against the anchor header's state root. `--anchor-unchecked` records that no node was asked.
+checks the committee against the anchor header's state root. The anchor pair (header root, committee root) is the
+one set-once trust root and nothing on-chain can tie the committee to the header (second-pass review R310-2P-5), so
+this review is mandatory before the proposal, against **two** independent endpoints: one endpoint is refused unless
+`--single-beacon` records it, and `--anchor-unchecked` records that no node was asked.
 
 A deposit whose committee mint was cancelled before the switch comes back by proof
 (`test_DRAIN_cancelledHonestMintComesBackByProof`).
@@ -280,15 +315,18 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 | `stepVKey`, `mintVKey` | from the audited programs | agent 316, round 15; not audited |
 | Anchor (`genesisValidatorsRoot`, `anchorSlot`, `anchorHeaderRoot`, `anchorSyncCommitteeRoot`) | A finalized Ethereum checkpoint read from the operators' own nodes, cross-checked on at least two independent sources, less than `maxStepGap` old at deployment | Set once; `verifier_review.py mint-verifier` checks it |
 | `beaconGenesisTime`, `secondsPerSlot` | 1606824023, 12 (Ethereum mainnet) | constants of the chain |
-| `maxStepGap` | 14 days | 2 to 30 days. Longer tolerates a longer outage of every prover; shorter bounds how old a committee may resume the chain. If nobody advances for this long, the proof path ends (handoff only). Operators must alert well before (runbook) |
-| `handoffAuthority`, `handoffDelay` | the `recoveryAuthority` multisig, 30 days | or zero to disable (section 5) |
+| `maxStepGap` | 14 days | 2 to 30 days. Longer tolerates a longer outage of every prover; shorter bounds how old a committee may resume the chain. If nobody lands a step for this long, the proof path ends (handoff only). Operators must alert well before (runbook) |
+| `maxHeadLag` | 1 day | 2 hours to 7 days, at most half of `maxStepGap`. It must exceed Ethereum's finality lag (about 15 minutes) plus the proving time of a step plus the L2's inclusion time; shorter makes a slow prover's step stale, longer lets a step leave an older store |
+| `handoffAuthority`, `handoffDelay` | the `recoveryAuthority` multisig, 30 days | **mandatory** (zero is refused); delay at least 14 days (section 5) |
 
 ## 8. Questions for the auditor
 
 - The public-values binding: is any field of the mint claim not bound to the proven log?
 - The mint hash rebuilt here against `BridgedStablecoinV2._structHash`.
-- The store: that `advance` accepts only a proof from the latest store; the period rules; `maxStepGap` and
-  `MAX_CLOCK_SKEW` against the L2 clock; that nothing but a step proof writes the store or `executionBlockHashAt`.
+- The store: that `advance` accepts only a proof from a recorded store at most `maxStepGap` old and to a head at most
+  `maxHeadLag` old; that a slot is recorded once and the head never moves back; the period rules; the clock rules
+  against the L2 clock; that nothing but a step proof writes `storeAt`, the head or `executionBlockHashAt`; whether
+  any sequence of valid steps can close `advance` while an honest prover is running (section 2.1).
 - The two statements: can STEP values pass as MINT values or the reverse (same length; tag and key)?
 - The programs against section 4, above all: two thirds participation on every applied update, no forced update,
   the signing domain, and the parent-hash walk ending exactly at the committed deposit block.
@@ -298,14 +336,21 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 
 ## 9. Tests
 
-`forge test --match-contract A276MintVerifier`: 39 tests on the mainnet-shaped pair with mock SP1 (the test builds the
+`forge test --match-contract A276MintVerifier`: 41 tests on the mainnet-shaped pair with mock SP1 (the test builds the
 mint public values from the vault's real `Deposited` log and plays the step program on a synthetic chain): the anchor
-as first store, configuration refusals, steps (anyone, only from the latest store, no progress, zero words, committee
-rules across periods, several periods in one proof, wrong program / tag / chain / genesis root, fuzz over the start
-words), the clock (future head, `maxStepGap` at and past the boundary), honest mint, one step for many mints and old
-checkpoints staying valid, forged claim, tampered words (fuzz), unknown and conflicting checkpoints, no mint under
-the anchor, duplicate, wrong vault, wrong chain, wrong token, token-first order, queue drain, guardian pause, handoff
-(no step after it; alive: only a successor anchored here; after the gap: the authority's root), the token's code-hash pin, gas.
+as first store, configuration refusals (a zero authority, `maxHeadLag` bounds), steps (anyone; from any recorded
+store, a race is harmless, a slot is recorded once; no progress, zero words, committee rules across periods, several
+periods in one proof, wrong program / tag / chain / genesis root, fuzz over the start words), the clock (future
+head, stale head at and past `maxHeadLag`, a recorded store older than the gap, `maxStepGap` at and past the
+boundary), honest mint, one step for many mints and old checkpoints staying valid, forged claim, tampered words
+(fuzz), unknown and conflicting checkpoints, no mint under the anchor, duplicate, wrong vault, wrong chain, wrong
+token, token-first order, queue drain, guardian pause, handoff (only the authority; no step after it; alive: only a
+successor anchored here; after the gap: the authority's root), the token's code-hash pin, gas.
+
+`R310SecondPass` (6): the second-pass review's demonstrations turned around (one-epoch steps cannot starve honest
+proofs or age the head; a step to a 29-day-old head is refused; a lapse needs a real outage and continues through
+the handoff; the successor's anchor is read again at activation) and the reviewer's cross-check of the real guests'
+committed bytes (agent 316's evidence) against `advance`, `decodeMintValues` and `verifyMint`.
 
 `R306VerifierReview.test_F3_conflictingFinalizedHistoriesAreRefused`: the round-14 review's demonstration of F3 turned
 into the regression test.

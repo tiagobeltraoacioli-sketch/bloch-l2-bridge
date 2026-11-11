@@ -124,7 +124,10 @@ finalized Ethereum block that a STEP proof stored in the verifier. Two rules fol
 - **Step after each deposit finalizes** (about 15 minutes after the deposit), then prove the mint under that step. The
   mint proof costs one hash per Ethereum block between the deposit and the stored block, so do not let deposits wait.
 - **Never let the store age past `maxStepGap`** (proposed 14 days). Past it `advance` refuses for good and the proof
-  path continues only through the handoff (with `handoffAuthority` zero: never). Alert levels for whoever runs the
+  path continues only through the handoff (a notice of `handoffDelay`, with a root the authority names). A step must
+  reach a finalized header at most `maxHeadLag` old (proposed 1 day): prove to the latest finalized header and send
+  at once. A proof may start from any store the contract recorded within the gap, so two provers do not invalidate
+  each other; if `advance` answers `AlreadyRecorded`, the slot is already there and the mint can be proven under it. Alert levels for whoever runs the
   prover: warning when `block.timestamp - slotTime(headSlot)` is above one day with no deposit waiting, critical
   above a quarter of `maxStepGap`. `verifier_review.py mint-verifier` refuses a verifier whose head is older than
   half of `maxStepGap`. Anyone can advance: it is a proof, never a signature, and at least two operators should run
@@ -164,14 +167,15 @@ It must end with `OK: N of N checks passed` and exit 0. It is read-only: it sign
 The dry release rebuilds the L2 from L1, so it needs the follower synced; it can take several minutes.
 
 `--allow-remote-eth-rpc` turns the own-node rule into a warning. Use it only for a rehearsal. `--rehearsal-pins`
-turns an `l2_pins` object (private-net pins) into a warning so the dry release runs on a private net; never on
-mainnet, where `l2_pins` must be `mainnet-v2`.
+turns an `l2_pins` object (private-net pins) into a warning so the dry release runs on a private net. **A run with
+`--rehearsal-pins` never ends `OK` or exits 0**: a clean one prints `REHEARSAL (not a go-live result; ...)` and exits
+3, whatever the chain id (second-pass review R310-2P-3). The go-live result is only the command above, without it.
 
-Tests: `python3 -m unittest test_preflight_signer` (16, offline, including the real `signatario.py` refusing at the
+Tests: `python3 -m unittest test_preflight_signer` (17, offline, including the real `signatario.py` refusing at the
 binary pins).
 
 Run on a private net in round 15 (item 281, host 209.250.236.240, proofless, 4 validators): with private pins and
-`--rehearsal-pins`, 66 of 66 checks passed and the dry release refused with exactly the expected reason, against a
+`--rehearsal-pins`, 66 of 66 checks passed (at that time still printed as `OK`) and the dry release refused with exactly the expected reason, against a
 follower and a producer built from the launch source for a private L1 and the **released** settled RPC `53e88565…`.
 With `mainnet-v2` pins and the three released binaries the binaries check passed and the dry release refused with
 "the follower verifies another network", as it must on a private net. **The released follower `cdf5da5c…` refuses
