@@ -7,9 +7,10 @@ touched here. Nothing was sent to anyone.
 ## 1. The freeze commit
 
 - Repository `bloch-l2-bridge`, branch `codex/bridge-r15-20261110`.
-- **The freeze commit is the commit that adds this file.** It differs from its parent only in
-  `docs/audit-rfp-r12/` (this file and the two manifests) and `docs/AUDIT-SCOPE-BRIDGE-V3.md`. Every file in the
-  scope lists is byte-identical in both, so the manifests are reproduced at the freeze commit:
+- **The freeze commit is the commit that adds the two round 15 manifests** (the last commit that touches
+  `docs/audit-rfp-r12/phase2-bridge.manifest.tsv`). It differs from its parent only in `docs/audit-rfp-r12/` (this
+  file and the two manifests). Every file in the scope lists is byte-identical in both, so the manifests, computed
+  at the parent, are reproduced at the freeze commit:
 
 ```
 python3 -I scripts/audit-rfp/manifest.py . HEAD docs/audit-rfp-r12/phase2-bridge.list
@@ -29,13 +30,13 @@ python3 -I scripts/audit-rfp/manifest.py . HEAD docs/audit-rfp-r12/phase2b-bridg
 |---|---:|---:|---:|---:|---:|
 | A1 Solidity (required) | 6 | 2,289 | 1,715 | **1,500** | 1,500 |
 | A2 Python daemons and deploy tools (required) | 13 | 8,120 | 6,441 | **5,830** | 5,754 |
-| A2 optional (`key_inventory.py`, `verifier_review.py`, `preflight_signer.py`) | 3 | 1,512 | 1,163 | 968 | 645 |
+| A2 optional (`key_inventory.py`, `verifier_review.py`, `preflight_signer.py`) | 3 | 1,533 | 1,178 | 983 | 645 |
 | Configs and templates (pinned by hash) | 10 | 808 | - | - | 808 lines |
 
 A1 did not move: **no launch contract changed in round 15.** A2 grew by 76 nSLOC, the fixes of the round 15 review:
 `release_submission.py` 284 to 357 (reservation retirement and the stuck alert, R310-1 and R310-4), `vigia.py` +2,
-`vault_pontes.py` +1 (R310-2). A2 optional grew by 323: the `settlement` and `mint-verifier` review modes and the
-relayer checks of the preflight.
+`vault_pontes.py` +1 (R310-2). A2 optional grew by 338: the `settlement` and `mint-verifier` review modes, the
+relayer checks of the preflight and its rehearsal mode.
 
 Code hashes of the launch contracts (fresh forced build at the freeze in a clean worktree, forge 1.7.1, Solidity
 0.8.24, `optimizer_runs` 1, shanghai; runtime with immutables zeroed). They equal the round 11 and round 14 values:
@@ -71,7 +72,8 @@ known window limit), `R310SettlementReview` (1: the demonstration of why the sna
 What a bidder must know about Phase 2B:
 - The mint verifier's two SP1 programs (STEP: Ethereum sync-committee light-client progress; MINT: receipt inclusion
   under a stored finalized execution block) are written in round 15 by a separate task in the repository
-  `bloch-sis-pow`, branch `codex/mint-verifier-sp1-r15-20261110`, to the public-values layouts of
+  `bloch-sis-pow`, branch `codex/mint-verifier-sp1-r15-20261110` (final tip `0ad48723`, crate
+  `crates/bloch-eth-mint-lc`; prototype identities in `docs/LC-MINT-VERIFIER.md` section 4), to the public-values layouts of
   `docs/LC-MINT-VERIFIER.md` section 3 (pin candidate v2, agreed between the two authors). They are **not** in these
   lists; their size and state are in that task's report. The contract's layout is fixed to them; a change there
   moves the contract.
@@ -88,7 +90,8 @@ anvil and stubs only; no physical power-loss test of the release journal; settle
 is not refundable, small settled items can delay a window-sized one, the forger shares pro rata).
 
 Changed or new in round 15:
-- Item 8: the mint verifier is stateful and its programs are being written; no vkey is pinned. The light-client
+- Item 8: the mint verifier is stateful and its programs exist as unaudited prototypes; no vkey is pinned and no
+  Groth16 proof of either statement has been verified through the contract. The light-client
   switch stays NO-GO until the programs are reproduced and audited, a mainnet anchor after the L1 KES bind (e8620)
   exists, the node release that serves `getlcproof` is rolled out, and this audit exists.
 - **A new liveness duty after the token's switch:** somebody must advance the mint verifier's store at least once
