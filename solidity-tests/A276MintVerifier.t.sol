@@ -424,6 +424,7 @@ contract A276MintVerifierTest {
         new EMV(c);
         c = cfg(AUTHORITY, 14 days);
         c.maxStepGap = 2 days - 1;
+        c.maxHeadLag = 2 hours; // so that only the gap's own minimum refuses
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
         c = cfg(AUTHORITY, 14 days);
