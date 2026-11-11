@@ -2,7 +2,7 @@
 """Pre-go-live check of one signer host of the bUSDC bridge (docs/BRIDGE-V3-OPERATOR-RUNBOOK.md, section 3).
 
   preflight_signer.py --config SIGNER.json [--eth-half-config ETH-HALF.json] [--relayer-config RELAYER.json]
-                      [--allow-remote-eth-rpc] [--skip-dry-release] [--skip-binaries] [--json]
+                      [--allow-remote-eth-rpc] [--rehearsal-pins] [--skip-dry-release] [--skip-binaries] [--json]
 
 Read-only. It signs nothing, sends nothing and prints no key material. Run it as the service user on the signer host,
 after the configs are filled and before the daemons are started. Exit 0: every check passed. Exit 1: at least one
@@ -95,6 +95,20 @@ def writable_dir(report, group, label, path):
     report.add(group, f'{label} is a writable directory', p.is_dir() and os.access(p, os.W_OK | os.X_OK), str(p))
 
 
+def creatable_dir(report, group, label, path):
+    """A directory the daemon makes itself at its first write: it exists and is writable, or its nearest existing
+    parent is a writable directory (the check runs before the daemons have ever started)."""
+    p = Path(str(path))
+    if p.exists():
+        writable_dir(report, group, label, p)
+        return
+    parent = p.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    report.add(group, f'{label} can be created (its parent is writable)',
+               parent.is_dir() and os.access(parent, os.W_OK | os.X_OK), str(p))
+
+
 def own_node(url):
     host = urlparse(str(url)).hostname or ''
     if host == 'localhost':
@@ -111,12 +125,15 @@ def is_address(value):
         c in '0123456789abcdefABCDEF' for c in value[2:])
 
 
-def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries):
+def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries, rehearsal_pins=False):
     left = undecided(cfg)
     report.add('config', 'signer config has no TBD-owner value', not left, ', '.join(left))
     for key, want in DECIDED_SIGNER.items():
-        report.add('config', f'signer {key} is {want!r}', cfg.get(key) == want and type(cfg.get(key)) is type(want),
-                   repr(cfg.get(key)))
+        ok = cfg.get(key) == want and type(cfg.get(key)) is type(want)
+        # A rehearsal on a private net cannot use the mainnet pins (the released follower follows mainnet only): its
+        # l2_pins is an object. --rehearsal-pins reports that as a warning, so the dry release still runs.
+        rehearsal = rehearsal_pins and key == 'l2_pins' and isinstance(cfg.get(key), dict)
+        report.add('config', f'signer {key} is {want!r}', ok, repr(cfg.get(key))[:200], warning=not ok and rehearsal)
     urls = cfg.get('l1_rpc_urls') or []
     report.add('config', 'at least two distinct L1 RPC URLs', isinstance(urls, list) and len(set(urls)) >= 2, str(len(urls)))
     feed = cfg.get('feed') or {}
@@ -131,7 +148,7 @@ def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries):
     private_file(report, 'files', 'L2 mint password file', cfg.get('password_file', ''))
     writable_dir(report, 'files', 'work_dir', cfg.get('work_dir', ''))
     writable_dir(report, 'files', 'shared_dir', cfg.get('shared_dir', ''))
-    writable_dir(report, 'files', 'scan_state_dir', cfg.get('scan_state_dir') or Path(str(cfg.get('shared_dir', ''))) / '.scan')
+    creatable_dir(report, 'files', 'scan_state_dir', cfg.get('scan_state_dir') or Path(str(cfg.get('shared_dir', ''))) / '.scan')
     writable_dir(report, 'files', 'database directory', Path(str(cfg.get('db', ''))).parent)
     if feed.get('publish_dir'):
         writable_dir(report, 'files', 'feed.publish_dir', feed['publish_dir'])
@@ -205,10 +222,13 @@ def check_journal(report, cfg, mounts='/proc/mounts'):
                    existing.is_dir() and os.access(existing, os.W_OK | os.X_OK), str(existing))
 
 
-def check_relayer(report, cfg, cfg_path):
+def check_relayer(report, cfg, cfg_path, rehearsal_pins=False):
     left = undecided(cfg)
     report.add('relayer', 'relayer config has no TBD-owner value', not left, ', '.join(left))
     for key, want in DECIDED_RELAYER.items():
+        if rehearsal_pins and key == 'l2_pins' and isinstance(cfg.get(key), dict):
+            report.add('relayer', f'relayer {key} is {want!r}', False, 'an object (--rehearsal-pins)', warning=True)
+            continue
         report.add('relayer', f'relayer {key} is {want!r}', cfg.get(key) == want and type(cfg.get(key)) is type(want),
                    repr(cfg.get(key)))
     check_journal(report, cfg)
@@ -276,11 +296,12 @@ def run(argv, signatario=HERE / 'signatario.py'):
     allow_remote = '--allow-remote-eth-rpc' in argv
     report = Report()
     cfg = load(cfg_path)
-    check_signer(report, cfg, cfg_path, allow_remote, '--skip-binaries' in argv)
+    rehearsal_pins = '--rehearsal-pins' in argv
+    check_signer(report, cfg, cfg_path, allow_remote, '--skip-binaries' in argv, rehearsal_pins)
     if opt('--eth-half-config'):
         check_eth_half(report, load(opt('--eth-half-config')), opt('--eth-half-config'), cfg, allow_remote)
     if opt('--relayer-config'):
-        check_relayer(report, load(opt('--relayer-config')), opt('--relayer-config'))
+        check_relayer(report, load(opt('--relayer-config')), opt('--relayer-config'), rehearsal_pins)
     if '--skip-dry-release' in argv:
         report.add('dry', 'dry release', True, 'skipped (--skip-dry-release)', warning=True)
     elif any(r['group'] in ('config', 'files', 'binaries') for r in report.failed):

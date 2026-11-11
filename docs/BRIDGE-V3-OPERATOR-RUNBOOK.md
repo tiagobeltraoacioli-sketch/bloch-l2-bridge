@@ -163,10 +163,21 @@ It must end with `OK: N of N checks passed` and exit 0. It is read-only: it sign
 
 The dry release rebuilds the L2 from L1, so it needs the follower synced; it can take several minutes.
 
-`--allow-remote-eth-rpc` turns the own-node rule into a warning. Use it only for a rehearsal.
+`--allow-remote-eth-rpc` turns the own-node rule into a warning. Use it only for a rehearsal. `--rehearsal-pins`
+turns an `l2_pins` object (private-net pins) into a warning so the dry release runs on a private net; never on
+mainnet, where `l2_pins` must be `mainnet-v2`.
 
-Tests: `python3 -m unittest test_preflight_signer` (12, offline, including the real `signatario.py` refusing at the
-binary pins). **Not yet run against a real follower of the launch build** (section 6).
+Tests: `python3 -m unittest test_preflight_signer` (16, offline, including the real `signatario.py` refusing at the
+binary pins).
+
+Run on a private net in round 15 (item 281, host 209.250.236.240, proofless, 4 validators): with private pins and
+`--rehearsal-pins`, 66 of 66 checks passed and the dry release refused with exactly the expected reason, against a
+follower and a producer built from the launch source for a private L1 and the **released** settled RPC `53e88565…`.
+With `mainnet-v2` pins and the three released binaries the binaries check passed and the dry release refused with
+"the follower verifies another network", as it must on a private net. **The released follower `cdf5da5c…` refuses
+any private net ("a funded manifest must be the Genesis-4 mainnet"), so the full check with mainnet pins can only
+pass on the real hosts against mainnet L1**: that is the owner's run at go-live. The run found and fixed two defects
+(a fresh host failed on the scan directory the daemon creates itself; no rehearsal mode).
 
 Guardian hosts: `python3 tools/guardiao/guardiao.py --config guardiao.json check --dry-run` and the health monitor, as in
 `tools/guardiao/README.md`. There is no guardian preflight script yet.
@@ -208,8 +219,8 @@ After line 18, each signer operator runs section 3 on its host and sends the las
 
 ## 6. Not done
 
-- The pre-go-live script has not run on a host with a real follower of build `926d2cf`; its dry release is tested
-  against the real `signatario.py` only up to the binary pins.
+- The pre-go-live script passed on a private net with private pins (section 3). With the mainnet pins and the released
+  follower it can only pass against mainnet L1: not run (owner's run on the real hosts).
 - No guardian preflight script.
 - No hardened systemd unit for the bUSDC signer (agent 173, I3): the mint key and the release key are used by one
   user. Separate users or hosts would make the separation mean more.

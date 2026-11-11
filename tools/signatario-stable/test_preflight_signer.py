@@ -254,6 +254,33 @@ class PreflightSigner(unittest.TestCase):
         if os.geteuid() != 0:
             self.assertFails(host.run('--skip-dry-release'), 'can be created')
 
+    def test_a_fresh_host_passes_before_the_daemons_made_their_scan_directory(self):
+        """Item 281, D1: `.scan` is made by the daemon at its first write; its absence must not fail the check."""
+        host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        scan = Path(host.root) / 'signatures/.scan'
+        if scan.exists():
+            scan.rmdir()
+        self.assertEqual(self.failed(host.run('--skip-dry-release')), [])
+        scan.parent.chmod(0o500)
+        self.addCleanup(scan.parent.chmod, 0o700)
+        if os.geteuid() != 0:
+            self.assertFails(host.run('--skip-dry-release'), 'scan_state_dir')
+
+    def test_rehearsal_pins_are_a_warning_only_with_the_flag(self):
+        """Item 281, D2: a private-net rehearsal has an l2_pins object; without the flag that stays a failure."""
+        for flag, fails in ((None, True), ('--rehearsal-pins', False)):
+            host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+            host.signer['l2_pins'] = {'follower': '00' * 32}
+            host.relayer['l2_pins'] = {'follower': '00' * 32}
+            report = host.run('--skip-dry-release', *([flag] if flag else []))
+            self.assertEqual(any('l2_pins' in r['check'] for r in report.failed), fails)
+            if flag:
+                # (the test host writes the signer config with the mainnet pins: only the relayer row is the object)
+                self.assertEqual(sum(r['result'] == 'warn' and 'l2_pins' in r['check'] for r in report.rows), 1)
+        host = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        host.relayer['l2_pins'] = 'devnet'
+        self.assertFails(host.run('--skip-dry-release', '--rehearsal-pins'), 'l2_pins')
+
     def test_journal_on_a_volatile_filesystem_is_refused(self):
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (root / 'run/relayer').mkdir(parents=True)
