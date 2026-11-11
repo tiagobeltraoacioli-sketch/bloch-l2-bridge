@@ -67,6 +67,20 @@ class R310JournalWedge(review.Base):
         again, _ = self.send(daemon, LATER[0])
         self.assertEqual((again, len(self.sent)), (tx, sends + 1))
 
+    def test_R310_2P_4_a_reused_nonce_is_protected_by_the_high_water_mark_again(self):
+        """Second-pass review R310-2P-4: the tombstone frees its nonce once. After the nonce is reserved again, a lost
+        reservation file at it stops the relayer, as at any other nonce below the mark."""
+        daemon, journal, _ = self.orphan()
+        self.assertFalse(journal.freed(0))
+        tx, _ = self.send(daemon, LATER[0])
+        self.assertFalse(journal.freed(0), 'reserved again: no longer free')
+        self.assertEqual(len(journal.retired(0)), 1, 'the history is kept')
+        journal.nonce_path(0).unlink()          # the reservation file of the reused nonce is lost
+        journal.accepted(LATER[0]).unlink()
+        self.sent_transactions.clear()
+        with self.assertRaisesRegex(RuntimeError, 'missing nonce reservation below the durable high-water mark'):
+            self.send(daemon, LATER[1])
+
     def test_a_release_seen_only_below_finality_keeps_the_reservation(self):
         daemon, journal, _ = self.orphan(final=False)
         for other in LATER:

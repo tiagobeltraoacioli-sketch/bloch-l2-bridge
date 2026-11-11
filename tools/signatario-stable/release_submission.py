@@ -157,19 +157,29 @@ class ReleaseJournal:
     def retired_path(self, nonce):
         return self.account / f'retired-{nonce}.json'
 
-    def retired(self, nonce):
-        """The retirement history of a nonce (a list), or None when nothing was ever retired at it."""
+    def tombstone(self, nonce):
         raw = self.read_file(self.retired_path(nonce))
         if raw is None:
             return None
         marker = strict_json(raw)
-        require(type(marker) is dict and set(marker) == {'schema', 'nonce', 'records'}
-                and type(marker['schema']) is int and marker['schema'] == 1
+        require(type(marker) is dict and set(marker) == {'schema', 'nonce', 'records', 'free'}
+                and type(marker['schema']) is int and marker['schema'] == 2 and type(marker['free']) is bool
                 and type(marker['nonce']) is int and marker['nonce'] == nonce and type(marker['records']) is list
                 and all(type(entry) is dict and set(entry) == {'burn', 'hash', 'reason'}
                         and all(isinstance(value, str) for value in entry.values()) for entry in marker['records']),
                 'unrecognized retirement record; operator reconciliation required')
-        return marker['records']
+        return marker
+
+    def retired(self, nonce):
+        """The retirement history of a nonce (a list), or None when nothing was ever retired at it."""
+        marker = self.tombstone(nonce)
+        return None if marker is None else marker['records']
+
+    def freed(self, nonce):
+        """True from a retirement at this nonce until the nonce is reserved again. Only then may a nonce at or below
+        the high-water mark have no reservation file (second-pass review R310-2P-4)."""
+        marker = self.tombstone(nonce)
+        return marker is not None and marker['free']
 
     def spent(self, item):
         """Why a reserved transaction can never pay, from finalized chain facts, or None while it still might.
@@ -202,7 +212,7 @@ class ReleaseJournal:
         history = self.retired(nonce) or []
         history.append({'burn': record['burn'], 'hash': record['hash'], 'reason': reason})
         # The tombstone is written first: a crash between the steps leaves a reservation that retires again.
-        self.write(self.retired_path(nonce), {'schema': 1, 'nonce': nonce, 'records': history[-64:]})
+        self.write(self.retired_path(nonce), {'schema': 2, 'nonce': nonce, 'records': history[-64:], 'free': True})
         for path in (self.nonce_path(nonce), self.accepted(record['burn']), self.pending):
             held = self.read(path)
             if held is not None and held[0]['hash'] == record['hash']:
@@ -222,7 +232,7 @@ class ReleaseJournal:
                 prior = None
         if prior is None:
             highest = self.index_highest()
-            require(highest is None or nonce > highest or self.retired(nonce) is not None,
+            require(highest is None or nonce > highest or self.freed(nonce),
                     'missing nonce reservation below the durable high-water mark; operator reconciliation required')
 
     def reserve_nonce(self, item):
@@ -230,6 +240,9 @@ class ReleaseJournal:
         nonce = quantity(tx['nonce'])
         self.check_nonce(nonce, record['burn'])
         self.write(self.nonce_path(nonce), record)
+        marker = self.tombstone(nonce)
+        if marker is not None and marker['free']:  # reserved again: the mark protects this nonce as any other
+            self.write(self.retired_path(nonce), {**marker, 'free': False})
         highest = self.index_highest()
         require(highest is not None, 'nonce index migration required before submission')
         if nonce > highest:

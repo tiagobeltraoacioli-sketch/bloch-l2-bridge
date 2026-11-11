@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -280,6 +281,24 @@ class PreflightSigner(unittest.TestCase):
         host = Host(tempfile.mkdtemp(dir=self.tmp.name))
         host.relayer['l2_pins'] = 'devnet'
         self.assertFails(host.run('--skip-dry-release', '--rehearsal-pins'), 'l2_pins')
+
+    def test_a_rehearsal_run_never_ends_ok(self):
+        """Second-pass review R310-2P-3: with --rehearsal-pins a clean run ends `rehearsal`, exit 3, never `ok` / 0,
+        on chain 700770 as on any other."""
+        report = self.host.run('--skip-dry-release')
+        self.assertEqual(self.failed(report), [])
+        self.assertEqual(pf.outcome(report, False), (0, 'ok'))
+        self.assertEqual(pf.outcome(report, True), (3, 'rehearsal'))
+        bad = Host(tempfile.mkdtemp(dir=self.tmp.name))
+        bad.relayer['relay_role'] = 'both'
+        self.assertEqual(pf.outcome(bad.run('--skip-dry-release', '--rehearsal-pins'), True), (1, 'fail'))
+        # Through the command line: the mainnet chain id and the mainnet pins make no difference.
+        paths = self.host.write()
+        done = subprocess.run([sys.executable, str(HERE / 'preflight_signer.py'), '--config', paths['signer'],
+                               '--skip-dry-release', '--skip-binaries', '--rehearsal-pins'], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 3, done.stdout[-400:])
+        self.assertIn('REHEARSAL (not a go-live result', done.stdout)
+        self.assertNotIn('\nOK:', done.stdout)
 
     def test_journal_on_a_volatile_filesystem_is_refused(self):
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))

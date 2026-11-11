@@ -246,7 +246,7 @@ class MintVerifierOffline(unittest.TestCase):
         self.now = 1_800_000_000
         self.imm = {'stepVKey': '0x' + '01' * 32, 'mintVKey': '0x' + '02' * 32, 'l2Token': self.TOKEN, 'sourceChainId': 1,
                     'vault': self.VAULT, 'route': '0x' + 'cc' * 32, 'beaconGenesisTime': BEACON_GENESIS,
-                    'secondsPerSlot': 12, 'maxStepGap': 14 * 86400,
+                    'secondsPerSlot': 12, 'maxStepGap': 14 * 86400, 'maxHeadLag': 86400,
                     'genesisValidatorsRoot': vr.MAINNET_BEACON['genesisValidatorsRoot'],
                     'anchorSlot': (self.now - 86400 - BEACON_GENESIS) // 12, 'anchorHeaderRoot': '0x' + '0a' * 32,
                     'anchorSyncCommitteeRoot': '0x' + '0b' * 32, 'handoffAuthority': self.AUTH, 'handoffDelay': 30 * 86400}
@@ -701,10 +701,10 @@ class EndToEnd(unittest.TestCase):
         address = self.n.create(
             'contracts/stable/EthereumMintVerifier.sol:EthereumMintVerifier',
             f'({self.mock_sp1},{self.STEP_VKEY},{self.MINT_VKEY},{self.token},31337,{self.vault},{self.route},{self.GVR},'
-            f'{slot},{anchor["root"]},{anchor["committeeRoot"]},{BEACON_GENESIS},12,{gap},{authority},{delay})')
+            f'{slot},{anchor["root"]},{anchor["committeeRoot"]},{BEACON_GENESIS},12,{gap},86400,{authority},{delay})')
         imm = {'stepVKey': self.STEP_VKEY, 'mintVKey': self.MINT_VKEY, 'l2Token': self.token, 'sourceChainId': 31337,
                'vault': self.vault, 'route': self.route, 'beaconGenesisTime': BEACON_GENESIS, 'secondsPerSlot': 12,
-               'maxStepGap': gap, 'genesisValidatorsRoot': self.GVR, 'anchorSlot': slot, 'anchorHeaderRoot': anchor['root'],
+               'maxStepGap': gap, 'maxHeadLag': 86400, 'genesisValidatorsRoot': self.GVR, 'anchorSlot': slot, 'anchorHeaderRoot': anchor['root'],
                'anchorSyncCommitteeRoot': anchor['committeeRoot'], 'handoffAuthority': authority, 'handoffDelay': delay}
         self.beacons[0].routes = routes(anchor)
         self.beacons[1].routes = routes(anchor, bootstrap=False)
@@ -751,8 +751,11 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(out['handoff']['enabled'])
         self.assertIn('anchored at a checkpoint this contract accepted', out['handoff']['designedMutability'])
         self.assertIsNone(out['tokenProposal'])
-        # One endpoint only: passes with a warning.
-        code, out = self.mint_review('--expect', self.mint_expect(imm), '--address', verifier, '--beacon', self.beacons[0].url)
+        # One endpoint only: refused, unless the reviewer records it (second-pass review R310-2P-5).
+        self.refused('ONE beacon endpoint', self.mint_review, '--expect', self.mint_expect(imm), '--address', verifier,
+                     '--beacon', self.beacons[0].url)
+        code, out = self.mint_review('--expect', self.mint_expect(imm), '--address', verifier, '--beacon', self.beacons[0].url,
+                                     '--single-beacon')
         self.assertEqual(code, 0, out)
         self.assertTrue(any('ONE beacon endpoint' in w for w in out['warnings']))
         # With --token: no proposal yet, then the 6-of-7 proposal, then a committee mint still queued.
@@ -767,11 +770,9 @@ class EndToEnd(unittest.TestCase):
         code, out = self.mint_review('--expect', self.mint_expect(imm), '--address', verifier, '--token', self.token, *self.both())
         self.assertEqual(code, 0, out)
         self.assertTrue(any('DRAIN BEFORE ACTIVATION: 1' in w for w in out['warnings']))
-        # A handoff verifier without the handoff is reported as immutable.
-        fixed, imm2, _ = self.mint_verifier(authority=vr.ZERO_ADDR)
-        self.step(fixed)
-        code, out = self.mint_review('--expect', self.mint_expect(imm2), '--address', fixed, *self.both())
-        self.assertEqual((code, out['handoff']['enabled']), (0, False), out)
+        # A verifier without a handoff authority cannot be deployed (second-pass review R310-2P-1).
+        with self.assertRaises(Exception):
+            self.mint_verifier(authority=vr.ZERO_ADDR)
 
     def test_08_mint_verifier_review_refuses_code_values_and_keys(self):
         verifier, imm, _ = self.mint_verifier()

@@ -6,7 +6,8 @@
 
 Read-only. It signs nothing, sends nothing and prints no key material. Run it as the service user on the signer host,
 after the configs are filled and before the daemons are started. Exit 0: every check passed. Exit 1: at least one
-check failed (each is listed). Exit 2: usage or an unreadable config.
+check failed (each is listed). Exit 2: usage or an unreadable config. Exit 3: every check passed in a REHEARSAL run
+(--rehearsal-pins): never a go-live result, whatever the chain id (second-pass review R310-2P-3).
 
 Checks:
   config     no TBD-owner value is left; the decided values (chain ids 700770 and 1, thresholds 5 and 5, l2_pins
@@ -311,6 +312,14 @@ def run(argv, signatario=HERE / 'signatario.py'):
     return report
 
 
+def outcome(report, rehearsal):
+    """(exit code, decision). A run with --rehearsal-pins never ends `ok` / 0: the pre-go-live gate cannot pass on a
+    host whose signer would trust operator-supplied pins."""
+    if report.failed:
+        return 1, 'fail'
+    return (3, 'rehearsal') if rehearsal else (0, 'ok')
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or '-h' in argv or '--help' in argv:
@@ -320,13 +329,15 @@ def main():
     except SystemExit as e:
         print(e, file=sys.stderr)
         raise SystemExit(2) from None
+    code, decision = outcome(report, '--rehearsal-pins' in argv)
     if '--json' in argv:
-        print(json.dumps({'decision': 'fail' if report.failed else 'ok', 'checks': report.rows}, indent=2))
+        print(json.dumps({'decision': decision, 'checks': report.rows}, indent=2))
     else:
         for r in report.rows:
             print(f"{r['result']:4}  [{r['group']}] {r['check']}" + (f"  ({r['detail']})" if r['detail'] else ''))
-        print(f"{'FAILED' if report.failed else 'OK'}: {len(report.rows) - len(report.failed)} of {len(report.rows)} checks passed")
-    raise SystemExit(1 if report.failed else 0)
+        word = {'fail': 'FAILED', 'ok': 'OK', 'rehearsal': 'REHEARSAL (not a go-live result; --rehearsal-pins)'}[decision]
+        print(f"{word}: {len(report.rows) - len(report.failed)} of {len(report.rows)} checks passed")
+    raise SystemExit(code)
 
 
 if __name__ == '__main__':

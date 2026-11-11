@@ -10,7 +10,7 @@ Read-only: nothing is ever signed or sent by this tool.
   verifier_review.py settlement --expect EXPECT.json --rpc ETH_URL --vault VAULT --l2-rpc L2_URL
                                [--address VERIFIER] [--snapshot SNAPSHOT.json] [--accept-open-slots]
   verifier_review.py mint-verifier --expect EXPECT.json --l2-rpc L2_URL --address VERIFIER [--token TOKEN]
-                               [--beacon URL]... [--anchor-unchecked] [--l2-block finalized]
+                               [--beacon URL]... [--single-beacon] [--anchor-unchecked] [--l2-block finalized]
 
 Why. `ProvenanceSourceVault.proposeVerifier` pins `verifier.codehash`, and `activateVerifier` re-checks it, but a code
 hash does not pin behaviour (172 V2, 171 F171-4):
@@ -328,7 +328,8 @@ SETTLEMENT_GETTERS = {
 MINT_VERIFIER_GETTERS = {
     'sp1Verifier': 'address', 'stepVKey': 'bytes32', 'mintVKey': 'bytes32', 'l2Token': 'address', 'sourceChainId': 'uint',
     'vault': 'address', 'route': 'bytes32', 'mintTypehash': 'bytes32', 'beaconGenesisTime': 'uint',
-    'secondsPerSlot': 'uint', 'maxStepGap': 'uint', 'genesisValidatorsRoot': 'bytes32', 'anchorSlot': 'uint',
+    'secondsPerSlot': 'uint', 'maxStepGap': 'uint', 'maxHeadLag': 'uint', 'genesisValidatorsRoot': 'bytes32',
+    'anchorSlot': 'uint',
     'anchorHeaderRoot': 'bytes32', 'anchorSyncCommitteeRoot': 'bytes32', 'handoffAuthority': 'address',
     'handoffDelay': 'uint'}
 MAINNET_BEACON = {'beaconGenesisTime': 1606824023, 'secondsPerSlot': 12,
@@ -830,7 +831,8 @@ def load_mint_expect(path):
     return e
 
 
-def check_mint_verifier(e, l2c, address, token=None, beacons=(), anchor_unchecked=False, get=http_get):
+def check_mint_verifier(e, l2c, address, token=None, beacons=(), anchor_unchecked=False, get=http_get,
+                        single_beacon=False):
     address = address.lower()
     refuse(l2c.chain_id == e['l2']['chainId'], f'the L2 RPC serves chain {l2c.chain_id}, expected {e["l2"]["chainId"]}')
     v = e['verifier']
@@ -846,6 +848,8 @@ def check_mint_verifier(e, l2c, address, token=None, beacons=(), anchor_unchecke
         for name, want in MAINNET_BEACON.items():
             refuse(got[name] == want, f'M1: {name} is {got[name]}; Ethereum mainnet\'s is {want}')
     refuse(got['secondsPerSlot'] > 0 and 2 * 86400 <= got['maxStepGap'] <= 30 * 86400, 'M1: unusable clock or step gap')
+    refuse(2 * 3600 <= got['maxHeadLag'] <= 7 * 86400 and 2 * got['maxHeadLag'] <= got['maxStepGap'],
+           'M1: maxHeadLag must be 2 hours to 7 days and at most half of maxStepGap')
     l2_token = got['l2Token']
     refuse(got['mintTypehash'] == '0x' + l2c.word(l2_token, 'MINT_TYPEHASH()').hex(), 'M1: mintTypehash is not the token\'s')
     # M7
@@ -869,18 +873,20 @@ def check_mint_verifier(e, l2c, address, token=None, beacons=(), anchor_unchecke
     refuse(successor == ZERO_ADDR, f'M3: a successor {successor} is already active: review the successor, not this contract')
     refuse(proposed == ZERO_ADDR, f'M3: a successor {proposed} is proposed: it must be reviewed and settled first')
     auth = got['handoffAuthority']
-    if auth == ZERO_ADDR:
-        handoff = {'enabled': False, 'designedMutability': 'Handoff is off: the verifier is immutable, and its mint path '
-                   'ends at the first Ethereum fork that changes the light-client rules or after maxStepGap without a step.'}
-    else:
-        refuse(len(l2c.code(auth)) > 0, f'M3: handoffAuthority {auth} has no code: a cold multisig contract is required')
-        refuse(auth not in {a.lower() for a in e.get('forbiddenAuthorities') or []},
-               f'M3: handoffAuthority {auth} is one of the hot bridge keys')
-        handoff = {'enabled': True, 'handoffAuthority': auth, 'handoffAuthorityCodeHash': khex(l2c.code(auth)),
-                   'handoffDelay': got['handoffDelay'], 'designedMutability':
-                   'The authority may propose a successor with ANY code; it activates after handoffDelay and no proof stops '
-                   'it. While the store is alive the successor must be anchored at a checkpoint this contract accepted; after '
-                   'maxStepGap without a step the authority chooses the root. Proof mints cannot be cancelled by guardians.'}
+    # The contract refuses a zero authority at deployment (second-pass review R310-2P-1); a build that allows it is
+    # not the reviewed one, and its mint path would end for good at a lapse or an Ethereum fork.
+    refuse(auth != ZERO_ADDR, 'M3: handoffAuthority is zero: without it a lapse or an Ethereum fork ends the mint path for good')
+    refuse(len(l2c.code(auth)) > 0, f'M3: handoffAuthority {auth} has no code: a cold multisig contract is required')
+    refuse(auth not in {a.lower() for a in e.get('forbiddenAuthorities') or []},
+           f'M3: handoffAuthority {auth} is one of the hot bridge keys')
+    handoff = {'enabled': True, 'handoffAuthority': auth, 'handoffAuthorityCodeHash': khex(l2c.code(auth)),
+               'handoffDelay': got['handoffDelay'], 'designedMutability':
+               'The authority may propose a successor with ANY code; it activates after handoffDelay and no proof stops '
+               'it. While the store is alive the successor must be anchored at a checkpoint this contract accepted (read at '
+               'proposal and again at activation; a guarantee only when the successor is itself a reviewed '
+               'EthereumMintVerifier build, whose anchor is immutable: run this review on the successor); after '
+               'maxStepGap without a step by anybody the authority chooses the root. Proof mints cannot be cancelled '
+               'by guardians.'}
     # M4
     block = rpc(l2c.url, 'eth_getBlockByNumber', [l2c.at, False])
     now = int(block['timestamp'], 16)
@@ -911,7 +917,10 @@ def check_mint_verifier(e, l2c, address, token=None, beacons=(), anchor_unchecke
                         'anchorSyncCommitteeRoot are whatever the deployer chose')
         anchor = {'checked': False}
     if len(beacons) == 1:
-        warnings.append('the anchor was checked against ONE beacon endpoint; use at least two independent nodes')
+        # The anchor pair (header root, committee root) is the one set-once trust root (second-pass review R310-2P-5).
+        refuse(single_beacon, 'M5: the anchor was checked against ONE beacon endpoint: pass a second, independent '
+                              '--beacon URL, or --single-beacon to record that only one was used')
+        warnings.append('the anchor was checked against ONE beacon endpoint (--single-beacon); use at least two independent nodes')
     # M6
     out_token = None
     if token is not None:
@@ -975,7 +984,8 @@ def main(argv=None):
             chain = Chain(opt('--l2-rpc'), opt('--l2-block', 'finalized'))
             result = {'decision': 'mint-verifier-reviewed',
                       **check_mint_verifier(load_mint_expect(opt('--expect')), chain, opt('--address'), opt('--token'),
-                                            every('--beacon'), '--anchor-unchecked' in args)}
+                                            every('--beacon'), '--anchor-unchecked' in args,
+                                            single_beacon='--single-beacon' in args)}
             result['block'] = int(chain.at, 16)
         else:
             refuse(opt('--expect') and opt('--rpc'), '--expect and --rpc are required')
