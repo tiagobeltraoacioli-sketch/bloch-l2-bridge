@@ -9,7 +9,8 @@ B-test	372	292	272	5cf468911d35b517ad32863bc4d32b3881fb5de6e8709a39db982513089a6
 B-tool	304	218	160	cdcf0d870e08c76de72c237ccfb4b3ba708a2b9bd429e0df47a719c18d804c53	tools/deploy-pontes/settlement_snapshot.py
 B-test	289	230	210	855edb7c6b15f04a3410e316ebc587b9635f2e824e3d989132786f9c61408c8b	tools/deploy-pontes/test_settlement_snapshot.py
 B-test	879	729	647	4a70fba2f4f01e074af6ffbeb82c86de505de7ac9e4a867366fed214b5fa0bc0	tools/deploy-pontes/test_settlement_review.py
+B-test	522	411	362	7ef927a4aea745758877c9a990c7c73c1c25a8bdbdbd431840e845702f1fd42c	solidity-tests/R310SecondPass.t.sol
 # total B1	951	635	513
 # total B-doc	588	0	0
-# total B-test	4057	3365	3122
+# total B-test	4579	3776	3484
 # total B-tool	304	218	160
