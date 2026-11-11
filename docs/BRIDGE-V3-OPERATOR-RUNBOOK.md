@@ -116,6 +116,23 @@ first lost key.
 - If a forged mint credits (`mint-chain`, `reservas` exit 2 `held`): close deposits (5 of 7, `setControls(false,
   true, ...)`), stop mint signing, and follow `docs/HELD-STATE-SETTLEMENT.md`.
 
+### 2.8 After the token's switch to proofs: the step duty (not at launch; the LC switch is NO-GO)
+
+Once `BridgedStablecoinV3` is on `EthereumMintVerifier` (`docs/LC-MINT-VERIFIER.md`), a deposit mints only under a
+finalized Ethereum block that a STEP proof stored in the verifier. Two rules follow:
+
+- **Step after each deposit finalizes** (about 15 minutes after the deposit), then prove the mint under that step. The
+  mint proof costs one hash per Ethereum block between the deposit and the stored block, so do not let deposits wait.
+- **Never let the store age past `maxStepGap`** (proposed 14 days). Past it `advance` refuses for good and the proof
+  path continues only through the handoff (with `handoffAuthority` zero: never). Alert levels for whoever runs the
+  prover: warning when `block.timestamp - slotTime(headSlot)` is above one day with no deposit waiting, critical
+  above a quarter of `maxStepGap`. `verifier_review.py mint-verifier` refuses a verifier whose head is older than
+  half of `maxStepGap`. Anyone can advance: it is a proof, never a signature, and at least two operators should run
+  a prover on different hosts.
+
+The prover (agent 316's host tools) and a head-age alert in the guardian daemon are not part of the launch line; they
+are prerequisites of the switch.
+
 ## 3. Pre-go-live check on every signer host
 
 Run as the service user, after the configs are filled and before the daemons start:
