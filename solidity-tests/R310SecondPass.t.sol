@@ -106,6 +106,7 @@ contract R310SecondPassTest {
     }
 
     function setUp() public {
+        griefSlot = 0;
         vm.roll(1000);
         vm.warp(uint256(GENESIS) + 8000 * EPOCH);
         mintKeys = sortedKeys(0x1000);
@@ -145,12 +146,12 @@ contract R310SecondPassTest {
         return EMV.Config(
             ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(token), block.chainid, address(vault),
             vault.routeId(), GVR, anchorSlot, rootAt(anchorSlot), committee(anchorSlot / 8192), BEACON_GENESIS, 12,
-            30 days, authority, delay
+            30 days, 2 days, authority, delay
         );
     }
 
     function newVerifier() private returns (EMV) {
-        return new EMV(cfg(address(0), 0));
+        return new EMV(cfg(AUTHORITY, 14 days));
     }
 
     function sortedKeys(uint256 base) private pure returns (uint256[] memory k) {
@@ -364,55 +365,84 @@ contract R310SecondPassTest {
 
     // ---------------------------------------------------------------- R310-2P-1
 
-    /// R310-2P-1. `advance` accepts any step that is newer than the head, however old the new head still is, and it
-    /// accepts only a proof that starts from the LATEST store. Whoever lands a one-epoch step in every L2 block
-    /// (a) makes every honest proof, which started from the store of the block before, revert `StaleStore`, and
-    /// (b) lets the head fall behind real time by (L2 block interval - 6.4 minutes) per block. Once the head is older
-    /// than `maxStepGap` nobody can advance again: the proof path of the token has ended, although a valid step was
-    /// accepted in every single L2 block. The griefer's steps follow old finality (constructible from archive data and
-    /// provable ahead of time, because each of its start stores is its own previous output).
-    function test_R310_2P_1_oneEpochStepsEndTheProofPathWhileEveryHonestStepReverts() public {
-        EMV mv = newVerifier(); // maxStepGap 30 days, anchor one day old, no handoff
-        uint256 griefSteps;
-        uint256 honestRefused;
-        while (mv.canAdvance()) {
-            this.oneBlock(mv); // an external call per block, so the test's memory does not grow
-            ++griefSteps;
-            ++honestRefused;
-        }
-        require(griefSteps == honestRefused && griefSteps > 1000, "a valid step landed in every block until the end");
-        // The end: a fresh honest step, from the latest store, is refused for good.
-        (bool again, bytes4 why) = tryAdvance(mv, stepPv(mv, freshSlot()), LC_STEP_VKEY);
-        require(!again && why == EMV.StepGapExceeded.selector, "the proof path has ended");
-        require(mv.handoffAuthority() == address(0), "and with the handoff off nothing can continue it");
-        // The last accepted step moved the head to a block that was already about 30 days old.
-        require(block.timestamp - mv.slotTime(mv.headSlot()) > 30 days, "head age");
+    /// R310-2P-1 (second-pass review, at `13d79cc`): `advance` accepted a step to a head of any age and only from the
+    /// latest store. Whoever landed a one-epoch step in every L2 block made every honest proof revert and let the head
+    /// age past `maxStepGap`: the proof path ended although a valid step was accepted in every block.
+    ///
+    /// Fixed (agent 314): a step must reach a FRESH head (`maxHeadLag`), and a proof may start from any recorded store
+    /// that is young enough. This is the reviewer's demonstration turned around: the same griefer, ordered first in
+    /// every block, cannot refuse a single honest proof and cannot hold the head back; its minimal steps are refused
+    /// as soon as they would leave a stale head.
+    function test_R310_2P_1_oneEpochStepsCannotStarveHonestProofsOrAgeTheHead() public {
+        EMV mv = newVerifier(); // maxStepGap 30 days, maxHeadLag 2 days, anchor one day old
+        for (uint256 i; i < 400; ++i) this.oneBlock(mv); // about four days of L2 blocks
+        require(honestAccepted == 400, "every honest proof landed, each made before the griefer's step of its block");
+        require(griefAccepted > 0 && griefRefused > 0, "the griefer's steps land only while they leave a fresh head");
+        require(block.timestamp - mv.slotTime(mv.headSlot()) < 1 hours && mv.canAdvance(), "the head stays fresh");
     }
+
+    uint256 honestAccepted;
+    uint256 griefAccepted;
+    uint256 griefRefused;
 
     function oneBlock(EMV mv) external {
         // The honest prover's proof for this block: from the store it saw, to the fresh finalized head.
         bytes memory honest = stepPv(mv, freshSlot());
-        // The griefer's transaction is ordered first: one epoch (32 slots) further, on the real chain.
-        advanceTo(mv, mv.headSlot() + 32);
-        (bool ok, bytes4 err) = tryAdvance(mv, honest, LC_STEP_VKEY);
-        require(!ok && err == EMV.StaleStore.selector, "the honest proof no longer starts from the latest store");
+        // The griefer's transaction is ordered first: the cheapest step there is, one epoch (32 slots) further along
+        // the old chain than its last one (from a recorded store; here always the anchor).
+        if (griefSlot == 0) griefSlot = anchorSlot + 32;
+        (bool g,) = tryAdvance(
+            mv,
+            abi.encode(
+                bytes32("BLOCH-ETH-LC-STEP-v2"), block.chainid, GVR, anchorSlot, rootAt(anchorSlot),
+                committee(anchorSlot / 8192), bytes32(0), griefSlot, rootAt(griefSlot), committee(griefSlot / 8192),
+                committee(griefSlot / 8192 + 1), execAt(griefSlot)
+            ),
+            LC_STEP_VKEY
+        );
+        griefSlot += 32;
+        if (g) ++griefAccepted;
+        else ++griefRefused;
+        (bool ok,) = tryAdvance(mv, honest, LC_STEP_VKEY);
+        if (ok) ++honestAccepted;
         vm.warp(block.timestamp + 14 minutes); // the next L2 block (8 to 14 minutes on this L2)
     }
 
-    /// The same contract accepts a step whose NEW head is 29 days old (no freshness rule on the new head).
-    function test_R310_2P_1_aStepToATwentyNineDayOldHeadIsAccepted() public {
+    uint64 griefSlot;
+
+    /// The same contract no longer accepts a step whose NEW head is 29 days old.
+    function test_R310_2P_1_aStepToATwentyNineDayOldHeadIsRefused() public {
         EMV mv = newVerifier();
         vm.warp(mv.slotTime(anchorSlot) + 29 days);
-        advanceTo(mv, anchorSlot + 32);
-        require(block.timestamp - mv.slotTime(mv.headSlot()) > 28 days, "accepted, and the store is still about to lapse");
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, anchorSlot + 32), LC_STEP_VKEY);
+        require(!ok && err == EMV.StaleHead.selector, "a stale head is refused");
+        advanceTo(mv, freshSlot());
+        require(block.timestamp - mv.slotTime(mv.headSlot()) < 1 hours, "a fresh one, from the same 29-day-old store, lands");
+    }
+
+    /// What a lapse is now, exactly: no step by anybody for the whole `maxStepGap`. Then `advance` is closed for good,
+    /// stored blocks still mint, and the path continues through the mandatory handoff authority.
+    function test_R310_2P_1_aLapseNeedsARealOutageAndIsNotTerminal() public {
+        EMV mv = newVerifier();
+        advanceTo(mv, freshSlot());
+        vm.warp(mv.slotTime(mv.headSlot()) + 30 days + 1);
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, freshSlot()), LC_STEP_VKEY);
+        require(!ok && err == EMV.StepGapExceeded.selector && !mv.canAdvance(), "closed");
+        require(mv.handoffAuthority() == AUTHORITY, "a deployment without an authority does not exist");
+        R310bSuccessor s = new R310bSuccessor(address(token));
+        s.anchorAt(slotAt(block.timestamp), keccak256("a checkpoint the authority names"), keccak256("its committee"), GVR);
+        vm.prank(AUTHORITY);
+        mv.proposeSuccessor(address(s));
+        vm.warp(block.timestamp + 14 days);
+        mv.activateSuccessor();
+        require(mv.successor() == address(s), "the path continues after the notice");
     }
 
     // ---------------------------------------------------------------- R310-2P-2
 
-    /// R310-2P-2. The "anchored at a checkpoint this contract accepted" rule (fix of R310-6) reads four views of the
-    /// successor once, at proposal. The pin covers the successor's code, not its storage or what its code does with
-    /// the anchor: a successor that answers an accepted checkpoint at proposal and another root afterwards activates.
-    function test_R310_2P_2_theSuccessorsAnchorIsOnlyReadAtProposal() public {
+    /// R310-2P-2 (at `13d79cc`): the successor's anchor was read once, at proposal. Fixed: it is read again at
+    /// activation while the light client is alive. The demonstration turned around.
+    function test_R310_2P_2_theSuccessorsAnchorIsReadAgainAtActivation() public {
         EMV mv = new EMV(cfg(AUTHORITY, 14 days));
         advanceTo(mv, anchorSlot + 64);
         R310bSuccessor s = successorAtHead(mv);
@@ -423,12 +453,12 @@ contract R310SecondPassTest {
         s.anchorAt(anchorSlot + 64, keccak256("a root this contract never accepted"), keccak256("its committee"), GVR);
         vm.warp(block.timestamp + 14 days);
         advanceTo(mv, slotAt(block.timestamp - 13 minutes)); // still alive at activation
+        vm.expectRevert(EMV.InvalidActivation.selector);
         mv.activateSuccessor();
-        require(mv.successor() == address(s), "activated");
-        require(
-            mv.checkpointAt(s.anchorSlot()) != mv.checkpointDigest(s.anchorHeaderRoot(), s.anchorSyncCommitteeRoot()),
-            "the active successor is not anchored at an accepted checkpoint"
-        );
+        // Naming the accepted checkpoint again, it activates.
+        s.anchorAt(anchorSlot + 64, rootAt(anchorSlot + 64), committee((anchorSlot + 64) / 8192), GVR);
+        mv.activateSuccessor();
+        require(mv.successor() == address(s), "activated on a recorded checkpoint");
     }
 
     // ---------------------------------------------------------------- cross-check with agent 316's guests
@@ -459,7 +489,7 @@ contract R310SecondPassTest {
         mv = new EMV(
             EMV.Config(
                 ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(t), 1, vault_, route_, GVR, prevSlot,
-                w(stepValues, 4), w(stepValues, 5), BEACON_GENESIS, 12, 14 days, address(0), 0
+                w(stepValues, 4), w(stepValues, 5), BEACON_GENESIS, 12, 14 days, 1 days, AUTHORITY, 30 days
             )
         );
     }

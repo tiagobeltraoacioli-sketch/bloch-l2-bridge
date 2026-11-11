@@ -142,12 +142,20 @@ contract A276MintVerifierTest {
         return EMV.Config(
             ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(token), block.chainid, address(vault),
             vault.routeId(), GVR, anchorSlot, rootAt(anchorSlot), committee(anchorSlot / 8192), BEACON_GENESIS, 12,
-            30 days, authority, delay
+            30 days, 4 days, authority, delay
         );
     }
 
     function newVerifier() private returns (EMV) {
-        return new EMV(cfg(address(0), 0));
+        return new EMV(cfg(AUTHORITY, 14 days));
+    }
+
+    /// The step program's public values from ANY store (given in full) to `newSlot` on the test's chain.
+    function stepPvFrom(uint64 prevSlot, bytes32 prevNext, uint64 newSlot) private view returns (bytes memory) {
+        return abi.encode(
+            bytes32("BLOCH-ETH-LC-STEP-v2"), block.chainid, GVR, prevSlot, rootAt(prevSlot), committee(prevSlot / 8192),
+            prevNext, newSlot, rootAt(newSlot), committee(newSlot / 8192), committee(newSlot / 8192 + 1), execAt(newSlot)
+        );
     }
 
     function sortedKeys(uint256 base) private pure returns (uint256[] memory k) {
@@ -367,6 +375,8 @@ contract A276MintVerifierTest {
         require(mv.executionBlockHashAt(anchorSlot) == 0, "no mint under the anchor");
         require(mv.anchorSlot() == anchorSlot && mv.anchorHeaderRoot() == rootAt(anchorSlot), "anchor kept");
         require(mv.stepCount() == 0 && mv.canAdvance(), "no step yet");
+        require(mv.storeAt(anchorSlot) == mv.storeDigest(rootAt(anchorSlot), committee(anchorSlot / 8192), 0), "first store");
+        require(mv.maxStepGap() == 30 days && mv.maxHeadLag() == 4 days && mv.handoffAuthority() == AUTHORITY, "config");
         require(mv.mintTypehash() == token.MINT_TYPEHASH(), "typehash");
         require(mv.STEP_VALUES_LEN() == 384 && mv.MINT_VALUES_LEN() == 384, "12 and 12 words");
         require(mv.STEP_TAG() == bytes32("BLOCH-ETH-LC-STEP-v2") && mv.MINT_TAG() == bytes32("BLOCH-ETH-MINT-v2"), "tags");
@@ -375,77 +385,99 @@ contract A276MintVerifierTest {
 
     /// Reviews F6 and F3: a clock that would refuse every honest step does not deploy.
     function test_CONFIG_refusesAnUnusableClock() public {
-        EMV.Config memory c = cfg(address(0), 0);
+        EMV.Config memory c = cfg(AUTHORITY, 14 days);
         c.beaconGenesisTime = 0;
         try new EMV(c) {
             revert("zero beacon genesis deployed");
         } catch {}
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.anchorSlot = slotAt(block.timestamp + 1 days);
         try new EMV(c) {
             revert("an anchor in the future deployed");
         } catch {}
         // An anchor already `maxStepGap` old could never advance.
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.anchorSlot = slotAt(block.timestamp - 30 days);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
         c.anchorSlot = slotAt(block.timestamp - 30 days + 1 hours);
         new EMV(c);
-        new EMV(cfg(address(0), 0));
+        new EMV(cfg(AUTHORITY, 14 days));
     }
 
     function test_CONFIG_refusesAnotherTokensVaultRouteOrChain() public {
-        EMV.Config memory c = cfg(address(0), 0);
+        EMV.Config memory c = cfg(AUTHORITY, 14 days);
         c.vault = address(0xDEAD);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.route = keccak256("other route");
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.sourceChainId = 11155111;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.maxStepGap = 30 days + 1;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.maxStepGap = 2 days - 1;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.maxStepGap = 2 days;
+        c.maxHeadLag = 1 days;
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.stepVKey = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.mintVKey = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.anchorHeaderRoot = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.anchorSyncCommitteeRoot = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.genesisValidatorsRoot = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
         c = cfg(AUTHORITY, 0);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
+        // A handoff authority is mandatory (second-pass review R310-2P-1): without one a lapse would be final.
+        c = cfg(address(0), 0);
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 14 days);
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        // maxHeadLag: 2 hours to 7 days, and at most half of maxStepGap.
+        c = cfg(AUTHORITY, 14 days);
+        c.maxHeadLag = 2 hours - 1;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c.maxHeadLag = 7 days + 1;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c.maxHeadLag = 2 days;
+        c.maxStepGap = 4 days - 1;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c.maxStepGap = 4 days;
+        new EMV(c);
         c = cfg(AUTHORITY, 13 days);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
-        c = cfg(address(0), 0);
+        c = cfg(AUTHORITY, 14 days);
         c.l2Token = address(0x1234);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
@@ -481,26 +513,77 @@ contract A276MintVerifierTest {
         );
     }
 
-    /// The proof must start from the LATEST store: a second proof made from the same store loses the race, and a
-    /// proof from an older store (an old committee) is refused for good.
-    function test_STEP_onlyFromTheLatestStore() public {
+    /// Second-pass review R310-2P-1 (b): a proof starts from ANY recorded store, so a race is harmless. A proof made
+    /// from the anchor still lands after somebody else advanced: it moves the head if it reaches further, and is
+    /// recorded beside the head if it does not. Only a store this contract recorded is a start.
+    function test_STEP_fromAnyRecordedStoreARaceIsHarmless() public {
         EMV mv = newVerifier();
         bytes memory first = stepPv(mv, anchorSlot + 64);
-        bytes memory rival = stepPv(mv, anchorSlot + 96);
+        bytes memory further = stepPv(mv, anchorSlot + 96); // made from the anchor, like `first`
+        bytes memory behind = stepPv(mv, anchorSlot + 32); // made from the anchor too
         (bool ok, bytes4 err) = tryAdvance(mv, first, LC_STEP_VKEY);
-        require(ok, "first");
-        (ok, err) = tryAdvance(mv, rival, LC_STEP_VKEY);
-        require(!ok && err == EMV.StaleStore.selector, "the rival started from the anchor");
+        require(ok && mv.headSlot() == anchorSlot + 64, "first");
+        (ok, err) = tryAdvance(mv, further, LC_STEP_VKEY);
+        require(ok && mv.headSlot() == anchorSlot + 96 && mv.stepCount() == 2, "the rival still lands and moves the head");
+        (ok, err) = tryAdvance(mv, behind, LC_STEP_VKEY);
+        require(ok && mv.stepCount() == 3, "a proof that reaches less still lands");
+        require(mv.headSlot() == anchorSlot + 96 && mv.headRoot() == rootAt(anchorSlot + 96), "the head does not move back");
+        require(mv.currentSyncCommitteeRoot() == committee((anchorSlot + 96) / 8192), "nor its committee");
+        require(mv.executionBlockHashAt(anchorSlot + 32) == execAt(anchorSlot + 32), "its block serves mints");
+        require(
+            mv.storeAt(anchorSlot + 32)
+                == mv.storeDigest(rootAt(anchorSlot + 32), committee((anchorSlot + 32) / 8192), committee((anchorSlot + 32) / 8192 + 1)),
+            "and it is a recorded store"
+        );
+        // A slot is recorded once: a replay, or a second proof that reaches a recorded slot, is refused (harmless).
         (ok, err) = tryAdvance(mv, first, LC_STEP_VKEY);
-        require(!ok && err == EMV.StaleStore.selector, "replay");
-        // Each field of the start store is compared.
+        require(!ok && err == EMV.AlreadyRecorded.selector, "replay");
+        bytes memory again = stepPvFrom(anchorSlot + 32, committee((anchorSlot + 32) / 8192 + 1), anchorSlot + 96);
+        (ok, err) = tryAdvance(mv, again, LC_STEP_VKEY);
+        require(!ok && err == EMV.AlreadyRecorded.selector && mv.stepCount() == 3, "a recorded slot");
+        // The store recorded beside the head is a valid start.
+        (ok, err) = tryAdvance(mv, stepPvFrom(anchorSlot + 32, committee((anchorSlot + 32) / 8192 + 1), anchorSlot + 128), LC_STEP_VKEY);
+        require(ok && mv.headSlot() == anchorSlot + 128, "from the side store");
+        // Each field of the start store is compared with what was recorded for its slot.
         for (uint256 i = 3; i <= 6; ++i) {
-            bytes32[] memory w = words(stepPv(mv, anchorSlot + 128));
+            bytes32[] memory w = words(stepPv(mv, anchorSlot + 160));
             w[i] = bytes32(uint256(w[i]) ^ 1);
             (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
-            require(!ok && err == EMV.StaleStore.selector, "start store field");
+            require(!ok && err == EMV.UnknownStore.selector, "start store field");
         }
-        advanceTo(mv, anchorSlot + 128);
+        // A slot nobody recorded is not a start, whatever the proof says about it.
+        (ok, err) = tryAdvance(mv, stepPvFrom(anchorSlot + 48, committee((anchorSlot + 48) / 8192 + 1), anchorSlot + 160), LC_STEP_VKEY);
+        require(!ok && err == EMV.UnknownStore.selector, "an unrecorded start");
+        advanceTo(mv, anchorSlot + 160);
+    }
+
+    /// Second-pass review R310-2P-1 (a): the finalized header a step reaches must be fresh.
+    function test_CLOCK_aStepMustReachAFreshHead() public {
+        EMV mv = newVerifier();
+        vm.warp(mv.slotTime(anchorSlot + 64) + 4 days + 1);
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, anchorSlot + 64), LC_STEP_VKEY);
+        require(!ok && err == EMV.StaleHead.selector, "a head older than maxHeadLag");
+        vm.warp(mv.slotTime(anchorSlot + 64) + 4 days);
+        (ok,) = tryAdvance(mv, stepPv(mv, anchorSlot + 64), LC_STEP_VKEY);
+        require(ok, "exactly maxHeadLag old passes");
+        // The rule is on the header reached, whatever the start: a proof beside the head is held to it too.
+        vm.warp(block.timestamp + 5 days);
+        advanceTo(mv, freshSlot());
+        (ok, err) = tryAdvance(mv, stepPvFrom(anchorSlot, 0, anchorSlot + 96), LC_STEP_VKEY);
+        require(!ok && err == EMV.StaleHead.selector, "an old header beside the head");
+    }
+
+    /// The start may be any recorded store, but not one older than `maxStepGap`.
+    function test_CLOCK_aRecordedStoreOlderThanTheGapIsNotAStart() public {
+        EMV mv = newVerifier();
+        vm.warp(block.timestamp + 20 days);
+        advanceTo(mv, freshSlot()); // from the anchor, 21 days old: inside the gap
+        uint64 kept = mv.headSlot();
+        vm.warp(block.timestamp + 10 days);
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPvFrom(anchorSlot, 0, freshSlot()), LC_STEP_VKEY);
+        require(!ok && err == EMV.StepGapExceeded.selector, "the anchor is 31 days old: no longer a start");
+        advanceTo(mv, freshSlot()); // from the store of 10 days ago
+        require(mv.headSlot() > kept && mv.canAdvance(), "alive");
     }
 
     function test_STEP_refusesNoProgressAndZeroRoots() public {
@@ -1100,14 +1183,17 @@ contract A276MintVerifierTest {
 
     // ---------------------------------------------------------------- handoff
 
-    function test_HANDOFF_offByDefault() public {
+    function test_HANDOFF_onlyTheAuthority() public {
         EMV mv = newVerifier();
-        A276AcceptAllSuccessor s = new A276AcceptAllSuccessor(address(token));
-        vm.prank(AUTHORITY);
+        A276AcceptAllSuccessor s = successorAtHead(mv);
+        vm.prank(MALLORY);
         vm.expectRevert(EMV.NotAuthority.selector);
         mv.proposeSuccessor(address(s));
         vm.expectRevert(EMV.NotAuthority.selector);
         mv.proposeSuccessor(address(s));
+        vm.prank(MALLORY);
+        vm.expectRevert(EMV.NotAuthority.selector);
+        mv.cancelSuccessor();
     }
 
     function test_HANDOFF_authorityDelayActivationAndCodeRecheck() public {

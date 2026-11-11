@@ -231,7 +231,7 @@ contract R306VerifierReviewTest {
         return EMV.Config(
             ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(token), block.chainid, address(vault),
             vault.routeId(), GVR, anchorSlot, keccak256("anchor header root"), keccak256("anchor sync committee root"),
-            beaconGenesis, 12, 30 days, address(0), 0
+            beaconGenesis, 12, 30 days, 4 days, address(0xA07401), 14 days
         );
     }
 
@@ -298,8 +298,7 @@ contract R306VerifierReviewTest {
         );
         require(!ok, "a finalized header nobody stored");
         require(stepTo(mv, slot, keccak256("root X")), "history X accepted by a step proof");
-        // A second step proof for the same slot with another root starts from a store that is no longer the latest
-        // (and makes no progress): refused.
+        // A second step proof for the same slot with another block: the slot is recorded once. Refused.
         require(!stepTo(mv, slot, keccak256("root Y")), "a second history for the slot");
         require(mv.executionBlockHashAt(slot) == keccak256("root X"), "one finalized block per slot");
         token.mintWithProof(
