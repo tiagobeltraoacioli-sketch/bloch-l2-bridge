@@ -225,55 +225,63 @@ contract R306VerifierReviewTest {
         return abi.encode(pv, abi.encode(keccak256(abi.encode(RELEASE_VKEY, pv))));
     }
 
+    bytes32 constant LC_STEP_VKEY = keccak256("light-client step program");
+
     function mintCfg(uint64 beaconGenesis, uint64 anchorSlot) private view returns (EMV.Config memory) {
         return EMV.Config(
-            ISP1Verifier(address(sp1)), MINT_VKEY, address(token), block.chainid, address(vault), vault.routeId(), GVR,
-            anchorSlot, keccak256("anchor block root"), keccak256("anchor sync committee root"), beaconGenesis, 12,
-            2 days, address(0), 0
+            ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(token), block.chainid, address(vault),
+            vault.routeId(), GVR, anchorSlot, keccak256("anchor header root"), keccak256("anchor sync committee root"),
+            beaconGenesis, 12, 30 days, address(0), 0
         );
     }
 
     function newMintVerifier() private returns (EMV) {
-        return new EMV(mintCfg(BEACON_GENESIS, uint64((block.timestamp - 30 days - BEACON_GENESIS) / 12)));
+        return new EMV(mintCfg(BEACON_GENESIS, uint64((block.timestamp - 1 days - BEACON_GENESIS) / 12)));
     }
 
     function freshSlot() private view returns (uint64) {
         return uint64((block.timestamp - 13 minutes - BEACON_GENESIS) / 12);
     }
 
-    /// "The program": public values of deposit `d` as the guest would commit them, with the block and root given.
+    /// "The step program": the store advanced to `slot`, whose finalized header has execution block `exec`.
+    function stepTo(EMV mv, uint64 slot, bytes32 exec) private returns (bool ok) {
+        bytes32 root = keccak256(abi.encode("header of", exec));
+        bytes memory pv = mv.expectedStepValues(
+            slot, root, keccak256(abi.encode("committee", slot / 8192)),
+            keccak256(abi.encode("committee", slot / 8192 + 1)), exec
+        );
+        // The anchor committee of this fixture is not on the "committee(period)" chain: keep it inside a period.
+        if (slot / 8192 == mv.headSlot() / 8192) {
+            pv = mv.expectedStepValues(slot, root, mv.currentSyncCommitteeRoot(), keccak256("next committee"), exec);
+        }
+        (ok,) = address(mv).call(abi.encodeCall(EMV.advance, (pv, abi.encode(keccak256(abi.encode(LC_STEP_VKEY, pv))))));
+    }
+
+    /// "The mint program": public values of deposit `d` as the guest would commit them, under the finalized
+    /// execution block (`slot`, `root`) and with the deposit's execution block hash given.
     function mintProof(EMV mv, Dep memory d, uint64 slot, bytes32 blockHash, bytes32 root)
         private
         view
         returns (bytes memory)
     {
-        bytes memory pv = mv.expectedPublicValues(
-            EMV.Claim(idOf(d), d.nonce, d.net, d.sender), uint64(block.number), blockHash, slot, root
+        bytes memory pv = abi.encode(
+            mv.MINT_TAG(), block.chainid, slot, root, address(vault), vault.routeId(), idOf(d), d.nonce, d.net,
+            bytes32(uint256(uint160(d.sender))), uint64(block.number), blockHash
         );
         return abi.encode(pv, abi.encode(keccak256(abi.encode(MINT_VKEY, pv))));
     }
 
-    function mintByProof(EMV mv, Dep memory d) private {
-        bytes memory proof = mintProof(mv, d, freshSlot(), keccak256("eth block"), keccak256("finalized root"));
-        token.mintWithProof(idOf(d), d.nonce, d.net, d.sender, proof);
-    }
+    // ---------------------------------------------------------------- F3 (Medium; fixed in round 15)
 
-    // ---------------------------------------------------------------- F3 (Medium, open)
-
-    /// F3. EthereumMintVerifier keeps no light-client state: every proof restarts from the one checkpoint fixed at
-    /// deployment, and the 13 public words carry nothing (no sync-committee period, no committee root, no parent of
-    /// the finalized header) that the contract could compare with what earlier proofs established. Two proofs that
-    /// name the SAME finalized slot with DIFFERENT finalized roots, and the same execution block number with different
-    /// block hashes, are both accepted and both mint. On a real chain that is two conflicting finalized histories.
-    /// The consequence for the program: its soundness rests on the weakest 2/3 of ANY sync committee since the anchor
-    /// (sync-committee keys are not slashable and old ones are cheap), forever, because a forged branch from an old
-    /// period is indistinguishable here from the real chain; `maxProofAge` does not help, the forged branch names any
-    /// slot it likes.
+    /// F3 (round 14 review, at a19b80e): EthereumMintVerifier kept no light-client state. Every proof restarted from
+    /// the one checkpoint fixed at deployment, so two proofs that named the SAME finalized slot with DIFFERENT
+    /// finalized blocks both minted (two conflicting finalized histories), and soundness rested on the weakest 2/3 of
+    /// ANY sync committee since the anchor.
     ///
-    /// FIXED BEHAVIOUR: the second mint below should be refused. Either the verifier stores what it has accepted
-    /// (period -> committee root, or the highest finalized slot -> root) and the public values commit those fields, or
-    /// the checkpoint is advanced on-chain so an old committee cannot be replayed.
-    function test_F3_mintVerifierAcceptsConflictingFinalizedHistories() public {
+    /// Round 15 (agent 314): the verifier stores the light-client store and the execution block of every finalized
+    /// header it accepted; a step proof must start from the latest store; a mint must name a stored block. This is the review's
+    /// demonstration turned into the regression test: the second history is refused.
+    function test_F3_conflictingFinalizedHistoriesAreRefused() public {
         EMV mv = newMintVerifier();
         proposeTokenSwitch(address(mv));
         vm.warp(block.timestamp + 14 days);
@@ -281,15 +289,36 @@ contract R306VerifierReviewTest {
         Dep memory a = deposit(ALICE, uint64(1000 * U));
         Dep memory b = deposit(DAVE, uint64(1000 * U));
         uint64 slot = freshSlot();
+        // Before any step names the slot, no history for it mints.
+        (bool ok,) = address(token).call(
+            abi.encodeCall(
+                token.mintWithProof,
+                (idOf(a), a.nonce, a.net, a.sender, mintProof(mv, a, slot, keccak256("block X"), keccak256("root X")))
+            )
+        );
+        require(!ok, "a finalized header nobody stored");
+        require(stepTo(mv, slot, keccak256("root X")), "history X accepted by a step proof");
+        // A second step proof for the same slot with another root starts from a store that is no longer the latest
+        // (and makes no progress): refused.
+        require(!stepTo(mv, slot, keccak256("root Y")), "a second history for the slot");
+        require(mv.executionBlockHashAt(slot) == keccak256("root X"), "one finalized block per slot");
         token.mintWithProof(
             idOf(a), a.nonce, a.net, a.sender, mintProof(mv, a, slot, keccak256("block X"), keccak256("root X"))
         );
-        token.mintWithProof(
-            idOf(b), b.nonce, b.net, b.sender, mintProof(mv, b, slot, keccak256("block Y"), keccak256("root Y"))
+        (ok,) = address(token).call(
+            abi.encodeCall(
+                token.mintWithProof,
+                (idOf(b), b.nonce, b.net, b.sender, mintProof(mv, b, slot, keccak256("block Y"), keccak256("root Y")))
+            )
         );
+        require(!ok, "history Y does not mint");
         (, uint64 queuedA,) = token.pendingMints(idOf(a));
         (, uint64 queuedB,) = token.pendingMints(idOf(b));
-        require(queuedA == a.net && queuedB == b.net, "both histories mint");
+        require(queuedA == a.net && queuedB == 0, "only the stored history mints");
+        // The honest proof of b under the stored header mints.
+        token.mintWithProof(
+            idOf(b), b.nonce, b.net, b.sender, mintProof(mv, b, slot, keccak256("block X2"), keccak256("root X"))
+        );
     }
 
     // ---------------------------------------------------------------- F5 (Low, the vault's window)

@@ -2,8 +2,7 @@
 
 Status: **UNAUDITED, not deployed.** Audit Phase 2B. Contract `contracts/stable/EthereumMintVerifier.sol`, tests
 `solidity-tests/A276MintVerifier.t.sol`. Written by agent 276 (round 12, uncommitted), finished by agent 306 (round 14),
-made stateful by agent 314 (round 15; sections 2 to 4 are the round-15 design, **the contract follows in the next
-commits of `codex/bridge-r15-20261110`**).
+made stateful by agent 314 (round 15, review F3; layout agreed with agent 316 through `agents/R15-CROSS-AREA.md`).
 
 The SP1 programs this contract verifies (section 4) are agent 316's task in round 15. Until they exist, are reproduced on two hosts
 and are audited, the token's mint switch has no target and the vault's light-client switch stays NO-GO
@@ -32,7 +31,7 @@ The on-chain state is the consensus specification's `LightClientStore`, reduced 
 | `headRoot` | `hash_tree_root(BeaconBlockHeader)` of that header |
 | `currentSyncCommitteeRoot` | `hash_tree_root(SyncCommittee)` of the committee of `period(headSlot)` |
 | `nextSyncCommitteeRoot` | the committee of `period(headSlot) + 1`, or zero while not yet learned |
-| `finalizedRoots[slot]` | every finalized header root ever accepted (the anchor and each step), never overwritten |
+| `executionBlockHashAt[slot]` | execution block hash of the finalized header each accepted step reached; written once, never overwritten; zero for every other slot, the anchor included |
 
 `period(slot) = slot / 8192` (32 slots x 256 epochs).
 
@@ -43,9 +42,11 @@ Two statements, two entry points:
   to start from the *latest* stored store, never an older one, so a forgery needs two thirds of the committee that is
   current (or next) at the head, not of any committee since deployment.
 - **MINT** (`verifyMint`, a `view`; the launch token calls it by `STATICCALL`, so it cannot write): "the vault's
-  `Deposited` log is in an execution block that is the block of a stored finalized header, or one of its ancestors".
-  It may name **any** stored finalized header (a finalized header stays final), so a mint proof is never invalidated
-  by a later step and has no signature work in it.
+  `Deposited` log is in an execution block that is a stored finalized execution block, or one of its ancestors by
+  the parent-hash chain". It may name **any** stored block (a finalized block stays final), so a mint proof is never
+  invalidated by a later step. The mint program has no consensus-layer code and no signature work in it (agent
+  316's proposal P1/P2): it survives a consensus fork that moves the payload inside the beacon block.
+- No mint can name the anchor slot: the anchor has no stored execution block hash. **The first step enables mints.**
 
 Why two statements and not one proof per mint that carries its own step: `verifyMint` cannot store, so a combined
 proof would either restart from a fixed checkpoint (F3) or race with every other advance; and N deposits finalized
@@ -57,14 +58,14 @@ Wall-clock rules (the L2 clock against the beacon clock `beaconGenesisTime + slo
 - `advance` refuses when the stored head is older than `maxStepGap` (immutable, 2 to 30 days; proposed 14 days). A
   light client that has been offline for longer than about the weak-subjectivity period must not resume from its old
   committee: exited validators' keys are cheap. After that gap the proof path can only continue through the handoff
-  (section 5); with the handoff disabled it ends. Stored headers stay usable for mints. **Consequence: somebody must
+  (section 5); with the handoff disabled it ends. Stored blocks stay usable for mints. **Consequence: somebody must
   advance at least once per `maxStepGap`.** Anyone can (operators run the prover; a depositor can); it is a proof,
   not a signature.
 
 On-chain redundancy against a program defect (cheap, checked in `advance`), with `pp = period(prevSlot)` and
 `pn = period(newSlot)`:
 
-- `newSlot > prevSlot`, `newHeaderRoot` and `newSyncCommitteeRoot` non-zero;
+- `newSlot > prevSlot`; `newHeaderRoot`, `newSyncCommitteeRoot` and `newExecutionBlockHash` non-zero;
 - `pn == pp`: `newSyncCommitteeRoot == prevSyncCommitteeRoot`, and a known next committee is kept
   (`prevNext != 0` implies `newNext == prevNext`);
 - `pn == pp + 1` and `prevNext != 0`: `newSyncCommitteeRoot == prevNext`;
@@ -74,8 +75,8 @@ On-chain redundancy against a program defect (cheap, checked in `advance`), with
 `verifyMint(token, mintHash, proof)` with `proof = abi.encode(bytes publicValues, bytes proofBytes)`:
 
 1. `token` is the one token fixed at deployment.
-2. The MINT public values carry this verifier's tag, chain id, vault and route; `finalizedRoots[finalizedSlot]` is
-   non-zero and equals `finalizedHeaderRoot`; the deposit id's top 8 bytes are the nonce; the recipient word has no
+2. The MINT public values carry this verifier's tag, chain id, vault and route; `executionBlockHashAt[finalizedSlot]`
+   is non-zero and equals `finalizedExecutionBlockHash`; the deposit id's top 8 bytes are the nonce; the recipient word has no
    high bits; no field is zero.
 3. The claim rebuilds the token's own EIP-712 Mint struct hash and it equals `mintHash`: the deposit id, nonce,
    **net** amount and recipient the token is about to mint are exactly those of the proven log.
@@ -85,16 +86,17 @@ It keeps no per-deposit state: the token refuses a second mint of the same id an
 
 The source chain, vault and route are read back from the token in the constructor. The anchor (`genesisValidatorsRoot`,
 `anchorSlot`, `anchorHeaderRoot`, `anchorSyncCommitteeRoot`) is one Ethereum finalized checkpoint given once to the
-constructor; it becomes the first store with `nextSyncCommitteeRoot = 0`.
+constructor; it becomes the first store with `nextSyncCommitteeRoot = 0`. (`anchorSyncCommitteeRoot` is the
+`hash_tree_root` of the current sync committee of the state at the anchor header.)
 
-## 3. Public values (the ABI for the two SP1 programs) — **PIN CANDIDATE v2, agreed through `R15-CROSS-AREA.md`**
+## 3. Public values (the ABI for the two SP1 programs) — **PIN CANDIDATE v2, agreed with agent 316 (2026-11-11)**
 
 Encoding for both: `abi.encode` of static words. Every word is 32 bytes; `uint64` and `uint256` are big-endian,
 left-padded with zeros; `address` is left-padded; a tag is the ASCII string right-padded with zeros. The program
 commits exactly these bytes and nothing else (one `commit_slice`). The contract refuses any other length and any
 non-canonical `uint64` or `address` word.
 
-### 3.1 STEP — tag `"BLOCH-ETH-LC-STEP-v2"`, 11 words, 352 bytes, verified with `stepVKey`
+### 3.1 STEP — tag `"BLOCH-ETH-LC-STEP-v2"`, 12 words, 384 bytes, verified with `stepVKey`
 
 | Word | Type | Field | Checked by the contract |
 |---|---|---|---|
@@ -109,6 +111,7 @@ non-canonical `uint64` or `address` word.
 | 8 | bytes32 | `newHeaderRoot`: `hash_tree_root` of the finalized `BeaconBlockHeader` at `newSlot` | non-zero; stored |
 | 9 | bytes32 | `newSyncCommitteeRoot`: committee of `period(newSlot)` | non-zero; period rules; stored |
 | 10 | bytes32 | `newNextSyncCommitteeRoot`: committee of `period(newSlot) + 1`, zero if not learned | period rules; stored |
+| 11 | bytes32 | `newExecutionBlockHash`: `block_hash` of the execution payload of the finalized header at `newSlot` | non-zero; stored in `executionBlockHashAt[newSlot]` |
 
 ### 3.2 MINT — tag `"BLOCH-ETH-MINT-v2"`, 12 words, 384 bytes, verified with `mintVKey`
 
@@ -116,8 +119,8 @@ non-canonical `uint64` or `address` word.
 |---|---|---|---|
 | 0 | bytes32 | tag | constant |
 | 1 | uint256 | `sourceChainId` | immutable |
-| 2 | uint64 | `finalizedSlot`: a stored finalized checkpoint | `finalizedRoots[finalizedSlot]` |
-| 3 | bytes32 | `finalizedHeaderRoot` | == `finalizedRoots[finalizedSlot]`, non-zero |
+| 2 | uint64 | `finalizedSlot`: a slot a step reached | key of `executionBlockHashAt` |
+| 3 | bytes32 | `finalizedExecutionBlockHash` | == `executionBlockHashAt[finalizedSlot]`, non-zero |
 | 4 | address | vault, the emitter of the log | immutable |
 | 5 | bytes32 | route, topic 2 of the log | immutable |
 | 6 | bytes32 | deposit id, topic 1 | mint hash |
@@ -129,8 +132,9 @@ non-canonical `uint64` or `address` word.
 
 Data word 1 of the log (`sender`) is not committed: it is inside the deposit id.
 
-`stepVKey` and `mintVKey` may be equal (one ELF with both statements): the tag and the length separate them, and the
-contract refuses a STEP proof in `verifyMint` and a MINT proof in `advance` by tag.
+Both statements have 384 bytes. The tag (word 0) and the verification key separate them: the contract checks the
+tag in both entry points, so STEP values are refused in `verifyMint` and MINT values in `advance` under either key.
+Agent 316 builds two ELFs (the mint program links no BLS code); `stepVKey` and `mintVKey` may still be equal.
 
 ## 4. What the SP1 programs must prove (specification for the guests; agent 316, task 277)
 
@@ -141,7 +145,7 @@ in for the chain of word 1. Nothing about the network is a free input.
 
 Private inputs: the start store (the finalized `BeaconBlockHeader` at `prevSlot`, the current `SyncCommittee`, the
 next `SyncCommittee` if known), zero or more `LightClientUpdate`s, and one final `LightClientFinalityUpdate` (or
-`LightClientUpdate`).
+`LightClientUpdate`). Consensus code: `helios-consensus-core` (the library under SP1 Helios), pinned by agent 316.
 
 The program must:
 
@@ -157,7 +161,9 @@ The program must:
    - the next-committee branch and the finality branch are verified against the attested header's state root with
      the generalized indices of the attested slot's fork.
 3. Refuse (panic, no commitment) unless the final store's finalized slot is strictly greater than `prevSlot`.
-4. Commit the 11 words: words 7 to 10 are the final store (finalized slot, `hash_tree_root` of its finalized beacon
+4. Verify the final finalized header's execution branch (the specification's `is_valid_light_client_header`) and
+   take the `block_hash` of its execution payload header as word 11; refuse a zero hash.
+5. Commit the 12 words: words 7 to 10 are the final store (finalized slot, `hash_tree_root` of its finalized beacon
    header, the committee roots; word 10 is zero exactly when the final store has no next committee).
 
 There is no wall-clock input: `current_slot` in the specification's check is replaced by "the signature slot is
@@ -165,19 +171,17 @@ after the attested slot, which is at or after the finalized slot"; the contract 
 
 ### 4.2 MINT
 
-Private inputs: the finalized `BeaconBlockHeader` whose root is word 3, SSZ branches from it to the execution payload
-of the deposit's block, the receipt-trie proof and the receipt.
+Private inputs: the RLP execution block headers from the stored finalized execution block (hash = word 3) down to
+the deposit's block, the receipt-trie proof and the receipt. No beacon object is an input.
 
 The program must:
 
-1. Hash the given finalized header into word 3 and commit its slot as word 2.
-2. Prove that the execution block of the deposit (words 10, 11) is the execution payload of that finalized block or
-   of one of its ancestors: for the finalized block itself, header `body_root` -> `execution_payload`; for an
-   ancestor, header `state_root` -> `block_roots[slot % 8192]` (within 8,192 slots) or `historical_summaries[i]`
-   -> `block_summary_root` -> `block_roots` (older), then that ancestor's `BeaconBlockHeader` -> `body_root` ->
-   `execution_payload` -> `block_number`, `block_hash`, `receipts_root`. Generalized indices are those of the fork of
-   the slot each object belongs to. An ancestor before the Capella fork (`historical_roots`) is out of scope: refuse.
-3. Verify the receipt at its transaction index in `receipts_root` (Merkle-Patricia proof, typed-receipt envelope
+1. Check `keccak256(RLP header 0) == word 3`.
+2. Walk the parent-hash chain: each next header's `keccak256` equals the previous header's `parentHash`, down to the
+   header whose hash is word 11 (zero steps when the deposit is in the finalized block itself). That header's
+   `number` field is word 10. Refuse a chain that does not end exactly at word 11. The cost is one keccak per block
+   between the deposit and the stored finalized block, so the operator steps soon after a deposit finalizes.
+3. Verify the receipt at its transaction index in that header's `receiptsRoot` (Merkle-Patricia proof, typed-receipt envelope
    decoded), refuse a receipt with status 0, and find in it one log with: emitter = word 4, topic 0 =
    `keccak256("Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)")`, exactly 3 topics, topic 1 = word 6,
    topic 2 = word 5, data exactly 128 bytes with data words 0, 2, 3 = words 7, 8, 9, each `uint64` word canonical.
@@ -193,8 +197,14 @@ Round 14 left the contract stateless (every proof restarted from the deployment 
 every sync committee since the anchor, the proving cost grew by one update per 27 hours for ever, and with the
 handoff off the anchor could never advance. Round 15 replaces the 13-word draft with the two layouts above. The
 round-14 tag `BLOCH-ETH-MINT-v1`, `trustAnchor`, `maxProofAge` and words "finalizedSlot/finalizedBlockRoot reached
-by the proof" are gone. Changes to this section after 2026-11-11 00:30 UTC are made only through
-`agents/R15-CROSS-AREA.md` (agent 316 may counter-propose there).
+by the proof" are gone.
+
+Agreement with agent 316 (`agents/R15-CROSS-AREA.md`, 2026-11-10 23:53, 23:56 and 2026-11-11 00:05 UTC): my first
+proposal had STEP with 11 words and MINT under a stored beacon header root, with ancestry through `block_roots` /
+`historical_summaries`. Agent 316 counter-proposed P1 (ancestry by the execution parent-hash chain: no per-fork
+state indices, no 8,192-slot limit, no new SSZ code) and P2 (STEP word 11 = the finalized execution block hash,
+verified by the library's own execution-branch check; MINT word 3 = that hash). Both accepted: the mint program then
+holds no consensus code at all. Further layout changes are made only through `agents/R15-CROSS-AREA.md`.
 
 ## 5. Handoff (optional)
 
@@ -231,29 +241,37 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 | Parameter | Proposed | Note |
 |---|---|---|
 | `sp1Verifier` | Own deployment of the vendored `SP1VerifierGroth16` v6.1.0 on the L2 | Same decision as for the release verifier; never the gateway |
-| `programVKey` | from the audited program | does not exist yet |
-| Anchor (`genesisValidatorsRoot`, `anchorSlot`, `anchorBlockRoot`, `anchorSyncCommitteeRoot`) | A finalized Ethereum checkpoint read from the operators' own nodes, cross-checked on at least two independent sources | Set once |
+| `stepVKey`, `mintVKey` | from the audited programs | agent 316, round 15; not audited |
+| Anchor (`genesisValidatorsRoot`, `anchorSlot`, `anchorHeaderRoot`, `anchorSyncCommitteeRoot`) | A finalized Ethereum checkpoint read from the operators' own nodes, cross-checked on at least two independent sources, less than `maxStepGap` old at deployment | Set once; `verifier_review.py mint-verifier` checks it |
 | `beaconGenesisTime`, `secondsPerSlot` | 1606824023, 12 (Ethereum mainnet) | constants of the chain |
-| `maxProofAge` | 2 days | 1 hour to 30 days; a longer age tolerates a slower prover, a shorter one bounds the use of an old finalized header |
+| `maxStepGap` | 14 days | 2 to 30 days. Longer tolerates a longer outage of every prover; shorter bounds how old a committee may resume the chain. If nobody advances for this long, the proof path ends (handoff only). Operators must alert well before (runbook) |
 | `handoffAuthority`, `handoffDelay` | the `recoveryAuthority` multisig, 30 days | or zero to disable (section 5) |
 
 ## 8. Questions for the auditor
 
 - The public-values binding: is any field of the mint claim not bound to the proven log?
 - The mint hash rebuilt here against `BridgedStablecoinV2._structHash`.
-- Freshness: `slotTime`, `maxProofAge`, `MAX_CLOCK_SKEW`, a finalized slot at or before the anchor.
+- The store: that `advance` accepts only a proof from the latest store; the period rules; `maxStepGap` and
+  `MAX_CLOCK_SKEW` against the L2 clock; that nothing but a step proof writes the store or `executionBlockHashAt`.
+- The two statements: can STEP values pass as MINT values or the reverse (same length; tag and key)?
+- The programs against section 4, above all: two thirds participation on every applied update, no forced update,
+  the signing domain, and the parent-hash walk ending exactly at the committed deposit block.
 - The handoff: proposal, cancel, expiry, activation window, the code-hash pins, a successor that reverts or lies in
   `l2Token()`.
 - That the verifier adds no way around the token's queue, cap, bucket, slot order or guardian cancel.
 
 ## 9. Tests
 
-`forge test --match-contract A276MintVerifier`: 28 tests on the mainnet-shaped pair with mock SP1 (the test builds the
-public values from the vault's real `Deposited` log): honest mint, forged claim, tampered words (fuzz), duplicate,
-wrong vault, wrong chain or anchor, wrong token, stale and future finality, token-first order, queue drain, guardian
-pause, handoff, the token's code-hash pin, gas.
+`forge test --match-contract A276MintVerifier`: 37 tests on the mainnet-shaped pair with mock SP1 (the test builds the
+mint public values from the vault's real `Deposited` log and plays the step program on a synthetic chain): the anchor
+as first store, configuration refusals, steps (anyone, only from the latest store, no progress, zero words, committee
+rules across periods, several periods in one proof, wrong program / tag / chain / genesis root, fuzz over the start
+words), the clock (future head, `maxStepGap` at and past the boundary), honest mint, one step for many mints and old
+checkpoints staying valid, forged claim, tampered words (fuzz), unknown and conflicting checkpoints, no mint under
+the anchor, duplicate, wrong vault, wrong chain, wrong token, token-first order, queue drain, guardian pause, handoff
+(and no step after it), the token's code-hash pin, gas.
 
-Mutation spot-check (round 14): 13 single-line mutants of the contract all fail the suite; the fuzz test passes at
-20,000 runs.
+`R306VerifierReview.test_F3_conflictingFinalizedHistoriesAreRefused`: the round-14 review's demonstration of F3 turned
+into the regression test.
 
-Not done: the SP1 program; a real proof; a `verifier_review.py` mode for a mint-verifier proposal.
+Not done here: the SP1 programs and a real proof (agent 316).

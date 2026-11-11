@@ -28,6 +28,8 @@ interface A276Vm {
     function expectRevert() external;
     function recordLogs() external;
     function getRecordedLogs() external returns (A276Log[] memory);
+    function snapshotState() external returns (uint256);
+    function revertToState(uint256 id) external returns (bool);
 }
 
 /// A successor that accepts every mint for the token it names (stands for a careless or hostile handoff).
@@ -47,7 +49,9 @@ contract A276AcceptAllSuccessor is IMintVerifier {
 /// Mainnet shape as A239LcSwitchTest: 5 of 7 mint and release keys, switch 6 of 7 and 14 d, T = 0 with a 12 h queue,
 /// bucket and window 10,000 a day, cap 100,000, 5/5 bps fee; 3 guardians (cancel quorum 2). SP1 is mocked (`RMockSP1`:
 /// a proof is keccak(vkey, publicValues)), so "the program" here is the test, which builds the public values from the
-/// vault's real `Deposited` log exactly as the guest must (layout in EthereumMintVerifier's doc and agents/276).
+/// vault's real `Deposited` log exactly as the guest must (layout in EthereumMintVerifier's doc and
+/// docs/LC-MINT-VERIFIER.md). Round 15 (agent 314): the verifier is stateful (review F3); the test's "chain" is
+/// `rootAt(slot)` and `committee(period)`, and a mint is proven under a header a step stored.
 contract A276MintVerifierTest {
     A276Vm constant vm = A276Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint256 constant U = 1e6;
@@ -55,6 +59,7 @@ contract A276MintVerifierTest {
     uint64 constant BUCKET = uint64(10_000 * U);
     uint64 constant MIN_BURN = uint64(10 * U);
     bytes32 constant MINT_VKEY = keccak256("mint program");
+    bytes32 constant LC_STEP_VKEY = keccak256("light-client step program");
     bytes32 constant RELEASE_VKEY = keccak256("release");
     bytes32 constant STEP_VKEY = keccak256("step");
     bytes32 constant WORDS = keccak256("step words");
@@ -98,7 +103,7 @@ contract A276MintVerifierTest {
         sp1 = new RMockSP1();
         vault = newVault();
         token = newToken(address(vault), vault.routeId());
-        anchorSlot = slotAt(block.timestamp - 30 days);
+        anchorSlot = slotAt(block.timestamp - 1 days);
     }
 
     // ---------------------------------------------------------------- fixtures
@@ -124,9 +129,9 @@ contract A276MintVerifierTest {
 
     function cfg(address authority, uint64 delay) private view returns (EMV.Config memory) {
         return EMV.Config(
-            ISP1Verifier(address(sp1)), MINT_VKEY, address(token), block.chainid, address(vault), vault.routeId(), GVR,
-            anchorSlot, keccak256("anchor block root"), keccak256("anchor sync committee root"), BEACON_GENESIS, 12,
-            2 days, authority, delay
+            ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(token), block.chainid, address(vault),
+            vault.routeId(), GVR, anchorSlot, rootAt(anchorSlot), committee(anchorSlot / 8192), BEACON_GENESIS, 12,
+            30 days, authority, delay
         );
     }
 
@@ -166,6 +171,42 @@ contract A276MintVerifierTest {
 
     function slotAt(uint256 t) private pure returns (uint64) {
         return uint64((t - BEACON_GENESIS) / 12);
+    }
+
+    /// "The chain" of the test: the finalized header root of a slot and the sync committee root of a period.
+    function rootAt(uint64 slot) private pure returns (bytes32) {
+        return keccak256(abi.encode("root", slot));
+    }
+
+    function committee(uint64 period) private pure returns (bytes32) {
+        return keccak256(abi.encode("committee", period));
+    }
+
+    /// The step program's public values from the stored store to `newSlot` on the test's chain.
+    function stepPv(EMV mv, uint64 newSlot) private view returns (bytes memory) {
+        return mv.expectedStepValues(
+            newSlot, rootAt(newSlot), committee(newSlot / 8192), committee(newSlot / 8192 + 1), execAt(newSlot)
+        );
+    }
+
+    /// Execution block hash of the finalized header at `slot` on the test's chain.
+    function execAt(uint64 slot) private pure returns (bytes32) {
+        return keccak256(abi.encode("execution block", slot));
+    }
+
+    function sp1Proof(bytes32 vkey, bytes memory pv) private pure returns (bytes memory) {
+        return abi.encode(keccak256(abi.encode(vkey, pv)));
+    }
+
+    function advanceTo(EMV mv, uint64 newSlot) private {
+        bytes memory pv = stepPv(mv, newSlot);
+        mv.advance(pv, sp1Proof(LC_STEP_VKEY, pv));
+    }
+
+    function tryAdvance(EMV mv, bytes memory pv, bytes32 vkey) private returns (bool ok, bytes4 err) {
+        bytes memory ret;
+        (ok, ret) = address(mv).call(abi.encodeCall(EMV.advance, (pv, sp1Proof(vkey, pv))));
+        if (!ok && ret.length >= 4) err = bytes4(ret);
     }
 
     /// The finalized slot a fresh proof reaches: about two epochs behind now.
@@ -213,17 +254,20 @@ contract A276MintVerifierTest {
         return EMV.Claim(d.id, d.nonce, d.net, address(uint160(uint256(d.pq))));
     }
 
-    /// The program's public values for deposit `d`, finalized at `slot`.
+    /// The mint program's public values for deposit `d` under the stored checkpoint at `slot`.
     function pvFor(EMV mv, Dep memory d, uint64 slot) private view returns (bytes memory) {
-        return mv.expectedPublicValues(claimOf(d), d.blockNumber, d.blockHash, slot, keccak256(abi.encode("root", slot)));
+        return mv.expectedMintValues(claimOf(d), d.blockNumber, d.blockHash, slot);
     }
 
     function proofOf(bytes32 vkey, bytes memory pv) private pure returns (bytes memory) {
         return abi.encode(pv, abi.encode(keccak256(abi.encode(vkey, pv))));
     }
 
-    function proofFor(EMV mv, Dep memory d) private view returns (bytes memory) {
-        return proofOf(MINT_VKEY, pvFor(mv, d, freshSlot()));
+    /// As a prover does it: the deposit is finalized, somebody advances the store past it (if nobody has), and the
+    /// inclusion is proven under the stored head.
+    function proofFor(EMV mv, Dep memory d) private returns (bytes memory) {
+        if (mv.headSlot() < freshSlot()) advanceTo(mv, freshSlot());
+        return proofOf(MINT_VKEY, pvFor(mv, d, mv.headSlot()));
     }
 
     function mintByProof(Dep memory d, bytes memory proof) private {
@@ -255,12 +299,13 @@ contract A276MintVerifierTest {
         );
     }
 
-    function rawPv(bytes32[13] memory w) private pure returns (bytes memory out) {
-        for (uint256 i; i < 13; ++i) out = bytes.concat(out, w[i]);
+    function rawPv(bytes32[] memory w) private pure returns (bytes memory out) {
+        for (uint256 i; i < w.length; ++i) out = bytes.concat(out, w[i]);
     }
 
-    function words(bytes memory pv) private pure returns (bytes32[13] memory w) {
-        for (uint256 i; i < 13; ++i) {
+    function words(bytes memory pv) private pure returns (bytes32[] memory w) {
+        w = new bytes32[](pv.length / 32);
+        for (uint256 i; i < w.length; ++i) {
             bytes32 x;
             assembly {
                 x := mload(add(pv, add(32, mul(i, 32))))
@@ -297,25 +342,21 @@ contract A276MintVerifierTest {
 
     // ---------------------------------------------------------------- construction
 
-    function test_CONFIG_trustAnchorIsDerivedAndPinned() public {
+    function test_CONFIG_theAnchorIsTheFirstStore() public {
         EMV mv = newVerifier();
-        bytes32 want = sha256(
-            abi.encodePacked(
-                bytes32("BLOCH-ETH-LC-TRUST-v1"), block.chainid, GVR, anchorSlot, keccak256("anchor block root"),
-                keccak256("anchor sync committee root")
-            )
-        );
-        require(mv.trustAnchor() == want, "anchor derivation");
-        require(
-            abi.encodePacked(bytes32("BLOCH-ETH-LC-TRUST-v1"), block.chainid, GVR, anchorSlot, bytes32(0), bytes32(0))
-                .length == 168,
-            "168-byte preimage"
-        );
+        require(mv.headSlot() == anchorSlot && mv.headRoot() == rootAt(anchorSlot), "head = anchor");
+        require(mv.currentSyncCommitteeRoot() == committee(anchorSlot / 8192), "anchor committee");
+        require(mv.nextSyncCommitteeRoot() == 0, "no next committee at deployment");
+        require(mv.executionBlockHashAt(anchorSlot) == 0, "no mint under the anchor");
+        require(mv.anchorSlot() == anchorSlot && mv.anchorHeaderRoot() == rootAt(anchorSlot), "anchor kept");
+        require(mv.stepCount() == 0 && mv.canAdvance(), "no step yet");
         require(mv.mintTypehash() == token.MINT_TYPEHASH(), "typehash");
-        require(mv.PUBLIC_VALUES_LEN() == 416, "13 words");
+        require(mv.STEP_VALUES_LEN() == 384 && mv.MINT_VALUES_LEN() == 384, "12 and 12 words");
+        require(mv.STEP_TAG() == bytes32("BLOCH-ETH-LC-STEP-v2") && mv.MINT_TAG() == bytes32("BLOCH-ETH-MINT-v2"), "tags");
+        require(mv.periodOf(8191) == 0 && mv.periodOf(8192) == 1, "period");
     }
 
-    /// Review F6: a clock that would refuse every honest proof does not deploy.
+    /// Reviews F6 and F3: a clock that would refuse every honest step does not deploy.
     function test_CONFIG_refusesAnUnusableClock() public {
         EMV.Config memory c = cfg(address(0), 0);
         c.beaconGenesisTime = 0;
@@ -327,6 +368,13 @@ contract A276MintVerifierTest {
         try new EMV(c) {
             revert("an anchor in the future deployed");
         } catch {}
+        // An anchor already `maxStepGap` old could never advance.
+        c = cfg(address(0), 0);
+        c.anchorSlot = slotAt(block.timestamp - 30 days);
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c.anchorSlot = slotAt(block.timestamp - 30 days + 1 hours);
+        new EMV(c);
         new EMV(cfg(address(0), 0));
     }
 
@@ -344,7 +392,34 @@ contract A276MintVerifierTest {
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
         c = cfg(address(0), 0);
-        c.maxProofAge = 31 days;
+        c.maxStepGap = 30 days + 1;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.maxStepGap = 2 days - 1;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.maxStepGap = 2 days;
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.stepVKey = 0;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.mintVKey = 0;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.anchorHeaderRoot = 0;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.anchorSyncCommitteeRoot = 0;
+        vm.expectRevert(EMV.InvalidConfiguration.selector);
+        new EMV(c);
+        c = cfg(address(0), 0);
+        c.genesisValidatorsRoot = 0;
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
         c = cfg(AUTHORITY, 0);
@@ -357,6 +432,208 @@ contract A276MintVerifierTest {
         c.l2Token = address(0x1234);
         vm.expectRevert(EMV.InvalidConfiguration.selector);
         new EMV(c);
+    }
+
+    // ---------------------------------------------------------------- the store: steps (review F3)
+
+    event Advanced(
+        uint64 indexed prevSlot,
+        uint64 indexed newSlot,
+        bytes32 newHeaderRoot,
+        bytes32 newSyncCommitteeRoot,
+        bytes32 newNextSyncCommitteeRoot,
+        bytes32 newExecutionBlockHash
+    );
+
+    function test_STEP_anyoneAdvancesAndEveryAcceptedHeaderIsKept() public {
+        EMV mv = newVerifier();
+        uint64 s1 = anchorSlot + 64;
+        uint64 s2 = freshSlot();
+        require(s1 / 8192 == anchorSlot / 8192 || s1 / 8192 == anchorSlot / 8192 + 1, "fixture");
+        vm.prank(MALLORY);
+        advanceTo(mv, s1);
+        require(mv.headSlot() == s1 && mv.headRoot() == rootAt(s1) && mv.stepCount() == 1, "head moved");
+        require(mv.currentSyncCommitteeRoot() == committee(s1 / 8192), "current committee");
+        require(mv.nextSyncCommitteeRoot() == committee(s1 / 8192 + 1), "next committee learned");
+        advanceTo(mv, s2);
+        require(mv.headSlot() == s2 && mv.stepCount() == 2, "second step");
+        require(
+            mv.executionBlockHashAt(anchorSlot) == 0 && mv.executionBlockHashAt(s1) == execAt(s1)
+                && mv.executionBlockHashAt(s2) == execAt(s2) && mv.executionBlockHashAt(s1 + 1) == 0,
+            "both steps stored, nothing else"
+        );
+    }
+
+    /// The proof must start from the LATEST store: a second proof made from the same store loses the race, and a
+    /// proof from an older store (an old committee) is refused for good.
+    function test_STEP_onlyFromTheLatestStore() public {
+        EMV mv = newVerifier();
+        bytes memory first = stepPv(mv, anchorSlot + 64);
+        bytes memory rival = stepPv(mv, anchorSlot + 96);
+        (bool ok, bytes4 err) = tryAdvance(mv, first, LC_STEP_VKEY);
+        require(ok, "first");
+        (ok, err) = tryAdvance(mv, rival, LC_STEP_VKEY);
+        require(!ok && err == EMV.StaleStore.selector, "the rival started from the anchor");
+        (ok, err) = tryAdvance(mv, first, LC_STEP_VKEY);
+        require(!ok && err == EMV.StaleStore.selector, "replay");
+        // Each field of the start store is compared.
+        for (uint256 i = 3; i <= 6; ++i) {
+            bytes32[] memory w = words(stepPv(mv, anchorSlot + 128));
+            w[i] = bytes32(uint256(w[i]) ^ 1);
+            (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+            require(!ok && err == EMV.StaleStore.selector, "start store field");
+        }
+        advanceTo(mv, anchorSlot + 128);
+    }
+
+    function test_STEP_refusesNoProgressAndZeroRoots() public {
+        EMV mv = newVerifier();
+        advanceTo(mv, anchorSlot + 64);
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, anchorSlot + 64), LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "same slot");
+        (ok, err) = tryAdvance(mv, stepPv(mv, anchorSlot + 63), LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "older slot");
+        uint64 n = anchorSlot + 96;
+        bytes memory pv = mv.expectedStepValues(n, 0, committee(n / 8192), committee(n / 8192 + 1), execAt(n));
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "zero header root");
+        pv = mv.expectedStepValues(n, rootAt(n), 0, committee(n / 8192 + 1), execAt(n));
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "zero committee");
+        pv = mv.expectedStepValues(n, rootAt(n), committee(n / 8192), committee(n / 8192 + 1), 0);
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "zero execution block hash");
+    }
+
+    /// What the contract can check of the committees without the program (defence against a program defect).
+    function test_STEP_committeeRulesAcrossPeriods() public {
+        // An anchor in the middle of a period, so that same-period and next-period steps both exist.
+        vm.warp(block.timestamp + 3 days);
+        anchorSlot = (slotAt(block.timestamp - 2 days) / 8192) * 8192 + 100;
+        EMV mv = newVerifier();
+        uint64 p = anchorSlot / 8192;
+        uint64 same = anchorSlot + 64;
+        // Same period, another current committee: refused.
+        bytes memory pv = mv.expectedStepValues(same, rootAt(same), keccak256("other committee"), committee(p + 1), execAt(same));
+        (bool ok, bytes4 err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "committee changed inside a period");
+        // Same period, the next committee still unknown after the step: allowed (the anchor has none).
+        pv = mv.expectedStepValues(same, rootAt(same), committee(p), 0, execAt(same));
+        (ok,) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(ok && mv.nextSyncCommitteeRoot() == 0, "next still unknown");
+        advanceTo(mv, same + 32);
+        require(mv.nextSyncCommitteeRoot() == committee(p + 1), "learned");
+        // Same period, a known next committee replaced or forgotten: refused.
+        pv = mv.expectedStepValues(same + 64, rootAt(same + 64), committee(p), keccak256("other next"), execAt(same + 64));
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "known next replaced");
+        pv = mv.expectedStepValues(same + 64, rootAt(same + 64), committee(p), 0, execAt(same + 64));
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "known next forgotten");
+        // Into the next period: the current committee must be the stored next one.
+        uint64 next = (p + 1) * 8192 + 5;
+        pv = mv.expectedStepValues(next, rootAt(next), keccak256("usurper"), committee(p + 2), execAt(next));
+        (ok, err) = tryAdvance(mv, pv, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "next period, not the stored next committee");
+        advanceTo(mv, next);
+        require(mv.currentSyncCommitteeRoot() == committee(p + 1), "rotated");
+    }
+
+    /// A step may cross several periods (one light-client update per period inside the proof).
+    function test_STEP_acrossSeveralPeriodsInOneProof() public {
+        vm.warp(block.timestamp + 10 days);
+        anchorSlot = slotAt(block.timestamp - 9 days);
+        EMV mv = newVerifier();
+        uint64 s = freshSlot();
+        require(s / 8192 >= anchorSlot / 8192 + 2, "fixture: at least two periods later");
+        advanceTo(mv, s);
+        require(mv.currentSyncCommitteeRoot() == committee(s / 8192), "current");
+    }
+
+    function test_STEP_wrongProgramTagChainOrGenesisRoot() public {
+        EMV mv = newVerifier();
+        uint64 n = anchorSlot + 64;
+        bytes memory pv = stepPv(mv, n);
+        (bool ok, bytes4 err) = tryAdvance(mv, pv, MINT_VKEY);
+        require(!ok && err != EMV.PublicValuesMismatch.selector, "a proof of the mint program is not a step");
+        bytes32[] memory w = words(pv);
+        w[0] = bytes32("BLOCH-ETH-MINT-v2");
+        (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "tag");
+        (ok, err) = tryAdvance(mv, rawPv(w), MINT_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "tag, under the mint key");
+        w = words(pv);
+        w[1] = bytes32(uint256(11155111));
+        (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "chain");
+        w = words(pv);
+        w[2] = keccak256("sepolia genesis validators root");
+        (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "another beacon chain");
+        w = words(pv);
+        w[7] = bytes32(uint256(type(uint64).max) + 1 + n);
+        (ok, err) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "slot word over u64");
+        (ok, err) = tryAdvance(mv, bytes.concat(pv, bytes32(0)), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "length");
+        (ok, err) = tryAdvance(mv, abi.encodePacked(words(pv)[0], pv), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "13 words");
+        // Mint public values (also 12 words) are not a step, under either key: the tag separates them.
+        Dep memory d = deposit(uint64(1000 * U), ALICE);
+        (ok, err) = tryAdvance(mv, pvFor(mv, d, anchorSlot), MINT_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "mint values in advance");
+        (ok, err) = tryAdvance(mv, pvFor(mv, d, anchorSlot), LC_STEP_VKEY);
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "mint values in advance, step key");
+        // The proof is over the exact public values.
+        bytes memory other = stepPv(mv, n + 32);
+        (ok,) = address(mv).call(abi.encodeCall(EMV.advance, (other, sp1Proof(LC_STEP_VKEY, pv))));
+        require(!ok && mv.headSlot() == anchorSlot, "proof of other values");
+        advanceTo(mv, n);
+    }
+
+    /// Any single word of honest step values changed is refused, except the five words that only the program states
+    /// (the new store), which the SP1 proof binds.
+    function testFuzz_STEP_anyWordOfTheStartChangedIsRefused(uint8 which, bytes32 value) public {
+        EMV mv = newVerifier();
+        bytes32[] memory w = words(stepPv(mv, anchorSlot + 64));
+        uint256 i = which % 7;
+        if (w[i] == value) return;
+        w[i] = value;
+        (bool ok,) = tryAdvance(mv, rawPv(w), LC_STEP_VKEY);
+        require(!ok && mv.headSlot() == anchorSlot && mv.stepCount() == 0, "refused, store untouched");
+    }
+
+    function test_CLOCK_aHeadInTheFutureIsRefused() public {
+        EMV mv = newVerifier();
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, slotAt(block.timestamp + 16 minutes)), LC_STEP_VKEY);
+        require(!ok && err == EMV.FutureProof.selector, "future");
+        (ok,) = tryAdvance(mv, stepPv(mv, slotAt(block.timestamp + 14 minutes)), LC_STEP_VKEY);
+        require(ok, "within the clock skew");
+    }
+
+    /// After `maxStepGap` without a step the store cannot resume from its old committee. Stored headers still mint.
+    function test_CLOCK_noStepFromAStoreOlderThanTheGap() public {
+        EMV mv = newVerifier();
+        switchToken(address(mv)); // 14 days
+        Dep memory d = deposit(uint64(1000 * U), ALICE);
+        bytes memory proof = proofFor(mv, d); // advances to a fresh head
+        uint64 head = mv.headSlot();
+        vm.warp(mv.slotTime(head) + 30 days);
+        require(mv.canAdvance(), "exactly at the gap");
+        uint256 snap = vm.snapshotState();
+        advanceTo(mv, freshSlot());
+        vm.revertToState(snap);
+        vm.warp(mv.slotTime(head) + 30 days + 1);
+        require(!mv.canAdvance(), "past the gap");
+        (bool ok, bytes4 err) = tryAdvance(mv, stepPv(mv, freshSlot()), LC_STEP_VKEY);
+        require(!ok && err == EMV.StepGapExceeded.selector, "old committee cannot resume");
+        // A deposit already under a stored header still mints.
+        mintByProof(d, proof);
+        // A later deposit has no stored header above it: nothing to prove it under (only the handoff continues).
+        Dep memory late = deposit(uint64(1000 * U), BOB);
+        bytes memory pv = mv.expectedMintValues(claimOf(late), late.blockNumber, late.blockHash, freshSlot());
+        (ok, err) = verifierErr(mv, mintHashOf(late), proofOf(MINT_VKEY, pv));
+        require(!ok && err == EMV.UnknownCheckpoint.selector, "no checkpoint");
     }
 
     // ---------------------------------------------------------------- honest path
@@ -388,16 +665,41 @@ contract A276MintVerifierTest {
         require(token.balanceOf(ALICE) == d.net && token.balanceOf(MALLORY) == 0, "Alice paid");
     }
 
+    /// One step serves every deposit finalized under it, and a mint proof made under an older stored header stays
+    /// valid after later steps (a step never invalidates a mint proof).
+    function test_HONEST_oneStepManyMintsAndOldCheckpointsStayValid() public {
+        EMV mv = newVerifier();
+        switchToken(address(mv));
+        Dep memory a = deposit(uint64(1000 * U), ALICE);
+        Dep memory b = deposit(uint64(2000 * U), BOB);
+        bytes memory proofA = proofFor(mv, a);
+        uint64 under = mv.headSlot();
+        bytes memory proofB = proofFor(mv, b);
+        require(mv.headSlot() == under && mv.stepCount() == 1, "one step for both");
+        vm.warp(block.timestamp + 1 days);
+        advanceTo(mv, freshSlot());
+        advanceTo(mv, freshSlot() + 32);
+        require(mv.headSlot() > under, "the head moved on");
+        mintByProof(a, proofA);
+        mintByProof(b, proofB);
+        vm.warp(block.timestamp + 12 hours);
+        token.executeMint(a.id);
+        (, uint64 stillQueued,) = token.pendingMints(b.id);
+        if (stillQueued != 0) token.executeMint(b.id); // the first call may drain the next due slot too
+        require(token.balanceOf(ALICE) == a.net && token.balanceOf(BOB) == b.net && !heldState(), "both credited");
+    }
+
     // ---------------------------------------------------------------- forged
 
     function test_FORGED_noDepositNoMint() public {
         EMV mv = newVerifier();
         switchToken(address(mv));
         Dep memory real = deposit(uint64(1000 * U), BOB);
+        advanceTo(mv, freshSlot());
         // A claim for Mallory in the next slot with no deposit behind it: the program cannot commit it, so the attacker
         // has public values but no proof for them.
         Dep memory fake = Dep(fid(keccak256("forged"), real.nonce), real.nonce, real.net, bytes32(uint256(uint160(MALLORY))), real.blockNumber, real.blockHash);
-        bytes memory pv = pvFor(mv, fake, freshSlot());
+        bytes memory pv = pvFor(mv, fake, mv.headSlot());
         (bool ok, bytes4 err) = tryMint(fake, abi.encode(pv, abi.encode(bytes32("garbage"))));
         require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "no proof, no mint");
         // A real proof of Bob's deposit cannot be bent to Mallory, another amount (the gross), or another id.
@@ -423,27 +725,32 @@ contract A276MintVerifierTest {
         EMV mv = newVerifier();
         switchToken(address(mv));
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes memory pv = pvFor(mv, d, freshSlot());
+        advanceTo(mv, freshSlot());
+        bytes memory pv = pvFor(mv, d, mv.headSlot());
         (bool ok, bytes4 err) = tryMint(d, proofOf(keccak256("another program"), pv));
         require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "other vkey");
-        bytes32[13] memory w = words(pv);
-        w[12] = keccak256("another finalized root");
+        (ok, err) = tryMint(d, proofOf(LC_STEP_VKEY, pv));
+        require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "the step program's key");
+        bytes32[] memory w = words(pv);
+        w[11] = keccak256("another block");
         (ok,) = verifierErr(mv, mintHashOf(d), abi.encode(rawPv(w), abi.encode(keccak256(abi.encode(MINT_VKEY, pv)))));
         require(!ok, "proof is over the exact public values");
         w = words(pv);
-        w[0] = bytes32("BLOCH-ETH-MINT-v0");
+        w[0] = bytes32("BLOCH-ETH-MINT-v1");
         (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "tag");
         w = words(pv);
-        w[1] = keccak256("another anchor");
-        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
-        require(!ok && err == EMV.PublicValuesMismatch.selector, "anchor");
-        w = words(pv);
-        w[8] = bytes32(uint256(w[8]) | (uint256(1) << 200));
+        w[9] = bytes32(uint256(w[9]) | (uint256(1) << 200));
         (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "recipient high bits");
         (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, bytes.concat(pv, bytes32(0))));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "length");
+        // Step public values (also 12 words) are not a mint: the tag separates them.
+        bytes memory step = stepPv(mv, mv.headSlot() + 32);
+        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(LC_STEP_VKEY, step));
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "step values in verifyMint");
+        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, step));
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "step values in verifyMint, mint key");
         mintByProof(d, proofOf(MINT_VKEY, pv));
     }
 
@@ -451,19 +758,18 @@ contract A276MintVerifierTest {
     function testFuzz_FORGED_anyWordChangedIsRefused(uint8 which, bytes32 value) public {
         EMV mv = newVerifier();
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes memory pv = pvFor(mv, d, freshSlot());
-        bytes32[13] memory w = words(pv);
-        uint256 i = which % 13;
+        advanceTo(mv, freshSlot());
+        bytes memory pv = pvFor(mv, d, mv.headSlot());
+        bytes32[] memory w = words(pv);
+        uint256 i = which % 12;
         if (w[i] == value) return;
-        // The deposit block number and hash and the finalized block root are statements of the program only: the
-        // verifier binds them through the proof (next test), not through its configuration.
-        if (i == 9 || i == 10 || i == 12) return;
-        // The finalized slot is a clock statement: another slot inside the freshness window is a valid statement.
-        if (i == 11 && uint256(value) <= type(uint64).max) return;
+        // The deposit block number and hash are statements of the program only: the verifier binds them through the
+        // proof (next test), not through its configuration or state.
+        if (i == 10 || i == 11) return;
         w[i] = value;
         bytes memory bad = rawPv(w);
         (bool ok,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, bad));
-        (bool ok2,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pv) );
+        (bool ok2,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pv));
         require(ok2, "the honest values pass");
         require(!ok, "a changed word is refused");
     }
@@ -472,12 +778,13 @@ contract A276MintVerifierTest {
     function test_FORGED_blockFieldsAreBoundByTheProof() public {
         EMV mv = newVerifier();
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes memory pv = pvFor(mv, d, freshSlot());
-        bytes32[13] memory w = words(pv);
-        w[10] = keccak256("another block");
+        advanceTo(mv, freshSlot());
+        bytes memory pv = pvFor(mv, d, mv.headSlot());
+        bytes32[] memory w = words(pv);
+        w[11] = keccak256("another block");
         (bool ok,) = verifierErr(mv, mintHashOf(d), abi.encode(rawPv(w), abi.encode(keccak256(abi.encode(MINT_VKEY, pv)))));
         require(!ok, "old proof, new block hash");
-        w[10] = 0;
+        w[11] = 0;
         (bool ok2, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok2 && err == EMV.PublicValuesMismatch.selector, "zero block hash");
     }
@@ -487,21 +794,66 @@ contract A276MintVerifierTest {
     function test_FORGED_theIdPrefixMustBeTheNonce() public {
         EMV mv = newVerifier();
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes32[13] memory w = words(pvFor(mv, d, freshSlot()));
-        w[6] = bytes32(uint256(d.nonce) + 1);
+        advanceTo(mv, freshSlot());
+        bytes32[] memory w = words(pvFor(mv, d, mv.headSlot()));
+        w[7] = bytes32(uint256(d.nonce) + 1);
         (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "nonce word against the id prefix");
     }
 
-    /// A finalized slot at the anchor is refused even when it is inside the age window (an anchor one hour old).
-    function test_STALE_aSlotAtTheAnchorIsRefusedInsideTheAgeWindow() public {
-        anchorSlot = slotAt(block.timestamp - 1 hours);
+    // ---------------------------------------------------------------- checkpoints (review F3)
+
+    /// Review F3, fixed behaviour: a finalized block no step stored is refused, and one slot has one execution block
+    /// for ever. Two "histories" for the same slot cannot both mint.
+    function test_CHECKPOINT_onlyStoredHeadersAndOneRootPerSlot() public {
+        EMV mv = newVerifier();
+        switchToken(address(mv));
+        Dep memory d = deposit(uint64(1000 * U), ALICE);
+        advanceTo(mv, freshSlot());
+        uint64 head = mv.headSlot();
+        // A slot nobody stored (also: after the head, before the anchor).
+        uint64[3] memory unknown = [head - 1, head + 1, anchorSlot - 1];
+        for (uint256 i; i < 3; ++i) {
+            bytes memory pv = pvFor(mv, d, unknown[i]);
+            (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pv));
+            require(!ok && err == EMV.UnknownCheckpoint.selector, "unknown slot");
+            // ...even when the "program" states a root for it.
+            bytes32[] memory w = words(pv);
+            w[3] = keccak256("block of a forged branch");
+            (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+            require(!ok && err == EMV.UnknownCheckpoint.selector, "unknown slot with a root");
+        }
+        // The stored slot with another root: a conflicting history.
+        bytes32[] memory x = words(pvFor(mv, d, head));
+        x[3] = keccak256("block Y");
+        (bool ok2, bytes4 err2) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(x)));
+        require(!ok2 && err2 == EMV.UnknownCheckpoint.selector, "conflicting block for a stored slot");
+        (ok2, err2) = tryMint(d, proofOf(MINT_VKEY, rawPv(x)));
+        require(!ok2 && err2 == BridgedStablecoinV2.InvalidProof.selector, "the token refuses it");
+        x[2] = bytes32(uint256(type(uint64).max) + 1 + head);
+        (ok2, err2) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(x)));
+        require(!ok2 && err2 == EMV.PublicValuesMismatch.selector, "slot word over u64");
+        mintByProof(d, proofOf(MINT_VKEY, pvFor(mv, d, head)));
+    }
+
+    /// The anchor carries no execution block hash: nothing mints under it, whatever hash the values name. The first
+    /// step enables mints.
+    function test_CHECKPOINT_noMintUnderTheAnchor() public {
         EMV mv = newVerifier();
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot)));
-        require(!ok && err == EMV.StaleProof.selector, "at the anchor");
-        (ok,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot + 1)));
-        require(ok, "the first slot after the anchor passes");
+        bytes32[] memory w = words(pvFor(mv, d, anchorSlot));
+        require(w[3] == 0, "nothing stored for the anchor");
+        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+        require(!ok && err == EMV.UnknownCheckpoint.selector, "zero hash");
+        w[3] = execAt(anchorSlot);
+        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+        require(!ok && err == EMV.UnknownCheckpoint.selector, "a hash for the anchor");
+        w[3] = rootAt(anchorSlot);
+        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+        require(!ok && err == EMV.UnknownCheckpoint.selector, "the anchor header root is not an execution block");
+        advanceTo(mv, anchorSlot + 64);
+        (ok,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot + 64)));
+        require(ok, "after the first step");
     }
 
     // ---------------------------------------------------------------- duplicate
@@ -511,7 +863,7 @@ contract A276MintVerifierTest {
         switchToken(address(mv));
         Dep memory d = deposit(uint64(1000 * U), ALICE);
         mintByProof(d, proofFor(mv, d));
-        // Same proof again, and a fresh proof at a later finalized slot.
+        // Same proof again, and a fresh proof under a later stored header.
         (bool ok, bytes4 err) = tryMint(d, proofFor(mv, d));
         require(!ok && err == SignerMintedToken.AlreadyMinted.selector, "queued: once");
         vm.warp(block.timestamp + 12 hours);
@@ -550,36 +902,34 @@ contract A276MintVerifierTest {
         }
         uint64 net = uint64(1000 * U - 1000 * U * 5 / 10_000);
         Dep memory d = Dep(id, 0, net, bytes32(uint256(uint160(MALLORY))), 1, keccak256("b"));
+        advanceTo(mv, freshSlot());
         // The program commits the emitter it really saw: the other vault (and its route).
-        bytes32[13] memory w = words(pvFor(mv, d, freshSlot()));
-        w[3] = bytes32(uint256(uint160(address(other))));
-        w[4] = other.routeId();
+        bytes32[] memory w = words(pvFor(mv, d, mv.headSlot()));
+        w[4] = bytes32(uint256(uint160(address(other))));
+        w[5] = other.routeId();
         (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "other vault");
         (ok, err) = tryMint(d, proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "token refuses");
-        w = words(pvFor(mv, d, freshSlot()));
-        w[3] = bytes32(uint256(uint160(address(other))));
+        w = words(pvFor(mv, d, mv.headSlot()));
+        w[4] = bytes32(uint256(uint160(address(other))));
         (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "same route, other emitter");
+        w = words(pvFor(mv, d, mv.headSlot()));
+        w[4] = bytes32(uint256(w[4]) | (uint256(1) << 160));
+        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
+        require(!ok && err == EMV.PublicValuesMismatch.selector, "vault word with high bits");
     }
 
-    function test_WRONGCHAIN_anotherSourceChainOrAnchorIsRefused() public {
+    function test_WRONGCHAIN_anotherSourceChainIsRefused() public {
         EMV mv = newVerifier();
         switchToken(address(mv));
         Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes32[13] memory w = words(pvFor(mv, d, freshSlot()));
-        w[2] = bytes32(uint256(11155111));
+        advanceTo(mv, freshSlot());
+        bytes32[] memory w = words(pvFor(mv, d, mv.headSlot()));
+        w[1] = bytes32(uint256(11155111));
         (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
         require(!ok && err == EMV.PublicValuesMismatch.selector, "Sepolia");
-        // A light client started on another beacon chain (other genesis validators root) has another anchor.
-        w = words(pvFor(mv, d, freshSlot()));
-        w[1] = mv.deriveTrustAnchor(
-            block.chainid, keccak256("sepolia gvr"), anchorSlot, keccak256("anchor block root"),
-            keccak256("anchor sync committee root")
-        );
-        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
-        require(!ok && err == EMV.PublicValuesMismatch.selector, "other beacon chain");
         mintByProof(d, proofFor(mv, d));
     }
 
@@ -590,45 +940,6 @@ contract A276MintVerifierTest {
         (bool ok, bytes memory ret) =
             address(mv).staticcall(abi.encodeCall(EMV.verifyMint, (address(twin), mintHashOf(d), proofFor(mv, d))));
         require(!ok && bytes4(ret) == EMV.WrongToken.selector, "bound to one token");
-    }
-
-    // ---------------------------------------------------------------- stale / future
-
-    function test_STALE_oldFinalityIsRefusedAndAFreshProofPasses() public {
-        EMV mv = newVerifier();
-        switchToken(address(mv));
-        Dep memory d = deposit(uint64(1000 * U), ALICE);
-        bytes memory old = proofFor(mv, d);
-        vm.warp(block.timestamp + 2 days + 1 hours);
-        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), old);
-        require(!ok && err == EMV.StaleProof.selector, "older than maxProofAge");
-        (ok, err) = tryMint(d, old);
-        require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "token refuses");
-        // At the boundary: exactly maxProofAge old passes.
-        uint64 s = slotAt(block.timestamp - 2 days);
-        bytes memory edge = proofOf(MINT_VKEY, pvFor(mv, d, s));
-        if (mv.slotTime(s) + 2 days >= block.timestamp) {
-            (ok,) = verifierErr(mv, mintHashOf(d), edge);
-            require(ok, "edge passes");
-        }
-        mintByProof(d, proofFor(mv, d));
-    }
-
-    function test_STALE_atOrBeforeTheAnchorAndFutureSlotsAreRefused() public {
-        EMV mv = newVerifier();
-        Dep memory d = deposit(uint64(1000 * U), ALICE);
-        (bool ok, bytes4 err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, anchorSlot)));
-        require(!ok && err == EMV.StaleProof.selector, "anchor slot");
-        uint64 future = slotAt(block.timestamp + 16 minutes);
-        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, future)));
-        require(!ok && err == EMV.FutureProof.selector, "future");
-        uint64 skew = slotAt(block.timestamp + 14 minutes);
-        (ok,) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, pvFor(mv, d, skew)));
-        require(ok, "within the clock skew");
-        bytes32[13] memory w = words(pvFor(mv, d, freshSlot()));
-        w[11] = bytes32(uint256(type(uint64).max) + 1);
-        (ok, err) = verifierErr(mv, mintHashOf(d), proofOf(MINT_VKEY, rawPv(w)));
-        require(!ok && err == EMV.PublicValuesMismatch.selector, "slot word over u64");
     }
 
     // ---------------------------------------------------------------- switch order (172 decision 2, 239 item 8)
@@ -648,7 +959,8 @@ contract A276MintVerifierTest {
         vm.expectRevert(BridgedStablecoinV2.CommitteeRetired.selector);
         token.mint(fake, b.nonce, uint64(500 * U), MALLORY, blob);
         Dep memory f = Dep(fake, b.nonce, uint64(500 * U), bytes32(uint256(uint160(MALLORY))), b.blockNumber, b.blockHash);
-        (bool ok, bytes4 err) = tryMint(f, abi.encode(pvFor(mv, f, freshSlot()), abi.encode(bytes32("x"))));
+        advanceTo(mv, freshSlot());
+        (bool ok, bytes4 err) = tryMint(f, abi.encode(pvFor(mv, f, mv.headSlot()), abi.encode(bytes32("x"))));
         require(!ok && err == BridgedStablecoinV2.InvalidProof.selector, "forged proof");
         mintByProof(b, proofFor(mv, b));
         R lc = new R(rcfg());
@@ -780,6 +1092,7 @@ contract A276MintVerifierTest {
     function test_HANDOFF_authorityDelayActivationAndCodeRecheck() public {
         EMV mv = new EMV(cfg(AUTHORITY, 30 days));
         switchToken(address(mv));
+        advanceTo(mv, freshSlot());
         A276AcceptAllSuccessor wrong = new A276AcceptAllSuccessor(address(0x1234));
         A276AcceptAllSuccessor s = new A276AcceptAllSuccessor(address(token));
         vm.expectRevert(EMV.NotAuthority.selector);
@@ -792,15 +1105,20 @@ contract A276MintVerifierTest {
         mv.proposeSuccessor(address(usdc));
         vm.prank(AUTHORITY);
         mv.proposeSuccessor(address(s));
-        vm.warp(block.timestamp + 30 days - 1);
+        // During the notice the pinned programs keep working: steps and mints.
+        vm.warp(block.timestamp + 15 days);
+        advanceTo(mv, freshSlot());
+        vm.warp(block.timestamp + 15 days - 1);
         vm.expectRevert(EMV.InvalidActivation.selector);
         mv.activateSuccessor();
-        // During the notice the pinned program keeps working.
         Dep memory d = deposit(uint64(1000 * U), ALICE);
         mintByProof(d, proofFor(mv, d));
         vm.warp(block.timestamp + 1);
         mv.activateSuccessor();
         require(mv.successor() == address(s), "active");
+        // This contract's own proof path has ended: no step either.
+        (bool stepped, bytes4 why) = tryAdvance(mv, stepPv(mv, freshSlot() + 32), LC_STEP_VKEY);
+        require(!stepped && why == EMV.SuccessorActive.selector && !mv.canAdvance(), "no step after the handoff");
         // The successor's format now (here: anything).
         Dep memory e = deposit(uint64(1000 * U), BOB);
         mintByProof(e, "");
@@ -857,7 +1175,12 @@ contract A276MintVerifierTest {
         Dep memory d = deposit(uint64(1000 * U), ALICE);
         bytes memory proof = proofFor(mv, d);
         bytes32 h = mintHashOf(d);
+        bytes memory spv = stepPv(mv, mv.headSlot() + 32);
+        bytes memory sproof = sp1Proof(LC_STEP_VKEY, spv);
         uint256 g = gasleft();
+        mv.advance(spv, sproof);
+        emit GasUsed("advance (mock SP1)", g - gasleft());
+        g = gasleft();
         mv.verifyMint(address(token), h, proof);
         emit GasUsed("verifyMint (mock SP1)", g - gasleft());
         g = gasleft();
