@@ -97,9 +97,16 @@ Recommendation (owner's choice):
 20. https://chainsecurity.com/security-audit/polygon-pos-portal-smart-contracts
 21. https://reports.chainsecurity.com/MakerDAO/ChainSecurity_MakerDAO_OPTokenBridge_Audit.pdf
 
+## Round 15 note (2026-11-11, bridge sizes only; estimates not recomputed)
+
+Sizes at the round 15 bridge freeze (`PHASE2-BRIDGE-FREEZE-R15.md`): Bridge A1 Solidity 1,500 nSLOC (unchanged); A2
+Python 5,830 nSLOC in 13 files (was 5,754); Phase 2B Solidity 491 nSLOC in two contracts (the mint verifier, now
+stateful, 282; the settlement verifier 209), plus the mint verifier's two SP1 programs, written in round 15 in
+`bloch-sis-pow` and sized in that task's report. The estimates below are not recomputed.
+
 ## Round 14 note (2026-11-09, bridge sizes only; estimates not recomputed)
 
-Sizes at the round 14 bridge freeze (`PHASE2-BRIDGE-FREEZE-R14.md`): Bridge A1 Solidity 1,500 nSLOC (was 1,496);
+Sizes at the round 14 bridge freeze (`PHASE2-BRIDGE-FREEZE-R14.md`, replaced by the round 15 record): Bridge A1 Solidity 1,500 nSLOC (was 1,496);
 A2 Python 5,754 nSLOC in 13 files (was 4,954); new Phase 2B Solidity 407 nSLOC in two contracts (the mint verifier 198,
 the held-state settlement verifier 209), plus a mint-verifier SP1 program that is not written yet. The estimates of
 section 3 were not recomputed: they use the `eb5c981` sizes. By size alone, Phase 2B adds about a quarter to the

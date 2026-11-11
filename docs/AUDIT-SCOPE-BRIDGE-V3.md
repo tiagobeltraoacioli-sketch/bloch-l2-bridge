@@ -28,9 +28,22 @@ final L2 launch build (agent 230) stays the one allowed post-freeze delta (const
   (section 2.3);
 - the operator runbook and the signer pre-go-live check (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md`, `preflight_signer.py`).
 
+**Round 15 freeze (agent 314):** branch `codex/bridge-r15-20261110`, from the round 14 freeze `1aef47c`. No launch
+contract moved (hashes of section 2 rebuilt and equal). Changes:
+- `EthereumMintVerifier` is now **stateful** (review F3 closed): an on-chain light-client store advanced only by
+  verified proofs, two statements (STEP, MINT) agreed with the author of the SP1 programs, and a successor that must
+  start from a checkpoint the contract accepted while the light client is alive (section 2.3);
+- the independent round 15 review (agent 310: 0 Critical, 0 High, 2 Medium, 2 Low, 3 Info) and its fixes (R310 rows
+  of section 7): release journal retirement and stuck alert, fee recipient in the refusal list, the settlement
+  snapshot rule, relayer preflight checks;
+- settlement and mint-verifier operator tooling: `settlement_snapshot.py`, `verifier_review.py settlement` and
+  `mint-verifier`;
+- executed on private nets: `getlcproof` across the KES bind into the `lc` tool (execute only), and the signer
+  pre-go-live check (sections 3.1 and 8).
+
 No launch contract moved since `8e5ce91`: the six hashes of section 2 are unchanged (rebuilt and compared at the freeze).
-The freeze commit is the one named in `docs/audit-rfp-r12/PHASE2-BRIDGE-FREEZE-R14.md`; it replaces `8e5ce91` and
-`eb5c981`. The signer re-pin (agent 230) is inside it; no post-freeze delta is left.
+The freeze commit is the one named in `docs/audit-rfp-r12/PHASE2-BRIDGE-FREEZE-R15.md` (round 15; it replaces the
+round 14 freeze `1aef47c`, whose record is in the history of that directory), `8e5ce91` and `eb5c981`. The signer re-pin (agent 230) is inside it; no post-freeze delta is left.
 
 The frontend is `postern-dex` `codex/bridge-v3-r7-20261102` @ `f7cdf26`, with agent 176's security fixes (`8d077ce`) and
 the fee and contract-recipient changes on `codex/bridge-frontend-r10-20261102` (agent 200).
@@ -134,24 +147,33 @@ Launch parameters are not in a config yet (owner decisions in report 103): the a
 pays less than the burn; `feesAccrued` outside backing on every path (deposit, release, queued release, sweep, shortfall);
 `sweepFees` and the recipient; rounding (always in the user's favour); the `minDeposit` net check.
 
-### 2.3 Phase 2B: the mint verifier and the held-state settlement verifier (new at the round 14 freeze)
+### 2.3 Phase 2B: the mint verifier and the held-state settlement verifier (round 14; mint verifier stateful since round 15)
 
 Neither is deployed at launch, and neither changes a launch contract. They are in scope so that the two prerequisites
 of the light-client switch named by agents 172 and 239 are audited before they are needed.
 
 | Contract | File (lines) | Chain | Creation keccak (bytes) | Runtime keccak (bytes, immutables zeroed) | Specification | Tests |
 |---|---|---|---|---|---|---|
-| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (368) | L2 700770 | `0xe40b8cb155c9e743903659ab31fa188aca7a18b3bb17ffb27eb3a6e983127f73` (9,866) | `0xbfedc25a5381c14d67d286c5f408aca9f5a5a9a69202afb466be9c9689f8f056` (7,332) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (28) |
-| **HeldStateSettlementVerifier** | `contracts/usdt/HeldStateSettlementVerifier.sol` (356) | Ethereum 1 | `0x9c0e4cc7d7641393dd5b98ba2d9fcf2024dfd29300d53e80fd0b78234cf2fa66` (12,749) | `0xf9d72d599313970c30a0cb0f2623fba97ca8953d9c2c7320aab61594708a0592` (9,043) | `docs/HELD-STATE-SETTLEMENT.md` | `R306HeldStateSettlement` (21) |
+| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (543) | L2 700770 | `0x773d6dc489d58164b4ce6c63708b378bfb836a33dff31f00016de7963e9c5e09` (13,218) | `0x859ba661652879980d760f18127486aca49d4889025f021a599745eea5c7ea86` (10,757) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (39) |
+| **HeldStateSettlementVerifier** | `contracts/usdt/HeldStateSettlementVerifier.sol` (356) | Ethereum 1 | `0x9c0e4cc7d7641393dd5b98ba2d9fcf2024dfd29300d53e80fd0b78234cf2fa66` (12,749) | `0xf9d72d599313970c30a0cb0f2623fba97ca8953d9c2c7320aab61594708a0592` (9,043) | `docs/HELD-STATE-SETTLEMENT.md` | `R306HeldStateSettlement` (21), `R310SettlementReview` (1) |
 
-- `EthereumMintVerifier` is the `IMintVerifier` the token switches to, once, in place of its mint committee. It checks
-  an SP1 proof that the vault emitted `Deposited` in a finalized Ethereum block and binds the proven log to the token's
-  own mint hash. **The SP1 program it verifies does not exist yet** (its statement is specified in
-  `docs/LC-MINT-VERIFIER.md` section 4); the contract is in scope, the program is not.
+- `EthereumMintVerifier` is the `IMintVerifier` the token switches to, once, in place of its mint committee. Since
+  round 15 it holds a light-client store (latest finalized beacon header, current and next sync-committee roots) set
+  once at deployment and advanced by anyone with a STEP proof that starts from the latest store; it keeps the execution
+  block hash of each finalized header reached, and accepts a mint with a MINT proof that the vault's `Deposited` log is
+  in such a block or an ancestor, bound to the token's own mint hash. A store older than `maxStepGap` cannot resume.
+  **The two SP1 programs it verifies are written in round 15 by a separate task (agent 316, repository
+  bloch-sis-pow, branch `codex/mint-verifier-sp1-r15-20261110`) to the layouts of `docs/LC-MINT-VERIFIER.md`
+  sections 3 and 4; they are not in this repository and not in this scope list.** The contract is in scope.
 - `HeldStateSettlementVerifier` is installed through the vault's one-way switch after a forged mint has credited. It pays
   clean burns and displaced deposits in full and held burns pro rata, under budgets fixed at deployment. Installing it
   spends the switch.
 - `verifier_review.py scan` passes both artifacts (no DELEGATECALL, CALLCODE, SELFDESTRUCT, CREATE or CREATE2).
+- Operator tooling for both (round 15, read-only, optional scope): `tools/deploy-pontes/settlement_snapshot.py`
+  computes the settlement's constructor snapshot from both chains at finalized blocks and refuses a snapshot with
+  open slots or queued mints (review R310-3); `verifier_review.py settlement` is the 14-day review of a settlement
+  proposal (rules S1 to S6); `verifier_review.py mint-verifier` is the review before the token's switch (rules M1 to
+  M7, with the anchor checked against beacon nodes).
 
 The questions for the auditor on each are in its specification (sections 8 and 7).
 
@@ -169,7 +191,7 @@ The questions for the auditor on each are in its specification (sections 8 and 7
 | **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
 | **reservas** | `tools/reservas/reservas.py` (288, `7fd93ad` G3) | none | Backing monitor; reports `held` (exit 2) |
 | Deploy tools | `tools/deploy-pontes/deploy_pontes.py` (840), `vault_pontes.py` (360, fee), `key_inventory.py` (197, agent 174), `legacy_digests.py` (88, round 14), `gas_v3.py`, `creation_gas_v3.py`, `rehearse_anvil.py` | Deployer, run by the owner | Pairing checks, including the token genesis head against the vault's. `validate` refuses `tx.gasLimit` above 5,000,000. The 22 retired addresses are refused in every role by sha256 digest; the addresses are not in the tree |
-| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (264, round 14) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
+| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (312, rounds 14 and 15; run on a private net in round 15, runbook section 3) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
 
 **Common rule:** every daemon refuses a `provenance` flag that does not match the contracts.
 
@@ -197,6 +219,17 @@ This lives in the `bloch-sis-pow` light-client repo, and its own review is a pre
   - with 130's stored proofs, on the a97c3cb vault and token they bind: honest burn paid (400 USDC, `releaseWithProof` 379,914 gas), forged burn's valid proof refused with `ProvenanceMismatch`;
   - 130's proofs **cannot** be paid by the `9f91a56` vault: F1 (`9cbde58`) puts the nonce in the deposit id, so the vault's chain heads and every v2 release id change. A release proof must be made over a burn of the deployed pair; the guest is unchanged (same instruction counts);
   - with the `9f91a56` vault and token at T = 0 (`scripts/lc-exit/rehearse_v3.py`): new real proofs with 130's unchanged ELFs (step compressed 421 s, 45.7 GiB scope peak; honest release Groth16 281 s, forged 380 s, about 20 GiB each). Honest burn paid 400 USDC; `releaseWithProof` **381,517** gas through `RecoverableReleaseVerifier` (379,390 through `SP1ReleaseVerifier`); `verifyRelease` about 268,100. The forged burn's valid proof is accepted by both verifiers and refused by the vault with `ProvenanceMismatch`, also after the honest one was paid; a lie about the head, a swapped proof and a tampered proof give `InvalidProof`; the replay gives `InvalidRelease`. These proofs are vectors in `test-vectors/sp1-release-lc-guests/release-v3-9f91a56-groth16.json` (`RecoverableReleaseVerifierV3Groth16`).
+
+- **Round 15, the `getlcproof` wiring executed across the KES bind** (task 280; native branch
+  `codex/bridge-r15-20261110`, `3a035de1` + `1344b5a7` + `9fffc3a8`): a private L1 with rehearsal binaries of node
+  release A `4f34d87e` crossed HF1 and the KES enforcement epoch; saved `getlcproof` answers from before, at and after
+  the bind were fed to `lc step ... execute` on a rehearsal build armed with the same schedule (the pinned mainnet
+  ELF cannot verify a private net: gates and network domain are compiled in). Honest cases exit 0 with the library's
+  output (about 47M instructions; 26M trimmed to quorum); dropped votes, a wrong anchor and a build bound to another
+  network domain are refused in the guest with nothing committed. A pre-bind proof is not bound to the network
+  domain, which is why the mainnet anchor must be after the bind (`docs/LC-MAINNET-ANCHOR.md`). The run found a tool
+  defect (a guest panic reported as accepted), fixed in `1344b5a7`. **Not executed: the release program, any proof,
+  release A2.**
 
 **Assumptions in the LC runs:**
 - L1 settlement and finality were made up (agent 110's table);
@@ -296,7 +329,7 @@ It is in scope only for the correctness of what it tells users.
    - `release_hold` is off, being redundant with V3.
 6. **Retired committee (agent 101's F5).** After the vault switch, the old committee keys can still stop deposits, with no end date.
 7. **Dust starvation (agent 101's F6).** Dust releases can starve a window-sized burn.
-8. **The mint verifier has no program yet.** `EthereumMintVerifier` (section 2.3) is the contract `mintSwitch` would target; the SP1 program it verifies is specified but not written, so `mintSwitch` still has no usable target. A key-holding forger can therefore delay deposits (F2) until the switch. The light-client switch stays NO-GO until the program, a mainnet anchor, the node release that serves `getlcproof` and this audit exist.
+8. **The mint verifier's programs are new and unaudited.** `EthereumMintVerifier` (section 2.3) is the contract `mintSwitch` would target; its two SP1 programs are being written in round 15 outside this repository, with no pinned vkeys yet, so `mintSwitch` still has no usable target. After the switch somebody must advance the verifier's store at least once per `maxStepGap` (a proof, not a signature), or the proof path ends and only the handoff continues it. A key-holding forger can therefore delay deposits (F2) until the switch. The light-client switch stays NO-GO until the program, a mainnet anchor, the node release that serves `getlcproof` and this audit exist.
 9. **LC guest.**
    - The proof runs used made-up L1 settlement and finality.
    - The vkeys are not pinned. Agent 110's layout rotates the step vkey.
@@ -357,9 +390,16 @@ It is in scope only for the correctness of what it tells users.
 | R14 model | 306 | Info (test) | Since round 13 the guardian suite `test_mint_switch` failed: its relayer model, built without `__init__`, lacked the new `provenance` and version state | Round 14: class defaults in `Vigia` (`9e8d6cc`) | `test_mint_switch` 15 |
 | 235 lists | 235, 306 | Info (publication) | The refusal lists published the 22 retired addresses | Round 14: `legacy_digests.py` holds sha256 digests; refusals unchanged | `test_launch_config` (11; the private-list test runs where the list is present), `test_key_inventory` |
 | R306 review F1, F2 | 306 (independent review) | High (Phase 2B draft) | A deposit of the "unminted tail" was refunded in full and could then still be minted on the L2 and claimed again as a held burn (2,860 USDC for a 1,500 deposit) | Round 14: the refundable tail is removed; only deposits displaced by a forged credit are refunded | `R306HeldStateSettlement` `test_DISPLACED_theDisplacedDepositIsRefundedAndAQueuedOneIsNot`; demonstrations on `codex/bridge-r14-review-20261109` `f1c96e1` |
-| R306 review F3 | 306 (independent review) | Medium (design, open) | `EthereumMintVerifier` is stateless: every proof restarts from the deployment checkpoint, so soundness rests on every past sync committee | **Open**: to decide before the program is written (`docs/LC-MINT-VERIFIER.md` 4.1) | `R306VerifierReview` `test_F3_*` (passes while the behaviour exists) |
+| R306 review F3 | 306 (independent review) | Medium (design) | `EthereumMintVerifier` was stateless: every proof restarted from the deployment checkpoint, so soundness rested on every past sync committee and two histories for one slot could both mint | Round 15 (`69a3184`): on-chain store advanced only by proofs from the latest store; mints only under a stored finalized block | `R306VerifierReview` `test_F3_conflictingFinalizedHistoriesAreRefused` (the demonstration turned around), `A276MintVerifier` `test_STEP_*`, `test_CHECKPOINT_*`, `test_CLOCK_*` |
 | R306 review F4, F6 | 306 (independent review) | Low, Info | The settlement's burn-verifier pin did not cover a handed-off `RecoverableReleaseVerifier`; the mint verifier deployed with an unusable clock | Round 14: successor and token checks; constructor clock check | `test_EVIDENCE_aBurnVerifierWithAnActiveSuccessorIsRefused`, `test_CONFIG_refusesAnUnusableClock` |
 | R306 paid burn | 306 | Medium (Phase 2B draft) | In light-client evidence mode anyone could register every burn the vault had already paid and exhaust the settlement's full-payment budget | Round 14: `registerBurn` refuses a burn with `releasedNonce` or `releasedBurn` set | `R306HeldStateSettlement` `test_BUDGET_aBurnTheVaultAlreadyPaidCannotUseABudget` |
+| R310-1 | 310 (independent review, round 15) | Medium (liveness) | A release nonce reserved in the round 13 journal for a burn that another relayer then paid was never freed: every later release of that relayer was refused | Round 15 (`6eb0849`): a reservation is retired on finalized facts only (the vault's `releasedBurn` at the finalized level, or the account's finalized transaction count past the nonce) while the node knows neither the transaction nor a receipt; tombstone and `release-reservation-orphaned` alert | `test_r310_review` (signatario-stable) 7 journal tests; the reviewer's demonstration `78b7ac0` turned around |
+| R310-3 | 310 | Medium (procedure, Phase 2B) | A settlement snapshot taken while a real deposit was not yet credited on the L2 let the forger take that slot later; the depositor then had no exit | Round 15 (`7abd540`): no contract change; `settlement_snapshot.py` and `verifier_review.py settlement` refuse open slots and queued mints (one recorded override for the case where no honest quorum can credit them), specification sections 3, 5.1 and 6 | `test_settlement_snapshot` 16, `test_settlement_review` 30; `R310SettlementReview` stays as the demonstration of why the rule exists |
+| R310-2 | 310 | Low | The refusal list did not cover the vault's immutable fee recipient | Round 15 (`2caa598`) | `tools/deploy-pontes/test_r310_review` |
+| R310-4 | 310 | Low (liveness) | A reserved release the node keeps refusing stopped the key's releases with no alert | Round 15 (`2caa598`): critical alert `release-reservation-stuck` at the third refusal, runbook 2.3a. The repeat-before-anything-else rule itself is kept | `test_r310_review` `R310StuckReservation` |
+| R310-6 | 310 | Info | The mint verifier's handoff let the authority choose the successor's trust root | Round 15 (`55042b7`): while the light client is alive the successor must be anchored at a checkpoint the contract accepted; after `maxStepGap` the authority chooses (recovery) | `A276MintVerifier` `test_HANDOFF_alive*`, `test_HANDOFF_afterTheGap*` |
+| R310-7 | 310 | Info | The pre-go-live check did not apply the decided values to the relayer config or look at the release journal directory | Round 15 (`2caa598`, `7e136e6`) | `test_preflight_signer` 16 |
+| R310-5 | 310 | Info | Native `lc` tool nits in rehearsal-only paths (`drop_votes` ignored in a release job, a possible panic on a malformed certificate, a reply with leading whitespace) | **Not fixed** (known issue; bloch-sis-pow) | - |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
 
@@ -422,6 +462,25 @@ These suites run as unittest modules, from their own tool directory:
 - in `tools/reservas`: `python3 -m unittest test_reservas_alerts`;
 - in `tools/guardiao`: `python3 -m unittest test_review2`;
 - in `tools/signatario-stable`: `test_review2`, `test_status_v3` and `test_sigfeed`, then `python3 rehearse_feed.py <repo>`.
+
+### Expected results at the round 15 freeze (agent 314, Mac, forge 1.7.1, Python 3.9)
+
+Commands as for round 14 below, in a clean worktree with its own build directories, plus the new modules. The anvil
+suites and `scripts/tests` ran at `167ea1e`; the freeze differs from it in `preflight_signer.py`, its test, documents
+and manifests only, and forge and the offline Python modules were run again at the freeze commit.
+
+- forge: **580 passed, 0 failed, 1 skipped** (48 suites): the round 14 568, `A276MintVerifier` 28 -> 39,
+  + `R310SettlementReview` 1. `A239Metamorphic` with `--isolate` under shanghai and cancun: 2/2 each. The two fuzz tests
+  of `A276MintVerifier` pass at 20,000 runs; a mutation spot-check of 40 single-line mutants of the contract is
+  killed in full.
+- Offline Python: as round 14, except `test_preflight_signer` 16; new: deploy-pontes `test_r310_review` 1,
+  `test_settlement_snapshot` 16; signatario-stable `test_r310_review` 8; `test_settlement_review` 30 (19 offline, 11 on
+  a loopback anvil with stub beacon servers). `test_verifier_review` 15; `scripts/tests` 419.
+- Anvil and other suites: the same counts as at the round 14 freeze, every line. Under a loaded machine three of them
+  (`test_bridge_review`, `test_guardiao_hf1`, `a123_drop_daemon cancel`) failed once in fixture setup or timed out
+  and passed when run alone (21/21, 8/8, 4/4); the controls that fail by design are unchanged.
+- Hashes: no launch contract moved against rounds 11 and 14 (section 2); `HeldStateSettlementVerifier` did not move;
+  `EthereumMintVerifier` is new (section 2.3).
 
 ### Expected results at the round 14 freeze (agent 306, Mac, forge 1.7.1, Python 3.9)
 
