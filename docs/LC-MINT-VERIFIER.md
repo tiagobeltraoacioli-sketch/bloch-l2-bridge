@@ -215,7 +215,16 @@ With `handoffAuthority` set, the authority may propose a successor verifier for 
 hash. Anyone activates it after `handoffDelay` (at least 14 days) and within 30 days. Until then this contract keeps
 verifying. The successor's code hash is re-checked on every mint.
 
-A successor is arbitrary code. With the handoff on, the authority can, after the notice, install a verifier that
+While this light client is alive (`canAdvance()`: no successor, the store younger than `maxStepGap`) the authority
+chooses the successor's **rules, not its root** (review R310-6, the analogue of `RecoverableReleaseVerifier`'s
+endorsed handoff): `proposeSuccessor` requires the successor to answer `anchorSlot()`, `anchorHeaderRoot()`,
+`anchorSyncCommitteeRoot()` and `genesisValidatorsRoot()` with a checkpoint this contract accepted (`checkpointAt`:
+the deployment anchor or the head of any step) on the same beacon chain. A successor program for new Ethereum rules
+is therefore deployed on a checkpoint proven here, and anyone can advance it during the notice. Only when the store
+is older than `maxStepGap` (the proof path has already ended) may the authority propose a successor on a checkpoint
+of its own choosing: that is the recovery from a gap, with the same notice.
+
+A successor is arbitrary code (its answers are part of the code the 14-day review reads; the code hash is pinned). With the handoff on, the authority can, after the notice, install a verifier that
 accepts any mint. The trust is the authority's, with `handoffDelay` of notice in which holders can exit. This is the
 same trade as `RecoverableReleaseVerifier`'s handoff (agent 239, item 6). The authority should be the same cold
 multisig as `recoveryAuthority`, disjoint from every hot key.
@@ -262,14 +271,14 @@ A deposit whose committee mint was cancelled before the switch comes back by pro
 
 ## 9. Tests
 
-`forge test --match-contract A276MintVerifier`: 37 tests on the mainnet-shaped pair with mock SP1 (the test builds the
+`forge test --match-contract A276MintVerifier`: 39 tests on the mainnet-shaped pair with mock SP1 (the test builds the
 mint public values from the vault's real `Deposited` log and plays the step program on a synthetic chain): the anchor
 as first store, configuration refusals, steps (anyone, only from the latest store, no progress, zero words, committee
 rules across periods, several periods in one proof, wrong program / tag / chain / genesis root, fuzz over the start
 words), the clock (future head, `maxStepGap` at and past the boundary), honest mint, one step for many mints and old
 checkpoints staying valid, forged claim, tampered words (fuzz), unknown and conflicting checkpoints, no mint under
 the anchor, duplicate, wrong vault, wrong chain, wrong token, token-first order, queue drain, guardian pause, handoff
-(and no step after it), the token's code-hash pin, gas.
+(no step after it; alive: only a successor anchored here; after the gap: the authority's root), the token's code-hash pin, gas.
 
 `R306VerifierReview.test_F3_conflictingFinalizedHistoriesAreRefused`: the round-14 review's demonstration of F3 turned
 into the regression test.

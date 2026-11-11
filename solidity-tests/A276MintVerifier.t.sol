@@ -32,12 +32,23 @@ interface A276Vm {
     function revertToState(uint256 id) external returns (bool);
 }
 
-/// A successor that accepts every mint for the token it names (stands for a careless or hostile handoff).
+/// A successor that accepts every mint for the token it names (stands for a careless or hostile handoff). It names
+/// an anchor, as a successor must while the light client it replaces is alive (review R310-6).
 contract A276AcceptAllSuccessor is IMintVerifier {
     address public immutable l2Token;
+    uint64 public anchorSlot;
+    bytes32 public anchorHeaderRoot;
+    bytes32 public anchorSyncCommitteeRoot;
+    bytes32 public genesisValidatorsRoot;
 
     constructor(address t) {
         l2Token = t;
+    }
+
+    function anchorAt(uint64 slot, bytes32 headerRoot, bytes32 committeeRoot, bytes32 gvr) external returns (address) {
+        (anchorSlot, anchorHeaderRoot, anchorSyncCommitteeRoot, genesisValidatorsRoot) =
+            (slot, headerRoot, committeeRoot, gvr);
+        return address(this);
     }
 
     function verifyMint(address, bytes32, bytes calldata) external pure returns (bytes4) {
@@ -201,6 +212,12 @@ contract A276MintVerifierTest {
     function advanceTo(EMV mv, uint64 newSlot) private {
         bytes memory pv = stepPv(mv, newSlot);
         mv.advance(pv, sp1Proof(LC_STEP_VKEY, pv));
+    }
+
+    /// A successor for the token, anchored at the verifier's current head.
+    function successorAtHead(EMV mv) private returns (A276AcceptAllSuccessor s) {
+        s = new A276AcceptAllSuccessor(address(token));
+        s.anchorAt(mv.headSlot(), mv.headRoot(), mv.currentSyncCommitteeRoot(), GVR);
     }
 
     function tryAdvance(EMV mv, bytes memory pv, bytes32 vkey) private returns (bool ok, bytes4 err) {
@@ -1094,7 +1111,8 @@ contract A276MintVerifierTest {
         switchToken(address(mv));
         advanceTo(mv, freshSlot());
         A276AcceptAllSuccessor wrong = new A276AcceptAllSuccessor(address(0x1234));
-        A276AcceptAllSuccessor s = new A276AcceptAllSuccessor(address(token));
+        wrong.anchorAt(mv.headSlot(), mv.headRoot(), mv.currentSyncCommitteeRoot(), GVR);
+        A276AcceptAllSuccessor s = successorAtHead(mv);
         vm.expectRevert(EMV.NotAuthority.selector);
         mv.proposeSuccessor(address(s));
         vm.prank(AUTHORITY);
@@ -1132,9 +1150,72 @@ contract A276MintVerifierTest {
         mv.proposeSuccessor(address(second));
     }
 
-    function test_HANDOFF_cancelAndExpiry() public {
+    /// Review R310-6: while the light client is alive the authority chooses the successor's rules, not its root.
+    function test_HANDOFF_aliveTheSuccessorMustStartFromACheckpointOfThisContract() public {
+        EMV mv = new EMV(cfg(AUTHORITY, 14 days));
+        advanceTo(mv, anchorSlot + 64);
+        advanceTo(mv, anchorSlot + 128);
+        A276AcceptAllSuccessor s = new A276AcceptAllSuccessor(address(token));
+        // No anchor getters answer zero: slot 0 was never accepted.
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        // A slot this contract never accepted, with a root of the authority's choosing.
+        s.anchorAt(anchorSlot + 96, rootAt(anchorSlot + 96), committee((anchorSlot + 96) / 8192), GVR);
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        // An accepted slot with another header root, another committee, or another beacon chain.
+        s.anchorAt(anchorSlot + 64, keccak256("forged header"), committee((anchorSlot + 64) / 8192), GVR);
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        s.anchorAt(anchorSlot + 64, rootAt(anchorSlot + 64), keccak256("forged committee"), GVR);
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        s.anchorAt(anchorSlot + 64, rootAt(anchorSlot + 64), committee((anchorSlot + 64) / 8192), keccak256("other chain"));
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        // A contract with no anchor at all (not a light client).
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(sp1));
+        // Accepted: an earlier step, the head, or the deployment anchor.
+        uint256 snap = vm.snapshotState();
+        s.anchorAt(anchorSlot + 64, rootAt(anchorSlot + 64), committee((anchorSlot + 64) / 8192), GVR);
+        vm.prank(AUTHORITY);
+        mv.proposeSuccessor(address(s));
+        vm.revertToState(snap);
+        s.anchorAt(anchorSlot, rootAt(anchorSlot), committee(anchorSlot / 8192), GVR);
+        vm.prank(AUTHORITY);
+        mv.proposeSuccessor(address(s));
+        require(mv.checkpointAt(anchorSlot + 128) == mv.checkpointDigest(mv.headRoot(), mv.currentSyncCommitteeRoot()), "head");
+    }
+
+    /// Recovery from a gap: once the store is older than `maxStepGap` the proof path has ended, and only then may the
+    /// authority's successor start from a checkpoint of its choosing (still with the full notice).
+    function test_HANDOFF_afterTheGapTheAuthorityChoosesTheRoot() public {
         EMV mv = new EMV(cfg(AUTHORITY, 14 days));
         A276AcceptAllSuccessor s = new A276AcceptAllSuccessor(address(token));
+        s.anchorAt(slotAt(block.timestamp), keccak256("a fresh checkpoint"), keccak256("its committee"), GVR);
+        vm.warp(mv.slotTime(anchorSlot) + 30 days);
+        vm.prank(AUTHORITY);
+        vm.expectRevert(EMV.InvalidProposal.selector);
+        mv.proposeSuccessor(address(s));
+        vm.warp(block.timestamp + 1);
+        require(!mv.canAdvance(), "the store cannot resume");
+        vm.prank(AUTHORITY);
+        mv.proposeSuccessor(address(s));
+        vm.warp(block.timestamp + 14 days);
+        mv.activateSuccessor();
+        require(mv.successor() == address(s), "recovered");
+    }
+
+    function test_HANDOFF_cancelAndExpiry() public {
+        EMV mv = new EMV(cfg(AUTHORITY, 14 days));
+        A276AcceptAllSuccessor s = successorAtHead(mv);
         vm.prank(AUTHORITY);
         mv.proposeSuccessor(address(s));
         vm.prank(AUTHORITY);

@@ -82,7 +82,11 @@ interface IMintSwitchToken {
 ///         authority may then propose a successor verifier, pinned to its code hash; anyone activates it after
 ///         `handoffDelay` and within `ACTIVATION_WINDOW`; until then this contract keeps verifying. A successor is
 ///         arbitrary code: the trust is the authority's, with `handoffDelay` of notice (no proof of life can stop a
-///         handoff). With `handoffAuthority` == 0 the verifier is immutable and its mint path ends at such a fork.
+///         handoff). While this light client is alive (`canAdvance`), the authority chooses the successor's rules but
+///         not its root: the successor must name, as its anchor, a checkpoint this contract accepted (`checkpointAt`;
+///         review R310-6). Only once the store is older than `maxStepGap` (the proof path has ended) may a successor
+///         start from a checkpoint of the authority's choosing: that is the recovery from a gap.
+///         With `handoffAuthority` == 0 the verifier is immutable and its mint path ends at such a fork or gap.
 ///         Nothing else is mutable: no owner, no setter, no upgrade, no recurring signature.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
 contract EthereumMintVerifier is IMintVerifier {
@@ -129,6 +133,9 @@ contract EthereumMintVerifier is IMintVerifier {
     /// Execution block hash of the finalized header each accepted step reached, by beacon slot. Written once per
     /// slot (slots only grow), never overwritten. Zero for every other slot, the anchor included.
     mapping(uint64 => bytes32) public executionBlockHashAt;
+    /// `checkpointDigest(headerRoot, syncCommitteeRoot)` of the anchor and of the head each step reached, by slot.
+    /// What a successor may be anchored at while this light client is alive.
+    mapping(uint64 => bytes32) public checkpointAt;
     /// Number of steps accepted.
     uint64 public stepCount;
 
@@ -263,6 +270,12 @@ contract EthereumMintVerifier is IMintVerifier {
         headSlot = c.anchorSlot;
         headRoot = c.anchorHeaderRoot;
         currentSyncCommitteeRoot = c.anchorSyncCommitteeRoot;
+        checkpointAt[c.anchorSlot] = checkpointDigest(c.anchorHeaderRoot, c.anchorSyncCommitteeRoot);
+    }
+
+    /// @notice What `checkpointAt` stores for a finalized header and the sync committee of its period.
+    function checkpointDigest(bytes32 headerRoot, bytes32 syncCommitteeRoot) public pure returns (bytes32) {
+        return keccak256(abi.encode(headerRoot, syncCommitteeRoot));
     }
 
     /// @notice The token's EIP-712 Mint struct hash for a claim, as BridgedStablecoinV2._structHash builds it.
@@ -373,6 +386,7 @@ contract EthereumMintVerifier is IMintVerifier {
         currentSyncCommitteeRoot = s.newSyncCommitteeRoot;
         nextSyncCommitteeRoot = s.newNextSyncCommitteeRoot;
         executionBlockHashAt[s.newSlot] = s.newExecutionBlockHash;
+        checkpointAt[s.newSlot] = checkpointDigest(s.newHeaderRoot, s.newSyncCommitteeRoot);
         ++stepCount;
         emit Advanced(
             s.prevSlot,
@@ -460,7 +474,10 @@ contract EthereumMintVerifier is IMintVerifier {
         return proposedSuccessor != address(0) && block.timestamp <= uint256(activatesAt) + ACTIVATION_WINDOW;
     }
 
-    /// @notice The authority proposes a successor verifier for the same token, pinned to its code hash.
+    /// @notice The authority proposes a successor verifier for the same token, pinned to its code hash. While this
+    ///         light client is alive the successor must be anchored at a checkpoint this contract accepted, on the
+    ///         same beacon chain (it must answer `anchorSlot()`, `anchorHeaderRoot()`, `anchorSyncCommitteeRoot()`
+    ///         and `genesisValidatorsRoot()`); after `maxStepGap` without a step the authority chooses the root.
     function proposeSuccessor(address successor_) external {
         if (handoffAuthority == address(0) || msg.sender != handoffAuthority) revert NotAuthority();
         if (
@@ -472,10 +489,27 @@ contract EthereumMintVerifier is IMintVerifier {
         } catch {
             revert InvalidProposal();
         }
+        if (canAdvance() && !_anchoredHere(EthereumMintVerifier(successor_))) revert InvalidProposal();
         proposedSuccessor = successor_;
         proposedCodehash = successor_.codehash;
         activatesAt = uint64(block.timestamp) + handoffDelay;
         emit SuccessorProposed(successor_, proposedCodehash, activatesAt);
+    }
+
+    /// @dev True when `s` names an anchor this contract accepted (the deployment anchor or the head of a step).
+    function _anchoredHere(EthereumMintVerifier s) private view returns (bool) {
+        try s.anchorSlot() returns (uint64 slot) {
+            bytes32 stored = checkpointAt[slot];
+            if (stored == 0) return false;
+            try s.anchorHeaderRoot() returns (bytes32 headerRoot) {
+                try s.anchorSyncCommitteeRoot() returns (bytes32 committeeRoot) {
+                    try s.genesisValidatorsRoot() returns (bytes32 gvr) {
+                        return stored == checkpointDigest(headerRoot, committeeRoot) && gvr == genesisValidatorsRoot;
+                    } catch {}
+                } catch {}
+            } catch {}
+        } catch {}
+        return false;
     }
 
     function cancelSuccessor() external {
