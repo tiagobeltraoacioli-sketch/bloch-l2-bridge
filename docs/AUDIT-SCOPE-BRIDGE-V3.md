@@ -32,7 +32,10 @@ final L2 launch build (agent 230) stays the one allowed post-freeze delta (const
 contract moved (hashes of section 2 rebuilt and equal). Changes:
 - `EthereumMintVerifier` is now **stateful** (review F3 closed): an on-chain light-client store advanced only by
   verified proofs, two statements (STEP, MINT) agreed with the author of the SP1 programs, and a successor that must
-  start from a checkpoint the contract accepted while the light client is alive (section 2.3);
+  start from a checkpoint the contract accepted while the light client is alive (section 2.3). After the reviewer's
+  second pass (R310-2P rows of section 7) a step must reach a fresh head and may start from any recorded store, and
+  a handoff authority is mandatory. **The round 15 freeze was made twice; the commit named in
+  `PHASE2-BRIDGE-FREEZE-R15.md` is the second and replaces `13d79cc`;**
 - the independent round 15 review (agent 310: 0 Critical, 0 High, 2 Medium, 2 Low, 3 Info) and its fixes (R310 rows
   of section 7): release journal retirement and stuck alert, fee recipient in the refusal list, the settlement
   snapshot rule, relayer preflight checks;
@@ -154,14 +157,16 @@ of the light-client switch named by agents 172 and 239 are audited before they a
 
 | Contract | File (lines) | Chain | Creation keccak (bytes) | Runtime keccak (bytes, immutables zeroed) | Specification | Tests |
 |---|---|---|---|---|---|---|
-| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (543) | L2 700770 | `0x773d6dc489d58164b4ce6c63708b378bfb836a33dff31f00016de7963e9c5e09` (13,218) | `0x859ba661652879980d760f18127486aca49d4889025f021a599745eea5c7ea86` (10,757) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (39) |
+| **EthereumMintVerifier** | `contracts/stable/EthereumMintVerifier.sol` (595) | L2 700770 | `0x6372928fd0a38bd89baf7e23ae3006ddd03f4d8475ddbf83c3d39490f479b2a0` (13,886) | `0xdf906591dda212f3bb08571eb1c3dc52759bfe3747d31113a456a0e0e8690649` (11,186) | `docs/LC-MINT-VERIFIER.md` | `A276MintVerifier` (41), `R310SecondPass` (6) |
 | **HeldStateSettlementVerifier** | `contracts/usdt/HeldStateSettlementVerifier.sol` (356) | Ethereum 1 | `0x9c0e4cc7d7641393dd5b98ba2d9fcf2024dfd29300d53e80fd0b78234cf2fa66` (12,749) | `0xf9d72d599313970c30a0cb0f2623fba97ca8953d9c2c7320aab61594708a0592` (9,043) | `docs/HELD-STATE-SETTLEMENT.md` | `R306HeldStateSettlement` (21), `R310SettlementReview` (1) |
 
 - `EthereumMintVerifier` is the `IMintVerifier` the token switches to, once, in place of its mint committee. Since
   round 15 it holds a light-client store (latest finalized beacon header, current and next sync-committee roots) set
-  once at deployment and advanced by anyone with a STEP proof that starts from the latest store; it keeps the execution
-  block hash of each finalized header reached, and accepts a mint with a MINT proof that the vault's `Deposited` log is
-  in such a block or an ancestor, bound to the token's own mint hash. A store older than `maxStepGap` cannot resume.
+  once at deployment and advanced by anyone with a STEP proof that starts from any store the contract recorded within
+  `maxStepGap` and reaches a finalized header at most `maxHeadLag` old; it keeps the execution block hash of each
+  finalized header reached, and accepts a mint with a MINT proof that the vault's `Deposited` log is in such a block
+  or an ancestor, bound to the token's own mint hash. If nobody lands a step for `maxStepGap` the proof path closes
+  and continues only through the mandatory handoff authority.
   **The two SP1 programs it verifies are written in round 15 by a separate task (agent 316, repository
   bloch-sis-pow, branch `codex/mint-verifier-sp1-r15-20261110`) to the layouts of `docs/LC-MINT-VERIFIER.md`
   sections 3 and 4; they are not in this repository and not in this scope list.** The contract is in scope.
@@ -191,7 +196,7 @@ The questions for the auditor on each are in its specification (sections 8 and 7
 | **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
 | **reservas** | `tools/reservas/reservas.py` (288, `7fd93ad` G3) | none | Backing monitor; reports `held` (exit 2) |
 | Deploy tools | `tools/deploy-pontes/deploy_pontes.py` (840), `vault_pontes.py` (360, fee), `key_inventory.py` (197, agent 174), `legacy_digests.py` (88, round 14), `gas_v3.py`, `creation_gas_v3.py`, `rehearse_anvil.py` | Deployer, run by the owner | Pairing checks, including the token genesis head against the vault's. `validate` refuses `tx.gasLimit` above 5,000,000. The 22 retired addresses are refused in every role by sha256 digest; the addresses are not in the tree |
-| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (333, rounds 14 and 15; run on a private net in round 15, runbook section 3) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
+| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (344, rounds 14 and 15; run on a private net in round 15, runbook section 3) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
 
 **Common rule:** every daemon refuses a `provenance` flag that does not match the contracts.
 
@@ -400,6 +405,11 @@ It is in scope only for the correctness of what it tells users.
 | R310-6 | 310 | Info | The mint verifier's handoff let the authority choose the successor's trust root | Round 15 (`55042b7`): while the light client is alive the successor must be anchored at a checkpoint the contract accepted; after `maxStepGap` the authority chooses (recovery) | `A276MintVerifier` `test_HANDOFF_alive*`, `test_HANDOFF_afterTheGap*` |
 | R310-7 | 310 | Info | The pre-go-live check did not apply the decided values to the relayer config or look at the release journal directory | Round 15 (`2caa598`, `7e136e6`) | `test_preflight_signer` 16 |
 | R310-5 | 310 | Info | Native `lc` tool nits in rehearsal-only paths (`drop_votes` ignored in a release job, a possible panic on a malformed certificate, a reply with leading whitespace) | **Not fixed** (known issue; bloch-sis-pow) | - |
+| R310-2P-1 | 310 (second pass, at `13d79cc`) | Medium (High with no handoff authority) | `advance` took a step to a head of any age and only from the latest store: one-epoch steps landed in every L2 block made every honest proof revert and aged the head past `maxStepGap`, ending the proof path for good | Refreeze (`27b76e4`): a step must reach a head at most `maxHeadLag` old; a proof may start from any recorded store within `maxStepGap`; one record per slot; a zero `handoffAuthority` is refused, so a lapse (now only a real outage of every prover for the whole gap) continues through the handoff | `R310SecondPass` `test_R310_2P_1_*` (the demonstrations `41d451e` turned around), `A276MintVerifier` `test_STEP_fromAnyRecordedStoreARaceIsHarmless`, `test_CLOCK_*` |
+| R310-2P-2 | 310 (second pass) | Low | The successor's anchor was read only at proposal | Refreeze (`27b76e4`): read again at activation while the light client is alive; stated as a guarantee only for a reviewed `EthereumMintVerifier` build | `R310SecondPass` `test_R310_2P_2_theSuccessorsAnchorIsReadAgainAtActivation` |
+| R310-2P-3 | 310 (second pass) | Low | `preflight_signer.py --rehearsal-pins` ended `OK`, exit 0, on chain 700770 | Refreeze (`83a1dc1`): a rehearsal run ends `REHEARSAL`, exit 3 | `test_preflight_signer` `test_a_rehearsal_run_never_ends_ok` |
+| R310-2P-4 | 310 (second pass) | Info | A retirement tombstone waived the high-water-mark protection of its nonce for good | Refreeze (`83a1dc1`): it frees the nonce once, until the nonce is reserved again | `test_r310_review` `test_R310_2P_4_*` |
+| R310-2P-5 | 310 (second pass) | Info | The deployment anchor (header root, committee root) is trusted as a pair | Stated; `verifier_review.py mint-verifier` now refuses a single beacon endpoint unless recorded (`83a1dc1`) | `test_settlement_review` test 07 |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
 
@@ -465,20 +475,19 @@ These suites run as unittest modules, from their own tool directory:
 
 ### Expected results at the round 15 freeze (agent 314, Mac, forge 1.7.1, Python 3.9)
 
-Commands as for round 14 below, in a clean worktree with its own build directories, plus the new modules. The anvil
-suites and `scripts/tests` ran at `167ea1e`; the freeze differs from it in `preflight_signer.py`, its test, documents
-and manifests only, and forge and the offline Python modules were run again at the freeze commit.
+Commands as for round 14 below, in a clean worktree with its own build directories, plus the new modules. Every
+suite ran at `4606e66`, the last commit that changes code; the freeze differs from it in documents, lists and
+manifests only, and forge and the offline Python modules were run again at the freeze commit.
 
-- forge: **580 passed, 0 failed, 1 skipped** (48 suites): the round 14 568, `A276MintVerifier` 28 -> 39,
-  + `R310SettlementReview` 1. `A239Metamorphic` with `--isolate` under shanghai and cancun: 2/2 each. The two fuzz tests
-  of `A276MintVerifier` pass at 20,000 runs; a mutation spot-check of 40 single-line mutants of the contract is
-  killed in full.
-- Offline Python: as round 14, except `test_preflight_signer` 16; new: deploy-pontes `test_r310_review` 1,
-  `test_settlement_snapshot` 16; signatario-stable `test_r310_review` 8; `test_settlement_review` 30 (19 offline, 11 on
+- forge: **588 passed, 0 failed, 1 skipped** (49 suites): the round 14 568, `A276MintVerifier` 28 -> 41,
+  + `R310SettlementReview` 1, + `R310SecondPass` 6. `A239Metamorphic` with `--isolate` under shanghai and cancun: 2/2
+  each. The two fuzz tests of `A276MintVerifier` pass at 20,000 runs; a mutation spot-check of 55 single-line mutants
+  of the contract is killed except one equivalent mutant (a redundant zero check).
+- Offline Python: as round 14, except `test_preflight_signer` 17; new: deploy-pontes `test_r310_review` 1,
+  `test_settlement_snapshot` 16; signatario-stable `test_r310_review` 9; `test_settlement_review` 30 (19 offline, 11 on
   a loopback anvil with stub beacon servers). `test_verifier_review` 15; `scripts/tests` 419.
-- Anvil and other suites: the same counts as at the round 14 freeze, every line. Under a loaded machine three of them
-  (`test_bridge_review`, `test_guardiao_hf1`, `a123_drop_daemon cancel`) failed once in fixture setup or timed out
-  and passed when run alone (21/21, 8/8, 4/4); the controls that fail by design are unchanged.
+- Anvil and other suites: the same counts as at the round 14 freeze, every line (no failure in this run; the first freeze run had three load-related failures that passed alone); the controls that fail
+  by design are unchanged.
 - Hashes: no launch contract moved against rounds 11 and 14 (section 2); `HeldStateSettlementVerifier` did not move;
   `EthereumMintVerifier` is new (section 2.3).
 

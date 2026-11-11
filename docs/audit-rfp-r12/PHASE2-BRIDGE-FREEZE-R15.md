@@ -1,4 +1,8 @@
-# Phase 2 and 2B: bridge V3 audit freeze, round 15 (2026-11-11)
+# Phase 2 and 2B: bridge V3 audit freeze, round 15 (2026-11-11, second freeze of the round)
+
+**This is the second round 15 freeze.** The first, `13d79cc`, was reviewed by the independent reviewer (second pass:
+0 Critical, 0 High, 1 Medium that is High without a handoff authority, 2 Low, 2 Info). This freeze fixes those
+findings and replaces `13d79cc`; nobody was sent the first one.
 
 This file replaces `PHASE2-BRIDGE-FREEZE-R14.md` and, for the bridge only, the Phase 2 commit, sizes and hashes of
 `AUDIT-RFP-COMBINED.md` (sections 2, 4.2, 6.2 item 14 and 11.2), which still name `eb5c981`. Phases 1 and 3 are not
@@ -20,7 +24,7 @@ python3 -I scripts/audit-rfp/manifest.py . HEAD docs/audit-rfp-r12/phase2b-bridg
 ```
 
   The outputs must equal `phase2-bridge.manifest.tsv` and `phase2b-bridge.manifest.tsv`.
-- It replaces `1aef47c` (round 14), `8e5ce91` (round 11) and `eb5c981` (round 10). After it, only owner inputs
+- It replaces `13d79cc` (first round 15 freeze), `1aef47c` (round 14), `8e5ce91` (round 11) and `eb5c981` (round 10). After it, only owner inputs
   change (section 6).
 - The scope document is `docs/AUDIT-SCOPE-BRIDGE-V3.md` at the same commit.
 
@@ -29,13 +33,13 @@ python3 -I scripts/audit-rfp/manifest.py . HEAD docs/audit-rfp-r12/phase2b-bridg
 | Track | Files | Lines | SLOC | nSLOC | At `1aef47c` (nSLOC) |
 |---|---:|---:|---:|---:|---:|
 | A1 Solidity (required) | 6 | 2,289 | 1,715 | **1,500** | 1,500 |
-| A2 Python daemons and deploy tools (required) | 13 | 8,120 | 6,441 | **5,830** | 5,754 |
-| A2 optional (`key_inventory.py`, `verifier_review.py`, `preflight_signer.py`) | 3 | 1,533 | 1,178 | 983 | 645 |
+| A2 Python daemons and deploy tools (required) | 13 | 8,133 | 6,450 | **5,839** | 5,754 |
+| A2 optional (`key_inventory.py`, `verifier_review.py`, `preflight_signer.py`) | 3 | 1,554 | 1,191 | 989 | 645 |
 | Configs and templates (pinned by hash) | 10 | 808 | - | - | 808 lines |
 
-A1 did not move: **no launch contract changed in round 15.** A2 grew by 76 nSLOC, the fixes of the round 15 review:
-`release_submission.py` 284 to 357 (reservation retirement and the stuck alert, R310-1 and R310-4), `vigia.py` +2,
-`vault_pontes.py` +1 (R310-2). A2 optional grew by 338: the `settlement` and `mint-verifier` review modes, the
+A1 did not move: **no launch contract changed in round 15.** A2 grew by 85 nSLOC, the fixes of the round 15 review:
+`release_submission.py` 284 to 366 (reservation retirement, the stuck alert, the one-time tombstone: R310-1, R310-4,
+R310-2P-4), `vigia.py` +2, `vault_pontes.py` +1 (R310-2). A2 optional grew by 344: the `settlement` and `mint-verifier` review modes, the
 relayer checks of the preflight and its rehearsal mode.
 
 Code hashes of the launch contracts (fresh forced build at the freeze in a clean worktree, forge 1.7.1, Solidity
@@ -56,15 +60,18 @@ code hash: it does not move.
 
 | File | Chain | Lines | SLOC | nSLOC | Creation keccak (bytes) | Runtime keccak (bytes) |
 |---|---|---:|---:|---:|---|---|
-| `contracts/stable/EthereumMintVerifier.sol` | L2 | 543 | 372 | **282** | `0x773d6dc489d58164b4ce6c63708b378bfb836a33dff31f00016de7963e9c5e09` (13,218) | `0x859ba661652879980d760f18127486aca49d4889025f021a599745eea5c7ea86` (10,757) |
+| `contracts/stable/EthereumMintVerifier.sol` | L2 | 595 | 395 | **304** | `0x6372928fd0a38bd89baf7e23ae3006ddd03f4d8475ddbf83c3d39490f479b2a0` (13,886) | `0xdf906591dda212f3bb08571eb1c3dc52759bfe3747d31113a456a0e0e8690649` (11,186) |
 | `contracts/usdt/HeldStateSettlementVerifier.sol` | Ethereum | 356 | 240 | **209** | `0x9c0e4cc7d7641393dd5b98ba2d9fcf2024dfd29300d53e80fd0b78234cf2fa66` (12,749) | `0xf9d72d599313970c30a0cb0f2623fba97ca8953d9c2c7320aab61594708a0592` (9,043) |
-| **Total contracts** | | 899 | 612 | **491** | | |
+| **Total contracts** | | 951 | 635 | **513** | | |
 | `tools/deploy-pontes/settlement_snapshot.py` (read-only tool, optional) | - | 304 | 218 | 160 | | |
 
-`HeldStateSettlementVerifier` is byte-identical to round 14. `EthereumMintVerifier` was rewritten in round 15 (198 to
-282 nSLOC): it is stateful (round 14 review F3).
+`HeldStateSettlementVerifier` is byte-identical to round 14. `EthereumMintVerifier` was rewritten in round 15 (198
+nSLOC at round 14): it is stateful (round 14 review F3), and since the second freeze a step must reach a fresh head,
+may start from any recorded store, and a handoff authority is mandatory (second-pass review R310-2P-1).
 
-Specifications: `docs/LC-MINT-VERIFIER.md`, `docs/HELD-STATE-SETTLEMENT.md`. Tests: `A276MintVerifier` (39),
+Specifications: `docs/LC-MINT-VERIFIER.md`, `docs/HELD-STATE-SETTLEMENT.md`. Tests: `A276MintVerifier` (41),
+`R310SecondPass` (6: the second-pass demonstrations turned around, and the reviewer's cross-check of the real
+guests' committed bytes against the contract),
 `R306HeldStateSettlement` (21), `R306VerifierReview` (2: the F3 regression, and the demonstration of F5, the vault's
 known window limit), `R310SettlementReview` (1: the demonstration of why the snapshot rule exists),
 `test_settlement_snapshot` (16), `test_settlement_review` (30).
@@ -77,10 +84,12 @@ What a bidder must know about Phase 2B:
   `docs/LC-MINT-VERIFIER.md` section 3 (pin candidate v2, agreed between the two authors). They are **not** in these
   lists; their size and state are in that task's report. The contract's layout is fixed to them; a change there
   moves the contract.
-- Internal reviews: round 14 (2 High in the settlement draft, fixed; F3 Medium, fixed in round 15) and the
-  independent round 15 review of the round 14 freeze (0 Critical, 0 High, 2 Medium, 2 Low, 3 Info; all but one Info
-  fixed, section 4). **The stateful `EthereumMintVerifier` itself has had no independent review yet** at the time of
-  this freeze: the reviewer's second pass is pending.
+- Internal reviews: round 14 (2 High in the settlement draft, fixed; F3 Medium, fixed in round 15); the independent
+  round 15 review of the round 14 freeze (0 Critical, 0 High, 2 Medium, 2 Low, 3 Info; all but one Info fixed); and
+  its second pass on the first round 15 freeze, which covered the stateful `EthereumMintVerifier` and the SP1
+  programs' source (1 Medium, 2 Low, 2 Info; all fixed or stated here, section 4). **The changes of this second
+  freeze (the accepted-step rules, the mandatory authority, the activation re-read) have not been reviewed
+  independently.** The public-values layouts did not change, so the programs at `0ad48723` still fit.
 
 ## 4. Known issues added since `AUDIT-RFP-COMBINED.md` section 6.2
 
@@ -94,13 +103,23 @@ Changed or new in round 15:
   Groth16 proof of either statement has been verified through the contract. The light-client
   switch stays NO-GO until the programs are reproduced and audited, a mainnet anchor after the L1 KES bind (e8620)
   exists, the node release that serves `getlcproof` is rolled out, and this audit exists.
-- **A new liveness duty after the token's switch:** somebody must advance the mint verifier's store at least once
-  per `maxStepGap` (proposed 14 days). It is a permissionless proof, never a signature. Past the gap the proof path
-  ends and continues only through the handoff (never, with `handoffAuthority` zero).
+- **A new liveness duty after the token's switch:** somebody must land a step on the mint verifier at least once
+  per `maxStepGap` (proposed 14 days), to a finalized header at most `maxHeadLag` old (proposed 1 day). It is a
+  permissionless proof, never a signature, and a proof may start from any store recorded within the gap, so provers
+  do not invalidate each other and a flood of minimal steps cannot hold the head back (R310-2P-1). A lapse now takes
+  the absence of every prover for the whole gap; then the proof path closes, stored blocks keep minting, later
+  deposits wait, and the path continues only through the handoff: `handoffDelay` of notice and a root the authority
+  names. A `handoffAuthority` is therefore mandatory (a deployment without one is refused): the fully immutable
+  variant no longer exists, and the authority's power over mints (item below) is part of every deployment.
 - No mint can name the anchor slot; the first step enables mints. A mint proof costs one hash per Ethereum block
   between the deposit and the stored finalized block.
-- While the light client is alive a handoff successor must start from a checkpoint the contract accepted; after
-  `maxStepGap` the authority chooses the root (the recovery from a gap), with the same notice.
+- While the light client is alive a handoff successor must start from a checkpoint the contract accepted (read at
+  proposal and at activation, R310-2P-2); after `maxStepGap` the authority chooses the root (the recovery from a
+  lapse), with the same notice. The rule binds what the successor answers: a guarantee for a reviewed build of the
+  same contract, a declaration for other code.
+- The deployment anchor (header root and committee root) is trusted as a pair; nothing on-chain can tie them
+  (R310-2P-5). `verifier_review.py mint-verifier` against two independent beacon endpoints is the protection.
+- A rehearsal run of the signer preflight (`--rehearsal-pins`) never ends `OK` (R310-2P-3).
 - Settlement snapshot rule (R310-3): the snapshot is taken only when every vault deposit's slot is credited on the L2
   and nothing is queued, with deposits closed. If no honest quorum can credit the remaining real deposits, the one
   recorded override leaves those depositors exposed to a later displacement with no exit; the tool lists them.
@@ -123,7 +142,7 @@ From the repository root at the freeze commit. Every net is a loopback anvil wit
 forge test --offline
 ```
 
-Expected: **580 passed, 0 failed, 1 skipped (48 suites)**. Then the Python and anvil suites of
+Expected: **588 passed, 0 failed, 1 skipped (49 suites)**. Then the Python and anvil suites of
 `docs/AUDIT-SCOPE-BRIDGE-V3.md` section 8, with the results listed there under "Expected results at the round 15
 freeze".
 
@@ -131,8 +150,8 @@ freeze".
 
 Addresses and choices, none of which changes code in scope: the fee treasury; signer, guardian and deployer addresses;
 the Bloch Inc Safe; `recoveryAuthority` and `handoffAuthority` members; `handoffDelay`; the SP1 verifier deployment;
-the mint verifier's anchor, `maxStepGap` and the two vkeys (from the audited programs); the primary relayer; the pager
-command.
+the mint verifier's anchor, `maxStepGap`, `maxHeadLag` and the two vkeys (from the audited programs); the primary
+relayer; the pager command.
 
-Not owner inputs, and they would move Phase 2B: findings of the reviewer's second pass on the stateful mint
-verifier, and any layout change forced by the SP1 programs.
+Not owner inputs, and they would move Phase 2B: findings of a review of this second freeze, and any layout change
+forced by the SP1 programs.

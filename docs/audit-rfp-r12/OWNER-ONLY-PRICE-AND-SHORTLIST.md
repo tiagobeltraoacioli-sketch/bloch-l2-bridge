@@ -100,8 +100,8 @@ Recommendation (owner's choice):
 ## Round 15 note (2026-11-11, bridge sizes only; estimates not recomputed)
 
 Sizes at the round 15 bridge freeze (`PHASE2-BRIDGE-FREEZE-R15.md`): Bridge A1 Solidity 1,500 nSLOC (unchanged); A2
-Python 5,830 nSLOC in 13 files (was 5,754); Phase 2B Solidity 491 nSLOC in two contracts (the mint verifier, now
-stateful, 282; the settlement verifier 209), plus the mint verifier's two SP1 programs, written in round 15 in
+Python 5,839 nSLOC in 13 files (was 5,754); Phase 2B Solidity 513 nSLOC in two contracts (the mint verifier, now
+stateful, 304; the settlement verifier 209), plus the mint verifier's two SP1 programs, written in round 15 in
 `bloch-sis-pow` and sized in that task's report. The estimates below are not recomputed.
 
 ## Round 14 note (2026-11-09, bridge sizes only; estimates not recomputed)
