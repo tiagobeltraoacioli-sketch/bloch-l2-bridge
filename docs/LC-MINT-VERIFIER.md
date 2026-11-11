@@ -141,6 +141,21 @@ Agent 316 builds two ELFs (the mint program links no BLS code); `stepVKey` and `
 Network configuration (fork versions and epochs, SSZ generalized indices per fork, the receipt encoding) is compiled
 in for the chain of word 1. Nothing about the network is a free input.
 
+The programs exist since 2026-11-11 (agent 316): repository `bloch-sis-pow`, branch
+`codex/mint-verifier-sp1-r15-20261110`, tip `0ad48723`, crate `crates/bloch-eth-mint-lc` (`sp1/step-program`,
+`sp1/mint-program`), program-side statement in its `docs/ETH-MINT-LC-PROGRAMS.md`. Prototype identities, **unaudited,
+not deployment pins** (SP1 6.8.0, ELFs equal on two hosts): step ELF sha256 `b89200b9…e4e5`, `stepVKey`
+`0x004c5259bf643a0f7faa92d060bfd623ded3d65e2faca6e082692ec816890764`; mint ELF sha256 `7e009c7e…2a3f`, `mintVKey`
+`0x00f44c0f66dc5f5c64ae3dc7eb8e78e3eed2a61ca8e6de1fbd6128f001b176cf`. Their public values equal this contract's
+`expectedStepValues` / `expectedMintValues` on the synthetic honest case (checked by their author with `cast`). One
+real compressed STEP proof of a recorded mainnet finality update was verified off-chain. **No Groth16 proof of either
+statement exists yet, so no real proof has been verified through this contract.**
+
+Three things the programs leave to this contract, and where it does them: MINT word 2 is only a lookup key (the
+contract compares word 3 with `executionBlockHashAt[word 2]` and uses word 2 for nothing else); MINT word 4 is
+whatever contract emitted the log (compared with the vault); STEP has no clock and no rule on the slot's position
+in its epoch (`advance` applies the clock; a finalized header is whatever the committee finalized).
+
 ### 4.1 STEP
 
 Private inputs: the start store (the finalized `BeaconBlockHeader` at `prevSlot`, the current `SyncCommittee`, the
@@ -295,4 +310,5 @@ the anchor, duplicate, wrong vault, wrong chain, wrong token, token-first order,
 `R306VerifierReview.test_F3_conflictingFinalizedHistoriesAreRefused`: the round-14 review's demonstration of F3 turned
 into the regression test.
 
-Not done here: the SP1 programs and a real proof (agent 316).
+Not done here: a real Groth16 proof of each statement verified on anvil through this contract (needs a proving host;
+the programs are agent 316's, section 4).

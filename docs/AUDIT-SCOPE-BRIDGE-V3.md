@@ -191,7 +191,7 @@ The questions for the auditor on each are in its specification (sections 8 and 7
 | **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
 | **reservas** | `tools/reservas/reservas.py` (288, `7fd93ad` G3) | none | Backing monitor; reports `held` (exit 2) |
 | Deploy tools | `tools/deploy-pontes/deploy_pontes.py` (840), `vault_pontes.py` (360, fee), `key_inventory.py` (197, agent 174), `legacy_digests.py` (88, round 14), `gas_v3.py`, `creation_gas_v3.py`, `rehearse_anvil.py` | Deployer, run by the owner | Pairing checks, including the token genesis head against the vault's. `validate` refuses `tx.gasLimit` above 5,000,000. The 22 retired addresses are refused in every role by sha256 digest; the addresses are not in the tree |
-| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (312, rounds 14 and 15; run on a private net in round 15, runbook section 3) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
+| Signer pre-go-live check (optional scope) | `tools/signatario-stable/preflight_signer.py` (333, rounds 14 and 15; run on a private net in round 15, runbook section 3) | none (read-only) | Checks a filled signer host and runs the dry release (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) |
 
 **Common rule:** every daemon refuses a `provenance` flag that does not match the contracts.
 
