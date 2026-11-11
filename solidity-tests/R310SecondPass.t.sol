@@ -23,6 +23,7 @@ interface R310bVm {
     function addr(uint256 privateKey) external pure returns (address);
     function sign(uint256 privateKey, bytes32 digest) external pure returns (uint8 v, bytes32 r, bytes32 s);
     function warp(uint256 timestamp) external;
+    function chainId(uint256 id) external;
     function roll(uint256 blockNumber) external;
     function prank(address sender) external;
     function etch(address target, bytes calldata code) external;
@@ -428,5 +429,64 @@ contract R310SecondPassTest {
             mv.checkpointAt(s.anchorSlot()) != mv.checkpointDigest(s.anchorHeaderRoot(), s.anchorSyncCommitteeRoot()),
             "the active successor is not anchored at an accepted checkpoint"
         );
+    }
+
+    // ---------------------------------------------------------------- cross-check with agent 316's guests
+
+    /// Public values committed by the real guests (execute-only runs of agent 316, `agents/316-evidence/`:
+    /// `step-honest.execute.json`, `mint-honest.execute.json`, `step-mainnet-same-period.execute.json`), fed to the
+    /// contract's own decoders. Agent 316 did not run the contract; this is the missing half. (SP1 itself is mocked.)
+    bytes constant GUEST_STEP = hex"424c4f43482d4554482d4c432d535445502d763200000000000000000000000000000000000000000000000000000000000000000000000000000000000000014b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe950000000000000000000000000000000000000000000000000000000000d48140cec888d862f8b733f9da50eae7ab69258882bbacd1212cf1061d4b3ee41bc926a0db6fa6e15f4f073349f69d984525499b8e6fe1b4da23d5689095a3b406c43600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d48280f2f99e5805358ab3fa93735a9ac5ac4f8888f7f41bde6221f4b4b321328cd2f6a0db6fa6e15f4f073349f69d984525499b8e6fe1b4da23d5689095a3b406c436000000000000000000000000000000000000000000000000000000000000000019d78cc2a5d8c3e6f4a7780c4e92b3a8a04bc2c1ef551ed871d0b60778f9536f";
+    bytes constant GUEST_MINT = hex"424c4f43482d4554482d4d494e542d763200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000d4828019d78cc2a5d8c3e6f4a7780c4e92b3a8a04bc2c1ef551ed871d0b60778f9536f0000000000000000000000007a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a5185cd51674619636f793135ca3794f284e39786105f7547cc92a4cb049fa719000000000000002acc3d3badb76cf6fb233dd79f1d14649bf268cfe59b3ce381000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000000000000000000000000000000000000595cbd50000000000000000000000000b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b000000000000000000000000000000000000000000000000000000000014fb18059cdf288c6cc238b30ceec72243c9b7460b14361003725f3d280c773bc43123b";
+    bytes constant GUEST_STEP_MAINNET = hex"424c4f43482d4554482d4c432d535445502d763200000000000000000000000000000000000000000000000000000000000000000000000000000000000000014b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe950000000000000000000000000000000000000000000000000000000000ee6d207d1be5decb9375484704a1f0c70294eb6b6c1af435939e52fa8034ac45c41aa736475a8ec07427848324ec74868983cadf4e00dc4d071ed45b3c700ed8dd0c3a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ee7520957c69d173fd4ff650d16f3265c6826c76b78bd3efa6d36b75404c3efe8b2bd536475a8ec07427848324ec74868983cadf4e00dc4d071ed45b3c700ed8dd0c3a57f37318ac1ff6c28961fbc3f81d6d1de3770306dd7fab5904ae471cf2f230027db7922e3b7243d817b7757dd2b5a1ad531ae969fb421842219945dd4d174f26";
+
+    function w(bytes memory pv, uint256 i) private pure returns (bytes32 x) {
+        assembly {
+            x := mload(add(pv, add(32, mul(i, 32))))
+        }
+    }
+
+    function guestVerifier(bytes memory stepValues, address vault_, bytes32 route_) private returns (EMV mv, BridgedStablecoinV3 t) {
+        vm.chainId(1);
+        t = new BridgedStablecoinV3(
+            "Bloch Bridged USDC", "bUSDC", 1, vault_, route_, addrs(mintKeys), 5,
+            SignerMintedToken.Limits(CAP, BUCKET, BUCKET / 1 days, 0, 12 hours, MIN_BURN),
+            SignerMintedToken.Guard(guardians, 72 hours, 72 hours), BridgedStablecoinV2.MintSwitch(6, 14 days)
+        );
+        uint64 prevSlot = uint64(uint256(w(stepValues, 3)));
+        uint64 newSlot = uint64(uint256(w(stepValues, 7)));
+        vm.warp(uint256(BEACON_GENESIS) + uint256(newSlot) * 12 + 13 minutes);
+        mv = new EMV(
+            EMV.Config(
+                ISP1Verifier(address(sp1)), LC_STEP_VKEY, MINT_VKEY, address(t), 1, vault_, route_, GVR, prevSlot,
+                w(stepValues, 4), w(stepValues, 5), BEACON_GENESIS, 12, 14 days, address(0), 0
+            )
+        );
+    }
+
+    function test_CROSS_theGuestsStepAndMintValuesDecodeAndVerifyInTheContract() public {
+        address vault_ = address(uint160(uint256(w(GUEST_MINT, 4))));
+        (EMV mv, BridgedStablecoinV3 t) = guestVerifier(GUEST_STEP, vault_, w(GUEST_MINT, 5));
+        require(keccak256(GUEST_STEP) == keccak256(mv.expectedStepValues(
+            uint64(uint256(w(GUEST_STEP, 7))), w(GUEST_STEP, 8), w(GUEST_STEP, 9), w(GUEST_STEP, 10), w(GUEST_STEP, 11)
+        )), "the guest's STEP bytes are exactly what the contract expects");
+        mv.advance(GUEST_STEP, sp1Proof(LC_STEP_VKEY, GUEST_STEP));
+        require(mv.headSlot() == uint64(uint256(w(GUEST_STEP, 7))) && mv.headRoot() == w(GUEST_STEP, 8), "store");
+        require(mv.executionBlockHashAt(mv.headSlot()) == w(GUEST_STEP, 11), "execution block hash stored");
+        // The guest's MINT names the slot and execution block hash that this STEP stored.
+        EMV.MintValues memory v = mv.decodeMintValues(GUEST_MINT);
+        require(v.finalizedSlot == mv.headSlot() && v.finalizedExecutionBlockHash == w(GUEST_STEP, 11), "link");
+        EMV.Claim memory c = mv.claimOf(v);
+        require(c.depositNonce == 42 && uint64(uint256(c.depositId) >> 192) == 42, "nonce and id prefix");
+        bytes4 ok = mv.verifyMint(address(t), mv.mintHashOf(c), abi.encode(GUEST_MINT, sp1Proof(MINT_VKEY, GUEST_MINT)));
+        require(ok == IMintVerifier.verifyMint.selector, "verified");
+        require(keccak256(GUEST_MINT) == keccak256(mv.expectedMintValues(c, v.depositBlockNumber, v.depositBlockHash, v.finalizedSlot)), "MINT bytes");
+    }
+
+    function test_CROSS_aRealMainnetStepIsAcceptedFromItsStartStore() public {
+        (EMV mv,) = guestVerifier(GUEST_STEP_MAINNET, address(vault), vault.routeId());
+        mv.advance(GUEST_STEP_MAINNET, sp1Proof(LC_STEP_VKEY, GUEST_STEP_MAINNET));
+        require(mv.nextSyncCommitteeRoot() == w(GUEST_STEP_MAINNET, 10) && mv.nextSyncCommitteeRoot() != 0, "next committee learned");
+        require(mv.stepCount() == 1, "one step");
     }
 }
