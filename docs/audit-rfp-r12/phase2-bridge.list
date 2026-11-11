@@ -1,4 +1,4 @@
-# Phase 2: bloch-l2-bridge at the round 14 bridge V3 freeze commit (agent 306)
+# Phase 2: bloch-l2-bridge at the round 15 bridge V3 freeze commit (agent 314)
 A1 contracts/stable/BridgedStablecoinV3.sol
 A1 contracts/stable/BridgedStablecoinV2.sol
 A1 contracts/bridged/SignerMintedToken.sol
