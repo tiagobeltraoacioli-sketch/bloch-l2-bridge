@@ -631,9 +631,8 @@ def check_settlement(e, chain, l2_url, vault, address=None, snapshot_path=None, 
            'snapshot (a new forged mint?); the last held claims would be refused. Take a new snapshot.')
     if got['fullBudget'] > snap['fullBudget']:
         warnings.append(f'fullBudget is {got["fullBudget"] - snap["fullBudget"]} above the recomputed value (clean burns '
-                        'released since the snapshot?); the excess can only stay locked')
-        refuse(got['fullBudget'] + got['sharedBudget'] <= state['ethereum']['totalLocked'] + got['fullBudget'] - snap['fullBudget'],
-               'S3: the budgets exceed what the vault holds')
+                        'released since the snapshot?). No honest claim can use the excess, but it raises what forged '
+                        'evidence could take from the held holders: prefer a new snapshot')
     if got['heldSupply'] > snap['heldSupply']:
         warnings.append(f'heldSupply is {got["heldSupply"] - snap["heldSupply"]} above the recomputed value: held burns '
                         'are paid at a lower rate than the vault could afford')

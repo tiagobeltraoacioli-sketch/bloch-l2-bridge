@@ -22,8 +22,16 @@ interface R310Vm {
     function assume(bool condition) external pure;
 }
 
-/// Round 15 independent review (agent 310). Harness copied from R306HeldStateSettlement.t.sol (helpers only).
-/// Each test PASSES while the defect exists.
+/// Round 15 independent review (agent 310), finding R310-3. Harness copied from R306HeldStateSettlement.t.sol
+/// (helpers only).
+/// THE CONTRACT BEHAVIOUR SHOWN HERE STANDS (agent 314, round 15): the settlement contract cannot read the L2, its
+/// displaced list is immutable and the vault's switch is spent, so a deposit whose slot is still open at the snapshot
+/// can be displaced afterwards with no exit. What prevents it is the snapshot rule, not code in this contract: the
+/// snapshot is taken only when every vault deposit's slot is credited on the L2 at a finalized block and nothing is
+/// queued (`token.mintCount() >= vault.depositCount()`, `pendingCount == 0`), with deposits closed. The rule is in
+/// docs/HELD-STATE-SETTLEMENT.md section 3, tools/deploy-pontes/settlement_snapshot.py refuses to compute a snapshot
+/// otherwise, and `verifier_review.py settlement` refuses to pass a proposal made from one (both unless the open
+/// slots are accepted explicitly, which is recorded). This test stays as the demonstration of why the rule exists.
 /// Agents 278 and 306: HeldStateSettlementVerifier on the bridge V3 vault and token, mainnet shape as A239LcSwitchTest
 /// (5 of 7 release and mint keys, switch 6 of 7 and 14 d, T = 0 with a 12 h queue, window 10,000 a day, cap 100,000,
 /// 5/5 bps fee), with 3 Ethereum vault guardians (72 h pause). SP1 is mocked where the light-client evidence mode is used.

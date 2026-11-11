@@ -2,6 +2,8 @@
 
 Status: **UNAUDITED, not deployed.** Audit Phase 2B. Contract `contracts/usdt/HeldStateSettlementVerifier.sol`,
 tests `solidity-tests/R306HeldStateSettlement.t.sol` (21). Written by agent 278 (round 12 draft) and agent 306.
+Operator tools (agent 314, round 15): `tools/deploy-pontes/settlement_snapshot.py` (the snapshot, section 3) and
+`tools/deploy-pontes/verifier_review.py settlement` (the review, section 5.1).
 
 This is a contingency. It is deployed only after an incident, from that incident's numbers. It is written and audited
 before launch so that it is not improvised afterwards (agent 172, decision 1).
@@ -49,8 +51,36 @@ settled payment and goes to the treasury through `sweepFees`, as for any release
 
 ## 3. The snapshot
 
-Taken by the operators from public chain data, after deposits are closed (`setControls(false, true)`, 5 of 7) and the
-mint committee has stopped signing. All amounts are in token units (6 decimals).
+Taken by the operators from public chain data, at one finalized block per chain, after deposits are closed
+(`setControls(false, true)`, 5 of 7). All amounts are in token units (6 decimals).
+
+**Rule (review R310-3, round 15): the snapshot is taken only when every vault deposit's slot is credited on the L2 and
+nothing is queued on the token** (`token.mintCount() >= vault.depositCount()` and `pendingCount == 0`, at a finalized
+L2 block). So, after closing deposits, the committee first mints every real deposit that is still uncredited and
+waits for each to credit (12 hours), the guardians cancel every forged candidate, and only then does the committee
+stop signing and the snapshot is taken. The reason: the forger still holds the mint keys during the wind-down. A
+forged mint credited into a slot that is open at the snapshot displaces that deposit after activation, and nothing
+can pay it: the displaced list is immutable and the vault's switch is spent
+(`R310SettlementReview.t.sol::test_R310_3_aDepositDisplacedAfterTheSnapshotHasNoExit`). With every slot credited
+there is no open slot left to take.
+
+The tool computes the snapshot and refuses it when the rule does not hold:
+
+```
+python3 tools/deploy-pontes/settlement_snapshot.py --rpc ETH_URL --l2-rpc L2_URL --vault VAULT --token L2_TOKEN --eth-from-block VAULT_DEPLOY_BLOCK --l2-from-block TOKEN_DEPLOY_BLOCK --out snapshot.json
+```
+
+It reads both chains at their finalized blocks (recorded with their hashes), accepts the `Deposited`, `MintExecuted`
+and `Burned` logs only if they rebuild the vault's deposit chain head, the token's `mintHead`, `mintedTotal` and
+`totalSupply`, and prints the constructor arguments. It holds no key and sends nothing. It never computes a snapshot
+with deposits open, a vault that has switched, no held state, more than 16 displaced deposits, or a `fullBudget` above
+`totalLocked`.
+
+If the honest signers cannot credit the remaining real deposits (the forger holds the quorum and the honest keys are
+fewer than 5), `--accept-open-slots` turns only the open-slot refusal into a warning recorded in the snapshot, which
+then lists each open nonce with its depositor and net amount. **Those depositors can be displaced later with no
+exit**; publish the list with the snapshot. The queued supply and the open deposits are then added to `heldSupply`
+(last row of the table).
 
 | Value | How to compute it |
 |---|---|
@@ -58,7 +88,7 @@ mint committee has stopped signing. All amounts are in token units (6 decimals).
 | `displacedNonces` | Slots below `token.mintCount()` whose credited mint is not the vault's deposit of that nonce (compare each `Minted` log with `vault.depositMatches`) |
 | `fullBudget` | Sum of the amounts of the clean burns not yet released, plus the sum of the net amounts of the displaced deposits |
 | `sharedBudget` | `vault.totalLocked() - fullBudget` |
-| `heldSupply` | `token.totalSupply()` plus the amounts of the held burns already made (burned, not released). Add the amount of every mint still queued on the token, and the net amount of every real deposit not yet credited (nonces from `token.mintCount()` up to the snapshot): each of them can still become supply |
+| `heldSupply` | `token.totalSupply()` plus the amounts of the held burns already made (burned, not released). Under the rule above nothing else exists. With `--accept-open-slots` only: add the amount of every mint still queued on the token (`pendingSupply`), and the net amount of every real deposit not yet credited (nonces from `token.mintCount()` up to the snapshot): each of them can still become supply. A queued mint of an open deposit is counted twice; the bound errs towards a lower rate, never towards paying more than the budget |
 
 With these values, `heldSupply - sharedBudget` is the forged supply. The constructor checks `fullBudget + sharedBudget
 <= totalLocked`, the deposit count, that deposits are closed and that the vault has not switched.
@@ -88,15 +118,44 @@ anyone could register every old burn and use up `fullBudget`.
 ## 5. Flow
 
 1. Incident: `guardiao` reports `mint-chain`, `reservas` reports `held`. Guardians pause the vault.
-2. Operators close deposits and stop mint signing. They take the snapshot (section 3) and publish it.
-3. Anyone deploys `HeldStateSettlementVerifier` with the snapshot. It is reviewed against the pinned build
-   (`verifier_review.py scan` passes: no DELEGATECALL, CALLCODE, SELFDESTRUCT, CREATE or CREATE2).
-4. 6 of 7 vault signers propose it (`proposeVerifier`). 14 days of notice. Anyone activates it.
+2. Operators close deposits. The committee credits every real deposit still uncredited, the guardians cancel every
+   forged candidate, and the committee stops signing mints. With every slot credited and nothing queued, the
+   operators take the snapshot with `settlement_snapshot.py` (section 3) and publish `snapshot.json`.
+3. Anyone deploys `HeldStateSettlementVerifier` with the snapshot's constructor arguments.
+4. Each vault signer, before signing the proposal, and again before the 14 days end, runs the review (section 5.1).
+   6 of 7 vault signers propose it (`proposeVerifier`). 14 days of notice. Anyone activates it.
 5. Anyone registers claims (`registerBurn`, `registerDisplaced`) and submits each settled item to
    `vault.releaseWithProof(item, "")`. Holders burn their bUSDC on the L2 to make a claim.
 
 Before activation nothing can be registered (`NotActive`). After it, vault guardians can no longer pause (the vault's
 rule for any switch), and the committee release path is retired.
+
+### 5.1 The review before signing, and during the 14 days
+
+```
+python3 tools/deploy-pontes/verifier_review.py settlement --expect settlement.review.json --rpc ETH_URL --l2-rpc L2_URL --vault VAULT --snapshot snapshot.json
+```
+
+`settlement.review.json` names the vault, the L2 token, both chain ids, the deploy blocks and the evidence mode
+(`{"domain": "bloch.bridge.lc-verifier-review.v1", "verifier": {"contract": "HeldStateSettlementVerifier"}, "vault":
+..., "l2Token": ..., "ethereum": {"chainId": 1, "vaultDeployBlock": ...}, "l2": {"chainId": 700770,
+"tokenDeployBlock": ...}, "settlement": {"burnVerifier": null, "attestThreshold": 6}}`). Add `--address VERIFIER` to
+review a deployment before it is proposed. The tool is read-only and refuses unless all of this holds (the checklist
+of the 14-day review):
+
+| # | Check |
+|---|---|
+| S1 | The code is the pinned build (no DELEGATECALL, CALLCODE, SELFDESTRUCT, CREATE, CREATE2; equal to the forge artifact outside its immutables), and no claim is registered yet |
+| S2 | The vault's live proposal is this address with this code hash; the vault has not switched; its deposits are closed |
+| S3 | Every constructor value, recomputed from both chains at finalized blocks: the deposit count and anchor head; **each listed nonce is displaced** (credited on the L2 with a mint that is not the vault's deposit: a wrongly listed nonce is paid twice) and no displaced deposit is missing; `sharedBudget` exactly; `fullBudget` and `heldSupply` not below the recomputed values |
+| S4 | The snapshot rule (R310-3): no open slot, nothing queued. `--accept-open-slots` records the waiver and lists the exposed deposits |
+| S5 | The evidence mode named in the expectation: committee mode with `attestThreshold` within the vault's switch quorum and signer count; or light-client mode with the burn verifier's code hash, the same L2 token and no successor active or proposed (review that verifier itself with `verifier_review.py check`) |
+| S6 | The published `snapshot.json` names the same values as the deployed verifier |
+
+Run it again shortly before activation: a forged mint credited during the notice (`heldSupply` below the recomputed
+value, or a new displaced deposit) is refused there, and the remedy is a new snapshot and a new proposal, which is
+possible only before activation. Held burns made during the notice do not change the snapshot (supply becomes held
+burns one for one).
 
 ## 6. Trust and limits
 
@@ -114,8 +173,14 @@ rule for any switch), and the committee release path is retired.
   budget and stays locked. Operators keep deposits closed; the frontend refuses a closed vault.
 - **Supply that appears after the snapshot and is not in `heldSupply`** (a new forged mint) does not raise what the
   vault pays, but the held claims then become first come, first served and the last are refused (section 3).
-- **A deposit not yet minted needs a working mint path to exit:** the committee keeps minting real deposits until every
-  slot is credited, or the token is on proofs. If neither is possible, those depositors cannot claim.
+- **A deposit whose slot is open at the snapshot can be displaced afterwards and then has no exit** (review R310-3):
+  it is not in the immutable displaced list, its slot is credited to the forger, and no second settlement can be
+  installed. The snapshot rule of section 3 removes the case (no open slot exists); the snapshot tool and the review
+  refuse otherwise. It remains only where the open slots were accepted explicitly because the honest signers could
+  not credit them; those deposits are listed in the published snapshot.
+- **A deposit not yet minted needs a working mint path to exit:** the committee mints every real deposit before the
+  snapshot (section 3), or the token is on proofs. If neither is possible, those depositors cannot claim, and they
+  are exposed to the displacement above.
 - **A displaced deposit is refunded net of the deposit fee and of the release fee** (about 0.1% in total).
 - **Light-client mode and the burn verifier's successor** (review F4): deployment refuses a verifier with a successor
   active or proposed, or one that names another L2 token. Registration refuses once a successor is **active** (the pin

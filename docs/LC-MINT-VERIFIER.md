@@ -242,6 +242,18 @@ multisig as `recoveryAuthority`, disjoint from every hot key.
    guardian votes (the token marks it `uncancellable`), so after the switch the proof is the only gate on a mint.
 5. Only then propose the vault's switch to the light-client release verifier.
 
+Before signing step 2, and again before step 4, every mint signer runs the review (read-only; rules M1 to M7 in the
+tool's header: pinned code and immutables, the SP1 verifier, no successor, a live store with at least one accepted
+step and a head younger than half of `maxStepGap`, the anchor against beacon nodes, the token's proposal and queue):
+
+```
+python3 tools/deploy-pontes/verifier_review.py mint-verifier --expect mint-verifier.review.json --l2-rpc L2_URL --address VERIFIER --token L2_TOKEN --beacon BEACON_URL_1 --beacon BEACON_URL_2
+```
+
+The beacon endpoints are the operators' own nodes (standard beacon API, GET only). At least one must serve the
+light-client bootstrap (`/eth/v1/beacon/light_client/bootstrap/{root}`): the tool hashes the 512 keys itself and
+checks the committee against the anchor header's state root. `--anchor-unchecked` records that no node was asked.
+
 A deposit whose committee mint was cancelled before the switch comes back by proof
 (`test_DRAIN_cancelledHonestMintComesBackByProof`).
 

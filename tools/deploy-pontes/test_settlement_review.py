@@ -396,7 +396,6 @@ class EndToEnd(unittest.TestCase):
             cls.route, '[' + ','.join(a for a, _ in cls.mint) + ']', '5',
             f'({100_000 * U},{10_000 * U},{10_000 * U // 86400},0,43200,{10 * U})', '([],0,0)', '(6,1209600)')
         n.send(cls.usdc, 'mint(address,uint256)', n.me, str(50_000 * U))
-        n.send(cls.usdc, 'approve(address,uint256)', cls.vault, str(2**255))
         cls.accept_all = n.create('solidity-tests/RecoverableReleaseVerifier.t.sol:AcceptAll')  # stands for a multisig
         cls.mock_sp1 = n.create('solidity-tests/RecoverableReleaseVerifier.t.sol:RMockSP1')
         # The incident. This key is Alice (it holds and burns bUSDC); the others only receive.
@@ -417,9 +416,7 @@ class EndToEnd(unittest.TestCase):
         cls.erin_deposit = cls.deposit(1500 * U, cls.erin)
         n.send(cls.token, 'burn(uint64,address)', str(300 * U), n.me)                 # held
         cls.controls(False, True)
-        cls.open_state = rpc('evm_snapshot')        # Erin's slot is open
-        cls.queue(cls.erin_deposit, cls.erin)
-        cls.credit(cls.erin_deposit[1])
+        # The class state stops here, with Erin's slot OPEN; most tests credit her first (`credit_erin`).
         cls.locked = 12_500 * U
         cls.supply_and_held = 8000 * U + 500 * U + 1000 * U + 1500 * U - 100 * U
 
@@ -460,6 +457,11 @@ class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.state = rpc('evm_snapshot')
         self.addCleanup(lambda: rpc('evm_revert', self.state))
+
+    def credit_erin(self):
+        """Every deposit's slot credited and nothing queued: the state the snapshot rule (R310-3) asks for."""
+        self.queue(self.erin_deposit, self.erin)
+        self.credit(self.erin_deposit[1])
 
     def tool(self, script, *args):
         out = subprocess.run([sys.executable, str(HERE / script), *args], capture_output=True, text=True, cwd=REPO)
@@ -514,6 +516,7 @@ class EndToEnd(unittest.TestCase):
     # ------------------------------------------------------------ the snapshot
 
     def test_01_snapshot_of_the_incident_and_the_constructor_takes_it(self):
+        self.credit_erin()
         out_file = self.work / 'snapshot.json'
         code, snap = self.snapshot('--out', str(out_file))
         self.assertEqual((code, snap['decision']), (0, 'snapshot'), snap)
@@ -529,6 +532,12 @@ class EndToEnd(unittest.TestCase):
         block = rpc('eth_getBlockByNumber', 'latest', False)
         self.assertEqual(snap['blocks']['ethereum'], {'number': int(block['number'], 16), 'hash': block['hash'],
                                                       'timestamp': int(block['timestamp'], 16)})
+        # The default block is `finalized` on both chains: the same values once the incident is final.
+        rpc('anvil_mine', hex(70))
+        code, final = self.tool('settlement_snapshot.py', '--rpc', URL, '--l2-rpc', URL, '--vault', self.vault,
+                                '--token', self.token)
+        self.assertEqual((code, final['snapshot']), (0, s))
+        self.assertLess(final['blocks']['l2']['number'], int(rpc('eth_blockNumber'), 16))
         # The real constructor accepts exactly these arguments, and reports the same values back.
         verifier = self.settlement(snap['constructorArgs'])
         self.assertEqual(int(self.n.call(verifier, 'heldSupply()(uint64)').split()[0]), s['heldSupply'])
@@ -539,6 +548,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(paid, 300 * U * s['sharedBudget'] // s['heldSupply'])
 
     def test_02_snapshot_refusals_on_chain(self):
+        self.credit_erin()
         self.refused('not both', self.snapshot, '--burn-verifier', self.accept_all, '--attest-threshold', '6')
         self.refused('attestThreshold', self.snapshot, '--attest-threshold', '5')
         self.refused('Deposited logs for depositCount', self.snapshot, '--eth-from-block', '30')
@@ -553,13 +563,11 @@ class EndToEnd(unittest.TestCase):
         self.refused('already switched', self.snapshot)
 
     def test_03_R310_3_an_open_slot_or_a_queued_mint_refuses_the_snapshot(self):
-        rpc('evm_revert', self.open_state)
-        type(self).open_state = rpc('evm_snapshot')
         out = self.refused('R310-3', self.snapshot)
         self.assertIn('nonces [4]', out['reason'])
         code, snap = self.snapshot('--accept-open-slots')
         self.assertEqual(code, 0, snap)
-        self.assertEqual([(o['nonce'], o['sender'], o['amount']) for o in snap['openSlots']], [(4, self.n.me, 1500 * U)])
+        self.assertEqual([(o['nonce'], o['sender'], o['amount']) for o in snap['openSlots']], [(4, self.n.me.lower(), 1500 * U)])
         self.assertIn('OPEN SLOTS ACCEPTED', snap['warnings'][0])
         self.assertEqual(snap['snapshot']['heldSupply'], self.supply_and_held, 'the open deposit is counted as supply')
         # Review: the same refusal for the signer, and the same recorded waiver.
@@ -570,12 +578,12 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(any('OPEN SLOTS ACCEPTED' in w for w in out['warnings']))
         self.assertEqual(out['recomputed']['openSlots'][0]['nonce'], 4)
         # Erin's mint queued (not yet credited): still refused, as a queued mint and an open slot.
+        branch = rpc('evm_snapshot')
         self.queue(self.erin_deposit, self.erin)
         out = self.refused('R310-3', self.snapshot)
         self.assertIn('1 mint(s) queued', out['reason'])
+        rpc('evm_revert', branch)
         # What the rule prevents (R310SettlementReview.t.sol): the forger takes the open slot instead.
-        rpc('evm_revert', self.open_state)
-        type(self).open_state = rpc('evm_snapshot')
         forged = '0x' + format(4, '016x') + 'cd' * 24
         self.queue((4, forged, 1500 * U), self.mallory)
         self.credit(forged)
@@ -586,6 +594,7 @@ class EndToEnd(unittest.TestCase):
     # ------------------------------------------------------------ settlement review
 
     def test_04_settlement_review_before_and_after_the_proposal(self):
+        self.credit_erin()
         out_file = self.work / 'published.json'
         _, snap = self.snapshot('--out', str(out_file))
         verifier = self.settlement(snap['constructorArgs'])
@@ -616,6 +625,7 @@ class EndToEnd(unittest.TestCase):
         self.refused('deposits are open', self.review, '--expect', self.settlement_expect())
 
     def test_05_settlement_review_refuses_wrong_constructor_values(self):
+        self.credit_erin()
         _, snap = self.snapshot()
         s = snap['snapshot']
         expect = self.settlement_expect()
@@ -637,6 +647,10 @@ class EndToEnd(unittest.TestCase):
         code, out = self.review('--expect', expect, '--address', verifier)
         self.assertEqual(code, 0, out)
         self.assertTrue(any('lower rate' in w for w in out['warnings']))
+        # A clean burn released by the committee during the notice: fullBudget is then above the recomputed value.
+        verifier = self.settlement(self.args(snap, fullBudget=s['fullBudget'] + 100 * U, sharedBudget=s['sharedBudget'] - 100 * U))
+        out = self.refused('sharedBudget', self.review, '--expect', expect, '--address', verifier)
+        self.assertIn(str(s['sharedBudget']), out['reason'])
         # Another contract at the address, and a proxy in front of the right one.
         self.refused('R3', self.review, '--expect', expect, '--address', self.accept_all)
         good = self.settlement(snap['constructorArgs'])
@@ -658,6 +672,7 @@ class EndToEnd(unittest.TestCase):
         lc = self.n.create('contracts/usdt/RecoverableReleaseVerifier.sol:RecoverableReleaseVerifier',
                            f'({sp1},{base.RELEASE_VKEY},{base.STEP_VKEY},{base.STEP_WORDS},{base.REHEARSAL_ANCHOR_DIGEST},'
                            f'31337,{self.token},1786656679,960,{self.accept_all},1209600,259200,1209600,2592000)')
+        self.credit_erin()
         code, snap = self.snapshot('--burn-verifier', lc)
         self.assertEqual((code, snap['snapshot']['attestThreshold']), (0, 0), snap)
         verifier = self.settlement(snap['constructorArgs'])
@@ -748,7 +763,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((code, out['warnings']), (0, []), out)
         self.assertEqual(out['tokenProposal']['pinnedCodeHash'], out['codeHash'])
         self.assertEqual(out['tokenProposal']['pendingCount'], 0)
-        self.queue((5, '0x' + format(5, '016x') + 'ef' * 24, 100 * U), self.mallory)
+        self.queue(self.erin_deposit, self.erin)
         code, out = self.mint_review('--expect', self.mint_expect(imm), '--address', verifier, '--token', self.token, *self.both())
         self.assertEqual(code, 0, out)
         self.assertTrue(any('DRAIN BEFORE ACTIVATION: 1' in w for w in out['warnings']))
