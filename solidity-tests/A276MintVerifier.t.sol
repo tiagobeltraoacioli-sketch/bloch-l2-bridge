@@ -563,6 +563,10 @@ contract A276MintVerifierTest {
         EMV mv = newVerifier();
         uint64 s = freshSlot();
         require(s / 8192 >= anchorSlot / 8192 + 2, "fixture: at least two periods later");
+        // No period rule applies across two periods: a zero committee is still refused.
+        bytes memory zero = mv.expectedStepValues(s, rootAt(s), 0, committee(s / 8192 + 1), execAt(s));
+        (bool ok, bytes4 err) = tryAdvance(mv, zero, LC_STEP_VKEY);
+        require(!ok && err == EMV.InvalidStep.selector, "zero committee across periods");
         advanceTo(mv, s);
         require(mv.currentSyncCommitteeRoot() == committee(s / 8192), "current");
     }
