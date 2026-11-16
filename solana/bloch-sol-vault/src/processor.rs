@@ -1,5 +1,5 @@
 use crate::{
-    abi::{self, Addr20, ReleaseContext, ReleaseItem, Word},
+    abi::{self, Addr20, ReleaseContext, ReleaseItem},
     cert::check_certificate,
     error::VaultError,
     state::*,

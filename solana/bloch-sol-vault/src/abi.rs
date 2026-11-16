@@ -69,12 +69,10 @@ pub fn sha256_words(words: &[&[u8]]) -> Word {
 /// The 20-byte identity of a Solana value in EVM-shaped messages: the last 20 bytes of
 /// keccak256(domain || part0 || part1 ...). The Ethereum address rule applied to a tagged preimage.
 pub fn id20(domain: &[u8], parts: &[&[u8]]) -> Addr20 {
-    let mut h = keccak::Hasher::default();
-    h.hash(domain);
-    for p in parts {
-        h.hash(p);
-    }
-    let full = h.result().to_bytes();
+    let mut all: Vec<&[u8]> = Vec::with_capacity(parts.len() + 1);
+    all.push(domain);
+    all.extend_from_slice(parts);
+    let full = keccak::hashv(&all).to_bytes();
     let mut out = [0u8; 20];
     out.copy_from_slice(&full[12..]);
     out
