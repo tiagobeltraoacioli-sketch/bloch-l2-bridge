@@ -943,6 +943,24 @@ def main_flow(r):
     check('R331-A2 (EXPECTED TO FAIL until fixed): a guardian check on an L2 view that is behind the burn reports no '
           'finding for an honest release (it should say "cannot judge yet")', rc_lag != 2, out_lag)
     notes['r331_a2'] = {'lag_block': lag_block, 'exit': rc_lag, 'out': out_lag}
+    # A3. Resources of a release with 5 and with 7 signatures (simulated only, nothing sent: the certificate is signed
+    #     here with the throwaway committee for a burn that does not exist).
+    a3 = {}
+    for n in (5, 7):
+        f, _ = r.direct_release(9000 + n, r.addr['payee'], 20 * U, r.state()['deposit_count'], list(range(n)))
+        try:
+            env = r.net.build(r.addr['relayer'], 'release', **f['args'])
+            dec = json.loads(r.must(['stellar', 'xdr', 'decode', '--type', 'TransactionEnvelope', '--output', 'json'], stdin=env))
+            tx = dec['tx']['tx']
+            res = tx['ext']['v1']['resources']
+            a3[n] = {'envelope_bytes': len(__import__('base64').b64decode(env)), 'fee': tx.get('fee'),
+                     'instructions': res.get('instructions'), 'read_bytes': res.get('disk_read_bytes', res.get('read_bytes')),
+                     'write_bytes': res.get('write_bytes'), 'resource_fee': tx['ext']['v1'].get('resource_fee')}
+        except (SystemExit, Exception) as e:  # noqa: BLE001
+            a3[n] = {'error': str(e)[-600:]}
+    check('R331-A3: a release with 7 signatures simulates within the network limits (5 for comparison)',
+          'instructions' in a3.get(7, {}) and 'instructions' in a3.get(5, {}), a3)
+    notes['r331_a3'] = a3
 
     # 13. diverging and stale views are held
     fork = lying_rpc(r.rpc, r.anvil_port + 20, 'fork')
