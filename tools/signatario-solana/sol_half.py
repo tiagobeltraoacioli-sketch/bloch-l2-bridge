@@ -301,8 +301,8 @@ def cmd_release(cfg, intent_path):
     rehearsal = bool(node.doc['solana'].get('rehearsal'))
     if not rehearsal and not (cfg.get('l2_rpc') and cfg.get('burn_router')):
         refuse('`l2_rpc` and `burn_router` are required on a public cluster: without them no recipient can be checked')
-    wallet, found_in = sol_recipient.find_wallet(cfg, rel['recipient'], got['nativeBurn'])
-    if wallet is None:
+    paid_to, found_in = sol_recipient.find_wallet(cfg, rel['recipient'], got['nativeBurn'])
+    if paid_to is None:
         direct = str((intent.get('l2') or {}).get('from', '')).lower() != str(cfg.get('burn_router', '')).lower()
         refuse(sol_recipient.HELD, recipient=got['recipient'], burn=got['nativeBurn'], direct_burn=direct)
 
@@ -352,7 +352,10 @@ def cmd_release(cfg, intent_path):
 
     cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
     wallet = ['--keystore', cfg['keystore'], '--password-file', cfg['password_file']]
-    signer = subprocess.run([cast, 'wallet', 'address', *wallet], capture_output=True, text=True)
+    try:
+        signer = subprocess.run([cast, 'wallet', 'address', *wallet], capture_output=True, text=True)
+    except OSError as e:
+        refuse('cast cannot be run', error=str(e))
     if signer.returncode:
         refuse('cast wallet address failed', stderr=signer.stderr.strip()[-800:])
     signer = signer.stdout.strip().lower()
@@ -367,7 +370,7 @@ def cmd_release(cfg, intent_path):
                     'nativeFinalizedNumber': ctx['nativeFinalizedNumber'],
                     'nativeFinalizedHash': S.hx(ctx['nativeFinalizedHash'])},
            digest=S.hx(digest), signature=done.stdout.strip().lower(), finalized_slot=finalized,
-           wallet=S.b58encode(wallet), wallet_found_in=found_in)
+           wallet=S.b58encode(paid_to), wallet_found_in=found_in)
 
 
 def main():
