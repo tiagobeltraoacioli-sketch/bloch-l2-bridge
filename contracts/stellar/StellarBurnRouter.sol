@@ -12,17 +12,25 @@ interface IStellarBridgedToken {
 ///         keccak256(bytes32("BLOCH-XLM-RECIPIENT-v1") ‖ strkey), where `strkey` is the 56-character address
 ///         (`G...` account or `C...` contract). The vault on Stellar pays a release only to an address with that
 ///         commitment (`recipient_commitment` in stellar/vault).
-///         This contract is a convenience and holds no power: it checks that the address is a well-formed strkey (so
-///         a typo cannot burn funds towards nothing), burns through the token, and publishes the address in a log
-///         for the relayers. A holder may also call `token.burn(amount, commitment)` directly and hand the address
-///         to a relayer by any channel; the commitment is what binds it.
+///         This contract holds no power: it checks that the address is a well-formed strkey (so a typo cannot burn
+///         funds towards nothing), burns through the token, and publishes the address in a log for the relayers.
 ///         It never holds tokens between calls, has no owner and no state.
+///         EXITS GO THROUGH THIS ROUTER. Its interface has the shape of the other routes' routers
+///         (`burnTo(uint64 amount, string address)` and an exit event with the burn id, the caller, the amount, the
+///         20 bytes the burn names and the address). A burn made directly on the token (`token.burn`) is served
+///         only by the stated rule of tools/signatario-stellar/stellar_half.py: the 20 bytes are the commitment of
+///         an address the signers are given, or the ACCOUNT THAT BURNED signs a claim (an Ethereum personal message
+///         naming the chain, the token, the burn id and one Stellar address). A contract cannot sign: a contract
+///         that burns directly towards 20 bytes that are no commitment cannot be paid. Integrations must not burn
+///         bUSDC.xlm directly.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
 contract StellarBurnRouter {
     IStellarBridgedToken public immutable token;
     bytes32 public constant RECIPIENT_TAG = bytes32("BLOCH-XLM-RECIPIENT-v1");
 
-    event StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, address commitment, string recipient);
+    event StellarExit(
+        bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress
+    );
 
     error BadStrkey();
     error TransferFailed();
@@ -70,11 +78,11 @@ contract StellarBurnRouter {
         return address(uint160(uint256(keccak256(abi.encodePacked(RECIPIENT_TAG, s)))));
     }
 
-    /// @notice Burns `amount` of the caller's tokens (approve this contract first) for `recipient` on Stellar.
-    function burnTo(uint64 amount, string calldata recipient) external returns (bytes32 burnId) {
-        address c = commitment(recipient);
+    /// @notice Burns `amount` of the caller's tokens (approve this contract first) for `stellarAddress` on Stellar.
+    function burnTo(uint64 amount, string calldata stellarAddress) external returns (bytes32 burnId) {
+        address c = commitment(stellarAddress);
         if (!token.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         burnId = token.burn(amount, c);
-        emit StellarExit(burnId, msg.sender, amount, c, recipient);
+        emit StellarExit(burnId, msg.sender, amount, bytes20(c), stellarAddress);
     }
 }

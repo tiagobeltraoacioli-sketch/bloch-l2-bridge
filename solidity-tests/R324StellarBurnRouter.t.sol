@@ -137,10 +137,10 @@ contract R324StellarBurnRouterTest {
                 require(logs[i].topics[1] == burnId && amount == 200 * U && recipient == want && mintCount == 1, "Burned");
                 burned = true;
             }
-            if (logs[i].topics[0] == keccak256("StellarExit(bytes32,address,uint64,address,string)")) {
-                (uint64 amount, address c, string memory recipient) = abi.decode(logs[i].data, (uint64, address, string));
+            if (logs[i].topics[0] == keccak256("StellarExit(bytes32,address,uint64,bytes20,string)")) {
+                (uint64 amount, bytes20 c, string memory recipient) = abi.decode(logs[i].data, (uint64, bytes20, string));
                 require(logs[i].topics[1] == burnId && address(uint160(uint256(logs[i].topics[2]))) == ALICE, "topics");
-                require(amount == 200 * U && c == want && keccak256(bytes(recipient)) == keccak256(bytes(G_ADDR)), "StellarExit");
+                require(amount == 200 * U && c == bytes20(want) && keccak256(bytes(recipient)) == keccak256(bytes(G_ADDR)), "StellarExit");
                 exit = true;
             }
         }

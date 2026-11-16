@@ -253,13 +253,13 @@ class Half:
         burn = intent['release']['nativeBurn']
         done = subprocess.run([self.cast, 'logs', '--rpc-url', self.cfg['l2_rpc'], '--address', self.cfg['router'],
                                '--from-block', str(self.cfg.get('router_from_block', 0)), '--json',
-                               'StellarExit(bytes32 indexed,address indexed,uint64,address,string)', burn],
+                               'StellarExit(bytes32 indexed,address indexed,uint64,bytes20,string)', burn],
                               capture_output=True, text=True)
         out = []
         if done.returncode:
             return out
         for log in json.loads(done.stdout or '[]'):
-            dec = subprocess.run([self.cast, 'abi-decode', '--input', 'f(uint64,address,string)', log['data']],
+            dec = subprocess.run([self.cast, 'abi-decode', '--input', 'f(uint64,bytes20,string)', log['data']],
                                  capture_output=True, text=True)
             lines = dec.stdout.strip().splitlines()
             if dec.returncode == 0 and len(lines) == 3:
