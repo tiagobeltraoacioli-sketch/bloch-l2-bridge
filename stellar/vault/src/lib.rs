@@ -54,7 +54,11 @@ const BPS: u64 = 10_000;
 pub const MAX_VALIDITY: u64 = 86_400;
 /// Ledgers. Replay records, chain heads and queued releases are written with at least this TTL (30 days at 5 s a
 /// ledger), capped by the network's maximum. The network's own minimum for a new persistent entry is higher today.
+#[cfg(not(feature = "rehearsal-short-ttl"))]
 pub const RECORD_TTL: u32 = 518_400;
+/// Rehearsal builds only (never deployed): records live 30 ledgers, so a local network can show one expiring.
+#[cfg(feature = "rehearsal-short-ttl")]
+pub const RECORD_TTL: u32 = 30;
 /// The instance (configuration and books) is extended to `INSTANCE_TTL` whenever it is below `INSTANCE_TTL / 2`.
 pub const INSTANCE_TTL: u32 = 1_555_200;
 
@@ -491,6 +495,15 @@ fn guardian_can_pause(cfg: &Config, st: &State, guardian: &BytesN<20>, now: u64)
         && (chain_ended(cfg, st, now) || st.guardian_last_chain.get(guardian.clone()) != Some(st.pause_chain))
 }
 
+/// A transfer of the asset. A failure inside the asset contract (a revoked authorization, a missing trustline, a
+/// short balance) is reported as this vault's `InvalidTransfer`, never under the asset contract's own error number,
+/// which would read as another of this vault's errors. Either way the whole call reverts.
+fn move_asset(env: &Env, asset: &token::TokenClient, from: &Address, to: &Address, stroops: i128) {
+    if !matches!(asset.try_transfer(from, to, &stroops), Ok(Ok(()))) {
+        fail(env, Error::InvalidTransfer);
+    }
+}
+
 /// Moves `amount` units out of the backing: the recipient gets it less the release fee, which stays as an accrued
 /// fee. The bucket and `total_locked` take the full burned amount.
 fn pay(env: &Env, cfg: &Config, st: &mut State, recipient: &Address, amount: u64) -> u64 {
@@ -514,7 +527,7 @@ fn pay(env: &Env, cfg: &Config, st: &mut State, recipient: &Address, amount: u64
     }
     st.total_locked -= amount;
     st.fees_accrued += fee;
-    asset.transfer(&vault, recipient, &paid);
+    move_asset(env, &asset, &vault, recipient, paid);
     if asset.balance(&vault) + paid != before {
         fail(env, Error::InvalidTransfer);
     }
@@ -765,7 +778,7 @@ impl Vault {
         if before < required_stroops(&st) {
             fail(&env, Error::InsufficientBacking);
         }
-        asset.transfer(&from, &vault, &amount);
+        move_asset(&env, &asset, &from, &vault, amount);
         if asset.balance(&vault) != before + amount {
             fail(&env, Error::InvalidTransfer);
         }
@@ -800,7 +813,7 @@ impl Vault {
         }
         let stroops = amount as i128 * STROOPS_PER_UNIT;
         st.fees_accrued = 0;
-        asset.transfer(&vault, &cfg.fee_recipient, &stroops);
+        move_asset(&env, &asset, &vault, &cfg.fee_recipient, stroops);
         if asset.balance(&vault) + stroops != before {
             fail(&env, Error::InvalidTransfer);
         }
@@ -866,6 +879,7 @@ impl Vault {
         if item.route != derived.route
             || item.amount == 0
             || item.amount > st.total_locked
+            || item.amount > cfg.window_limit
             || item.recipient == vault
             || item.recipient == cfg.token
             || item.native_burn.to_array() == [0u8; 32]

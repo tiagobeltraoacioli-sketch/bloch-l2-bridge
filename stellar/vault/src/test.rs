@@ -209,6 +209,17 @@ fn high_s_twin(sig: &[u8; 65]) -> [u8; 65] {
     out
 }
 
+/// True if `twin` is `sig` with s replaced by n - s and v flipped: under plain ECDSA both verify for the same key.
+/// (k256 itself refuses to recover from a high s, so the relation is checked on the scalars.)
+fn is_malleated_twin(sig: &[u8; 65], twin: &[u8; 65]) -> bool {
+    let high = Signature::from_slice(&twin[..64]).unwrap();
+    twin[32..64] > HALF_ORDER[..]
+        && twin[..32] == sig[..32]
+        && high.normalize_s().map(|low| low.to_bytes().to_vec()) == Some(sig[..64].to_vec())
+        && twin[64] != sig[64]
+        && (twin[64] == 27 || twin[64] == 28)
+}
+
 fn recover_x(digest: &[u8; 32], sig: &[u8; 65]) -> Option<[u8; 20]> {
     let s = Signature::from_slice(&sig[..64]).ok()?;
     let r = RecoveryId::from_byte(sig[64].checked_sub(27)?)?;
@@ -258,6 +269,24 @@ fn err_of<T: core::fmt::Debug, C: core::fmt::Debug>(r: Tried<T, C>) -> Error {
         other => panic!("expected a vault error, got {:?}", other),
     }
 }
+
+/// The raw error of a call refused by something other than the vault's own checks.
+fn raw_err<T: core::fmt::Debug, C: core::fmt::Debug>(r: Tried<T, C>) -> soroban_sdk::Error {
+    match r {
+        Err(Ok(e)) => e,
+        other => panic!("expected an error, got {:?}", other),
+    }
+}
+
+/// Errors of the Stellar Asset Contract, as the host reports them: `Error(Contract, #code)`. They leave the vault
+/// unchanged, so their codes share the number space of the vault's own `Error` (10 reads as `Paused`, 11 as
+/// `ProvenanceMismatch`). Reported to the caller.
+fn sac_error(code: u32) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(code)
+}
+const SAC_OPERATION_NOT_SUPPORTED: u32 = 2;
+const SAC_BALANCE_ERROR: u32 = 10;
+const SAC_BALANCE_DEAUTHORIZED: u32 = 11;
 
 fn panic_message(payload: std::boxed::Box<dyn core::any::Any + Send>) -> StdString {
     if let Some(s) = payload.downcast_ref::<StdString>() {
@@ -387,7 +416,7 @@ struct Fx {
 }
 
 fn attach(p: &Parts, cfg: &Config, vault: &Address) -> Fx {
-    let net = sha256(PASSPHRASE);
+    let net = p.env.ledger().network_id().to_array();
     let vault_id = addr_parts(vault).1;
     let token_id = addr_parts(&p.token).1;
     // sha256 over: tag, network id, source domain, native domain, asset, token id, vault id, 6 (decimals), cap.
@@ -759,7 +788,7 @@ fn test_keys_recover_to_their_ethereum_addresses() {
     for k in sorted_keys(1..=7) {
         let s = sign(&k, &d);
         assert_eq!(recover_x(&d, &s), Some(k.addr));
-        assert_eq!(recover_x(&d, &high_s_twin(&s)), Some(k.addr));
+        assert!(is_malleated_twin(&s, &high_s_twin(&s)));
     }
 }
 
@@ -1329,8 +1358,15 @@ fn deposit_refused_without_authorization_of_the_depositor() {
     let from = fx.user(100 * U);
     // From here on nothing is authorized by anyone.
     fx.env.set_auths(&[]);
-    let r = fx.try_dep(&from, 100 * U);
-    assert!(matches!(r, Err(Err(InvokeError::Abort))), "{:?}", r);
+    let e = raw_err(fx.try_dep(&from, 100 * U));
+    // The host's authorization failure, not a vault error.
+    assert_eq!(
+        e,
+        soroban_sdk::Error::from_type_and_code(
+            soroban_sdk::xdr::ScErrorType::Context,
+            soroban_sdk::xdr::ScErrorCode::InvalidAction
+        )
+    );
     assert_eq!(fx.v.state().deposit_count, 0);
     assert_eq!(fx.bal(&from), 1_000 * U as i128);
     assert_eq!(fx.bal(&fx.vault), 0);
@@ -1606,7 +1642,7 @@ fn release_refused_with_high_s_signature() {
             let s = if i == position {
                 let twin = high_s_twin(&s);
                 // The twin is a valid signature of the same key under plain ECDSA.
-                assert_eq!(recover_x(&d, &twin), Some(fx.signers[i].addr));
+                assert!(is_malleated_twin(&s, &twin));
                 twin
             } else {
                 s
@@ -1851,12 +1887,15 @@ fn release_refuses_certificate_of_another_network_deployment() {
     p.env.ledger().with_mut(|l| l.network_id = sha256(b"Public Global Stellar Network ; September 2015"));
     let b = fx_parts(p, |_, _| {});
     assert_eq!(b.vault_id, a.vault_id);
-    assert_ne!(b.v.derived().route, a.v.derived().route);
+    assert_ne!(b.net, a.net);
+    assert_eq!(b.v.derived().network_id.to_array(), b.net);
+    assert_eq!(b.v.derived().route.to_array(), b.route);
+    assert_ne!(b.route, a.route);
     let to = Address::generate(&a.env);
     let item = a.item(1, &to, U);
     let ctx = a.ctx();
     // What the other network's vault would have its committee sign for this very item.
-    let foreign = b.v.release_digest(&item, &ctx).to_array();
+    let foreign = b.release_digest_x(&item, &ctx);
     assert_ne!(foreign, a.release_digest_x(&item, &ctx));
     assert_release_refused(&a, &item, a.v.try_release(&item, &ctx, &a.first(7, &foreign)), Error::InvalidCertificate);
 }
@@ -1882,10 +1921,10 @@ fn release_refuses_certificate_of_another_contract() {
 }
 
 #[test]
-fn release_to_an_account_without_trustline_changes_nothing() {
+fn release_to_the_issuer_account_keeps_the_books_whole() {
     let fx = fx_funded();
-    // The issuer's own account stands in for a G... recipient; a transfer to the issuer burns, which the vault's
-    // balance check accepts. A plain account with no trustline cannot be built here, so only the issuer is shown.
+    // The only G... address these tests can build is the issuer's own account. A transfer to the issuer burns; the
+    // vault's balance check accepts it and the books stay whole.
     let to = fx.issuer.address();
     let item = fx.item(1, &to, U);
     fx.release(&item);
@@ -2294,23 +2333,106 @@ fn queue_generation_1_queues_again_and_cannot_be_cancelled() {
     assert_eq!(err_of(fx.try_release_n(&again, &fx.ctx(), 7)), Error::InvalidRelease);
 }
 
-#[test]
-fn queue_generation_1_must_name_the_cancelled_nonce_and_burn() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
+/// A cancelled, queued release under nonce 1; returns the cancelled item.
+fn cancelled_release(fx: &Fx, to: &Address) -> Release {
+    let item = fx.item(1, to, 2_000 * U);
     fx.release(&item);
     fx.try_cancel(&fx.release_id(&item), &[1, 2]).unwrap().unwrap();
-    // Same nonce, another burn id.
-    let mut a = item.clone();
-    a.generation = 1;
-    a.native_burn = fx.burn(55);
-    assert_eq!(err_of(fx.try_release_n(&a, &fx.ctx(), 7)), Error::InvalidRelease);
-    // Same burn id, another nonce.
-    let mut b = item.clone();
+    item
+}
+
+#[test]
+fn queue_generation_1_may_name_another_burn_id_for_the_cancelled_nonce() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    let cancelled = cancelled_release(&fx, &to);
+    // The real burn of nonce 1: another id, another recipient, another amount.
+    let real_to = Address::generate(&fx.env);
+    let mut real = fx.item(1, &real_to, 1_500 * U);
+    real.generation = 1;
+    real.native_burn = fx.burn(55);
+    let id = fx.release_id(&real);
+    // `threshold` signatures are not enough for it either.
+    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 5)), Error::InvalidCertificate);
+    assert_eq!(fx.v.released_burn(&real.native_burn), None);
+    fx.try_release_n(&real, &fx.ctx(), 6).unwrap().unwrap();
+    let ready_at = fx.now() + HOUR;
+    assert_eq!(fx.v.pending(&id), Some(Pending { recipient: real_to.clone(), amount: 1_500 * U, ready_at, nonce: 1 }));
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: real.native_burn.clone(), generation: 1, cancelled: false }));
+    assert_eq!(fx.v.released_burn(&real.native_burn), Some(1));
+    // The cancelled id stays recorded under the nonce: it can never be released, under any nonce or generation.
+    assert_eq!(fx.v.released_burn(&cancelled.native_burn), Some(1));
+    for (nonce, generation) in [(1u64, 0u32), (1, 1), (2, 0), (2, 1)] {
+        let mut old = cancelled.clone();
+        old.nonce = nonce;
+        old.generation = generation;
+        assert_eq!(err_of(fx.try_release_n(&old, &fx.ctx(), 7)), Error::InvalidRelease);
+    }
+    // Locked: guardians cannot cancel it, and no second generation-1 certificate is accepted.
+    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotCancellable);
+    let mut second = real.clone();
+    second.native_burn = fx.burn(56);
+    assert_eq!(err_of(fx.try_release_n(&second, &fx.ctx(), 7)), Error::InvalidRelease);
+    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 7)), Error::InvalidRelease);
+    fx.advance(HOUR);
+    fx.v.execute_release(&id);
+    assert_eq!(fx.bal(&real_to), (1_500 * U as i128 - 750_000) * 10);
+    assert_eq!(fx.bal(&to), 0);
+    fx.assert_whole();
+}
+
+#[test]
+fn queue_generation_1_with_another_burn_id_pays_at_once_below_the_queue_threshold() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    cancelled_release(&fx, &to);
+    let mut real = fx.item(1, &to, 10 * U);
+    real.generation = 1;
+    real.native_burn = fx.burn(55);
+    fx.try_release_n(&real, &fx.ctx(), 6).unwrap().unwrap();
+    assert_eq!(fx.bal(&to), (10 * U as i128 - 5_000) * 10);
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: real.native_burn.clone(), generation: 1, cancelled: false }));
+    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 7)), Error::InvalidRelease);
+}
+
+#[test]
+fn queue_generation_1_refused_for_a_burn_id_released_under_another_nonce() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    let cancelled = cancelled_release(&fx, &to);
+    // Burn id X paid under nonce 2, burn id Y queued under nonce 3.
+    let paid = fx.item(2, &to, U);
+    fx.release(&paid);
+    let queued = fx.item(3, &to, 2_000 * U);
+    fx.release(&queued);
+    for taken in [paid.native_burn.clone(), queued.native_burn.clone()] {
+        let mut item = cancelled.clone();
+        item.generation = 1;
+        item.native_burn = taken;
+        assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
+    }
+    assert!(fx.v.burn_record(&1).unwrap().cancelled);
+    assert_eq!(fx.v.released_burn(&paid.native_burn), Some(2));
+    // The cancelled nonce is still open for its one locked certificate.
+    let mut again = cancelled.clone();
+    again.generation = 1;
+    fx.try_release_n(&again, &fx.ctx(), 6).unwrap().unwrap();
+}
+
+#[test]
+fn queue_generation_1_refused_for_another_nonce_than_the_cancelled_one() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    let cancelled = cancelled_release(&fx, &to);
+    // The cancelled burn id under a nonce that was never cancelled.
+    let mut b = cancelled.clone();
     b.generation = 1;
     b.nonce = 55;
     assert_eq!(err_of(fx.try_release_n(&b, &fx.ctx(), 7)), Error::InvalidRelease);
+    // A new burn id under a nonce that was never cancelled.
+    b.native_burn = fx.burn(55);
+    assert_eq!(err_of(fx.try_release_n(&b, &fx.ctx(), 7)), Error::InvalidRelease);
+    assert_eq!(fx.v.burn_record(&55), None);
 }
 
 #[test]
@@ -2724,15 +2846,10 @@ fn issuer_deauthorizing_the_vault_blocks_deposit_and_release_and_consumes_nothin
     fx.sac.set_authorized(&fx.vault, &false);
     assert!(!fx.sac.authorized(&fx.vault));
     let st = fx.v.state();
-    let d = fx.try_dep(&from, 100 * U);
-    std::println!("OBSERVE deauthorized deposit: {:?}", d);
-    assert!(d.is_err());
-    let r = fx.v.try_release(&item, &ctx, &cert);
-    std::println!("OBSERVE deauthorized release: {:?}", r);
-    assert!(r.is_err());
-    let s = fx.v.try_sweep_fees();
-    std::println!("OBSERVE deauthorized sweep: {:?}", s);
-    assert!(s.is_err());
+    // Each fails inside the asset contract (its error 11, balance deauthorized), which undoes the whole call.
+    assert_eq!(raw_err(fx.try_dep(&from, 100 * U)), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    assert_eq!(raw_err(fx.v.try_release(&item, &ctx, &cert)), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    assert_eq!(raw_err(fx.v.try_sweep_fees()), sac_error(SAC_BALANCE_DEAUTHORIZED));
     assert_eq!(fx.v.state(), st);
     assert_eq!(fx.v.burn_record(&1), None);
     assert_eq!(fx.v.released_burn(&item.native_burn), None);
@@ -2821,42 +2938,60 @@ fn issuer_clawback_flag_enabled_after_the_vault_balance_exists() {
     fx.dep(5_000 * U);
     fx.issuer.set_flag(IssuerFlags::RevocableFlag);
     fx.issuer.set_flag(IssuerFlags::ClawbackEnabledFlag);
-    let r = fx.sac.try_clawback(&fx.vault, &10);
-    std::println!("OBSERVE late clawback flag, clawback of the vault: {:?}", r);
-    std::println!("OBSERVE balance after: {}", fx.bal(&fx.vault));
-    // A holder whose balance is created after the flag was enabled.
+    // What the SDK's asset contract does: the clawback bit is fixed on a balance when it is created, so the vault's
+    // balance, created before the flag, cannot be clawed back (asset error 10).
+    assert_eq!(fx.sac.try_clawback(&fx.vault, &10), Err(Ok(sac_error(SAC_BALANCE_ERROR))));
+    assert_eq!(fx.bal(&fx.vault), 50_000 * U as i128);
+    fx.assert_whole();
+    // A holder whose balance is created after the flag was enabled can be clawed back.
     let late = fx.user(10 * U);
-    let r2 = fx.sac.try_clawback(&late, &10);
-    std::println!("OBSERVE late clawback flag, clawback of a new holder: {:?}", r2);
-    // Deauthorization of the old balance, which only needs the revocable flag at the time of the call.
-    let r3 = fx.sac.try_set_authorized(&fx.vault, &false);
-    std::println!("OBSERVE late revocable flag, deauthorize the vault: {:?}", r3);
+    fx.sac.clawback(&late, &10);
+    assert_eq!(fx.bal(&late), 10 * U as i128 * 10 - 10);
+    // Deauthorization is different: it reads the issuer's revocable flag at the time of the call, so the flag set
+    // late does reach the old balance and freezes the vault.
+    fx.sac.set_authorized(&fx.vault, &false);
+    let from = fx.user(100 * U);
+    assert_eq!(raw_err(fx.try_dep(&from, 100 * U)), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    let to = Address::generate(&fx.env);
+    assert_eq!(raw_err(fx.try_release(&fx.item(1, &to, U))), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    assert_eq!(fx.v.burn_record(&1), None);
+    fx.sac.set_authorized(&fx.vault, &true);
+    fx.release(&fx.item(1, &to, U));
+    fx.assert_whole();
 }
 
 #[test]
 fn issuer_without_revocable_flag_cannot_deauthorize_or_claw_back() {
     let fx = fx_issuer(&[]);
     fx.dep(5_000 * U);
-    let a = fx.sac.try_set_authorized(&fx.vault, &false);
-    let c = fx.sac.try_clawback(&fx.vault, &10);
-    std::println!("OBSERVE no flags: deauthorize {:?} clawback {:?}", a, c);
-    assert!(a.is_err() && c.is_err());
+    assert_eq!(fx.sac.try_set_authorized(&fx.vault, &false), Err(Ok(sac_error(SAC_OPERATION_NOT_SUPPORTED))));
+    assert_eq!(fx.sac.try_clawback(&fx.vault, &10), Err(Ok(sac_error(SAC_BALANCE_ERROR))));
     fx.assert_whole();
 }
 
 #[test]
-fn issuer_auth_required_flag_observed() {
+fn issuer_auth_required_vault_must_be_authorized_before_the_first_deposit() {
     let fx = fx_issuer(&[IssuerFlags::RequiredFlag, IssuerFlags::RevocableFlag]);
     let from = Address::generate(&fx.env);
-    let m = fx.sac.try_mint(&from, &(100 * U as i128 * 10));
-    std::println!("OBSERVE auth required: mint to a new holder {:?}", m);
+    // With the issuer's auth-required flag every new balance starts unauthorized, the vault's included.
+    assert_eq!(fx.sac.try_mint(&from, &(100 * U as i128 * 10)), Err(Ok(sac_error(SAC_BALANCE_DEAUTHORIZED))));
     fx.sac.set_authorized(&from, &true);
     fx.sac.mint(&from, &(100 * U as i128 * 10));
-    let d = fx.try_dep(&from, 100 * U);
-    std::println!("OBSERVE auth required: deposit into an unauthorized vault {:?}", d);
+    assert_eq!(raw_err(fx.try_dep(&from, 100 * U)), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    assert_eq!(fx.v.state().deposit_count, 0);
     fx.sac.set_authorized(&fx.vault, &true);
-    let d = fx.try_dep(&from, 100 * U);
-    std::println!("OBSERVE auth required: deposit into an authorized vault {:?}", d);
+    fx.try_dep(&from, 100 * U).unwrap().unwrap();
+    // A release to a recipient the issuer has not authorized fails in the asset and consumes nothing.
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, U);
+    let mut ctx = fx.ctx();
+    ctx.valid_until = fx.now() + DAY;
+    let cert = fx.rcert(&item, &ctx, 5);
+    assert_eq!(raw_err(fx.v.try_release(&item, &ctx, &cert)), sac_error(SAC_BALANCE_DEAUTHORIZED));
+    assert_eq!(fx.v.burn_record(&1), None);
+    fx.sac.set_authorized(&to, &true);
+    fx.v.release(&item, &ctx, &cert);
+    fx.assert_whole();
 }
 
 // ── 10. storage and archival ───────────────────────────────────────────────────
@@ -2868,7 +3003,8 @@ fn storage_records_are_written_with_at_least_record_ttl() {
     let item = fx.item(1, &to, U);
     fx.release(&item);
     let max = fx.env.as_contract(&fx.vault, || fx.env.storage().max_ttl());
-    std::println!("OBSERVE max_ttl {}", max);
+    // The test ledger's maximum (6,311,999) is above both constants, so neither is capped here.
+    assert!(max >= INSTANCE_TTL);
     let record_ttl = RECORD_TTL.min(max);
     let (nonce_ttl, burn_ttl, head_ttl, instance_ttl) = fx.env.as_contract(&fx.vault, || {
         (
@@ -2878,12 +3014,37 @@ fn storage_records_are_written_with_at_least_record_ttl() {
             fx.env.storage().instance().get_ttl(),
         )
     });
-    std::println!("OBSERVE ttl nonce {} burn {} head {} instance {}", nonce_ttl, burn_ttl, head_ttl, instance_ttl);
     assert!(nonce_ttl >= record_ttl);
     assert!(burn_ttl >= record_ttl);
     assert!(head_ttl >= record_ttl);
     assert!(instance_ttl >= INSTANCE_TTL.min(max) / 2);
     assert!(instance_ttl >= record_ttl);
+    // Exactly, in this run (all written in the current ledger).
+    assert_eq!((nonce_ttl, burn_ttl, head_ttl, instance_ttl), (RECORD_TTL, RECORD_TTL, RECORD_TTL, INSTANCE_TTL));
+}
+
+#[test]
+fn storage_queue_and_cancel_records_get_record_ttl_and_instance_is_extended() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, 2_000 * U);
+    let id = fx.release_id(&item);
+    fx.release(&item);
+    let ttl = |k: Key| fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().get_ttl(&k));
+    assert_eq!(ttl(Key::Pending(id.clone())), RECORD_TTL);
+    // Later, the cancel rewrites the nonce record with a fresh TTL.
+    fx.env.ledger().with_mut(|l| l.sequence_number += 1_000);
+    assert_eq!(ttl(Key::Nonce(1)), RECORD_TTL - 1_000);
+    fx.try_cancel(&id, &[0, 1]).unwrap().unwrap();
+    assert_eq!(ttl(Key::Nonce(1)), RECORD_TTL);
+    assert_eq!(ttl(Key::Burn(item.native_burn.clone())), RECORD_TTL - 1_000);
+    // The instance is extended back to INSTANCE_TTL once it has fallen below half of it.
+    let instance = || fx.env.as_contract(&fx.vault, || fx.env.storage().instance().get_ttl());
+    assert_eq!(instance(), INSTANCE_TTL - 1_000);
+    fx.env.ledger().with_mut(|l| l.sequence_number += INSTANCE_TTL / 2);
+    assert_eq!(instance(), INSTANCE_TTL / 2 - 1_000);
+    fx.v.sweep_fees();
+    assert_eq!(instance(), INSTANCE_TTL);
 }
 
 #[test]
@@ -2897,14 +3058,31 @@ fn storage_uses_no_temporary_entries() {
     fx.pause(0);
     fx.try_unpause(6).unwrap().unwrap();
     fx.v.sweep_fees();
-    let (temporary, persistent) = fx.env.as_contract(&fx.vault, || {
-        (fx.env.storage().temporary().all().len(), fx.env.storage().persistent().all().len())
+    // The test host lists the entries of every contract here (the asset's balances are persistent entries too), so
+    // no contract in this run, the asset included, wrote a temporary entry.
+    let (temporary, present, queued) = fx.env.as_contract(&fx.vault, || {
+        let p = fx.env.storage().persistent();
+        let present = p.has(&Key::Head(1))
+            && p.has(&Key::Nonce(1))
+            && p.has(&Key::Burn(fx.burn(1)))
+            && p.has(&Key::Nonce(2))
+            && p.has(&Key::Burn(fx.burn(2)));
+        let t = fx.env.storage().temporary();
+        let in_temporary = t.has(&Key::Head(1)) || t.has(&Key::Nonce(1)) || t.has(&Key::Nonce(2)) || t.has(&Key::State);
+        assert!(!in_temporary);
+        (t.all().len(), present, p.has(&Key::Pending(fx.release_id(&queued))))
     });
     assert_eq!(temporary, 0);
-    // Head(1), Nonce(1), Burn(1), Nonce(2), Burn(2); the cancelled Pending entry is gone.
-    assert_eq!(persistent, 5);
+    assert!(present);
+    // The cancelled Pending entry is gone.
+    assert!(!queued);
 }
 
+/// What the SDK 29 test host does with a persistent entry whose TTL ended: it restores it by itself. Once the ledger
+/// sequence is past the entry's live-until ledger, the entry is served again as if restored in the current ledger
+/// (its TTL reads as the minimum persistent TTL less one, 4,095), with no error, no panic and no explicit restore
+/// step. So an archived-and-missing record cannot be produced here; what is asserted is the required property: with
+/// the record's TTL over, neither the old certificate nor a fresh one for the same burn is ever paid.
 #[test]
 fn storage_replay_after_the_record_ttl_never_succeeds() {
     let fx = fx_funded();
@@ -2915,25 +3093,39 @@ fn storage_replay_after_the_record_ttl_never_succeeds() {
     let cert = fx.rcert(&item, &ctx, 5);
     fx.v.release(&item, &ctx, &cert);
     let paid = fx.bal(&to);
+    let st = fx.v.state();
     let nonce_ttl = fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().get_ttl(&Key::Nonce(1)));
-    // Only the sequence moves: the close time stays, so the certificate itself is still within its validity.
+    // Only the sequence moves: the close time stays, so the certificate itself is still within its validity and the
+    // replay records are the only thing between it and a second payment.
     fx.env.ledger().with_mut(|l| l.sequence_number += nonce_ttl + 1);
+    // The entry's live-until ledger is now in the past, and the host reports it as just restored.
+    let ttl = catch_unwind(AssertUnwindSafe(|| {
+        fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().get_ttl(&Key::Nonce(1)))
+    }));
+    assert_eq!(ttl.ok(), Some(4_095));
+    // The old certificate.
     let r = catch_unwind(AssertUnwindSafe(|| fx.v.try_release(&item, &ctx, &cert)));
-    match &r {
-        Ok(v) => std::println!("OBSERVE replay past ttl returned {:?}", v),
-        Err(_) => std::println!("OBSERVE replay past ttl panicked"),
-    }
-    let v = catch_unwind(AssertUnwindSafe(|| fx.v.burn_record(&1)));
-    match &v {
-        Ok(v) => std::println!("OBSERVE burn_record past ttl {:?}", v),
-        Err(_) => std::println!("OBSERVE burn_record past ttl panicked"),
-    }
-    let b = catch_unwind(AssertUnwindSafe(|| fx.bal(&to)));
-    match &b {
-        Ok(v) => std::println!("OBSERVE balance past ttl {:?} (paid {})", v, paid),
-        Err(_) => std::println!("OBSERVE balance past ttl panicked"),
-    }
-    assert!(!matches!(r, Ok(Ok(Ok(())))));
+    assert!(!matches!(r, Ok(Ok(_))), "the replay was accepted");
+    // In this host it is an ordinary refusal: the expired record is read as restored.
+    assert_eq!(err_of(r.unwrap()), Error::InvalidRelease);
+    // A fresh certificate of the whole committee for the same nonce and burn.
+    let r = catch_unwind(AssertUnwindSafe(|| fx.try_release_n(&item, &ctx, 7)));
+    assert!(!matches!(r, Ok(Ok(_))), "the re-certified replay was accepted");
+    assert_eq!(err_of(r.unwrap()), Error::InvalidRelease);
+    // Same nonce under another burn id, same burn id under another nonce.
+    let mut other_burn = item.clone();
+    other_burn.native_burn = fx.burn(2);
+    assert_eq!(err_of(fx.try_release_n(&other_burn, &ctx, 7)), Error::InvalidRelease);
+    let mut other_nonce = item.clone();
+    other_nonce.nonce = 2;
+    assert_eq!(err_of(fx.try_release_n(&other_nonce, &ctx, 7)), Error::InvalidRelease);
+    assert_eq!(fx.bal(&to), paid);
+    assert_eq!(fx.v.state(), st);
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: false }));
+    assert_eq!(fx.v.released_burn(&item.native_burn), Some(1));
+    // A new burn is still paid, and its records are written with a full TTL.
+    fx.release(&fx.item(3, &to, U));
+    assert_eq!(fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().get_ttl(&Key::Nonce(3))), RECORD_TTL);
 }
 
 // ── 11. books invariant under a randomized sequence ────────────────────────────
@@ -3040,7 +3232,6 @@ fn books_invariant_holds_under_randomized_operations() {
         let b = fx.v.backing();
         assert_eq!(b.balance, b.required);
     }
-    std::println!("OBSERVE random run counts {:?}", count);
     assert_eq!(fx.bal(&fx.fee_recipient), swept as i128 * 10);
     let out: i128 = recipients.iter().map(|r| fx.bal(r)).sum();
     let held: i128 = users.iter().map(|u| fx.bal(u)).sum();

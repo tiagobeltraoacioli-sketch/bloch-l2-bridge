@@ -40,8 +40,7 @@ import stellar_net as sn  # noqa: E402
 
 PASSPHRASE = 'Standalone Network ; February 2017'
 TOKEN_CREATION_KECCAK = '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7'
-ANVIL_KEYS = ['0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-              '0x59c6995e998f97a5a0044966f0945389dc9d86dae88c7a8412f4603b6b78690d']
+ANVIL_KEYS = ['0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', None]  # anvil's account 0; the user
 U = 10**6           # one USDC in L2 units
 S = 10**7           # one USDC in stroops
 results = []
@@ -65,7 +64,8 @@ class Rig:
         self.anvil_port = int(a.get('--anvil-port', 0))
         self.l2 = f'http://127.0.0.1:{self.anvil_port}'
         self.xdg = self.dir / 'xdg'
-        self.env = dict(os.environ, XDG_CONFIG_HOME=str(self.xdg))
+        # Identities live in this run's own directory, whatever the caller's environment says.
+        self.env = dict(os.environ, XDG_CONFIG_HOME=str(self.xdg), STELLAR_CONFIG_HOME=str(self.xdg / 'stellar'))
         self.addr = {}
         self.procs = []
 
@@ -166,6 +166,9 @@ class Rig:
                      '--amount', str(1_000_000 * S))
         self.token = self.stellar('contract', 'asset', 'deploy', '--asset', self.asset, '--source-account', 'issuer',
                                   *self.net_args()).splitlines()[-1]
+        # Anyone may pay rent for any entry: keep the asset contract alive on networks with short entry lifetimes.
+        self.stellar('contract', 'extend', '--id', self.token, '--source-account', 'relayer', '--ledgers-to-extend',
+                     '500000', *self.net_args())
         lab = lambda s: hashlib.sha256(s.encode()).hexdigest()  # noqa: E731
         self.config = {
             'token': self.token, 'source_domain': lab('stellar-standalone'), 'native_domain': lab('bloch-l2-31337'),
@@ -279,7 +282,10 @@ class Rig:
         dep = json.loads(self.cast('send', '--private-key', ANVIL_KEYS[0], '--rpc-url', self.l2, '--json', '--create',
                                    rart['bytecode']['object'] + rargs[2:]))
         self.router = dep['contractAddress'].lower()
-        self.alice = self.cast('wallet', 'address', '--private-key', ANVIL_KEYS[1]).lower()
+        k = json.loads(self.cast('wallet', 'new', '--json'))[0]   # the L2 user: a fresh throwaway key, funded here
+        ANVIL_KEYS[1] = k['private_key']
+        self.alice = k['address'].lower()
+        self.cast('rpc', 'anvil_setBalance', self.alice, hex(10**20), '--rpc-url', self.l2)
         self.code_keccak = self.cast('keccak', self.cast('code', self.l2token, '--rpc-url', self.l2))
 
     def signer_configs(self, others=None):
@@ -780,7 +786,8 @@ def archival_flow(r):
     settings = json.loads(r.stellar('network', 'settings', *r.net_args(), '--output', 'json'))
     arch = [e['state_archival'] for e in settings['updated_entry'] if 'state_archival' in e][0]
     notes['state_archival'] = arch
-    check('archival net: persistent entries live only a few ledgers here', int(arch['max_entry_ttl']) <= 200, arch)
+    check('archival net: a new persistent entry lives only a few ledgers here (min_persistent_ttl <= 60)',
+          int(arch['min_persistent_ttl']) <= 60, arch)
     ok, sent = r.open_vault()
     check('archival net: vault opened', ok, sent)
     ok, dep = r.deposit(1_000 * S, '0x' + '0a' * 20)
@@ -803,11 +810,13 @@ def archival_flow(r):
     # The worst case: the committee signs the SAME burn again with a fresh validity (fooled signers). Try every route.
     f2, _ = r.direct_release(1, payee, 100 * U, 1, [0, 1, 2, 3, 4], valid=3000)
     ok, out = r.invoke('relayer', r.vault, 'release', **f2['args'])
-    notes['replay_after_expiry_direct'] = out[-700:]
+    notes['replay_after_expiry_direct'] = out[:1200]
     check('archival: a fresh certificate for the paid burn does NOT pay after the record expired (direct call)',
           not ok and r.balance(payee) == paid, out)
+    check('archival: that refusal is the vault\'s own (InvalidRelease #3): the expired record was restored for the '
+          'call and read', '#3' in out, out[:600])
     ok, out = r.invoke('relayer', r.vault, 'release', **f['args'])
-    notes['replay_after_expiry_same_cert'] = out[-700:]
+    notes['replay_after_expiry_same_cert'] = out[:1200]
     check('archival: the original certificate does NOT pay after the record expired', not ok and r.balance(payee) == paid, out)
     rc, sent = r.submit(f2, key='replay-expired')
     notes['replay_after_expiry_relayer'] = sent

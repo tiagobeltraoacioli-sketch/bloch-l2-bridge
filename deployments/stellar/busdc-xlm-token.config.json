@@ -1,0 +1,40 @@
+{
+  "domain": "bloch.bridge.stellar-token-deploy.v1",
+  "status": "PROTOTYPE, UNAUDITED. Nothing is deployed.",
+  "notes": {
+    "contract": "contracts/stable/BridgedStablecoinV3.sol, byte-identical to the Ethereum bridge's launch token (creation code keccak 0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7); only constructor arguments differ",
+    "source": "sourceChainId is the Stellar network id (sha256 of the network passphrase) as a uint256; sourceVault is the low 20 bytes of the vault's contract id; sourceRoute is the vault's route. All three come from the DEPLOYED vault: tools/signatario-stellar/pairing.py args prints them, pairing.py check verifies them and the mint-chain genesis after the deploy",
+    "committee": "the same 7 `l2-mint-signer` and 3 `l2-token-guardian` keys as bUSDC (EIP-712 binds the token address, so a signature for one token is not valid for another)",
+    "vaultSection": "the vault's signer and guardian sets as deployed, for pairing.py check",
+    "limits": "as bUSDC: T = 0 (every mint waits 12 h and is cancellable), bucket 10,000 a day, cap 100,000, minBurn 10",
+    "router": "contracts/stellar/StellarBurnRouter.sol is deployed after the token, with the token as its only argument; it has no power",
+    "deployTool": "tools/deploy-pontes/deploy_pontes.py validates an Ethereum vault on an Ethereum RPC and is NOT adapted to a Stellar source; the owner deploys with the arguments pairing.py prints (docs/STELLAR-BRIDGE-DEPLOY.md section 5)"
+  },
+  "network": {"name": "bloch-l2-mainnet", "chainId": 700770, "rehearsal": false},
+  "token": {
+    "contract": "BridgedStablecoinV3",
+    "name": "Bloch Bridged USDC (Stellar)",
+    "symbol": "bUSDC.xlm",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeKeccak": null
+  },
+  "stellar": {
+    "networkPassphrase": "Public Global Stellar Network ; September 2015",
+    "sourceChainId": "55527100184162397446267447655670856106844621679976070008664532462234000271737",
+    "vault": "TBD-deploy",
+    "sourceVault": "TBD-deploy",
+    "sourceRoute": "TBD-deploy"
+  },
+  "vault": {"signers": ["TBD-owner"], "guardians": ["TBD-owner"]},
+  "signers": {"threshold": 5, "set": [
+    {"operator": null, "address": "TBD-owner"}, {"operator": null, "address": "TBD-owner"},
+    {"operator": null, "address": "TBD-owner"}, {"operator": null, "address": "TBD-owner"},
+    {"operator": null, "address": "TBD-owner"}, {"operator": null, "address": "TBD-owner"},
+    {"operator": null, "address": "TBD-owner"}]},
+  "guardians": {"pauseDuration": 259200, "pauseCooldown": 259200, "set": [
+    {"operator": null, "address": "TBD-owner"}, {"operator": null, "address": "TBD-owner"},
+    {"operator": null, "address": "TBD-owner"}]},
+  "mintSwitch": {"threshold": 6, "delay": 1209600},
+  "limits": {"supplyCap": 100000000000, "bucketCapacity": 10000000000, "refillPerSecond": 115740,
+             "largeMintThreshold": 0, "largeMintDelay": 43200, "minBurn": 10000000}
+}

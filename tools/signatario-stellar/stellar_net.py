@@ -229,6 +229,7 @@ class Net:
         env = dict(os.environ)
         if self.cfg.get('stellar_config_dir'):
             env['XDG_CONFIG_HOME'] = self.cfg['stellar_config_dir']
+            env['STELLAR_CONFIG_HOME'] = str(Path(self.cfg['stellar_config_dir']) / 'stellar')
         done = subprocess.run([self.cli] + argv, capture_output=True, text=True, input=stdin, env=env)
         if done.returncode:
             raise StellarError(f'{what} failed: {(done.stderr or done.stdout).strip()[-1500:]}')

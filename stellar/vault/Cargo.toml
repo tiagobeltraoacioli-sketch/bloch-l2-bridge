@@ -10,6 +10,10 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
+[features]
+# Rehearsal only: RECORD_TTL becomes 30 ledgers (see lib.rs). The deployed Wasm is built without it.
+rehearsal-short-ttl = []
+
 [dependencies]
 soroban-sdk = { workspace = true, features = ["hazmat-address"] }
 
