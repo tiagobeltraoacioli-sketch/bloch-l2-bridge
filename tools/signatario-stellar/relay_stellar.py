@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Relayer for the Stellar vault: submits calls anyone may submit (a combined release, a queued release that is due,
-the fee sweep, committee controls, a guardian's signed pause, an unpause, a guardian cancel). It holds no bridge key:
+the fee sweep, committee controls, a guardian's signed pause, an unpause). It holds no bridge key:
 only a Stellar account that pays the fee. The certificate inside the call is what the vault checks.
 
   relay_stellar.py --config RELAY.json submit --call CALL.json [--key NAME]
@@ -13,10 +13,9 @@ transaction is built and simulated against the relayer's own RPC, signed, and it
 the journal BEFORE it is sent. A Stellar transaction is identified by its hash and can be applied at most once (its
 sequence number), so resending the journaled envelope is always safe, and a new one is built only when the journaled
 one is known dead: applied and failed, or its sequence number consumed by something else. For a release, a new
-transaction is never built once the vault records the burn nonce (live or archived): the release is done. The one
-exception is the vault's own: a `generation` 1 release (the certificate of the switch quorum after a guardian cancel)
-is built only while the vault's record of that nonce is live and says cancelled, generation 0, and its burn id is
-absent; it is journaled under its own key.
+transaction is never built while the vault counts the burn (`burn_status` 1 queued or 2 paid: done) or counts its
+nonce or id for another release (3: refused). A release that a guardian pause voided is open again (0), and its new
+certificate, signed under the new pause count, is journaled under its own key.
 
 Config: `stellar_rpc`, `network_passphrase`, `vault`, `relayer` (the G... address that pays), `relayer_identity`
 (the `stellar` CLI identity that signs for it), `journal` (directory); optional `stellar_cli`, `stellar_config_dir`.
@@ -59,9 +58,8 @@ def submit(cfg, call, key):
     journal = Path(cfg['journal'])
     journal.mkdir(parents=True, exist_ok=True)
     fn, args = call['fn'], call['args']
-    generation = int(args['item'].get('generation', 0)) if fn == 'release' else 0
     if key is None:
-        key = (f"release-{args['item']['nonce']}" + ('-g1' if generation == 1 else '')) if fn == 'release' \
+        key = f"release-{args['item']['nonce']}-p{args['context']['pause_count']}" if fn == 'release' \
             else f'{fn}-{int(time.time())}'
     path = journal / f'{key}.json'
     entry = json.loads(path.read_text()) if path.exists() else None
@@ -86,13 +84,12 @@ def submit(cfg, call, key):
         write_json(path, entry)
 
     if fn == 'release':
-        for name, value in (('Nonce', args['item']['nonce']), ('Burn', args['item']['native_burn'])):
-            state, record = net.record_value(name, value)
-            if name == 'Nonce' and generation == 1 and state == 'live' and isinstance(record, dict) \
-                    and record.get('cancelled') is True and int(record.get('generation', -1)) == 0:
-                continue  # cancelled by the guardians: the vault accepts one locked certificate for this nonce
-            if state != 'absent':
-                out(True, key=key, status='DONE', note=f'the vault already records this burn ({name} is {state})')
+        status = net.burn_status(args['item']['nonce'], args['item']['native_burn'])
+        if status in (1, 2):
+            out(True, key=key, status='DONE', note='the vault already records this burn ('
+                + ('queued' if status == 1 else 'paid') + ')')
+        if status != 0:
+            out(False, key=key, status='REFUSED', error='the vault counts this nonce or burn id for another release')
     try:
         envelope = net.sign(net.build(cfg['relayer'], fn, **args), cfg['relayer_identity'])
     except sn.StellarError as e:

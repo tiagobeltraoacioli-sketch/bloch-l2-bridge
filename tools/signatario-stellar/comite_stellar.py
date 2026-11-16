@@ -64,7 +64,8 @@ def sign(cfg, argv, args):
     if view != digest.hex():
         fail('the digest computed here differs from the vault\'s', local=digest.hex(), vault=view)
     ks = ['--keystore', cfg['keystore'], '--password-file', cfg['password_file']]
-    done = subprocess.run([cast, 'wallet', 'sign', '--no-hash'] + ks + ['0x' + digest.hex()], capture_output=True, text=True)
+    # An Ethereum personal message over the vault's digest (EIP-191; no `--no-hash`).
+    done = subprocess.run([cast, 'wallet', 'sign'] + ks + ['0x' + digest.hex()], capture_output=True, text=True)
     who = subprocess.run([cast, 'wallet', 'address'] + ks, capture_output=True, text=True).stdout.strip().lower()
     if done.returncode or who[2:] not in c['signers']:
         fail('signing failed, or this keystore is not one of the vault\'s signers', signer=who)

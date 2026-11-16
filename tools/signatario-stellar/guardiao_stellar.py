@@ -3,21 +3,19 @@
 a Stellar transaction, so every guardian action is a signature over a vault digest that any relayer submits.
 
   guardiao_stellar.py --config G.json pause  --out CALL.json
-  guardiao_stellar.py --config G.json cancel --id 0xRELEASEID [--valid-until T] --out PARTIAL.json
-  guardiao_stellar.py --config G.json combine-cancel --sig A.json --sig B.json --out CALL.json
   guardiao_stellar.py --config G.json check
 
-pause    signs `pause_digest(pause_count, valid_until)` for the vault's current pause count; valid for `valid_seconds`
-         (default 600). One guardian is enough. The vault refuses it if this guardian already paused in the current
-         chain, during a pause, or within the cooldown after a committee unpause.
-cancel   signs `cancel_digest(id, valid_until)` for a QUEUED release; a majority of the guardians (2 of 3) cancels.
-         The guardians must sign the same `valid_until`: the first one's is printed, the others pass it with
-         `--valid-until` (accepted only inside (ledger time, ledger time + one day]). It works only while the vault
-         was deployed with a release delay; with delay 0 nothing is ever queued and a guardian can only pause.
+pause    signs `pause_digest(pause_count, valid_until)` (an Ethereum personal message) for the vault's current pause
+         count; valid for `valid_seconds` (default 600). One guardian is enough. The vault refuses it if this
+         guardian already paused in the current chain, during a pause, or within the cooldown after a committee
+         unpause. A pause is the guardians' whole power, and it VOIDS: every release still queued and every
+         certificate signed before it is dead for good; the signers certify the real burns again by themselves
+         once the pause is over. There is no separate cancel.
 check    read-only: every release the vault paid or queued (its events in the RPC's retained window) must be a burn of
          the L2 token: `burnIdOf(nonce)` equals the release's burn id and a `Burned` log with that id carries the same
          amount and the commitment of the Stellar recipient, in a block at or below the L2's finalized block. Prints the
-         findings; exit 2 if any (the operator's unit then runs `pause`, and `cancel` for a queued one).
+         findings; exit 2 if any (the operator's unit then runs `pause`). A queued release that a pause already
+         voided pays no one: it is listed under `voided`, not as a finding.
 
 Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`, `keystore`, `password_file`; for `check` also
 `l2_rpc`, `token`, optional `l2_finalized_tag` (default "finalized"), `from_ledger`; optional `cast`, `stellar_cli`.
@@ -52,7 +50,7 @@ class Guardian:
 
     def sign(self, digest):
         ks = ['--keystore', self.cfg['keystore'], '--password-file', self.cfg['password_file']]
-        sig = self.run([self.cast, 'wallet', 'sign', '--no-hash'] + ks + ['0x' + digest.hex()]).lower()
+        sig = self.run([self.cast, 'wallet', 'sign'] + ks + ['0x' + digest.hex()]).lower()
         who = self.run([self.cast, 'wallet', 'address'] + ks).lower()
         return who, sig
 
@@ -78,39 +76,17 @@ class Guardian:
         Path(out).write_text(json.dumps(call, indent=2) + '\n')
         print(json.dumps(call, indent=2))
 
-    def cancel(self, rid, out, proposed=None):
-        d, c, latest = self.context()
-        rid = sn.b32(rid)
-        if self.net.view('pending', id=rid.hex()) is None:
-            fail('no queued release has this id')
-        valid_until = latest['close_time'] + int(self.cfg.get('valid_seconds', 600))
-        if proposed is not None:
-            valid_until = int(proposed)
-            if not latest['close_time'] < valid_until <= latest['close_time'] + sn.MAX_VALIDITY:
-                fail('the proposed valid_until is outside (ledger time, ledger time + one day]', valid_until=valid_until)
-        digest = sn.cancel_digest(self.net.passphrase, self.net.vault, d['route'], rid, valid_until)
-        if self.net.view('cancel_digest', id=rid.hex(), valid_until=valid_until) != digest.hex():
-            fail('the cancel digest computed here differs from the vault\'s')
-        who, sig = self.sign(digest)
-        if who[2:] not in c['guardians']:
-            fail('this keystore is not one of the vault\'s guardians', address=who)
-        part = {'kind': 'stellar-release-cancel', 'guardian': who, 'id': rid.hex(), 'valid_until': valid_until,
-                'signature': sig}
-        Path(out).write_text(json.dumps(part, indent=2) + '\n')
-        print(json.dumps(part, indent=2))
-
     def check(self):
         tok, l2 = self.cfg['token'], self.cfg['l2_rpc']
         fin_tag = self.cfg.get('l2_finalized_tag', 'finalized')
         fin = int(self.run([self.cast, 'block', fin_tag, '--rpc-url', l2, '--field', 'number']))
         health = self.net.health()
         start = max(int(self.cfg.get('from_ledger', 0)), int(health['oldestLedger']))
-        findings, seen, cancelled = [], 0, set()
+        findings, seen = [], 0
+        pause_count = int(self.net.view('state')['pause_count'])
         while True:
             events, latest, _ = self.net.events(start)
             for e in events:
-                if e['name'] == 'release_cancelled':
-                    cancelled.add(e['topics'][0])
                 if e['name'] not in ('released', 'release_queued'):
                     continue
                 seen += 1
@@ -138,26 +114,17 @@ class Guardian:
             if not events or events[-1]['ledger'] >= latest:
                 break
             start = events[-1]['ledger'] + 1
-        # A queued release the guardians already cancelled pays no one: reported, but no longer a finding.
-        done = [f for f in findings if f['release'] in cancelled and f['event'] == 'release_queued']
+        # A queued release that a pause voided pays no one: reported, but no longer a finding.
+        def voided(f):
+            if f['event'] != 'release_queued':
+                return False
+            pending = self.net.view('pending', id=f['release'])
+            return pending is None or int(pending['pause_count']) != pause_count
+        done = [f for f in findings if voided(f)]
         findings = [f for f in findings if f not in done]
         print(json.dumps({'ok': not findings, 'releases_checked': seen, 'l2_finalized': fin, 'findings': findings,
-                          'cancelled': done}, indent=2))
+                          'voided': done}, indent=2))
         raise SystemExit(2 if findings else 0)
-
-
-def combine_cancel(g, paths, out):
-    parts = [json.loads(Path(p).read_text()) for p in paths]
-    if not parts or any(p.get('kind') != 'stellar-release-cancel' or (p['id'], p['valid_until'])
-                        != (parts[0]['id'], parts[0]['valid_until']) for p in parts):
-        fail('the partials are not cancel signatures for one release id and validity')
-    by = {p['guardian']: p['signature'] for p in parts}
-    chosen = sorted(by, key=lambda a: int(a, 16))
-    call = {'kind': 'stellar-release-cancel-call', 'guardians': chosen,
-            'call': {'fn': 'cancel_release', 'args': {'id': parts[0]['id'], 'valid_until': parts[0]['valid_until'],
-                                                      'signatures': [by[a][2:] for a in chosen]}}}
-    Path(out).write_text(json.dumps(call, indent=2) + '\n')
-    print(json.dumps(call, indent=2))
 
 
 def main():
@@ -167,12 +134,8 @@ def main():
     args = {a: argv[i + 1] for i, a in enumerate(argv[:-1]) if a.startswith('--')}
     g = Guardian(json.loads(Path(args['--config']).read_text()))
     try:
-        if 'combine-cancel' in argv:
-            combine_cancel(g, [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == '--sig'], args['--out'])
-        elif 'pause' in argv:
+        if 'pause' in argv:
             g.pause(args['--out'])
-        elif 'cancel' in argv:
-            g.cancel(args['--id'], args['--out'], args.get('--valid-until'))
         elif 'check' in argv:
             g.check()
         else:

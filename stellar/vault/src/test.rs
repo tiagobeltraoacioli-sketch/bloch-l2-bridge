@@ -172,7 +172,20 @@ fn sorted_keys(scalars: core::ops::RangeInclusive<u64>) -> StdVec<Key20> {
 }
 
 /// r ‖ s ‖ v, low s, v = 27 / 28.
+/// keccak256("\x19Ethereum Signed Message:\n32" ‖ digest): what a key signs for the vault (EIP-191).
+fn personal(digest: &[u8; 32]) -> [u8; 32] {
+    let mut m = StdVec::from(&b"\x19Ethereum Signed Message:\n32"[..]);
+    m.extend_from_slice(digest);
+    keccak(&m)
+}
+
+/// A signature of `digest` as a personal message, as the committee's tools produce it.
 fn sign(k: &Key20, digest: &[u8; 32]) -> [u8; 65] {
+    sign_raw(k, &personal(digest))
+}
+
+/// Plain ECDSA over the 32 bytes given, low-s, v 27 or 28.
+fn sign_raw(k: &Key20, digest: &[u8; 32]) -> [u8; 65] {
     let (sig, rec) = k.sk.sign_prehash_recoverable(digest).unwrap();
     let mut rec = rec.to_byte();
     let sig = match sig.normalize_s() {
@@ -588,7 +601,6 @@ impl Fx {
             .u(i.mint_count)
             .u(i.minted_total)
             .b32(&i.mint_head.to_array())
-            .u(i.generation as u64)
             .sha256()
     }
 
@@ -601,6 +613,7 @@ impl Fx {
         self.domain_x("BLOCH-XLM-RELEASE-AUTH-v1")
             .b32(&self.release_id_x(i))
             .u(c.valid_until)
+            .u(c.pause_count)
             .u(c.native_finalized_number)
             .b32(&c.native_finalized_hash.to_array())
             .keccak()
@@ -622,10 +635,6 @@ impl Fx {
 
     fn unpause_digest_x(&self, count: u64, valid_until: u64) -> [u8; 32] {
         self.domain_x("BLOCH-XLM-UNPAUSE-v1").b32(&self.route).u(count).u(valid_until).keccak()
-    }
-
-    fn cancel_digest_x(&self, id: &[u8; 32], valid_until: u64) -> [u8; 32] {
-        self.domain_x("BLOCH-XLM-RELEASE-CANCEL-v1").b32(&self.route).b32(id).u(valid_until).keccak()
     }
 
     // certificates
@@ -690,13 +699,13 @@ impl Fx {
             mint_count: st.deposit_count,
             minted_total: st.total_locked,
             mint_head: st.deposit_head,
-            generation: 0,
         }
     }
 
     fn ctx(&self) -> ReleaseContext {
         ReleaseContext {
             valid_until: self.now() + HOUR,
+            pause_count: self.v.state().pause_count,
             native_finalized_number: 4_242,
             native_finalized_hash: b32(&self.env, &[0xab; 32]),
         }
@@ -741,12 +750,6 @@ impl Fx {
         self.v.try_unpause(&count, &valid_until, &self.first(n, &self.unpause_digest_x(count, valid_until)))
     }
 
-    fn try_cancel(&self, id: &BytesN<32>, guardians: &[usize]) -> Tried<(), soroban_sdk::ConversionError> {
-        let valid_until = self.now() + 600;
-        let d = self.cancel_digest_x(&id.to_array(), valid_until);
-        self.v.try_cancel_release(id, &valid_until, &self.gsigs(guardians, &d))
-    }
-
     /// The vault's own events of the last invocation.
     fn vault_events(&self) -> soroban_sdk::testutils::ContractEvents {
         self.env.events().all().filter_by_contract(&self.vault)
@@ -786,7 +789,8 @@ fn test_keys_recover_to_their_ethereum_addresses() {
     let d = keccak(b"digest");
     for k in sorted_keys(1..=7) {
         let s = sign(&k, &d);
-        assert_eq!(recover_x(&d, &s), Some(k.addr));
+        assert_eq!(recover_x(&personal(&d), &s), Some(k.addr));
+        assert_eq!(recover_x(&d, &sign_raw(&k, &d)), Some(k.addr));
         assert!(is_malleated_twin(&s, &high_s_twin(&s)));
     }
 }
@@ -868,7 +872,7 @@ fn release_id_and_digest_match_independent_computation() {
     // Every field moves the id.
     let base = fx.release_id_x(&item);
     let mut variants: StdVec<Release> = StdVec::new();
-    for k in 0..9 {
+    for k in 0..8 {
         let mut i = item.clone();
         match k {
             0 => i.route = b32(&fx.env, &[1; 32]),
@@ -878,8 +882,7 @@ fn release_id_and_digest_match_independent_computation() {
             4 => i.native_burn = b32(&fx.env, &[2; 32]),
             5 => i.mint_count += 1,
             6 => i.minted_total += 1,
-            7 => i.mint_head = b32(&fx.env, &[3; 32]),
-            _ => i.generation = 1,
+            _ => i.mint_head = b32(&fx.env, &[3; 32]),
         }
         variants.push(i);
     }
@@ -890,7 +893,7 @@ fn release_id_and_digest_match_independent_computation() {
 }
 
 #[test]
-fn control_pause_unpause_and_cancel_digests_match_independent_computation() {
+fn control_pause_and_unpause_digests_match_independent_computation() {
     let fx = fx();
     let t = fx.now() + 77;
     for (d, r) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -899,8 +902,6 @@ fn control_pause_unpause_and_cancel_digests_match_independent_computation() {
     assert_eq!(fx.v.pause_digest(&5, &t).to_array(), fx.pause_digest_x(5, t));
     assert_eq!(fx.v.unpause_digest(&5, &t).to_array(), fx.unpause_digest_x(5, t));
     assert_ne!(fx.v.pause_digest(&5, &t), fx.v.unpause_digest(&5, &t));
-    let id = [0x5a; 32];
-    assert_eq!(fx.v.cancel_digest(&b32(&fx.env, &id), &t).to_array(), fx.cancel_digest_x(&id, t));
 }
 
 // ── 1. constructor ─────────────────────────────────────────────────────────────
@@ -1022,7 +1023,7 @@ fn ctor_accepts_boundary_values() {
     let fx = fx_with(|c, _| {
         c.deposit_fee_bps = 30;
         c.release_fee_bps = 30;
-        c.release_delay = 14 * DAY;
+        c.release_delay = 7 * DAY;
         c.pause_duration = 14 * DAY;
         c.pause_cooldown = 14 * DAY;
         c.threshold = 2;
@@ -1406,7 +1407,7 @@ fn release_pays_amount_less_fee_and_updates_books() {
     fx.assert_whole();
     assert_eq!(
         fx.v.burn_record(&1),
-        Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: false })
+        Some(BurnRecord { burn: item.native_burn.clone(), pause_count: 0, paid: true })
     );
     assert_eq!(fx.v.released_burn(&item.native_burn), Some(1));
     assert_eq!(fx.v.pending(&fx.release_id(&item)), None);
@@ -1507,15 +1508,6 @@ fn release_refused_for_zero_burn_id() {
     let mut item = fx.item(1, &to, U);
     item.native_burn = b32(&fx.env, &[0; 32]);
     assert_release_refused(&fx, &item, fx.try_release(&item), Error::InvalidRelease);
-}
-
-#[test]
-fn release_refused_for_generation_above_one() {
-    let fx = fx_funded();
-    let to = Address::generate(&fx.env);
-    let mut item = fx.item(1, &to, U);
-    item.generation = 2;
-    assert_release_refused(&fx, &item, fx.try_release_n(&item, &fx.ctx(), 7), Error::InvalidRelease);
 }
 
 #[test]
@@ -2086,12 +2078,11 @@ fn queue_release_above_threshold_waits_and_then_pays() {
         amount: 1_000 * U + 1,
         native_burn: item.native_burn.clone(),
         ready_at,
-        generation: 0,
     };
     assert_eq!(ev, [queued.to_xdr(&fx.env, &fx.vault)]);
     // Queued: recorded, nothing paid, books and bucket untouched.
-    assert_eq!(fx.v.pending(&id), Some(Pending { recipient: to.clone(), amount: 1_000 * U + 1, ready_at, nonce: 1 }));
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: false }));
+    assert_eq!(fx.v.pending(&id), Some(Pending { recipient: to.clone(), amount: 1_000 * U + 1, ready_at, nonce: 1, pause_count: 0 }));
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), pause_count: 0, paid: false }));
     assert_eq!(fx.v.released_burn(&item.native_burn), Some(1));
     assert_eq!(fx.bal(&to), 0);
     assert_eq!(fx.v.state(), st);
@@ -2131,25 +2122,8 @@ fn queue_certificate_cannot_be_queued_twice() {
     let cert = fx.rcert(&item, &ctx, 5);
     fx.v.release(&item, &ctx, &cert);
     assert_eq!(err_of(fx.v.try_release(&item, &ctx, &cert)), Error::InvalidRelease);
-    let mut again = item.clone();
-    again.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&again, &fx.ctx(), 7)), Error::InvalidRelease);
-}
-
-#[test]
-fn queue_execute_refused_while_paused() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    fx.pause(0);
-    fx.advance(HOUR);
-    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Paused);
-    assert!(fx.v.pending(&id).is_some());
-    fx.advance(71 * HOUR);
-    fx.v.execute_release(&id);
-    assert_eq!(fx.bal(&to), (2_000 * U as i128 - 1_000_000) * 10);
+    // Nor does a fresh certificate of all seven signers queue it again while it is queued.
+    assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
 }
 
 #[test]
@@ -2184,287 +2158,6 @@ fn queue_execute_is_rate_limited_like_any_release() {
     fx.assert_whole();
 }
 
-#[test]
-fn queue_cancel_by_guardian_majority_removes_the_release() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    let st = fx.v.state();
-    fx.try_cancel(&id, &[0, 2]).unwrap().unwrap();
-    let ev = fx.vault_events();
-    let cancelled = ReleaseCancelled { id: id.clone(), nonce: 1, native_burn: item.native_burn.clone() };
-    assert_eq!(ev, [cancelled.to_xdr(&fx.env, &fx.vault)]);
-    assert_eq!(fx.v.pending(&id), None);
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: true }));
-    // The burn id is forgotten: the cancelled release was never paid, and the burn it names is not lost.
-    assert_eq!(fx.v.released_burn(&item.native_burn), None);
-    assert_eq!(fx.v.state(), st);
-    fx.advance(HOUR);
-    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::NotQueued);
-    assert_eq!(fx.bal(&to), 0);
-    // Cancelling again: nothing is queued.
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotQueued);
-}
-
-#[test]
-fn queue_cancel_accepts_all_three_guardians() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    fx.release(&item);
-    fx.try_cancel(&fx.release_id(&item), &[0, 1, 2]).unwrap().unwrap();
-}
-
-#[test]
-fn queue_cancel_refused_with_one_guardian_of_three() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    for g in 0..3 {
-        assert_eq!(err_of(fx.try_cancel(&id, &[g])), Error::InvalidCertificate);
-    }
-    // The same guardian twice is not two guardians.
-    assert_eq!(err_of(fx.try_cancel(&id, &[1, 1])), Error::InvalidCertificate);
-    assert_eq!(err_of(fx.try_cancel(&id, &[2, 0])), Error::InvalidCertificate);
-    assert!(fx.v.pending(&id).is_some());
-}
-
-#[test]
-fn queue_cancel_refused_with_signer_keys() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    let valid_until = fx.now() + 600;
-    let d = fx.cancel_digest_x(&id.to_array(), valid_until);
-    for n in [2usize, 3] {
-        let r = fx.v.try_cancel_release(&id, &valid_until, &fx.first(n, &d));
-        assert_eq!(err_of(r), Error::InvalidCertificate);
-    }
-    // One guardian and one signer.
-    let mut keys = vec![&fx.guardians[0], &fx.signers[0]];
-    keys.sort_by(|a, b| a.addr.cmp(&b.addr));
-    assert_eq!(err_of(fx.v.try_cancel_release(&id, &valid_until, &fx.cert(&keys, &d))), Error::InvalidCertificate);
-    assert!(fx.v.pending(&id).is_some());
-}
-
-#[test]
-fn queue_cancel_refused_for_wrong_id_validity_or_instance() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    let now = fx.now();
-    // Signed for another release id.
-    let d = fx.cancel_digest_x(&[7; 32], now + 600);
-    assert_eq!(err_of(fx.v.try_cancel_release(&id, &(now + 600), &fx.gsigs(&[0, 1], &d))), Error::InvalidCertificate);
-    // Expired and too far.
-    for t in [now - 1, now + DAY + 1] {
-        let d = fx.cancel_digest_x(&id.to_array(), t);
-        assert_eq!(err_of(fx.v.try_cancel_release(&id, &t, &fx.gsigs(&[0, 1], &d))), Error::InvalidContext);
-    }
-    // Signed for another deployment.
-    let other = fx.sibling();
-    let d = other.cancel_digest_x(&id.to_array(), now + 600);
-    assert_eq!(err_of(fx.v.try_cancel_release(&id, &(now + 600), &fx.gsigs(&[0, 1], &d))), Error::InvalidCertificate);
-    assert!(fx.v.pending(&id).is_some());
-}
-
-#[test]
-fn queue_cancelled_burn_refuses_old_and_new_generation_0_certificates() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    let ctx = fx.ctx();
-    let cert = fx.rcert(&item, &ctx, 5);
-    fx.v.release(&item, &ctx, &cert);
-    fx.try_cancel(&fx.release_id(&item), &[0, 1]).unwrap().unwrap();
-    assert_eq!(err_of(fx.v.try_release(&item, &ctx, &cert)), Error::InvalidRelease);
-    // A new generation-0 certificate, even by all seven signers and for a small (instant) amount.
-    assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
-    let mut small = item.clone();
-    small.amount = U;
-    assert_eq!(err_of(fx.try_release_n(&small, &fx.ctx(), 7)), Error::InvalidRelease);
-    assert_eq!(fx.bal(&to), 0);
-}
-
-#[test]
-fn queue_generation_1_needs_switch_threshold() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    fx.release(&item);
-    fx.try_cancel(&fx.release_id(&item), &[1, 2]).unwrap().unwrap();
-    let mut again = item.clone();
-    again.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&again, &fx.ctx(), 5)), Error::InvalidCertificate);
-    assert_eq!(fx.v.pending(&fx.release_id(&again)), None);
-    assert!(fx.v.burn_record(&1).unwrap().cancelled);
-}
-
-#[test]
-fn queue_generation_1_queues_again_and_cannot_be_cancelled() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 2_000 * U);
-    fx.release(&item);
-    fx.try_cancel(&fx.release_id(&item), &[1, 2]).unwrap().unwrap();
-    let mut again = item.clone();
-    again.generation = 1;
-    let id = fx.release_id(&again);
-    assert_ne!(id, fx.release_id(&item));
-    fx.try_release_n(&again, &fx.ctx(), 6).unwrap().unwrap();
-    let ready_at = fx.now() + HOUR;
-    assert_eq!(fx.v.pending(&id), Some(Pending { recipient: to.clone(), amount: 2_000 * U, ready_at, nonce: 1 }));
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 1, cancelled: false }));
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1])), Error::NotCancellable);
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotCancellable);
-    // A third certificate is refused whatever its generation.
-    for generation in [0u32, 1] {
-        let mut third = item.clone();
-        third.generation = generation;
-        assert_eq!(err_of(fx.try_release_n(&third, &fx.ctx(), 7)), Error::InvalidRelease);
-    }
-    fx.advance(HOUR);
-    fx.v.execute_release(&id);
-    assert_eq!(fx.bal(&to), (2_000 * U as i128 - 1_000_000) * 10);
-    fx.assert_whole();
-    assert_eq!(err_of(fx.try_release_n(&again, &fx.ctx(), 7)), Error::InvalidRelease);
-}
-
-/// A cancelled, queued release under nonce 1; returns the cancelled item.
-fn cancelled_release(fx: &Fx, to: &Address) -> Release {
-    let item = fx.item(1, to, 2_000 * U);
-    fx.release(&item);
-    fx.try_cancel(&fx.release_id(&item), &[1, 2]).unwrap().unwrap();
-    item
-}
-
-#[test]
-fn queue_generation_1_may_name_another_burn_id_for_the_cancelled_nonce() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let cancelled = cancelled_release(&fx, &to);
-    // The real burn of nonce 1: another id, another recipient, another amount.
-    let real_to = Address::generate(&fx.env);
-    let mut real = fx.item(1, &real_to, 1_500 * U);
-    real.generation = 1;
-    real.native_burn = fx.burn(55);
-    let id = fx.release_id(&real);
-    // `threshold` signatures are not enough for it either.
-    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 5)), Error::InvalidCertificate);
-    assert_eq!(fx.v.released_burn(&real.native_burn), None);
-    fx.try_release_n(&real, &fx.ctx(), 6).unwrap().unwrap();
-    let ready_at = fx.now() + HOUR;
-    assert_eq!(fx.v.pending(&id), Some(Pending { recipient: real_to.clone(), amount: 1_500 * U, ready_at, nonce: 1 }));
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: real.native_burn.clone(), generation: 1, cancelled: false }));
-    assert_eq!(fx.v.released_burn(&real.native_burn), Some(1));
-    // The cancelled id is forgotten. Under nonce 1 (taken by the locked certificate) and as a generation-1
-    // certificate of a nonce that was never cancelled it is refused; as an ordinary burn of another nonce it is a
-    // burn like any other (see cancel_of_a_forgery_that_used_a_real_burn_id_does_not_lose_that_burn).
-    assert_eq!(fx.v.released_burn(&cancelled.native_burn), None);
-    for (nonce, generation) in [(1u64, 0u32), (1, 1), (2, 1)] {
-        let mut old = cancelled.clone();
-        old.nonce = nonce;
-        old.generation = generation;
-        assert_eq!(err_of(fx.try_release_n(&old, &fx.ctx(), 7)), Error::InvalidRelease);
-    }
-    // Locked: guardians cannot cancel it, and no second generation-1 certificate is accepted.
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotCancellable);
-    let mut second = real.clone();
-    second.native_burn = fx.burn(56);
-    assert_eq!(err_of(fx.try_release_n(&second, &fx.ctx(), 7)), Error::InvalidRelease);
-    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 7)), Error::InvalidRelease);
-    fx.advance(HOUR);
-    fx.v.execute_release(&id);
-    assert_eq!(fx.bal(&real_to), (1_500 * U as i128 - 750_000) * 10);
-    assert_eq!(fx.bal(&to), 0);
-    fx.assert_whole();
-}
-
-#[test]
-fn queue_generation_1_with_another_burn_id_pays_at_once_below_the_queue_threshold() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    cancelled_release(&fx, &to);
-    let mut real = fx.item(1, &to, 10 * U);
-    real.generation = 1;
-    real.native_burn = fx.burn(55);
-    fx.try_release_n(&real, &fx.ctx(), 6).unwrap().unwrap();
-    assert_eq!(fx.bal(&to), (10 * U as i128 - 5_000) * 10);
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: real.native_burn.clone(), generation: 1, cancelled: false }));
-    assert_eq!(err_of(fx.try_release_n(&real, &fx.ctx(), 7)), Error::InvalidRelease);
-}
-
-#[test]
-fn queue_generation_1_refused_for_a_burn_id_released_under_another_nonce() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let cancelled = cancelled_release(&fx, &to);
-    // Burn id X paid under nonce 2, burn id Y queued under nonce 3.
-    let paid = fx.item(2, &to, U);
-    fx.release(&paid);
-    let queued = fx.item(3, &to, 2_000 * U);
-    fx.release(&queued);
-    for taken in [paid.native_burn.clone(), queued.native_burn.clone()] {
-        let mut item = cancelled.clone();
-        item.generation = 1;
-        item.native_burn = taken;
-        assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
-    }
-    assert!(fx.v.burn_record(&1).unwrap().cancelled);
-    assert_eq!(fx.v.released_burn(&paid.native_burn), Some(2));
-    // The cancelled nonce is still open for its one locked certificate.
-    let mut again = cancelled.clone();
-    again.generation = 1;
-    fx.try_release_n(&again, &fx.ctx(), 6).unwrap().unwrap();
-}
-
-#[test]
-fn queue_generation_1_refused_for_another_nonce_than_the_cancelled_one() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    let cancelled = cancelled_release(&fx, &to);
-    // The cancelled burn id under a nonce that was never cancelled.
-    let mut b = cancelled.clone();
-    b.generation = 1;
-    b.nonce = 55;
-    assert_eq!(err_of(fx.try_release_n(&b, &fx.ctx(), 7)), Error::InvalidRelease);
-    // A new burn id under a nonce that was never cancelled.
-    b.native_burn = fx.burn(55);
-    assert_eq!(err_of(fx.try_release_n(&b, &fx.ctx(), 7)), Error::InvalidRelease);
-    assert_eq!(fx.v.burn_record(&55), None);
-}
-
-#[test]
-fn queue_generation_1_refused_for_a_burn_never_cancelled() {
-    let fx = fx_queue();
-    let to = Address::generate(&fx.env);
-    // Never seen.
-    let mut fresh = fx.item(1, &to, 2_000 * U);
-    fresh.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&fresh, &fx.ctx(), 7)), Error::InvalidRelease);
-    assert_eq!(fx.v.burn_record(&1), None);
-    // Queued, not cancelled.
-    let queued = fx.item(2, &to, 2_000 * U);
-    fx.release(&queued);
-    let mut q1 = queued.clone();
-    q1.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&q1, &fx.ctx(), 7)), Error::InvalidRelease);
-    // Paid, not cancelled.
-    let paid = fx.item(3, &to, U);
-    fx.release(&paid);
-    let mut p1 = paid.clone();
-    p1.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&p1, &fx.ctx(), 7)), Error::InvalidRelease);
-}
-
 /// The committee closing releases stops queued releases too: they stay queued and are paid once releases are open
 /// again. Nothing is lost and nothing is paid meanwhile.
 #[test]
@@ -2491,158 +2184,337 @@ fn queue_execute_refused_while_releases_are_closed() {
     fx.assert_whole();
 }
 
-// ── 6b. what a guardian cancel can and cannot do (coordinator conditions, 2026-11-17) ──────────────
+// ── 6b. a guardian pause voids; nothing else can be done to a release (reviewer 325: XLM-1, XLM-4) ────────────
 
-/// Condition 1: a cancel never loses the user's burn. The SAME burn (same nonce, same id, same recipient and
-/// amount) is certified again by the switch quorum and is paid exactly once.
+/// R325-XLM-4. A pause does not merely hold a queued release: it voids it, for good, whoever ends the pause.
 #[test]
-fn cancel_then_fresh_certificate_for_the_same_burn_pays_exactly_once() {
+fn pause_voids_queued_releases_and_no_unpause_revives_them() {
+    for by_committee in [false, true] {
+        let fx = fx_queue();
+        let to = Address::generate(&fx.env);
+        let item = fx.item(1, &to, 2_000 * U);
+        let id = fx.release_id(&item);
+        fx.release(&item);
+        assert_eq!(fx.v.burn_status(&1, &item.native_burn), 1);
+        fx.pause(0);
+        // The queued release is dead from the pause on: its burn is open again.
+        assert_eq!(fx.v.burn_status(&1, &item.native_burn), 0);
+        fx.advance(2 * HOUR);
+        assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Paused);
+        if by_committee {
+            fx.try_unpause(6).unwrap().unwrap();
+        } else {
+            fx.advance(72 * HOUR);
+        }
+        assert!(!fx.v.paused());
+        let st = fx.v.state();
+        assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Voided);
+        fx.advance(30 * DAY);
+        assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Voided);
+        assert_eq!(fx.bal(&to), 0);
+        assert_eq!(fx.v.state().total_locked, st.total_locked);
+    }
+}
+
+/// R325-XLM-4. A certificate signed before a pause is dead after it, even when the pause is shorter than the
+/// certificate's validity and whatever path the release would take.
+#[test]
+fn certificate_signed_before_a_pause_is_dead_after_it() {
+    let fx = fx_short_pauses(HOUR, HOUR);
+    fx.dep(5_000 * U);
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, 100 * U);
+    let mut ctx = fx.ctx();
+    ctx.valid_until = fx.now() + DAY;
+    assert_eq!(ctx.pause_count, 0);
+    let cert = fx.rcert(&item, &ctx, 7);
+    fx.pause(1);
+    fx.advance(HOUR);
+    assert!(!fx.v.paused() && fx.now() < ctx.valid_until);
+    assert_release_refused(&fx, &item, fx.v.try_release(&item, &ctx, &cert), Error::InvalidContext);
+    // Naming the new count without new signatures does not help: the count is signed.
+    let mut relabelled = ctx.clone();
+    relabelled.pause_count = 1;
+    assert_release_refused(&fx, &item, fx.v.try_release(&item, &relabelled, &cert), Error::InvalidCertificate);
+    // A certificate for a future count is refused as well.
+    let mut ahead = fx.ctx();
+    ahead.pause_count = 2;
+    assert_release_refused(&fx, &item, fx.try_release_n(&item, &ahead, 7), Error::InvalidContext);
+    // The committee signs again under the current count: paid.
+    fx.release(&item);
+    assert_eq!(fx.bal(&to), (100 * U as i128 - 50_000) * 10);
+}
+
+/// R325-XLM-1. A voided burn is not lost and needs nothing special: the ordinary threshold certifies it again, it
+/// waits the delay again, and it is paid exactly once.
+#[test]
+fn voided_burn_is_certified_again_by_the_ordinary_threshold_and_paid_exactly_once() {
     let fx = fx_queue();
     let to = Address::generate(&fx.env);
     let item = fx.item(1, &to, 2_000 * U);
+    let id = fx.release_id(&item);
     let ctx0 = fx.ctx();
     let cert0 = fx.rcert(&item, &ctx0, 5);
     fx.v.release(&item, &ctx0, &cert0);
     let st = fx.v.state();
-    // A false alarm: 2 of 3 guardians cancel a real release.
-    fx.try_cancel(&fx.release_id(&item), &[0, 1]).unwrap().unwrap();
-    assert_eq!(fx.v.state(), st);
-    assert_eq!(fx.bal(&to), 0);
-    assert_eq!(fx.v.released_burn(&item.native_burn), None);
-    // The fresh certificate for the same burn: generation 1, 6 of 7.
-    let mut again = item.clone();
-    again.generation = 1;
-    let id = fx.release_id(&again);
+    fx.pause(2);
+    fx.try_unpause(6).unwrap().unwrap();
+    // The same burn, the same five signers, the current pause count.
     let ctx1 = fx.ctx();
-    let cert1 = fx.rcert(&again, &ctx1, 6);
-    fx.v.release(&again, &ctx1, &cert1);
-    assert_eq!(fx.bal(&to), 0);
-    assert_eq!(fx.v.released_burn(&item.native_burn), Some(1));
-    fx.advance(HOUR);
+    assert_eq!(ctx1.pause_count, 1);
+    let cert1 = fx.rcert(&item, &ctx1, 5);
+    fx.v.release(&item, &ctx1, &cert1);
+    assert_eq!(fx.release_id(&item), id);
+    let ready_at = fx.now() + HOUR;
+    assert_eq!(
+        fx.v.pending(&id),
+        Some(Pending { recipient: to.clone(), amount: 2_000 * U, ready_at, nonce: 1, pause_count: 1 })
+    );
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), pause_count: 1, paid: false }));
+    // Once per pause: no second certificate while this one is queued.
+    assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
+    // The delay runs again from the new certificate.
+    fx.advance(HOUR - 1);
+    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::NotReady);
+    fx.advance(1);
     fx.v.execute_release(&id);
     let paid = (2_000 * U as i128 - 1_000_000) * 10;
     assert_eq!(fx.bal(&to), paid);
     assert_eq!(fx.v.state().total_locked, st.total_locked - 2_000 * U);
-    // Exactly once: neither certificate, nor a new one of any generation by all seven, nor the queue pays again.
+    assert_eq!(fx.v.burn_status(&1, &item.native_burn), 2);
+    // Exactly once: the queue, both certificates, a fresh one of all seven, and the same burn under another nonce.
     assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::NotQueued);
-    assert_eq!(err_of(fx.v.try_execute_release(&fx.release_id(&item))), Error::NotQueued);
-    assert_eq!(err_of(fx.v.try_release(&item, &ctx0, &cert0)), Error::InvalidRelease);
-    assert_eq!(err_of(fx.v.try_release(&again, &ctx1, &cert1)), Error::InvalidRelease);
-    for generation in [0u32, 1] {
-        let mut third = item.clone();
-        third.generation = generation;
-        assert_eq!(err_of(fx.try_release_n(&third, &fx.ctx(), 7)), Error::InvalidRelease);
-        // The same burn id under another nonce is refused as well.
-        third.nonce = 2;
-        assert_eq!(err_of(fx.try_release_n(&third, &fx.ctx(), 7)), Error::InvalidRelease);
-    }
+    assert_eq!(err_of(fx.v.try_release(&item, &ctx0, &cert0)), Error::InvalidContext);
+    assert_eq!(err_of(fx.v.try_release(&item, &ctx1, &cert1)), Error::InvalidRelease);
+    assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
+    let mut other = item.clone();
+    other.nonce = 2;
+    assert_eq!(err_of(fx.try_release_n(&other, &fx.ctx(), 7)), Error::InvalidRelease);
+    // A later pause does not reopen a paid burn.
+    fx.advance(80 * HOUR);
+    fx.pause(0);
+    fx.advance(72 * HOUR);
+    assert_eq!(err_of(fx.try_release_n(&item, &fx.ctx(), 7)), Error::InvalidRelease);
     assert_eq!(fx.bal(&to), paid);
     fx.assert_whole();
 }
 
-/// Condition 1, the other way a cancel comes about: a forged release names a REAL burn id under a nonce that is not
-/// that burn's. After the cancel the real burn is paid under its own nonce by an ordinary certificate, once.
+/// A forged release that took a real burn's nonce is voided by a pause; the real burn of that nonce is then paid by
+/// an ordinary certificate, and the forged burn id is forgotten.
 #[test]
-fn cancel_of_a_forgery_that_used_a_real_burn_id_does_not_lose_that_burn() {
+fn voided_forgery_leaves_its_nonce_to_the_real_burn() {
+    let fx = fx_queue();
+    let thief = Address::generate(&fx.env);
+    let to = Address::generate(&fx.env);
+    let mut forged = fx.item(1, &thief, 3_000 * U);
+    forged.native_burn = fx.burn(99);
+    let forged_id = fx.release_id(&forged);
+    fx.release(&forged);
+    // While the forgery is queued, the real burn of nonce 1 is held.
+    let real = fx.item(1, &to, 1_500 * U);
+    assert_eq!(err_of(fx.try_release(&real)), Error::InvalidRelease);
+    assert_eq!(fx.v.burn_status(&1, &real.native_burn), 3);
+    fx.pause(1);
+    fx.try_unpause(6).unwrap().unwrap();
+    assert_eq!(fx.v.burn_status(&1, &real.native_burn), 0);
+    let id = fx.release_id(&real);
+    fx.release(&real);
+    assert_eq!(fx.v.released_burn(&forged.native_burn), None);
+    assert_eq!(fx.v.released_burn(&real.native_burn), Some(1));
+    // The forgery cannot come back for this nonce, with any number of signatures.
+    assert_eq!(err_of(fx.try_release_n(&forged, &fx.ctx(), 7)), Error::InvalidRelease);
+    assert_eq!(err_of(fx.v.try_execute_release(&forged_id)), Error::Voided);
+    fx.advance(HOUR);
+    assert_eq!(err_of(fx.v.try_execute_release(&forged_id)), Error::Voided);
+    fx.v.execute_release(&id);
+    assert_eq!(fx.bal(&to), (1_500 * U as i128 - 750_000) * 10);
+    assert_eq!(fx.bal(&thief), 0);
+    fx.assert_whole();
+}
+
+/// A forged release that named a REAL burn id under a nonce that is not that burn's: once voided, the real burn is
+/// paid under its own nonce, and its id cannot be used a second time.
+#[test]
+fn voided_forgery_that_used_a_real_burn_id_does_not_lose_that_burn() {
     let fx = fx_queue();
     let to = Address::generate(&fx.env);
     let thief = Address::generate(&fx.env);
-    // The real burn: nonce 7, id burn(7), 1,200 units to `to`. The forgery: the same id under nonce 3, to the thief.
     let real = fx.item(7, &to, 1_200 * U);
     let mut forged = fx.item(3, &thief, 3_000 * U);
     forged.native_burn = real.native_burn.clone();
     fx.release(&forged);
-    // While the forgery is queued the real burn is held (its id is taken): nothing is recorded for it.
     assert_eq!(err_of(fx.try_release(&real)), Error::InvalidRelease);
     assert_eq!(fx.v.burn_record(&7), None);
-    fx.try_cancel(&fx.release_id(&forged), &[1, 2]).unwrap().unwrap();
-    // The real burn, under its own nonce, with the ordinary quorum.
+    fx.pause(0);
+    fx.try_unpause(6).unwrap().unwrap();
     let id = fx.release_id(&real);
     fx.release(&real);
     assert_eq!(fx.v.released_burn(&real.native_burn), Some(7));
+    // The forgery's nonce is open again, but not for the burn id that is now recorded under nonce 7.
+    assert_eq!(err_of(fx.try_release_n(&forged, &fx.ctx(), 7)), Error::InvalidRelease);
     fx.advance(HOUR);
     fx.v.execute_release(&id);
     assert_eq!(fx.bal(&to), (1_200 * U as i128 - 600_000) * 10);
-    assert_eq!(fx.bal(&thief), 0);
-    // The forged certificate stays dead, and nonce 3 is open only for one locked certificate with another id.
-    assert_eq!(err_of(fx.try_release(&forged)), Error::InvalidRelease);
-    let mut forged1 = forged.clone();
-    forged1.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&forged1, &fx.ctx(), 7)), Error::InvalidRelease);
-    let mut real3 = fx.item(3, &to, 10 * U);
-    real3.generation = 1;
-    fx.try_release_n(&real3, &fx.ctx(), 6).unwrap().unwrap();
+    assert_eq!(err_of(fx.try_release_n(&forged, &fx.ctx(), 7)), Error::InvalidRelease);
+    // Nonce 3 is paid with its own burn by an ordinary certificate.
+    let real3 = fx.item(3, &to, 10 * U);
+    fx.release(&real3);
     assert_eq!(fx.bal(&to), (1_200 * U as i128 - 600_000) * 10 + (10 * U as i128 - 5_000) * 10);
+    assert_eq!(fx.bal(&thief), 0);
     fx.assert_whole();
 }
 
-/// Condition 2: guardians alone move nothing and change nothing, cancel a nonce at most once, and cannot keep the
-/// committee from paying: the switch quorum (the unpause quorum) certifies again and ends their pause.
+/// Reviewer 325, R325-XLM-1, the demonstration turned into a regression. With the proposed mainnet shape (every
+/// release waits in the queue) two of the three guardian keys try to stop every one of 30 exits. All they have is
+/// the pause: each of them once per chain, then the cooldown. Every exit is paid, with the ordinary 5 of 7 and
+/// nothing done by hand; the two keys void two exits per chain and no more.
 #[test]
-fn guardians_alone_cannot_move_funds_change_limits_or_block_a_burn_for_good() {
+fn r325_xlm1_two_guardian_keys_cannot_starve_exits() {
     let fx = fx_with(|c, _| {
-        c.release_delay = HOUR;
-        c.large_release_threshold = 1_000 * U;
-        c.pause_duration = 2 * HOUR;
-        c.pause_cooldown = 2 * HOUR;
+        c.release_delay = 2 * HOUR;
+        c.large_release_threshold = 0;
     });
     fx.controls(true, true);
     fx.dep(5_000 * U);
+    let (mut voided, mut paid) = (0u32, 0u32);
+    let start = fx.now();
+    for nonce in 1..=30u64 {
+        let to = Address::generate(&fx.env);
+        let item = fx.item(nonce, &to, 20 * U);
+        let id = fx.release_id(&item);
+        loop {
+            // Certified by five signers (again, after every void).
+            fx.try_release_n(&item, &fx.ctx(), 5).unwrap().unwrap();
+            // The two keys void it if either of them can pause.
+            let hit = (0..2).any(|g| matches!(fx.try_pause(&fx.guardians[g]), Ok(Ok(()))));
+            if !hit {
+                break;
+            }
+            voided += 1;
+            assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Paused);
+            fx.advance(72 * HOUR);
+            assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Voided);
+        }
+        fx.advance(2 * HOUR);
+        fx.v.execute_release(&id);
+        assert_eq!(fx.bal(&to), (20 * U as i128 - 10_000) * 10);
+        paid += 1;
+    }
+    assert_eq!(paid, 30);
+    assert!(voided < 30, "two guardians voided {voided} exits in a row with nothing to stop them");
+    // One chain of two pauses, then 72 h in which they can do nothing: 30 exits of 2 h each fit in it.
+    assert_eq!(voided, 2);
+    assert_eq!(fx.now() - start, 2 * 72 * HOUR + 30 * 2 * HOUR);
+    fx.assert_whole();
+}
+
+/// Guardians alone move nothing and change nothing: a pause leaves the configuration, the books and the balance as
+/// they were, and guardian signatures open no release and end no pause.
+#[test]
+fn guardians_alone_cannot_move_funds_or_change_limits() {
+    let fx = fx_queue();
     let to = Address::generate(&fx.env);
     let item = fx.item(1, &to, 2_000 * U);
     fx.release(&item);
     let (cfg, st, balance) = (fx.v.config(), fx.v.state(), fx.bal(&fx.vault));
-    // All three guardians cancel. Configuration (limits, committee, fee address), books and balance are untouched.
-    fx.try_cancel(&fx.release_id(&item), &[0, 1, 2]).unwrap().unwrap();
-    assert_eq!((fx.v.config(), fx.v.state(), fx.bal(&fx.vault)), (cfg.clone(), st.clone(), balance));
-    assert_eq!(fx.bal(&to), 0);
-    // Guardian signatures open nothing: not the controls, not a release of any generation, not an unpause.
-    let mut again = item.clone();
-    again.generation = 1;
-    let c = fx.ctx();
-    let by_guardians = fx.gsigs(&[0, 1, 2], &fx.release_digest_x(&again, &c));
-    assert_eq!(err_of(fx.v.try_release(&again, &c, &by_guardians)), Error::InvalidCertificate);
-    // The committee certifies the burn again (6 of 7). Guardians cannot cancel that one.
-    let id = fx.release_id(&again);
-    fx.try_release_n(&again, &fx.ctx(), 6).unwrap().unwrap();
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotCancellable);
-    // What is left to them is the pause every guardian has on Ethereum too. It holds the release ...
     fx.pause(0);
-    fx.advance(HOUR);
-    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Paused);
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotCancellable);
-    // ... until the same quorum ends it. Guardians are then blocked for the cooldown, and the release is paid.
-    assert_eq!(err_of(fx.try_unpause(5)), Error::InvalidCertificate);
+    let after = fx.v.state();
+    assert_eq!(fx.v.config(), cfg);
+    assert_eq!(fx.bal(&fx.vault), balance);
+    assert_eq!(
+        (after.total_locked, after.fees_accrued, after.deposit_count, after.deposit_head.clone(), after.bucket),
+        (st.total_locked, st.fees_accrued, st.deposit_count, st.deposit_head.clone(), st.bucket)
+    );
+    assert_eq!((after.deposits_enabled, after.releases_enabled, after.control_nonce), (true, true, st.control_nonce));
+    // All three guardian keys sign an unpause and a release: neither is accepted.
+    let count = after.pause_count;
+    let t = fx.now() + 600;
+    let by_guardians = fx.gsigs(&[0, 1, 2], &fx.unpause_digest_x(count, t));
+    assert_eq!(err_of(fx.v.try_unpause(&count, &t, &by_guardians)), Error::InvalidCertificate);
     fx.try_unpause(6).unwrap().unwrap();
+    let c = fx.ctx();
+    let forged = fx.gsigs(&[0, 1, 2], &fx.release_digest_x(&item, &c));
+    assert_eq!(err_of(fx.v.try_release(&item, &c, &forged)), Error::InvalidCertificate);
+    assert_eq!(fx.bal(&to), 0);
+    // The committee pays the burn; the guardians are blocked for the cooldown meanwhile.
+    fx.release(&item);
     for g in 0..3 {
         assert_eq!(err_of(fx.try_pause(&fx.guardians[g])), Error::InvalidPause);
     }
-    fx.v.execute_release(&id);
+    fx.advance(HOUR);
+    fx.v.execute_release(&fx.release_id(&item));
     assert_eq!(fx.bal(&to), (2_000 * U as i128 - 1_000_000) * 10);
     assert_eq!(fx.v.config(), cfg);
     fx.assert_whole();
-    // Without the committee the pause chain ends by itself: each guardian once, then the cooldown.
-    assert_eq!(fx.v.state().total_locked, st.total_locked - 2_000 * U);
 }
 
-/// With `release_delay` 0 (the Ethereum launch behaviour) nothing is ever queued: `cancel_release` cannot succeed
-/// and the guardians are pause-only.
+/// With `release_delay` 0 nothing is ever queued; a pause still voids every certificate not yet submitted.
 #[test]
-fn without_a_release_delay_guardians_are_pause_only() {
-    let fx = fx_funded();
+fn without_a_release_delay_a_pause_voids_unsubmitted_certificates_only() {
+    let fx = fx_short_pauses(HOUR, HOUR);
+    fx.dep(5_000 * U);
     assert_eq!(fx.cfg.release_delay, 0);
     let to = Address::generate(&fx.env);
-    let item = fx.item(1, &to, 500 * U);
-    let id = fx.release_id(&item);
-    fx.release(&item);
-    assert_eq!(fx.bal(&to), (500 * U as i128 - 250_000) * 10);
-    assert_eq!(fx.v.pending(&id), None);
-    assert_eq!(err_of(fx.try_cancel(&id, &[0, 1, 2])), Error::NotQueued);
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: false }));
-    // No generation-1 certificate is ever accepted, because nothing can be cancelled.
-    let mut g1 = fx.item(2, &to, 10 * U);
-    g1.generation = 1;
-    assert_eq!(err_of(fx.try_release_n(&g1, &fx.ctx(), 7)), Error::InvalidRelease);
+    let paid = fx.item(1, &to, 500 * U);
+    fx.release(&paid);
+    assert_eq!(fx.v.pending(&fx.release_id(&paid)), None);
+    let held = fx.item(2, &to, 500 * U);
+    let mut ctx = fx.ctx();
+    ctx.valid_until = fx.now() + DAY;
+    let cert = fx.rcert(&held, &ctx, 5);
+    fx.pause(0);
+    fx.advance(HOUR);
+    assert_eq!(fx.v.burn_status(&1, &paid.native_burn), 2);
+    assert_eq!(err_of(fx.v.try_release(&held, &ctx, &cert)), Error::InvalidContext);
+    assert_eq!(err_of(fx.try_release_n(&paid, &fx.ctx(), 7)), Error::InvalidRelease);
+    fx.release(&held);
+    assert_eq!(fx.bal(&to), 2 * (500 * U as i128 - 250_000) * 10);
+}
+
+/// R325-XLM-3. The committee and the guardians sign every digest as an Ethereum personal message. A signature over
+/// the bare 32 bytes is not accepted anywhere.
+#[test]
+fn signatures_over_the_bare_digest_are_refused() {
+    let fx = fx_funded();
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, U);
+    let ctx = fx.ctx();
+    let d = fx.release_digest_x(&item, &ctx);
+    let mut bare = Vec::new(&fx.env);
+    for k in fx.signers.iter().take(7) {
+        bare.push_back(BytesN::from_array(&fx.env, &sign_raw(k, &d)));
+    }
+    assert_release_refused(&fx, &item, fx.v.try_release(&item, &ctx, &bare), Error::InvalidCertificate);
+    let t = fx.now() + 600;
+    let bare_pause = BytesN::from_array(&fx.env, &sign_raw(&fx.guardians[0], &fx.pause_digest_x(0, t)));
+    assert_eq!(err_of(fx.v.try_guardian_pause(&t, &bare_pause)), Error::NotGuardian);
+    assert!(!fx.v.paused());
+    // What is signed is exactly keccak256("\x19Ethereum Signed Message:\n32" ‖ digest).
+    let mut cert = Vec::new(&fx.env);
+    for k in fx.signers.iter().take(5) {
+        cert.push_back(BytesN::from_array(&fx.env, &sign_raw(k, &personal(&d))));
+    }
+    fx.v.release(&item, &ctx, &cert);
+    assert_eq!(fx.bal(&to), (U as i128 - 500) * 10);
+}
+
+/// After a chain of pauses the vault is open for `pause_cooldown`; a delay that does not fit in it twice is refused.
+#[test]
+fn ctor_refuses_a_release_delay_above_half_the_cooldown() {
+    ctor_refused(|c, _| {
+        c.release_delay = 36 * HOUR + 1;
+        c.large_release_threshold = 0;
+    });
+    let ok = fx_with(|c, _| c.release_delay = 36 * HOUR);
+    assert_eq!(ok.v.config().release_delay, 36 * HOUR);
+    // Without guardians there is no pause to fit around.
+    let free = fx_with(|c, p| {
+        c.guardians = Vec::new(&p.env);
+        c.pause_duration = 0;
+        c.pause_cooldown = 0;
+        c.release_delay = 14 * DAY;
+    });
+    assert_eq!(free.v.config().release_delay, 14 * DAY);
 }
 
 /// A release above `window_limit` could never be executed (the bucket never holds that much), so it is refused
@@ -2659,15 +2531,15 @@ fn queue_refuses_release_above_window_limit() {
     assert_release_refused(&fx, &item, fx.try_release_n(&item, &fx.ctx(), 7), Error::InvalidRelease);
     assert_eq!(fx.v.pending(&id), None);
     assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::NotQueued);
-    // A generation-1 certificate above the limit is refused too, and leaves the cancelled nonce open.
-    let cancelled = fx.item(2, &to, 2_000 * U);
-    fx.release(&cancelled);
-    fx.try_cancel(&fx.release_id(&cancelled), &[0, 1]).unwrap().unwrap();
-    let mut big = cancelled.clone();
-    big.generation = 1;
+    // A certificate above the limit for a voided nonce is refused too, and leaves that nonce open.
+    let voided = fx.item(2, &to, 2_000 * U);
+    fx.release(&voided);
+    fx.pause(0);
+    fx.try_unpause(6).unwrap().unwrap();
+    let mut big = voided.clone();
     big.amount = 10_000 * U + 1;
     assert_eq!(err_of(fx.try_release_n(&big, &fx.ctx(), 7)), Error::InvalidRelease);
-    assert!(fx.v.burn_record(&2).unwrap().cancelled);
+    assert_eq!(fx.v.burn_status(&2, &voided.native_burn), 0);
     // Exactly window_limit queues and is paid after the delay.
     let max = fx.item(1, &to, 10_000 * U);
     let max_id = fx.release_id(&max);
@@ -3209,7 +3081,7 @@ fn storage_records_are_written_with_at_least_record_ttl() {
 }
 
 #[test]
-fn storage_queue_and_cancel_records_get_record_ttl_and_instance_is_extended() {
+fn storage_queue_records_get_record_ttl_and_instance_is_extended() {
     let fx = fx_queue();
     let to = Address::generate(&fx.env);
     let item = fx.item(1, &to, 2_000 * U);
@@ -3217,18 +3089,16 @@ fn storage_queue_and_cancel_records_get_record_ttl_and_instance_is_extended() {
     fx.release(&item);
     let ttl = |k: Key| fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().get_ttl(&k));
     assert_eq!(ttl(Key::Pending(id.clone())), RECORD_TTL);
-    // Later, the cancel rewrites the nonce record with a fresh TTL.
+    // Later, the execution rewrites the nonce record (now paid) with a fresh TTL.
     fx.env.ledger().with_mut(|l| l.sequence_number += 1_000);
     assert_eq!(ttl(Key::Nonce(1)), RECORD_TTL - 1_000);
-    fx.try_cancel(&id, &[0, 1]).unwrap().unwrap();
+    fx.advance(HOUR);
+    fx.v.execute_release(&id);
     assert_eq!(ttl(Key::Nonce(1)), RECORD_TTL);
-    // The cancel removes the burn-id record (the release was never paid).
-    assert!(!fx.env.as_contract(&fx.vault, || fx.env.storage().persistent().has(&Key::Burn(item.native_burn.clone()))));
     // The instance is extended back to INSTANCE_TTL once it has fallen below half of it.
     let instance = || fx.env.as_contract(&fx.vault, || fx.env.storage().instance().get_ttl());
-    assert_eq!(instance(), INSTANCE_TTL - 1_000);
     fx.env.ledger().with_mut(|l| l.sequence_number += INSTANCE_TTL / 2);
-    assert_eq!(instance(), INSTANCE_TTL / 2 - 1_000);
+    assert!(instance() < INSTANCE_TTL / 2);
     fx.v.sweep_fees();
     assert_eq!(instance(), INSTANCE_TTL);
 }
@@ -3240,29 +3110,27 @@ fn storage_uses_no_temporary_entries() {
     fx.release(&fx.item(1, &to, U));
     let queued = fx.item(2, &to, 2_000 * U);
     fx.release(&queued);
-    fx.try_cancel(&fx.release_id(&queued), &[0, 1]).unwrap().unwrap();
     fx.pause(0);
     fx.try_unpause(6).unwrap().unwrap();
+    fx.release(&queued);
     fx.v.sweep_fees();
     // The test host lists the entries of every contract here (the asset's balances are persistent entries too), so
     // no contract in this run, the asset included, wrote a temporary entry.
-    let (temporary, present, queued) = fx.env.as_contract(&fx.vault, || {
+    let (temporary, present) = fx.env.as_contract(&fx.vault, || {
         let p = fx.env.storage().persistent();
         let present = p.has(&Key::Head(1))
             && p.has(&Key::Nonce(1))
             && p.has(&Key::Burn(fx.burn(1)))
             && p.has(&Key::Nonce(2))
-            // the cancel removed the burn-id record of the cancelled release
-            && !p.has(&Key::Burn(fx.burn(2)));
+            && p.has(&Key::Burn(fx.burn(2)))
+            && p.has(&Key::Pending(fx.release_id(&queued)));
         let t = fx.env.storage().temporary();
         let in_temporary = t.has(&Key::Head(1)) || t.has(&Key::Nonce(1)) || t.has(&Key::Nonce(2)) || t.has(&Key::State);
         assert!(!in_temporary);
-        (t.all().len(), present, p.has(&Key::Pending(fx.release_id(&queued))))
+        (t.all().len(), present)
     });
     assert_eq!(temporary, 0);
     assert!(present);
-    // The cancelled Pending entry is gone.
-    assert!(!queued);
 }
 
 /// What the SDK 29 test host does with a persistent entry whose TTL ended: it restores it by itself. Once the ledger
@@ -3308,7 +3176,7 @@ fn storage_replay_after_the_record_ttl_never_succeeds() {
     assert_eq!(err_of(fx.try_release_n(&other_nonce, &ctx, 7)), Error::InvalidRelease);
     assert_eq!(fx.bal(&to), paid);
     assert_eq!(fx.v.state(), st);
-    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), generation: 0, cancelled: false }));
+    assert_eq!(fx.v.burn_record(&1), Some(BurnRecord { burn: item.native_burn.clone(), pause_count: 0, paid: true }));
     assert_eq!(fx.v.released_burn(&item.native_burn), Some(1));
     // A new burn is still paid, and its records are written with a full TTL.
     fx.release(&fx.item(3, &to, U));

@@ -14,9 +14,11 @@ database, the proposal of a shared context) is that module's code and keeps its 
 Replaced:
   1. the deposit id and the deposit's sender: a Stellar address (strkey) instead of an Ethereum address; the id is
      sha256 over the vault's Stellar fields with the nonce in its top 8 bytes (stellar_net.deposit_id);
-  2. the release digest: the Soroban vault's (stellar_net.release_digest), over the Stellar recipient whose
-     commitment is the burn's 20-byte recipient. The half reports that address; it is accepted only if it hashes to
-     the commitment read from the L2 burn;
+  2. the release digest: the Soroban vault's (stellar_net.release_digest), signed as an Ethereum personal message,
+     over the vault's pause count and the Stellar recipient whose commitment is the burn's 20-byte recipient. The
+     half reports that address; it is accepted only if it hashes to the commitment read from the L2 burn, or, for
+     a burn made directly on the token, if the account that burned (as this signer read it from the L2) signed
+     the claim text naming it (stellar_net.claim_text);
   3. `combine` for a release: the arguments of the vault's `release` for the `stellar` CLI instead of an EVM call.
 
 The config is signatario.py's, with `provenance: true`, `source_chain_id` = the Stellar network id as a decimal
@@ -26,6 +28,7 @@ and `vault` (the C... address).
 """
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -51,37 +54,60 @@ class StellarCtx(S.Ctx):
         except sn.StellarError as e:
             S.refuse(str(e))
         self.stellar_recipient = None
-        self.generation = 0   # 1 only when the half certifies a nonce again after a guardian cancel
+        self.pause_count = None
 
     def deposit_id(self, route, nonce, sender, amount, pq):
         return '0x' + sn.deposit_id(route, nonce, sender, amount, pq[26:]).hex()
+
+    def claim_holds(self, claim, burner, burn_id, recipient):
+        """The burner's signed claim for a direct burn: checked here again, with the burner this signer read."""
+        try:
+            text = sn.claim_text(self.l2_chain_id, self.token, burn_id, recipient)
+            if not isinstance(claim, dict) or claim.get('stellar_address') != recipient:
+                return False
+            if len(str(burner)) != 42 or str(burner).lower() == str(self.cfg.get('router', '')).lower():
+                return False
+            return subprocess.run([self.cast, 'wallet', 'verify', '--address', burner, text, str(claim.get('signature'))],
+                                  capture_output=True).returncode == 0
+        except (sn.StellarError, KeyError, ValueError, TypeError):
+            return False
+
+    def recipient_bound(self, recipient, commitment, claim, burner, burn_id):
+        try:
+            if '0x' + sn.recipient_commitment(recipient).hex() == commitment:
+                return True
+        except sn.StellarError:
+            return False
+        return self.claim_holds(claim, burner, burn_id, recipient)
 
     def eth_half(self, kind, **subs):
         out = super().eth_half(kind, **subs)
         if kind == 'release':
             recipient = out.get('stellar_recipient')
-            commitment = S.address((out.get('release') or {}).get('recipient', ''), 'recipient')
-            try:
-                if '0x' + sn.recipient_commitment(recipient).hex() != commitment:
-                    S.refuse('the Stellar recipient does not hash to the burn\'s recipient commitment',
-                             stellar_recipient=recipient, commitment=commitment)
-            except sn.StellarError as e:
-                S.refuse(f'the Stellar half named an invalid recipient: {e}')
-            if out.get('vault_contract') != self.vault_contract or int(out.get('generation', -1)) not in (0, 1):
-                S.refuse('the Stellar half answered for another vault or generation', half=out)
+            rel = out.get('release') or {}
+            commitment = S.address(rel.get('recipient', ''), 'recipient')
+            intent = json.loads(Path(subs['intent']).read_text())
+            burner = (intent.get('l2') or {}).get('from')
+            if not self.recipient_bound(recipient, commitment, out.get('claim'), burner, rel.get('nativeBurn', '')):
+                S.refuse('the Stellar recipient neither hashes to the burn\'s recipient commitment nor is claimed by '
+                         'the account that burned', stellar_recipient=recipient, commitment=commitment)
+            if out.get('vault_contract') != self.vault_contract:
+                S.refuse('the Stellar half answered for another vault', half=out)
             self.stellar_recipient = recipient
-            self.generation = int(out['generation'])
+            self.pause_count = S.uint(out.get('pause_count'), 64, 'pause_count')
         return out
 
     def release_digest(self, rel, context):
-        if self.stellar_recipient is None:
+        """What the release key signs: the personal-message hash of the vault's digest."""
+        if self.stellar_recipient is None or self.pause_count is None:
             S.refuse('no Stellar recipient was verified for this release')
         item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': self.stellar_recipient,
                 'amount': rel['amount'], 'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],
-                'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead'], 'generation': self.generation}
-        ctx = {'valid_until': context['validUntil'], 'native_finalized_number': context['nativeFinalizedNumber'],
+                'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead']}
+        ctx = {'valid_until': context['validUntil'], 'pause_count': self.pause_count,
+               'native_finalized_number': context['nativeFinalizedNumber'],
                'native_finalized_hash': context['nativeFinalizedHash']}
-        return '0x' + sn.release_digest(self.passphrase, self.vault_contract, item, ctx).hex()
+        return '0x' + sn.personal(sn.release_digest(self.passphrase, self.vault_contract, item, ctx)).hex()
 
 
 def verified_deposit(ctx, deposit_id):
@@ -130,32 +156,24 @@ def cmd_combine(ctx, args):
     out = Path(S.option(args, '--out'))
     fields = ('source_chain_id', 'source_vault', 'release', 'context', 'digest')
     first = {f: sigs[0][f] for f in fields}
-    recipient = (sigs[0].get('eth') or {}).get('stellar_recipient')
-    generation = int((sigs[0].get('eth') or {}).get('generation', 0))
-    if generation not in (0, 1):
-        S.refuse('unknown generation in the partial signatures')
+    half = sigs[0].get('eth') or {}
+    recipient, pause_count, claim = half.get('stellar_recipient'), half.get('pause_count'), half.get('claim')
     for s in sigs[1:]:
+        h = s.get('eth') or {}
         if s.get('kind') != 'stable-release' or {f: s.get(f) for f in fields} != first \
-                or (s.get('eth') or {}).get('stellar_recipient') != recipient \
-                or int((s.get('eth') or {}).get('generation', 0)) != generation:
+                or h.get('stellar_recipient') != recipient or h.get('pause_count') != pause_count:
             S.refuse('the partial signatures are for different messages',
                      differ=[f for f in fields if s.get(f) != first[f]])
     rel, c = first['release'], first['context']
+    burner = (sigs[0].get('l2') or {}).get('from')
+    if not ctx.recipient_bound(recipient, rel['recipient'], claim, burner, rel['nativeBurn']):
+        S.refuse('the Stellar recipient neither hashes to the release\'s recipient commitment nor is claimed by the '
+                 'account that burned')
     ctx.stellar_recipient = recipient
-    ctx.generation = generation
-    try:
-        if '0x' + sn.recipient_commitment(recipient).hex() != rel['recipient']:
-            S.refuse('the Stellar recipient does not hash to the release\'s recipient commitment')
-    except sn.StellarError as e:
-        S.refuse(str(e))
+    ctx.pause_count = S.uint(pause_count, 64, 'pause_count')
     if ctx.release_digest(rel, c) != first['digest']:
         S.refuse('the partials\' digest is not the vault digest of their release')
     k = int(ctx.cfg.get('vault_threshold', ctx.cfg['threshold']))
-    if generation == 1:
-        # The locked certificate after a guardian cancel needs the vault's switch quorum (6 of 7 at launch).
-        if 'vault_switch_threshold' not in ctx.cfg:
-            S.refuse('a generation-1 release needs "vault_switch_threshold" in the config')
-        k = int(ctx.cfg['vault_switch_threshold'])
     by_signer = {s['signer']: s['signature'] for s in sigs}
     if len(by_signer) < k:
         S.refuse(f'need {k} distinct signers, have {len(by_signer)}')
@@ -165,11 +183,12 @@ def cmd_combine(ctx, args):
             'args': {'item': {'route': unhex(rel['route']), 'nonce': rel['nonce'], 'recipient': recipient,
                               'amount': rel['amount'], 'native_burn': unhex(rel['nativeBurn']),
                               'mint_count': rel['mintCount'], 'minted_total': rel['mintedTotal'],
-                              'mint_head': unhex(rel['mintHead']), 'generation': generation},
-                     'context': {'valid_until': c['validUntil'], 'native_finalized_number': c['nativeFinalizedNumber'],
+                              'mint_head': unhex(rel['mintHead'])},
+                     'context': {'valid_until': c['validUntil'], 'pause_count': ctx.pause_count,
+                                 'native_finalized_number': c['nativeFinalizedNumber'],
                                  'native_finalized_hash': unhex(c['nativeFinalizedHash'])},
                      'signatures': [unhex(by_signer[a]) for a in chosen]}}
-    result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'generation': generation,
+    result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'pause_count': ctx.pause_count,
               'signers': chosen,
               'signatures': [by_signer[a] for a in chosen], 'to': ctx.vault_contract, 'call': call}
     out.write_text(json.dumps(result, indent=2) + '\n')

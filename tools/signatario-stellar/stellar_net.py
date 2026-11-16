@@ -12,8 +12,10 @@ The hashes mirror stellar/vault/src/lib.rs (32-byte words as Solidity's abi.enco
   deposit id nonce (8 bytes) ‖ low 24 bytes of sha256(tag DEPOSIT, route, nonce, keccak(tag SENDER ‖ strkey), net, l2)
   head       keccak256(previous head, deposit id, net, l2 recipient)
   release id sha256(tag RELEASE, route, nonce, keccak(tag RECIPIENT ‖ strkey), amount, burn, mintCount, mintedTotal,
-                    mintHead, generation)
-  digests    keccak256(tag, network id, vault id, ...): signed raw, no message prefix
+                    mintHead)
+  digests    keccak256(tag, network id, vault id, ...). A key signs a digest as an Ethereum personal message
+             (EIP-191): the ECDSA signature is over personal(digest) = keccak256("\x19Ethereum Signed Message:\n32"
+             ‖ digest), which is what `cast wallet sign 0x<digest>` produces without `--no-hash`.
 """
 import base64
 import hashlib
@@ -33,7 +35,7 @@ TAGS = {k: v.encode() for k, v in {
     'mint_chain': 'BLOCH-USDT-MINT-CHAIN-v1', 'route': 'BLOCH-XLM-ROUTE-v1', 'deposit': 'BLOCH-XLM-DEPOSIT-v1',
     'sender': 'BLOCH-XLM-SENDER-v1', 'recipient': 'BLOCH-XLM-RECIPIENT-v1', 'release': 'BLOCH-XLM-RELEASE-v1',
     'release_auth': 'BLOCH-XLM-RELEASE-AUTH-v1', 'controls': 'BLOCH-XLM-CONTROLS-v1',
-    'pause': 'BLOCH-XLM-GUARDIAN-PAUSE-v1', 'unpause': 'BLOCH-XLM-UNPAUSE-v1', 'cancel': 'BLOCH-XLM-RELEASE-CANCEL-v1',
+    'pause': 'BLOCH-XLM-GUARDIAN-PAUSE-v1', 'unpause': 'BLOCH-XLM-UNPAUSE-v1',
 }.items()}
 
 
@@ -142,11 +144,11 @@ def next_head(head, dep_id, amount, l2_recipient):
 
 
 def release_id(rel):
-    """`rel`: route, nonce, recipient (strkey), amount, native_burn, mint_count, minted_total, mint_head, generation."""
+    """`rel`: route, nonce, recipient (strkey), amount, native_burn, mint_count, minted_total, mint_head."""
     return hashlib.sha256(
         tag('release') + b32(rel['route']) + uint(rel['nonce']) + address_hash('recipient', rel['recipient'])
         + uint(rel['amount']) + b32(rel['native_burn']) + uint(rel['mint_count']) + uint(rel['minted_total'])
-        + b32(rel['mint_head']) + uint(rel['generation'])).digest()
+        + b32(rel['mint_head'])).digest()
 
 
 def _domain(name, passphrase, vault):
@@ -154,9 +156,22 @@ def _domain(name, passphrase, vault):
 
 
 def release_digest(passphrase, vault, rel, ctx):
-    """`ctx`: valid_until, native_finalized_number, native_finalized_hash."""
+    """`ctx`: valid_until, pause_count (the vault's, when signed), native_finalized_number, native_finalized_hash."""
     return keccak256(_domain('release_auth', passphrase, vault) + release_id(rel) + uint(ctx['valid_until'])
-                     + uint(ctx['native_finalized_number']) + b32(ctx['native_finalized_hash']))
+                     + uint(ctx['pause_count']) + uint(ctx['native_finalized_number'])
+                     + b32(ctx['native_finalized_hash']))
+
+
+def claim_text(l2_chain_id, token, burn_id, to):
+    """The one line the burner of a direct L2 burn signs (Ethereum personal message) to name its Stellar address."""
+    strkey_decode(to)
+    return (f'Bloch bridge bUSDC.xlm claim: pay burn 0x{b32(burn_id).hex()} of token {str(token).lower()} on chain '
+            f'{int(l2_chain_id)} to Stellar address {to}')
+
+
+def personal(digest):
+    """What a committee or guardian key signs for `digest`: its EIP-191 personal-message hash."""
+    return keccak256(b'\x19Ethereum Signed Message:\n32' + b32(digest))
 
 
 def control_digest(passphrase, vault, route, deposits, releases, nonce, valid_until):
@@ -170,10 +185,6 @@ def pause_digest(passphrase, vault, route, pause_count, valid_until):
 
 def unpause_digest(passphrase, vault, route, pause_count, valid_until):
     return keccak256(_domain('unpause', passphrase, vault) + b32(route) + uint(pause_count) + uint(valid_until))
-
-
-def cancel_digest(passphrase, vault, route, rid, valid_until):
-    return keccak256(_domain('cancel', passphrase, vault) + b32(route) + b32(rid) + uint(valid_until))
 
 
 # ── the network ─────────────────────────────────────────────────────────────
@@ -332,6 +343,11 @@ class Net:
             if isinstance(key, list) and len(key) == 1 and isinstance(key[0], str):
                 out[key[0]] = scval(item['val'])
         return out, (exe.get('wasm') if isinstance(exe, dict) else exe), e.get('liveUntilLedgerSeq'), latest
+
+    def burn_status(self, nonce, burn):
+        """The vault's own answer for a burn: 0 open (never released, or its queued release was voided by a pause),
+        1 queued, 2 paid, 3 held (the nonce or the burn id counts for another release)."""
+        return int(self.view('burn_status', nonce=int(nonce), burn=b32(burn).hex()))
 
     def record_value(self, name, value):
         """(state, decoded value or None) of a persistent record of the vault."""

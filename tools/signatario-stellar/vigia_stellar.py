@@ -14,11 +14,14 @@ directories) is that module's code. Replaced, because it reads or writes the sou
                them and keccak(head[n], id, amount, recipient) equals the stored head[n + 1], and only once that
                entry's ledger is `finality_ledgers` behind the node. Discovery only: signatario_stellar.py and
                stellar_half.py decide again before anything is signed.
-  released     the vault records the burn id (paid or queued), live or archived. A burn whose NONCE the vault records
-               while its id is absent was cancelled or displaced by the guardians: it is parked with an alert and
-               needs the operators' deliberate re-certification (`recertify_nonces`, docs/STELLAR-BRIDGE.md 6).
-  certificates a partial counts if its signature recovers to one of the vault's signers and its digest is the vault's
-               release digest of its fields (computed here; the vault's code is pinned by `vault_wasm_hash`).
+  released     the vault's own `burn_status` of the burn's nonce and id: queued or paid is done. A burn whose queued
+               release a guardian pause voided is open again and is signed again like any other, with no operator
+               step. A burn whose nonce or id the vault counts for another release (a forgery took it) is parked
+               with an alert until a pause voids that one.
+  certificates a partial counts if its signature (an Ethereum personal message) recovers to one of the vault's
+               signers, its digest is the vault's release digest of its fields (computed here; the vault's code is
+               pinned by `vault_wasm_hash`), and it was signed under the vault's CURRENT pause count: a round from
+               before a pause is dead and a new one is opened.
   anchor       a round can be joined if this node holds the same hash for the round's anchor ledger.
   relay        a release with `vault_threshold` certificates goes to relay_stellar.py (journal before publication);
                a queued release that is due is executed the same way.
@@ -61,6 +64,7 @@ class VigiaStellar(V.Vigia):
         self.known_deposits = {}   # nonce -> verified fields, for this process only
         self.queued = set()        # release ids seen queued, for this process only
         self.queue_cursor = None
+        self.burn_nonce = {}       # burn id -> nonce, from this process's own L2 reads and verified partials
 
     # ── the source network's clock and identity ──────────────────────────────
     def latest(self):
@@ -172,13 +176,44 @@ class VigiaStellar(V.Vigia):
         return ids
 
     # ── releases ─────────────────────────────────────────────────────────────
+    def burns(self):
+        burns = super().burns()
+        for b in burns:
+            self.burn_nonce[b['burn_id']] = b['nonce']
+        return burns
+
+    def pause_count(self):
+        return self.chain_read('stellar-pause-count', lambda: int(self.net.view('state')['pause_count']))
+
+    def status(self, burn_id):
+        """The vault's burn_status for a burn id, or None while this process does not know the burn's nonce."""
+        nonce = self.burn_nonce.get(burn_id)
+        if nonce is None:
+            # relay mode without an L2 scan: the nonce stated by the certificates in SHARED (untrusted; a wrong nonce
+            # only makes the vault answer for another pair, and the vault checks every release again).
+            for f in (self.shared / 'release' / burn_id[2:]).glob('r-*/*.json'):
+                try:
+                    rec = json.loads(f.read_text())
+                    if str(rec['release']['nativeBurn']).lower() == burn_id:
+                        nonce = int(rec['release']['nonce'])
+                        break
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+        if nonce is None:
+            return None
+        return self.chain_read(('stellar-burn-status', burn_id), lambda: self.net.burn_status(nonce, burn_id))
+
     def released(self, burn_id):
-        state, _ = self.net.record_value('Burn', burn_id)
-        return state != 'absent'
+        return self.status(burn_id) in (1, 2)
 
     def release_finished(self, burn_id):
-        # Stellar does not reorganise: a record in a closed ledger is final. Nothing is cached across passes.
+        # Stellar does not reorganise: the answer of a closed ledger is final. Nothing is cached across passes. A
+        # queued release counts as done here; if a pause voids it, the vault answers "open" again and it is redone.
         return self.released(burn_id)
+
+    def burn_done(self, d, burn_id):
+        """As vigia.py, without the `done` marker: on this route a queued release can become open again."""
+        return 'known' if self.release_finished(burn_id) else None
 
     def unpayable(self, b):
         if 'mint_head' not in b:
@@ -190,13 +225,13 @@ class VigiaStellar(V.Vigia):
                       mint_count=b['mint_count'], mint_head=b['mint_head'],
                       reason='the burn was made under a mint chain the vault deposits do not back')
             return True
-        state, record = self.net.record_value('Nonce', b['nonce'])
-        if state != 'absent':
-            # The nonce is recorded and the burn id is not: a guardian cancel (of this burn, or of a forgery that took
-            # its nonce). Only the operators' deliberate re-certification pays it; nothing is signed automatically.
+        self.burn_nonce[b['burn_id']] = b['nonce']
+        if self.status(b['burn_id']) == 3:
+            # The vault counts this nonce or this burn id for another release: a forgery took it. A guardian pause
+            # voids that one; nothing is signed until then.
             if b['burn_id'] not in self.parked_logged:
-                V.log(kind='alert', severity='critical', id='release-needs-recertification', burn=b['burn_id'],
-                      nonce=b['nonce'], record=record, record_state=state)
+                V.log(kind='alert', severity='critical', id='release-held-nonce-or-id-taken', burn=b['burn_id'],
+                      nonce=b['nonce'])
             return True
         return False
 
@@ -239,15 +274,18 @@ class VigiaStellar(V.Vigia):
             rel, c, half = rec['release'], rec['context'], rec.get('eth') or {}
             if str(rel['nativeBurn']).lower() != burn_id or rnd.name != bridge_feed.round_name(rec):
                 return None
-            recipient, generation = half['stellar_recipient'], int(half.get('generation', 0))
-            if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
-                return None
+            recipient, count = half['stellar_recipient'], int(half['pause_count'])
+            if count != self.pause_count():
+                return None  # signed before a pause: dead
+            if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower() and not half.get('claim'):
+                return None  # (a claim is verified by signatario_stellar.py when the certificates are combined)
             item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': recipient, 'amount': rel['amount'],
                     'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],
-                    'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead'], 'generation': generation}
-            ctx = {'valid_until': c['validUntil'], 'native_finalized_number': c['nativeFinalizedNumber'],
+                    'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead']}
+            ctx = {'valid_until': c['validUntil'], 'pause_count': count, 'native_finalized_number': c['nativeFinalizedNumber'],
                    'native_finalized_hash': c['nativeFinalizedHash']}
-            want = '0x' + sn.release_digest(self.net.passphrase, self.vault_contract, item, ctx).hex()
+            want = '0x' + sn.personal(sn.release_digest(self.net.passphrase, self.vault_contract, item, ctx)).hex()
+            self.burn_nonce.setdefault(burn_id, int(rel['nonce']))
         except (KeyError, ValueError, TypeError, sn.StellarError):
             return None
         return rec if want == rec['digest'].lower() else None
@@ -278,10 +316,7 @@ class VigiaStellar(V.Vigia):
         burn_id = '0x' + d.name
         if not V.WORD.fullmatch(burn_id):
             return
-        state = self.burn_done(d, burn_id)
-        if state:
-            if state == 'new':
-                V.log(kind='relay-release', burn=burn_id, done=True)
+        if self.burn_done(d, burn_id):
             return
         live = self.quorum_release(d, burn_id)
         if live is None or not self.backup_due('eth', f'release:{burn_id}'):
@@ -315,8 +350,8 @@ class VigiaStellar(V.Vigia):
             return
         for rid in sorted(self.queued):
             pending = self.net.view('pending', id=rid)
-            if pending is None:
-                self.queued.discard(rid)   # paid or cancelled
+            if pending is None or int(pending['pause_count']) != int(st['pause_count']):
+                self.queued.discard(rid)   # paid, or voided by a pause (its burn is certified again by the signers)
                 continue
             if now < int(pending['ready_at']) or int(pending['amount']) > int(self.net.view('available_to_release')):
                 continue

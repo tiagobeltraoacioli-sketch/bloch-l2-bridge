@@ -4,6 +4,7 @@ from a Stellar RPC and the Soroban vault (stellar/vault) instead of an Ethereum 
 
   stellar_half.py --config XLM.json deposit --deposit-id 0xID [--fields FILE]
   stellar_half.py --config XLM.json release --intent INTENT.json
+  stellar_half.py --config XLM.json claim-text --burn-id 0xID --to G...
 
 It prints one JSON object: {"ok": true, ...} with exit 0, or {"ok": false, "reason": ...} with exit 1. It reads only
 this signer's own Stellar RPC (and, when configured, further RPCs that must agree) and signs only what it checked.
@@ -17,9 +18,9 @@ deposit  Stellar closes a ledger by consensus and never reorganises, so the rule
          keccak(head[n], id, amount, recipient) equals the stored head[n + 1]. An RPC that has pruned the event
          (the default retention is about 7 days) can therefore not make this half sign something else; it can only
          make it wait for the fields. The vault's code is pinned by its Wasm hash. Signs nothing.
-release  the pinned Wasm; the route; releases enabled; no pause; the burn nonce and burn id not released: a record
-         that is live OR archived refuses (an archived record exists; only an absent one allows a signature, and a
-         read error is never "absent"); amount within `total_locked` and the release bucket; the burn's chain head
+release  the pinned Wasm; the route; releases enabled; no pause; the vault's `burn_status` of the burn nonce and burn
+         id is 0 (open): the vault reads its own records, restored if archived, and a read error is never "open";
+         amount within `total_locked` and the release bucket; the burn's chain head
          equals the vault's head at its mint count; the Stellar recipient (from `stellar_recipient` in the intent, a
          hint file, or the L2 router's log: any source) hashes to the burn's 20-byte recipient; the vault's balance
          covers its books. `validUntil` in (ledger time, ledger time + max_valid_seconds], never above the vault's
@@ -28,17 +29,25 @@ release  the pinned Wasm; the route; releases enabled; no pause; the burn nonce 
          of the signed digest (the vault cannot check a ledger hash); it travels with the certificate so the k
          partials agree. The digest is computed here and must equal the vault's `release_digest`. A local database
          refuses two different releases for one nonce or one burn.
-         After a guardian cancel (the vault's record of the nonce says `cancelled`, generation 0) the nonce is
-         certified again only as a deliberate act of this operator: the nonce is listed in `recertify_nonces`. The
-         half then signs `generation` 1 (the vault asks `switch_threshold` signatures for it and it cannot be
-         cancelled), with every other check unchanged: the burn is still read from the L2 by signatario.py. A nonce
-         that is listed but not cancelled on the vault is refused.
+         The certificate names the vault's pause count: a guardian pause voids every certificate signed before it and
+         every release still queued. A burn whose queued release was voided is simply open again (`burn_status` 0),
+         and this half signs it again like any other burn: no operator step. A burn whose nonce or id counts for
+         another release (`burn_status` 3: a forgery took it) is refused until a guardian pause voids that one.
+         The signature is an Ethereum personal message (EIP-191) over the vault's digest.
+claim    A burn made directly on the token names 20 bytes that may commit to no Stellar address (an Ethereum
+         address, as on bUSDC). It is paid by this stated rule only: the account that burned signs, as an Ethereum
+         personal message, the text printed by `claim-text` (it names the L2 chain, the token, the burn id and one
+         Stellar address), and the signed claim is placed in `recipient_claims/<burn id>.json` as
+         {"stellar_address": "G...", "signature": "0x..."}. The burner is taken from the L2 burn that signatario.py
+         read from its own L2, never from the claim. A burn made through the router has the router as its burner,
+         and a contract cannot sign: router burns are paid only to the address the router committed to. A burner
+         that is a contract cannot claim.
 
 Config (one JSON per signer): `stellar_rpc`, `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account`,
 `keystore`, `password_file`, `db`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
 `vault_from_ledger`, `finality_ledgers` (12), `max_ledger_age` (60), `valid_seconds` (1800), `max_valid_seconds`
 (3600), `recipient_hints` (directory of files named by the commitment hex), `l2_rpc` + `router` (StellarBurnRouter),
-`recertify_nonces` (list of burn nonces whose cancelled release this operator agreed to certify again).
+`recipient_claims` (directory of signed claims, see above) with `l2_chain_id` and `l2_token`.
 """
 import fcntl
 import json
@@ -203,11 +212,41 @@ class Half:
         for c in candidates:
             try:
                 if sn.recipient_commitment(c) == commitment:
-                    return c
+                    return c, None
             except sn.StellarError:
                 continue
+        claim = self.claim(intent)
+        if claim is not None:
+            return claim['stellar_address'], claim
         refuse('no Stellar address is known for the burn\'s recipient commitment; publish it (router log or hint)',
                commitment=hx(commitment))
+
+    def claim_text(self, burn_id, to):
+        sn.strkey_decode(to)
+        c = self.cfg
+        return sn.claim_text(c['l2_chain_id'], c['l2_token'], burn_id, to)
+
+    def claim(self, intent):
+        """A claim signed by the account that burned, for a burn whose 20 bytes commit to no known address."""
+        claims = self.cfg.get('recipient_claims')
+        burn = unhex(intent['release']['nativeBurn']).lower()
+        path = Path(claims) / f'{burn}.json' if claims else None
+        if path is None or not path.exists():
+            return None
+        burner = str((intent.get('l2') or {}).get('from', '')).lower()
+        if len(burner) != 42 or burner == str(self.cfg.get('router', '')).lower():
+            refuse('a claim is accepted only from the account that burned, and never for a router burn', burner=burner)
+        try:
+            claim = json.loads(path.read_text())
+            to, sig = claim['stellar_address'], claim['signature']
+            l2 = intent['l2']
+            text = sn.claim_text(l2['chain_id'], l2['token'], burn, to)
+        except (OSError, ValueError, KeyError, TypeError, sn.StellarError) as e:
+            refuse('the claim file for this burn is not readable or names no Stellar address', error=str(e))
+        done = subprocess.run([self.cast, 'wallet', 'verify', '--address', burner, text, sig], capture_output=True, text=True)
+        if done.returncode:
+            refuse('the claim is not signed by the account that burned', burner=burner, text=text)
+        return {'stellar_address': to, 'signature': sig, 'burner': burner, 'text': text}
 
     def router_recipients(self, intent):
         """Strings the L2 router logged for this burn id. Untrusted: only the commitment decides."""
@@ -248,24 +287,12 @@ class Half:
             refuse('the vault is paused by a guardian', paused_until=state['paused_until'])
         nonce, amount = int(rel['nonce']), int(rel['amount'])
         burn = sn.b32(rel['nativeBurn'])
-        generation = 0
-        if nonce in [int(n) for n in self.cfg.get('recertify_nonces', [])]:
-            # The one certificate allowed after a guardian cancel. The vault's record must say so, live.
-            record, entry, _ = self.net.record_state('Nonce', nonce)
-            if record != 'live':
-                refuse(f'recertify_nonces lists nonce {nonce}, but its record on the vault is {record}', nonce=nonce)
-            rec = sn.scval(entry['dataJson']['contract_data']['val'])
-            if rec.get('cancelled') is not True or int(rec.get('generation', -1)) != 0:
-                refuse('recertify_nonces lists a nonce the vault does not record as cancelled', nonce=nonce, record=rec)
-            record, _, _ = self.net.record_state('Burn', burn)
-            if record != 'absent':
-                refuse(f'this burn id is already recorded by the vault (Burn record is {record})', nonce=nonce)
-            generation = 1
-        else:
-            for name, value in (('Nonce', nonce), ('Burn', burn)):
-                record, _, _ = self.net.record_state(name, value)
-                if record != 'absent':
-                    refuse(f'this burn is already recorded by the vault ({name} record is {record})', nonce=nonce)
+        status = self.net.burn_status(nonce, burn)
+        if status in (1, 2):
+            refuse('this burn is already recorded by the vault (' + ('queued' if status == 1 else 'paid') + ')', nonce=nonce)
+        if status != 0:
+            refuse('the vault counts this nonce or this burn id for another release: held until a guardian pause '
+                   'voids that one', nonce=nonce, status=status)
         if amount <= 0 or amount > int(state['total_locked']):
             refuse('the amount is zero or above the vault\'s locked total', amount=amount, locked=state['total_locked'])
         if amount > int(self.net.view('available_to_release')):
@@ -285,7 +312,7 @@ class Half:
         if int(backing['balance']) < int(backing['required']):
             refuse('the vault holds less than its books need (clawback?): nothing is signed', backing=backing)
         commitment = sn.b20(rel['recipient'])
-        recipient = self.stellar_recipient(intent, commitment)
+        recipient, claim = self.stellar_recipient(intent, commitment)
         if recipient in (self.net.vault, config['token']):
             refuse('the recipient is the vault or the asset contract')
         if int(native['nativeFinalizedHash'], 16) == 0:
@@ -313,8 +340,8 @@ class Half:
 
         item = {'route': derived['route'], 'nonce': nonce, 'recipient': recipient, 'amount': amount,
                 'native_burn': burn.hex(), 'mint_count': mint_count, 'minted_total': int(rel['mintedTotal']),
-                'mint_head': unhex(rel['mintHead']).lower(), 'generation': generation}
-        ctx = {'valid_until': valid_until, 'native_finalized_number': int(native['nativeFinalizedNumber']),
+                'mint_head': unhex(rel['mintHead']).lower()}
+        ctx = {'valid_until': valid_until, 'pause_count': int(state['pause_count']), 'native_finalized_number': int(native['nativeFinalizedNumber']),
                'native_finalized_hash': unhex(native['nativeFinalizedHash']).lower()}
         digest = sn.release_digest(self.net.passphrase, self.net.vault, item, ctx)
         onchain = self.net.view('release_digest', item=item, context=ctx)
@@ -331,10 +358,6 @@ class Half:
             for table, key in (('nonces', str(nonce)), ('burns', burn.hex())):
                 prior = db[table].get(key)
                 if prior is not None and prior != core:
-                    if generation == 1 and table == 'nonces':
-                        # The vault records the earlier release of this nonce as cancelled: it can never be paid.
-                        db.setdefault('cancelled', []).append(prior)
-                        continue
                     refuse('this signer already signed another release for this nonce or burn', prior=prior, now=core)
             db['nonces'][str(nonce)] = core
             db['burns'][burn.hex()] = core
@@ -342,7 +365,8 @@ class Half:
             tmp.write_text(json.dumps(db, indent=2) + '\n')
             os.replace(tmp, self.db_path)
 
-        done = subprocess.run([self.cast, 'wallet', 'sign', '--no-hash', '--keystore', self.cfg['keystore'],
+        # An Ethereum personal message over the vault's 32-byte digest (no `--no-hash`: cast applies EIP-191).
+        done = subprocess.run([self.cast, 'wallet', 'sign', '--keystore', self.cfg['keystore'],
                                '--password-file', self.cfg['password_file'], hx(digest)], capture_output=True, text=True)
         if done.returncode:
             refuse('signing failed', stderr=done.stderr.strip()[-500:])
@@ -352,11 +376,11 @@ class Half:
         if unhex(signer) not in config['signers']:
             refuse('this keystore is not one of the vault\'s signers', signer=signer)
         answer(True, signer=signer, release=rel, stellar_recipient=recipient, vault_contract=self.net.vault,
-               generation=generation,
+               pause_count=ctx['pause_count'], claim=claim, vault_digest=hx(digest),
                context={'validUntil': valid_until, 'sourceAnchorNumber': anchor, 'sourceAnchorHash': '0x' + own['hash'],
                         'nativeFinalizedNumber': ctx['native_finalized_number'],
                         'nativeFinalizedHash': native['nativeFinalizedHash']},
-               digest=hx(digest), signature=done.stdout.strip().lower())
+               digest=hx(sn.personal(digest)), signature=done.stdout.strip().lower())
 
 
 def main():
@@ -370,6 +394,8 @@ def main():
             half.deposit(args)
         elif 'release' in argv:
             half.release(args)
+        elif 'claim-text' in argv:
+            print(half.claim_text(hx(sn.b32(args['--burn-id'])), args['--to']))
         else:
             raise SystemExit(__doc__)
     except sn.StellarError as e:

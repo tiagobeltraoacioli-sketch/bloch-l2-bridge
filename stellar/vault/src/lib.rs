@@ -25,12 +25,14 @@
 //!   `STROOPS_PER_UNIT`; nothing is rounded;
 //! - a guardian pauses with a signature (its secp256k1 key cannot sign a Stellar transaction);
 //! - releases above `large_release_threshold` wait `release_delay` in a queue (both fixed at deployment; delay 0
-//!   means no queue, and the guardians are then pause-only exactly as on Ethereum); a majority of the guardians may
-//!   cancel a queued release once. A cancel pays no one and loses no burn: the burn id is free again, and
-//!   `switch_threshold` signers (the unpause quorum) certify the cancelled nonce again, once, and that release
-//!   cannot be cancelled;
+//!   means no queue). Guardians have no other power than the pause, and a pause voids: every certificate signed
+//!   before it and every release still queued is dead (both carry the pause count they were made under). A voided
+//!   burn loses nothing: the committee certifies it again with the ordinary threshold, once per pause, and it waits
+//!   the delay again. An unpause revives nothing;
 //! - there is no block-hash anchor (Soroban exposes none and Stellar has no forks); a certificate binds the network
-//!   id and this contract, and expires at `valid_until`, at most `MAX_VALIDITY` ahead;
+//!   id, this contract and the vault's pause count, and expires at `valid_until`, at most `MAX_VALIDITY` ahead;
+//! - every digest is signed as an Ethereum personal message (EIP-191, "\x19Ethereum Signed Message:\n32"), as on
+//!   the other routes; the digest itself starts with a `BLOCH-XLM-...` tag and binds the network id and contract id;
 //! - the recipient of a release is a Stellar address, which the 20-byte recipient of the L2 burn commits to.
 //!
 //! Storage and archival: replay records are persistent entries. A persistent entry whose TTL ends is archived, never
@@ -82,7 +84,8 @@ const TAG_RELEASE_AUTH: &[u8] = b"BLOCH-XLM-RELEASE-AUTH-v1";
 const TAG_CONTROLS: &[u8] = b"BLOCH-XLM-CONTROLS-v1";
 const TAG_PAUSE: &[u8] = b"BLOCH-XLM-GUARDIAN-PAUSE-v1";
 const TAG_UNPAUSE: &[u8] = b"BLOCH-XLM-UNPAUSE-v1";
-const TAG_CANCEL: &[u8] = b"BLOCH-XLM-RELEASE-CANCEL-v1";
+/// EIP-191 personal-message prefix for a 32-byte message: what the committee's keys actually sign.
+const PERSONAL_PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n32";
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -101,7 +104,8 @@ pub enum Error {
     ProvenanceMismatch = 11,
     NotQueued = 12,
     NotReady = 13,
-    NotCancellable = 14,
+    /// A queued release from before a guardian pause: dead; the burn must be certified again.
+    Voided = 14,
     NotGuardian = 15,
 }
 
@@ -124,9 +128,9 @@ pub struct Config {
     /// secp256k1 committee, as Ethereum addresses, strictly ascending.
     pub signers: Vec<BytesN<20>>,
     pub threshold: u32,
-    /// Signatures that end a pause early or certify a cancelled release again (>= threshold).
+    /// Signatures that end a pause early (>= threshold).
     pub switch_threshold: u32,
-    /// Pause-only guardians, strictly ascending, never signers.
+    /// Pause-only guardians, strictly ascending, never signers. A pause voids the queue and older certificates.
     pub guardians: Vec<BytesN<20>>,
     pub pause_duration: u64,
     pub pause_cooldown: u64,
@@ -189,8 +193,6 @@ pub struct Release {
     pub mint_count: u64,
     pub minted_total: u64,
     pub mint_head: BytesN<32>,
-    /// 0 for the first certificate of a burn nonce; 1 for the one certificate allowed after a guardian cancel.
-    pub generation: u32,
 }
 
 #[contracttype]
@@ -198,6 +200,9 @@ pub struct Release {
 pub struct ReleaseContext {
     /// Ledger close time (seconds) after which the certificate is dead.
     pub valid_until: u64,
+    /// The vault's `pause_count` when the certificate was signed. A guardian pause raises the count, so no
+    /// certificate from before a pause is accepted after it, however the pause ends.
+    pub pause_count: u64,
     /// Bloch L2 block, final on the Bloch L1, holding the burn.
     pub native_finalized_number: u64,
     pub native_finalized_hash: BytesN<32>,
@@ -207,8 +212,11 @@ pub struct ReleaseContext {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BurnRecord {
     pub burn: BytesN<32>,
-    pub generation: u32,
-    pub cancelled: bool,
+    /// The vault's `pause_count` when this release was accepted.
+    pub pause_count: u64,
+    /// False while the release waits in the queue. An unpaid record from before the latest pause is void: the nonce
+    /// is open again for one certificate.
+    pub paid: bool,
 }
 
 #[contracttype]
@@ -218,6 +226,8 @@ pub struct Pending {
     pub amount: u64,
     pub ready_at: u64,
     pub nonce: u64,
+    /// The vault's `pause_count` when it was queued; it is executed only while the count is still that.
+    pub pause_count: u64,
 }
 
 #[contracttype]
@@ -239,8 +249,8 @@ enum Key {
     Head(u64),
     /// Replay record by burn nonce. Persistent.
     Nonce(u64),
-    /// Replay record by burn id: the nonce it was released under. Persistent. Removed only by a guardian cancel
-    /// (the release was never paid).
+    /// Replay record by burn id: the nonce it was released under. Persistent. It counts only while that nonce's
+    /// record names this id and is paid or still queued under the current pause count.
     Burn(BytesN<32>),
     /// A queued release, by release id. Persistent.
     Pending(BytesN<32>),
@@ -283,16 +293,6 @@ pub struct ReleaseQueued {
     pub amount: u64,
     pub native_burn: BytesN<32>,
     pub ready_at: u64,
-    pub generation: u32,
-}
-
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReleaseCancelled {
-    #[topic]
-    pub id: BytesN<32>,
-    pub nonce: u64,
-    pub native_burn: BytesN<32>,
 }
 
 #[contractevent]
@@ -437,8 +437,12 @@ fn required_stroops(st: &State) -> i128 {
     (st.total_locked as i128 + st.fees_accrued as i128) * STROOPS_PER_UNIT
 }
 
-/// The Ethereum address of the key that signed `digest`. Refuses a high `s` and any `v` but 27 or 28.
+/// The Ethereum address of the key that signed `digest` as a personal message (EIP-191): the signature is over
+/// keccak256("\x19Ethereum Signed Message:\n32" ‖ digest). Refuses a high `s` and any `v` but 27 or 28.
 fn recover(env: &Env, digest: &Hash<32>, signature: &BytesN<65>) -> BytesN<20> {
+    let mut message = Bytes::from_slice(env, PERSONAL_PREFIX);
+    message.extend_from_array(&digest.to_array());
+    let digest = &env.crypto().keccak256(&message);
     let sig = signature.to_array();
     let v = sig[64];
     if (v != 27 && v != 28) || sig[32..64] > HALF_ORDER[..] {
@@ -486,6 +490,12 @@ fn strictly_ascending(env: &Env, set: &Vec<BytesN<20>>) {
         }
         previous = a.to_array();
     }
+}
+
+/// A release record counts while it is paid, or queued under the current pause count. An unpaid record from before
+/// the latest guardian pause is void.
+fn record_counts(r: &BurnRecord, pause_count: u64) -> bool {
+    r.paid || r.pause_count == pause_count
 }
 
 fn chain_ended(cfg: &Config, st: &State, now: u64) -> bool {
@@ -571,6 +581,8 @@ impl Vault {
             || (g != 0
                 && (c.pause_duration == 0 || c.pause_duration > MAX_PAUSE_DURATION || c.pause_cooldown < c.pause_duration))
             || c.release_delay > MAX_RELEASE_DELAY
+            // After a chain of pauses the vault is open for `pause_cooldown`: a voided exit must fit in it twice over.
+            || (g != 0 && c.release_delay > c.pause_cooldown / 2)
             || c.source_domain == c.native_domain
             || c.source_domain.to_array() == [0u8; 32]
             || c.native_domain.to_array() == [0u8; 32]
@@ -681,6 +693,37 @@ impl Vault {
         env.storage().persistent().get(&Key::Burn(burn))
     }
 
+    /// Where the burn `burn` of nonce `nonce` stands: 0 open (never released, or its queued release was voided by a
+    /// pause: a certificate is accepted), 1 queued, 2 paid, 3 held (the nonce counts for another burn id, or the
+    /// burn id counts under another nonce: no certificate for this pair is accepted now).
+    pub fn burn_status(env: Env, nonce: u64, burn: BytesN<32>) -> u32 {
+        let pause_count = load_state(&env).pause_count;
+        let record: Option<BurnRecord> = env.storage().persistent().get(&Key::Nonce(nonce));
+        if let Some(r) = record {
+            if record_counts(&r, pause_count) {
+                return if r.burn != burn {
+                    3
+                } else if r.paid {
+                    2
+                } else {
+                    1
+                };
+            }
+        }
+        let by_burn: Option<u64> = env.storage().persistent().get(&Key::Burn(burn.clone()));
+        if let Some(other) = by_burn {
+            if other != nonce {
+                let o: Option<BurnRecord> = env.storage().persistent().get(&Key::Nonce(other));
+                if let Some(o) = o {
+                    if o.burn == burn && record_counts(&o, pause_count) {
+                        return 3;
+                    }
+                }
+            }
+        }
+        0
+    }
+
     pub fn pending(env: Env, id: BytesN<32>) -> Option<Pending> {
         env.storage().persistent().get(&Key::Pending(id))
     }
@@ -722,12 +765,12 @@ impl Vault {
             .uint(item.mint_count)
             .uint(item.minted_total)
             .b32(&item.mint_head)
-            .uint(item.generation as u64)
             .sha256(&env)
             .to_bytes()
     }
 
-    /// The 32 bytes the committee signs for a release (raw secp256k1 over this digest, no message prefix).
+    /// The 32 bytes the committee signs for a release, as an Ethereum personal message (EIP-191). The same holds
+    /// for every `*_digest` view below.
     pub fn release_digest(env: Env, item: Release, context: ReleaseContext) -> BytesN<32> {
         Self::release_hash(&env, &Self::release_id(env.clone(), item), &context).to_bytes()
     }
@@ -742,10 +785,6 @@ impl Vault {
 
     pub fn unpause_digest(env: Env, pause_count: u64, valid_until: u64) -> BytesN<32> {
         Self::counted_hash(&env, TAG_UNPAUSE, pause_count, valid_until).to_bytes()
-    }
-
-    pub fn cancel_digest(env: Env, id: BytesN<32>, valid_until: u64) -> BytesN<32> {
-        Self::cancel_hash(&env, &id, valid_until).to_bytes()
     }
 
     // ── deposits ───────────────────────────────────────────────────────────────
@@ -862,8 +901,9 @@ impl Vault {
 
     // ── releases ───────────────────────────────────────────────────────────────
 
-    /// Pays (or queues) a burn of the L2 token, certified by `threshold` signers; a burn a guardian majority
-    /// cancelled needs `switch_threshold` signers and `generation` 1.
+    /// Pays (or queues) a burn of the L2 token, certified by `threshold` signers under the vault's current pause
+    /// count. One release per burn nonce and per burn id; a queued release that a guardian pause voided leaves its
+    /// nonce open for one new certificate.
     pub fn release(env: Env, item: Release, context: ReleaseContext, signatures: Vec<BytesN<65>>) {
         let cfg = load_config(&env);
         let derived = load_derived(&env);
@@ -876,7 +916,7 @@ impl Vault {
             fail(&env, Error::InvalidRelease);
         }
         check_validity(&env, context.valid_until, Error::InvalidContext);
-        if context.native_finalized_hash.to_array() == [0u8; 32] {
+        if context.native_finalized_hash.to_array() == [0u8; 32] || context.pause_count != st.pause_count {
             fail(&env, Error::InvalidContext);
         }
         let vault = env.current_contract_address();
@@ -887,7 +927,6 @@ impl Vault {
             || item.recipient == vault
             || item.recipient == cfg.token
             || item.native_burn.to_array() == [0u8; 32]
-            || item.generation > 1
         {
             fail(&env, Error::InvalidRelease);
         }
@@ -899,34 +938,57 @@ impl Vault {
         if head != Some(item.mint_head.clone()) {
             fail(&env, Error::ProvenanceMismatch);
         }
-        // Replay: one release per burn nonce and per burn id; a cancelled one may come back once, locked.
+        // Replay: one release per burn nonce and per burn id. A record counts while it is paid or queued under the
+        // current pause count; an unpaid record from before a pause is void.
+        let counts = |r: &BurnRecord| record_counts(r, st.pause_count);
         let nonce_key = Key::Nonce(item.nonce);
         let burn_key = Key::Burn(item.native_burn.clone());
         let record: Option<BurnRecord> = env.storage().persistent().get(&nonce_key);
+        if let Some(r) = &record {
+            if counts(r) {
+                fail(&env, Error::InvalidRelease);
+            }
+        }
         let by_burn: Option<u64> = env.storage().persistent().get(&burn_key);
-        let required = match (record, by_burn, item.generation) {
-            (None, None, 0) => cfg.threshold,
-            // After a cancel the nonce is open for ONE locked certificate of `switch_threshold` signers. It names the
-            // real burn of that nonce: the cancelled id again (a false alarm, or a forgery of the amount or the
-            // recipient) or another id (a forgery that took the nonce), as long as that id is not recorded under any
-            // nonce. The cancel freed the cancelled id.
-            (Some(r), None, 1) if r.cancelled && r.generation == 0 => cfg.switch_threshold,
-            _ => fail(&env, Error::InvalidRelease),
-        };
+        if let Some(other) = by_burn {
+            if other != item.nonce {
+                let o: Option<BurnRecord> = env.storage().persistent().get(&Key::Nonce(other));
+                if let Some(o) = o {
+                    if o.burn == item.native_burn && counts(&o) {
+                        fail(&env, Error::InvalidRelease);
+                    }
+                }
+            }
+        }
         let id = Self::release_id(env.clone(), item.clone());
-        check_certificate(&env, &Self::release_hash(&env, &id, &context), &signatures, &cfg.signers, required);
-        put(
-            &env,
-            &nonce_key,
-            &BurnRecord { burn: item.native_burn.clone(), generation: item.generation, cancelled: false },
-        );
+        check_certificate(&env, &Self::release_hash(&env, &id, &context), &signatures, &cfg.signers, cfg.threshold);
+        if let Some(r) = &record {
+            // The voided release of this nonce named another burn id (a forgery that took the nonce): forget it.
+            if r.burn != item.native_burn {
+                let old = Key::Burn(r.burn.clone());
+                if env.storage().persistent().get(&old) == Some(item.nonce) {
+                    env.storage().persistent().remove(&old);
+                }
+            }
+        }
         put(&env, &burn_key, &item.nonce);
         if cfg.release_delay != 0 && item.amount > cfg.large_release_threshold {
             let ready_at = now + cfg.release_delay;
             put(
                 &env,
+                &nonce_key,
+                &BurnRecord { burn: item.native_burn.clone(), pause_count: st.pause_count, paid: false },
+            );
+            put(
+                &env,
                 &Key::Pending(id.clone()),
-                &Pending { recipient: item.recipient.clone(), amount: item.amount, ready_at, nonce: item.nonce },
+                &Pending {
+                    recipient: item.recipient.clone(),
+                    amount: item.amount,
+                    ready_at,
+                    nonce: item.nonce,
+                    pause_count: st.pause_count,
+                },
             );
             save_state(&env, &st);
             ReleaseQueued {
@@ -936,11 +998,11 @@ impl Vault {
                 amount: item.amount,
                 native_burn: item.native_burn,
                 ready_at,
-                generation: item.generation,
             }
             .publish(&env);
             return;
         }
+        put(&env, &nonce_key, &BurnRecord { burn: item.native_burn.clone(), pause_count: st.pause_count, paid: true });
         let fee = pay(&env, &cfg, &mut st, &item.recipient, item.amount);
         save_state(&env, &st);
         Released {
@@ -954,8 +1016,9 @@ impl Vault {
         .publish(&env);
     }
 
-    /// Anyone pays a queued release once its delay has passed, unless the vault is paused or the committee closed
-    /// releases (it then stays queued and is paid once they are open again).
+    /// Anyone pays a queued release once its delay has passed, unless the vault is paused, the committee closed
+    /// releases (it then stays queued), or a guardian paused the vault since it was queued (it is then void for
+    /// good, whoever ended the pause: the burn is certified again and waits the delay again).
     pub fn execute_release(env: Env, id: BytesN<32>) {
         let cfg = load_config(&env);
         let mut st = load_state(&env);
@@ -968,14 +1031,23 @@ impl Vault {
         if now < st.paused_until {
             fail(&env, Error::Paused);
         }
+        if pending.pause_count != st.pause_count {
+            fail(&env, Error::Voided);
+        }
         if !st.releases_enabled {
             fail(&env, Error::InvalidRelease);
         }
         if now < pending.ready_at {
             fail(&env, Error::NotReady);
         }
-        let record: BurnRecord = env.storage().persistent().get(&Key::Nonce(pending.nonce)).unwrap();
+        let nonce_key = Key::Nonce(pending.nonce);
+        let mut record: BurnRecord = env.storage().persistent().get(&nonce_key).unwrap();
+        if record.paid || record.pause_count != pending.pause_count {
+            fail(&env, Error::Voided);
+        }
         env.storage().persistent().remove(&key);
+        record.paid = true;
+        put(&env, &nonce_key, &record);
         let fee = pay(&env, &cfg, &mut st, &pending.recipient, pending.amount);
         save_state(&env, &st);
         Released {
@@ -989,41 +1061,6 @@ impl Vault {
         .publish(&env);
     }
 
-    /// A majority of the guardians cancels a queued release. The nonce stays recorded as cancelled, so the cancelled
-    /// certificate and every other `generation` 0 certificate of that nonce are dead; the burn id is forgotten, so
-    /// the burn it names is not lost. Only `switch_threshold` signers (the quorum that ends a pause) can certify
-    /// that nonce again (`generation` 1, for the same or another burn id), once, and that release cannot be
-    /// cancelled: guardians delay a burn by one cancel, never for good.
-    /// Guardians move nothing, pay no one and change no limit. With `release_delay` 0 nothing is ever queued and
-    /// this function can never succeed.
-    pub fn cancel_release(env: Env, id: BytesN<32>, valid_until: u64, signatures: Vec<BytesN<65>>) {
-        let cfg = load_config(&env);
-        let key = Key::Pending(id.clone());
-        let pending: Pending = match env.storage().persistent().get(&key) {
-            Some(p) => p,
-            None => fail(&env, Error::NotQueued),
-        };
-        let nonce_key = Key::Nonce(pending.nonce);
-        let mut record: BurnRecord = env.storage().persistent().get(&nonce_key).unwrap();
-        if record.generation != 0 || record.cancelled {
-            fail(&env, Error::NotCancellable);
-        }
-        check_validity(&env, valid_until, Error::InvalidContext);
-        check_certificate(
-            &env,
-            &Self::cancel_hash(&env, &id, valid_until),
-            &signatures,
-            &cfg.guardians,
-            cfg.guardians.len() / 2 + 1,
-        );
-        env.storage().persistent().remove(&key);
-        env.storage().persistent().remove(&Key::Burn(record.burn.clone()));
-        record.cancelled = true;
-        put(&env, &nonce_key, &record);
-        save_state(&env, &load_state(&env));
-        ReleaseCancelled { id, nonce: pending.nonce, native_burn: record.burn }.publish(&env);
-    }
-
     // ── guardians ──────────────────────────────────────────────────────────────
 
     /// True if `guardian` could pause right now.
@@ -1034,6 +1071,8 @@ impl Vault {
     /// One guardian stops deposits and releases for `pause_duration`. The guardian signs `pause_digest` for the
     /// current `pause_count`; anyone may submit it. Not while paused, not within `pause_cooldown` of a committee
     /// unpause, and once per guardian in a chain of consecutive pauses.
+    /// The pause raises `pause_count`, which voids every release certificate signed before it and every release
+    /// still in the queue. That is the guardians' whole power: they move nothing, pay no one and change no limit.
     pub fn guardian_pause(env: Env, valid_until: u64, signature: BytesN<65>) {
         let cfg = load_config(&env);
         let mut st = load_state(&env);
@@ -1056,7 +1095,8 @@ impl Vault {
         GuardianPaused { guardian, pause_count: st.pause_count, paused_until: st.paused_until }.publish(&env);
     }
 
-    /// `switch_threshold` signers end the current pause early; guardians then wait `pause_cooldown`.
+    /// `switch_threshold` signers end the current pause early; guardians then wait `pause_cooldown`. Nothing the
+    /// pause voided comes back: `pause_count` stays.
     pub fn unpause(env: Env, pause_count: u64, valid_until: u64, signatures: Vec<BytesN<65>>) {
         let cfg = load_config(&env);
         let mut st = load_state(&env);
@@ -1090,6 +1130,7 @@ impl Vault {
         Self::domain(env, TAG_RELEASE_AUTH)
             .b32(id)
             .uint(context.valid_until)
+            .uint(context.pause_count)
             .uint(context.native_finalized_number)
             .b32(&context.native_finalized_hash)
             .keccak(env)
@@ -1109,9 +1150,6 @@ impl Vault {
         Self::domain(env, tag).b32(&load_derived(env).route).uint(count).uint(valid_until).keccak(env)
     }
 
-    fn cancel_hash(env: &Env, id: &BytesN<32>, valid_until: u64) -> Hash<32> {
-        Self::domain(env, TAG_CANCEL).b32(&load_derived(env).route).b32(id).uint(valid_until).keccak(env)
-    }
 }
 
 #[cfg(test)]
