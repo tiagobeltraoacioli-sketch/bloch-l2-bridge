@@ -1,0 +1,136 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "network": {
+    "id": "solana",
+    "name": "Solana",
+    "kind": "svm",
+    "chainId": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "nativeCurrency": {
+      "symbol": "SOL",
+      "decimals": 9
+    }
+  },
+  "asset": {
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "id": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "issuer": "Circle",
+    "issuerNative": true,
+    "issuerPowers": [
+      "blacklist"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading on https://api.mainnet-beta.solana.com: getAccountInfo of the mint at finalized, slot 470242302",
+        "date": "2026-11-16",
+        "note": "owner program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA (classic SPL Token, not Token-2022), 6 decimals, mint authority BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG, freeze authority 7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar (the issuer can freeze any USDC token account, which is the blacklist power here)"
+      },
+      {
+        "source": "https://developers.circle.com/stablecoins/usdc-contract-addresses (Circle's own address table)",
+        "date": "2026-11-16"
+      }
+    ]
+  },
+  "custody": {
+    "type": "svm-program",
+    "address": "TBD-deploy",
+    "contract": "solana/bloch-sol-vault (program); the vault is a program-derived account of the configuration hash, its token account a program-derived account of the vault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDC (Solana)",
+    "symbol": "bUSDC.sol",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "11000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "10000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8",
+    "paidOn": "source",
+    "collection": "accrued in the vault's token account outside the backing; anyone sends sweep_fees and the vault pays the recipient's USDC associated token account 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg, which must exist first",
+    "networkFee": "the depositor pays the deposit transaction and the rent of its deposit record (about 0.0024 SOL); the relayer pays the two release transactions and the rent of the release record (about 0.0021 SOL)"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its deposit record account is read at finalized commitment on the signer's own node and its slot is at least 150 slots below the finalized slot.",
+    "tag": "finalized",
+    "confirmations": 150,
+    "typicalSeconds": 90,
+    "worstCaseSeconds": 3600,
+    "reorg": "Signers read only finalized account state. Every mint waits 12 hours on the L2; a mint whose deposit record is gone after a cluster restart is cancelled by the guardians. If it credits anyway, the vault refuses every later burn because the token's mint chain no longer equals the vault's deposit chain: releases are held, nothing is credited twice and nothing is paid without a deposit."
+  },
+  "deposit": {
+    "method": "program-instruction",
+    "recipientEncoding": "the 20 bytes of the L2 address, in the instruction data after the amount",
+    "function": "instruction 1 (deposit) of the vault program: data = 0x01 | amount u64 little-endian | 20-byte L2 address; accounts: depositor (signer, writable), depositor USDC token account (writable), vault (writable), vault token account (writable), USDC mint, deposit record PDA [\"deposit\", vault, deposit count as u64 little-endian] (writable), token program, system program",
+    "steps": [
+      "read the vault account to learn the next deposit nonce and derive the deposit record address",
+      "send the deposit instruction signed by the wallet that holds the USDC (it also pays about 0.0024 SOL of rent for the deposit record)",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to the L2 address"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "a zero L2 address",
+      "a deposit while the vault is paused or deposits are switched off",
+      "any token account that is not classic SPL USDC",
+      "do not name a contract as the L2 address unless it can move the token"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient) on the token, with sourceRecipient = SolanaRecipientRegistry.commitmentOf(wallet); announce(wallet) on the registry once per wallet",
+    "recipientEncoding": "20-byte commitment: the last 20 bytes of keccak256(\"BLOCH-SVM-ACCOUNT-ID-v1\" || the 32-byte Solana wallet address). The vault pays only the USDC associated token account of a wallet that hashes to it",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDC, the burned amount less 0.05%",
+    "notes": [
+      "the wallet's USDC associated token account must exist before the payment; relayers do not create it by default, and anyone (the user included) may create it and may send the payment transaction",
+      "a release above 1,000 USDC waits 1,800 seconds on Solana between approval and payment; a guardian pause voids approvals not yet paid, which the committee then signs again",
+      "a commitment computed from anything but the wallet address (for example a token account address) cannot be paid: use commitmentOf",
+      "a recipient token account frozen by the issuer cannot be paid until it is thawed; the burn names the recipient and cannot be redirected"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://explorer.solana.com/tx/{tx}",
+      "address": "https://explorer.solana.com/address/{address}",
+      "block": "https://explorer.solana.com/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
+    "custody.address will be the program id and the vault account address, written as <programId>/<vaultAddress>; custody.codeHash the sha256 of the deployed program binary.",
+    "Solana-only vault values that the schema's limits do not carry: largeReleaseThreshold 1000000000 and releaseDelay 1800 seconds on the source side, maxValidSeconds 3600.",
+    "The source chain id inside every signed message is keccak256(\"BLOCH-SVM-CHAIN-ID-v1\" || genesis hash bytes) = 0x720ef12f64972f1d7a826f17e9d177f041fbca3173c9bce00aa50eac2c22fdec."
+  ]
+}
