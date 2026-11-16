@@ -126,6 +126,10 @@ def cmd_token(args, verify=False):
         pol.release_payout(vault, lim['minBurn'], 1)
     except pol.PolicyError as e:
         refuse(f'token minBurn is too small for the vault policy: {e.reason}')
+    if p['maxDepositSats'] > lim['bucketCapacity'] * unit:
+        refuse('a deposit of maxDepositSats would not fit the token mint bucket: its mint could never queue and would block every later one')
+    if p['capSats'] != lim['supplyCap'] * unit:
+        refuse('the vault cap must equal the token supply cap', capSats=p['capSats'], supplyCap=lim['supplyCap'])
     if lim['bucketCapacity'] * unit > p['windowLimitSats']:
         refuse('one burn (at most bucketCapacity) must fit the vault release window', window=p['windowLimitSats'])
     if not p['windowLimitSats'] <= lim['supplyCap'] * unit:

@@ -16,8 +16,11 @@ def owner_regtest():
     return c.address_from_spk('bitcoin-regtest', c.spk_from_address('bitcoin-mainnet', 'bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk'))
 
 
+BIG = {'maxDepositSats': 10**9, 'capSats': 10**13}
+
+
 def vault(**over):
-    return pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 0, owner_regtest(), {**pol.DEFAULT_POLICY, **over})
+    return pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 0, owner_regtest(), {**pol.DEFAULT_POLICY, **BIG, **over})
 
 
 def tip(value=300_000, marker=None, txid='bb' * 32):
@@ -112,10 +115,10 @@ class Addresses(unittest.TestCase):
     def test_route_moves_with_every_fixed_value(self):
         base = vault().route
         self.assertNotEqual(base, vault(windowLimitSats=1).route)
-        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 4, KEYS, 'aa' * 32, 0, owner_regtest(), pol.DEFAULT_POLICY).route)
-        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 1, owner_regtest(), pol.DEFAULT_POLICY).route)
-        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 0, vault().thread_address(), pol.DEFAULT_POLICY).route)
-        self.assertEqual(base, pol.Vault('bitcoin-regtest', 5, list(reversed(KEYS)), 'aa' * 32, 0, owner_regtest(), pol.DEFAULT_POLICY).route)
+        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 4, KEYS, 'aa' * 32, 0, owner_regtest(), vault().policy).route)
+        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 1, owner_regtest(), vault().policy).route)
+        self.assertNotEqual(base, pol.Vault('bitcoin-regtest', 5, KEYS, 'aa' * 32, 0, vault().thread_address(), vault().policy).route)
+        self.assertEqual(base, pol.Vault('bitcoin-regtest', 5, list(reversed(KEYS)), 'aa' * 32, 0, owner_regtest(), vault().policy).route)
 
     def test_policy_validation(self):
         for bad in ({'depositFeeBps': 31}, {'releaseFeeBps': 0}, {'unitSats': 1}, {'minConfirmations': 0}, {'dustSats': 100}):
@@ -155,6 +158,7 @@ class Builder(unittest.TestCase):
     def test_refusals(self):
         v = vault()
         for kw, word in (({'deposits': [dep(0, 19_999)]}, 'below the minimum'),
+                         ({'deposits': [dep(0, 10**9 + 1)]}, 'above the maximum'),
                          ({'deposits': [dep(0, 30_000)], 'feerate': 60}, 'miner charge exceeds'),
                          ({'feerate': 0, 'deposits': [dep(0, 10**6)]}, 'fee rate'),
                          ({'feerate': 501, 'deposits': [dep(0, 10**6)]}, 'fee rate'),
@@ -256,6 +260,23 @@ class Builder(unittest.TestCase):
         self.assertGreater(high['fee'], low['fee'])
         self.assertLess(high['credits'][0]['units'], low['credits'][0]['units'])
         self.assertNotEqual(high['credits'][0]['deposit_id'], low['credits'][0]['deposit_id'])
+
+
+class Cap(unittest.TestCase):
+    def test_sweeps_stop_at_the_supply_cap_and_resume_after_burns(self):
+        v = vault(maxDepositSats=10**7, capSats=2 * 10**7)
+        b = pol.build_vault_tx(v, tip(), [dep(0, 10**7), dep(1, 10**7)], [], [], 1)
+        s = {'txid': b['tx'].txid(), 'vout': 0, 'value': b['tx'].outputs[0][0], 'marker': b['marker']}
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, s, [dep(2, 10**6)], [], [], 1)
+        self.assertTrue(e.exception.wait and 'supply cap' in e.exception.reason)
+        # a burn in the same transaction makes room; releases alone are never blocked by the cap
+        ok = pol.build_vault_tx(v, s, [dep(2, 10**6)], [], [{'nonce': 1, 'units': 20_000, 'recipient': b'\x01' * 20}], 1)
+        self.assertLessEqual(ok['marker'].liabilities, 2 * 10**7)
+        pol.build_vault_tx(v, s, [], [], [{'nonce': 1, 'units': 600, 'recipient': b'\x01' * 20}], 1)
+        for bad in ({'maxDepositSats': 10}, {'capSats': 10**6, 'maxDepositSats': 10**7}):
+            with self.assertRaises(pol.PolicyError):
+                vault(**bad)
 
 
 class Rules(unittest.TestCase):

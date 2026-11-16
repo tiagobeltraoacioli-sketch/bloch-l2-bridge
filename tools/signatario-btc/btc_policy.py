@@ -29,6 +29,8 @@ DEFAULT_POLICY = {
     'depositFeeBps': 5,
     'releaseFeeBps': 5,
     'minDepositSats': 20_000,
+    'maxDepositSats': 10_000_000,  # at most the L2 token's mint bucket: a larger credit could never mint and would block the order
+    'capSats': 100_000_000,        # the L2 token's supply cap in sats: the vault never owes holders more
     'maxChargeBps': 1_000,        # an item never pays more than 10% of itself to miners; above that it waits
     'dustSats': 546,
     'ownerPayoutMinSats': 10_000,
@@ -66,6 +68,7 @@ def policy_hash(policy):
             and 0 < policy['sweepDepth'] and 0 < policy['minConfirmations'] <= policy['maxConfirmations']
             and policy['satsPerExtraConfirmation'] > 0 and policy['dustSats'] >= 546
             and policy['ownerPayoutMinSats'] >= policy['dustSats'] and policy['windowSeconds'] > 0
+            and policy['minDepositSats'] <= policy['maxDepositSats'] <= policy['capSats']
             and 0 < policy['maxDepositsPerTx'] <= 50 and 0 < policy['maxReleasesPerTx'] <= 100):
         raise PolicyError('policy value out of range')
     return hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).digest()
@@ -137,6 +140,8 @@ def deposit_credit(vault, value, feerate):
     p = vault.policy
     if value < p['minDepositSats']:
         raise PolicyError('the deposit is below the minimum; it is never swept or credited', value=value)
+    if value > p['maxDepositSats']:
+        raise PolicyError('the deposit is above the maximum; it is never swept or credited', value=value)
     fee = value * p['depositFeeBps'] // 10_000
     charge = feerate * (vault.deposit_vb + vault.overhead_vb)
     if charge > value * p['maxChargeBps'] // 10_000:
@@ -212,6 +217,8 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate):
         paid.add(b['nonce'])
     if liabilities < 0:
         raise PolicyError('the burns exceed what the vault owes: a credited mint has no swept deposit behind it')
+    if deposits and liabilities > p['capSats']:
+        raise PolicyError('the sweep would pass the supply cap; the deposits wait for burns', wait=True, cap=p['capSats'])
 
     total_in = tip['value'] + sum(d['value'] for d in deposits) + sum(d['value'] for d in donations)
     paid_out = sum(x['sats'] for x in payouts)

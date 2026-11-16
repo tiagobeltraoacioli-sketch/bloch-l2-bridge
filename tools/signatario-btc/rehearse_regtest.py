@@ -327,7 +327,7 @@ def run(rig):
            '--unsafe-password', f'throwaway-{i}')
     owner = c.address_from_spk('bitcoin-regtest', c.spk_from_address('bitcoin-mainnet', OWNER_MAINNET))
     policy = {**pol.DEFAULT_POLICY, 'sweepDepth': 1, 'minConfirmations': 3, 'windowLimitSats': 100_000_000,
-              'largeReleaseSats': 30_000_000}
+              'largeReleaseSats': 30_000_000, 'maxDepositSats': 100_000_000, 'capSats': 10_000_000_000}
 
     # the anchor: the first thread output, paid to the bare 5-of-7 script; it seeds the fee pool
     thread_address = c.address_from_spk('bitcoin-regtest', c.p2wsh(c.multisig_script(5, pubs)))
@@ -426,6 +426,7 @@ def run(rig):
     d_alice = rig.pay(dep_addr(alice), '0.90000000')
     d_bob = rig.pay(dep_addr(bob), '0.90000000')
     d_small = rig.pay(dep_addr(bob), '0.00010000')          # below the minimum
+    d_huge = rig.pay(dep_addr(bob), '1.50000000')           # above the maximum (it could never fit the mint bucket)
     d_stray = rig.pay(vault.thread_address(), '0.00030000')  # sent to the bare vault address: names nobody
     check('A1 two recipients get two different deposit addresses, both plain P2WSH any wallet can pay',
           dep_addr(alice) != dep_addr(bob) and dep_addr(alice).startswith('bcrt1q') and len(dep_addr(alice)) == 64)
@@ -438,7 +439,10 @@ def run(rig):
     check('A3 a deposit claimed for another recipient is refused by every signer',
           all_refuse(r['signs'], 'not the deposit address of the recipient named'), reasons(r['signs']) or r['propose'])
     r = rig.vault_tx(2, deposits=[(d_small[0], d_small[1], bob)], tag='a-small')
-    check('A4 a deposit below the minimum is never swept', r['propose'][0] != 0 and 'below the minimum' in r['propose'][1].get('reason', ''))
+    r_huge = rig.vault_tx(2, deposits=[(d_huge[0], d_huge[1], bob)], tag='a-huge')
+    check('A4 a deposit below the minimum or above the maximum is never swept',
+          r['propose'][0] != 0 and 'below the minimum' in r['propose'][1].get('reason', '')
+          and r_huge['propose'][0] != 0 and 'above the maximum' in r_huge['propose'][1].get('reason', ''), r_huge['propose'][1])
     r = rig.vault_tx(2, deposits=[(d_alice[0], d_alice[1], alice), (d_bob[0], d_bob[1], bob)], signers=range(7), tag='a-sweep')
     check('A5 sweep of two deposits: 7 of 7 signers rebuild and sign, 5 signatures spend the 5-of-7 scripts, node accepts',
           r['combine'] and r['combine'][0] == 0 and sum(1 for rc, _ in r['signs'] if rc == 0) == 7, r)
