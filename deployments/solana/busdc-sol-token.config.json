@@ -2,7 +2,7 @@
   "domain": "bloch.bridge.solana-token-deploy.v1",
   "bridge": "stable",
   "notes": {
-    "status": "UNAUDITED. Nothing is deployed. tools/deploy-pontes/deploy_pontes.py does NOT read this file: its stable-bridge schema has an `ethereum` section and its run / verify steps read an Ethereum vault through --source-rpc (code hash, routeId, cap, an unused vault). The Solana equivalent of those checks is not built; see docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md section 7",
+    "status": "UNAUDITED. Nothing is deployed. tools/deploy-pontes/deploy_pontes.py does not read this file directly (its stable-bridge schema has an `ethereum` section and reads an Ethereum vault). The path is tools/signatario-solana/sol_deploy_token.py: `translate` writes the deploy_pontes config from this file and the vault file, and `pontes <command>` runs the unchanged deploy_pontes.py with the source vault read from Solana; see docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md section 7",
     "token": "BridgedStablecoinV3, byte-identical to the Ethereum bridge's token (creation code keccak256 0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7); only the constructor arguments differ",
     "units": "1 USDC = 1e6 units (6 decimals)",
     "source": "sourceChainId is keccak256(\"BLOCH-SVM-CHAIN-ID-v1\" || genesis hash bytes) as a uint256; sourceVault is the vault's 20-byte identity vault20 = last 20 bytes of keccak256(\"BLOCH-SVM-VAULT-ID-v1\" || program id || vault address); sourceRoute is the vault's route. Both come from `sol_vault.py verify` after the vault is initialized",

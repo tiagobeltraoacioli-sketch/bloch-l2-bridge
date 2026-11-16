@@ -3,8 +3,9 @@
 Status: **UNAUDITED. Nothing is deployed.** This is a delta to `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md`, which stays
 in force for everything on the L2 side (the pinned follower build, the L2 mint keys, the relayer roles on the L2,
 the 6-of-7 unpause of the token, what each role does on a forged mint). Only what Solana changes is written here.
-The tools are under `tools/signatario-solana/`; they were being written when this text was, so check each command
-against the tool's `--help`. Nothing in this document has been run by an operator.
+The tools are under `tools/signatario-solana/`; this text was checked against them after they were written, and
+the local rehearsal (`rehearse_local.py`) runs the signer, the relayer and the guardian watch described here.
+Nothing in this document has been run by an operator.
 
 Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md`.
 
@@ -14,7 +15,7 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
 |---|---|---|
 | Signer operator (7) | An own Solana RPC node; `signatario.py` (unchanged) with `sol_half.py` as its source half; `sol_vigia.py sign` | The same L2 mint key and release key as for the Ethereum bridge. No Solana key |
 | Relayer (at one or more signer operators) | `sol_vigia.py relay` | One Solana fee-payer key (ed25519, no vault power) and the L2 relayer gas key |
-| Guardian operator (3) | An own Solana RPC node; the vault watch and `sol_vault.py pause-sign` / `pause-submit`; `sol_vault.py reserves` | The same L2 token guardian key and vault guardian key. One Solana fee-payer key to deliver its own pause |
+| Guardian operator (3) | An own Solana RPC node; `sol_guardiao.py watch` (the vault and token watch, with the automatic vault pause); by hand `sol_vault.py pause-sign` / `pause-submit`; `sol_vault.py reserves` | The same L2 token guardian key and vault guardian key. One Solana fee-payer key to deliver its own pause |
 | Owner | nothing permanent | The deployer fee payer (once) |
 
 ## 2. For every operator: an own Solana node, read at `finalized`
@@ -47,8 +48,11 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
 - **Signing again after a pause.** A guardian pause voids every approval that was not yet paid. After the pause
   the release record still exists in state "approved", but the vault refuses to pay it (`Voided`, error 116). The
   release is then signed again, with a new `validUntil`, and approved again. This is the same release for the same
-  burn, so the equivocation guard allows it. A signer must not sign it again while the reason for the pause is
-  unknown: the pause exists so that a wrong approval is looked at first.
+  burn, so the equivocation guard allows it. `sol_vigia.py sign` does this by itself as soon as the pause is over
+  (72 h, or earlier by a 6-of-7 unpause): its Solana half refuses only a paid release or a standing approval. So
+  an operator who does not yet know the reason for the pause stops its sign daemon before the pause ends; the
+  pause exists so that a wrong approval is looked at first. A pause never loses an exit: the burn stays on the
+  L2, no paid record exists for its nonce, and five signers can always certify it again (shown in the rehearsal).
 - A certificate lives at most `maxValidSeconds` (3,600 s). If five partial signatures are not collected and
   submitted within that time, the round is repeated with a new `validUntil`.
 - A release approval carries exactly the threshold of signatures (5). Six fit a transaction; seven do not.
@@ -71,9 +75,14 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   once: with `releaseDelay` it is still unpaid for 30 minutes if it is above the threshold, and the pause voids it.
   A queued mint with no deposit record is cancelled on the L2 by 2 of 3 guardians, as in the main runbook (2.7).
 - Two L2 views before a vault pause (rule 2.4) applies unchanged.
-- An automatic guardian daemon for this vault (the `guardiao.py` release watch, ported) is not part of the tool
-  set described to the author of this document. Until it exists, the watch above is a manual duty, which is not
-  acceptable for mainnet.
+- The automatic watch is `tools/signatario-solana/sol_guardiao.py` (`check`, `watch`): a subclass of
+  `tools/guardiao/guardiao.py` that keeps the L2 side, the findings, the grace periods, the token pause and the
+  cancel votes of the parent and reads the source side from the vault's accounts at `finalized`. With
+  `vault_pause: true` it signs and delivers its own vault pause on a due reserves, release or approval finding.
+  A standing approval with no matching burn is a finding of its own (`release-unknown:approval-<nonce>-<seq>`).
+  It lists the vault's release records with `getProgramAccounts`: the guardian's own node must serve that method
+  for the program (an Agave RPC node with account indexes, or a provider plan that allows it).
+  Unlike the Ethereum guardian it shares the Solana encoding library with the signer tools; see section 10.
 
 ## 5. Relayers
 
@@ -91,8 +100,15 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   A Solana transaction that did not land expires with its blockhash (about a minute) and can simply be sent again;
   the program makes a second approval or a second payment of the same nonce fail. There is no account nonce to
   reserve, so the write-ahead journal of the Ethereum relayer has no counterpart here.
-- Relay roles and the backup stagger (rule 2.2) apply to the Solana relayers as well. `sol_vigia.py` is new code
-  and does not have `vigia.py`'s signature feed transport or its journals; treat this as a gap, not as parity.
+- Relay roles and the backup stagger (rule 2.2) apply to the Solana relayers as well. `sol_vigia.py` is a
+  subclass of `vigia.py`: rounds, budgets, the signature feed, relay roles and the L2 nonce record are the
+  parent's code. The Solana side keeps no `sent` file and no journal: the relayer sends `approve`, reads the
+  release record back, and sends `execute` when the record is ready, the vault is not paused and the release
+  bucket allows the amount. The feed transport was NOT exercised in the Solana rehearsal (it used a local shared
+  directory); treat the feed over this bridge as untested.
+- Relayer config beyond the Ethereum one: `sol_half_config`, `sol_fee_payer`, `recipient_registry`,
+  `registry_from_block`, `sol_create_recipient_account` (default false). `eth_rpc` and the `eth_relayer_*` keys
+  are not used.
 - `sweep_fees` is permissionless and cheap. Any relayer may run `sol_vault.py sweep` on a schedule; it fails
   harmlessly while the fee owner's token account does not exist or is frozen.
 
@@ -147,4 +163,10 @@ restart is announced:
   a check that the node reports the right genesis hash, that the program is final with the pinned binary hash,
   that the vault state equals the config, and a dry release refusal.
 - No ops templates (systemd units, config templates) for the Solana daemons exist under `deployments/solana/`.
-- The automatic guardian watch and the feed transport are named above as gaps.
+- The signature feed over this bridge is untested (section 5). The guardian watch shares `solana_lib.py` and
+  `sol_half.Node` with the signer tools, so it is not an independent implementation of the Solana encodings as
+  the Ethereum guardian is of the Ethereum ones.
+- The guardian watch was rehearsed for the honest history (no finding) and for an unbacked credited mint
+  (reserves and mint-chain findings, automatic vault pause). A forged approval or payment on a live validator
+  needs five committee keys; the watch's handling of it is covered only by the code path that the mint case
+  shares, not by a rehearsed forged release.

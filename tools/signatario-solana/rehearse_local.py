@@ -319,11 +319,14 @@ class Rehearsal:
         signers = '[' + ','.join(a for a, _ in self.mint_keys) + ']'
         guardians = '[' + ','.join(a for a, _ in self.l2_guardians) + ']'
         limits = f'({5_000 * U},{1_000 * U},{1_000 * U // 86400},0,43200,{10 * U})'
-        dep = out(FORGE, 'create', '--root', PROJECT, '--broadcast', '--rpc-url', L2_URL, '--private-key', self.deployer,
-                  'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', '--constructor-args',
-                  'Bloch Bridged USDC (Solana)', 'bUSDC.sol', s['sourceChainId'], s['sourceVault'], s['sourceRoute'],
-                  signers, '5', limits, f'({guardians},259200,259200)', '(6,1209600)')
-        self.token = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
+        if (PROJECT / '.git').exists() and '--no-deploy-path' not in sys.argv:
+            self.token = self.deploy_by_path(s)
+        else:  # a copy without git data: deploy_pontes pins a revision, so the documented path cannot run
+            dep = out(FORGE, 'create', '--root', PROJECT, '--broadcast', '--rpc-url', L2_URL, '--private-key', self.deployer,
+                      'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', '--constructor-args',
+                      'Bloch Bridged USDC (Solana)', 'bUSDC.sol', s['sourceChainId'], s['sourceVault'], s['sourceRoute'],
+                      signers, '5', limits, f'({guardians},259200,259200)', '(6,1209600)')
+            self.token = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
         check('the token starts from the vault\'s deposit-chain genesis',
               l2_view(self.token, 'mintHead()(bytes32)') == s['mintChainGenesis'])
         self.registry = None
@@ -350,6 +353,72 @@ class Rehearsal:
                 'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
                 'eth_half_release': half + ['release', '--intent', '{intent}']}))
             self.signer_cfgs.append((cfg, half_cfg))
+
+    def deploy_by_path(self, s):
+        """The L2 token deployed by the documented path: sol_deploy_token.py over deploy_pontes.py (unchanged)."""
+        d = WORK / 'token-deploy'
+        d.mkdir()
+        env = dict(os.environ, FOUNDRY_BIN=str(FOUNDRY))
+
+        def path(*argv):
+            done = run(sys.executable, HERE / 'sol_deploy_token.py', *argv, ok=False, env=env)
+            try:
+                answer = json.loads(done.stdout)
+            except ValueError:
+                answer = {'decision': 'refused', 'reason': 'no JSON', 'stdout': done.stdout[-400:], 'stderr': done.stderr[-800:]}
+            answer['exit'] = done.returncode
+            return answer
+        genesis = json.loads(out(CAST, 'block', '0', '--rpc-url', L2_URL, '--json'))['hash']
+        token_file = {
+            'domain': 'bloch.bridge.solana-token-deploy.v1', 'bridge': 'stable', 'notes': {'status': 'local rehearsal'},
+            'network': {'name': 'bloch-l2-local-rehearsal', 'chainId': L2_CHAIN, 'genesisHash': genesis, 'rehearsal': True},
+            'source': {'revision': out('git', 'rev-parse', 'HEAD', cwd=PROJECT)},
+            'deployer': {'address': address_of(self.deployer), 'startNonce': 0,
+                         'fundedBy': {'entity': 'rehearsal', 'safe': '0x' + os.urandom(20).hex()}},
+            'mintSwitch': {'threshold': 6, 'delay': 1209600},
+            'token': {'contract': 'BridgedStablecoinV3', 'name': 'Bloch Bridged USDC (Solana)', 'symbol': 'bUSDC.sol', 'decimals': 6},
+            'solana': {'cluster': 'localnet', 'genesisHash': S.b58encode(self.sol.rpc.genesis_hash()), 'programId': 'TBD-deploy',
+                       'vaultAddress': 'TBD-deploy', 'vault20': 'TBD-deploy', 'route': 'TBD-deploy', 'vaultCap': 5_000 * U},
+            'registry': {'address': 'TBD-deploy'},
+            'signers': {'threshold': 5, 'set': [{'operator': f'op{i}', 'address': a} for i, (a, _) in enumerate(self.mint_keys, 1)]},
+            'guardians': {'pauseDuration': 259200, 'pauseCooldown': 259200,
+                          'set': [{'operator': f'g{i}', 'address': a} for i, (a, _) in enumerate(self.l2_guardians, 1)]},
+            'limits': {'supplyCap': 5_000 * U, 'bucketCapacity': 1_000 * U, 'refillPerSecond': 1_000 * U // 86400,
+                       'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 10 * U},
+            'tx': {'gasLimit': 5_000_000, 'maxGasPriceWei': 10**11}}
+        (d / 'token.json').write_text(json.dumps(token_file, indent=2))
+        common = ['--vault-config', str(self.config_path)]
+        cfg, plan = str(d / 'pontes.json'), str(d / 'plan.json')
+        bad = dict(token_file, solana=dict(token_file['solana'], vault20='0x' + '11' * 20))
+        (d / 'token-bad.json').write_text(json.dumps(bad))
+        r = path('translate', '--token-config', str(d / 'token-bad.json'), *common, '--write', str(d / 'bad.json'))
+        check('token deployment path: a token file naming another vault than the vault file derives is refused', r['exit'] == 1, answer=r)
+        r = path('translate', '--token-config', str(d / 'token.json'), *common, '--write', cfg)
+        check('token deployment path: translate derives the source side from the vault file', r.get('decision') == 'translated'
+              and r['ethereum']['vault'] == s['sourceVault'] and str(r['ethereum']['chainId']) == s['sourceChainId'], answer=r)
+        r = path('pontes', 'validate', '--config', cfg, '--rehearsal', *common)
+        check('token deployment path: deploy_pontes validates the translated config', r.get('decision') == 'config-valid', answer=r)
+        sha = r.get('configSha256')
+        r = path('source', '--config', cfg, *common, '--source-rpc', SOL_URL)
+        check('token deployment path: the source check finds the vault pinned and never used', r.get('decision') == 'source-ok', answer=r)
+        r = path('pontes', 'plan', '--config', cfg, '--rehearsal', '--write', plan, *common)
+        check('token deployment path: plan (creation code of the frozen token)', r.get('contract', {}).get('name') == 'BridgedStablecoinV3', answer=str(r)[:600])
+        net = ['--config', cfg, '--plan', plan, '--rpc', L2_URL, '--rehearsal', *common]
+        r = path('pontes', 'run', *net, '--source-rpc', SOL_URL)
+        check('token deployment path: dry run against the Solana vault (unused, pinned)', r.get('decision') == 'dry-run', answer=r)
+        r = path('pontes', 'run', *net, '--source-rpc', L2_URL)
+        check('token deployment path: an RPC that is not the Solana cluster is refused as the source', r['exit'] == 1, answer=r)
+        r = path('pontes', 'run', *net, '--source-rpc', SOL_URL, '--broadcast', '--confirm', str(sha), '--write', str(d / 'broadcast.json'),
+                 '--', '--private-key', self.deployer)
+        check('token deployment path: one signed creation is broadcast', r.get('decision') == 'broadcast', answer=r)
+        r = path('pontes', 'record', *net, '--broadcast-file', str(d / 'broadcast.json'), '--write', str(d / 'record.json'))
+        check('token deployment path: record', r.get('decision') == 'recorded', answer=r)
+        l2_mine()
+        r = path('pontes', 'verify', *net, '--record', str(d / 'record.json'), '--source-rpc', SOL_URL)
+        check('token deployment path: verify at finalized (code, immutables, sets; the Solana vault: route, cap, guardians, mint chain)',
+              r.get('decision') == 'verified' and r.get('mintChain', {}).get('clean') is True and 'solanaSource' in r, answer=r)
+        self.path, self.path_cfg = path, ['--config', cfg, *common, '--source-rpc', SOL_URL]
+        return json.loads(Path(plan).read_text())['contract']['address'].lower()
 
     # ── tools ───────────────────────────────────────────────────────────────
     def vault(self, command, *argv):
@@ -391,6 +460,10 @@ class Rehearsal:
         code, _ = self.certified_raw(S.controls_authorization(self.config.source_chain_id, self.a.vault20, self.a.route, True, True, 0, int(valid_until)),
                                      self.release_keys[:5], self.ix.set_controls(True, True, 0, int(valid_until)))
         check('the same controls certificate replayed is refused (InvalidControls)', code == 105, code=code)
+        if hasattr(self, 'path'):
+            r = self.path('source', *self.path_cfg)
+            check('token deployment path: once the vault was used (a control change), a new token over it is refused',
+                  r['exit'] == 1 and 'has been used' in r.get('reason', ''), answer=r)
 
     def certified_raw(self, authorization, keys, instruction, index=0, before=()):
         """[secp256k1 instruction signed with raw throwaway keys, instruction] as one transaction."""
@@ -695,8 +768,9 @@ class Rehearsal:
         return min(refilled, self.config.window_limit)
 
     def wait_bucket(self, amount):
+        """Until the release bucket holds `amount` in the signers' view too (`finalized` is some seconds behind)."""
         for _ in range(200):
-            if self.available_now() >= amount:
+            if self.available_now() >= amount + 4 * U:
                 return
             time.sleep(3)
         raise RuntimeError('the release bucket did not refill')
