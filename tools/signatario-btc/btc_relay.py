@@ -105,7 +105,8 @@ def main():
         except pol.PolicyError as e:
             fail(f'the rules refuse this transaction: {e.reason}', wait=e.wait, **e.detail)
         proposal = {'kind': 'btc-vault-proposal', 'version': 1, 'tip': tip['txid'], 'feerate': feerate,
-                    'deposits': [{'txid': d['txid'], 'vout': d['vout'], 'recipient': '0x' + d['recipient'].hex()} for d in deposits],
+                    'deposits': [{'txid': d['txid'], 'vout': d['vout'], 'recipient': '0x' + d['recipient'].hex()}
+                                 for d in sorted(deposits, key=lambda d: (d['txid'], d['vout']))],
                     'donations': [{'txid': d['txid'], 'vout': d['vout']} for d in donations],
                     'burns': sorted(refs, key=lambda r: r['nonce']), 'tx': built['tx'].stripped().hex(),
                     'txid': built['tx'].txid(), 'fee': built['fee'], 'owner_paid': built['owner_paid'],
@@ -125,7 +126,8 @@ def main():
             if parent is None:
                 fail('an input has no parent on this node')
             prevouts.append(parent['tx'].outputs[vout])
-        scripts = [vault.thread_script] + [vault.deposit_script(bytes.fromhex(d['recipient'][2:])) for d in proposal['deposits']] \
+        ordered = sorted(proposal['deposits'], key=lambda d: (d['txid'], d['vout']))  # the builder's input order
+        scripts = [vault.thread_script] + [vault.deposit_script(bytes.fromhex(d['recipient'][2:])) for d in ordered] \
             + [vault.thread_script] * len(proposal['donations'])
         if len(scripts) != len(tx.inputs) or any(c.p2wsh(s) != spk for s, (_, spk) in zip(scripts, prevouts)):
             fail('the proposal inputs do not match the vault scripts')
