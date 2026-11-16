@@ -10,7 +10,8 @@
 validate  refuses an undecided value (null, TBD-owner, TBD-deploy), a bad Base58Check address, an address used in two
           roles, and, on TRON mainnet (chain id 728126428), anything but the decided shape: USDT
           TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t, transfer mode 1, 7 signers with 5 to release and 6 to switch or
-          unpause, 3 guardians, a fee of at most 30 bps each way with a recipient that holds no other role, and
+          unpause, 3 guardians, a fee of at most 30 bps each way plus a fixed release fee (not zero, at most half
+          of l2MinBurn) with a recipient that holds no other role, and
           `consume_user_resource_percent` 100 (the deployer never pays for other people's calls).
 plan      prints the constructor arguments, the creation code hashes and the transaction settings. Nothing is sent.
 create    builds the CreateSmartContract transaction HERE (tronlib), shows it, and with --broadcast signs and sends it,
@@ -34,7 +35,7 @@ TRON_MAINNET = 728126428
 USDT_MAINNET = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
 CTOR = ('constructor(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,'
         '(uint64,uint64,uint8,uint64,uint64,uint64),(address[],uint64,uint64),'
-        '(uint8,uint64,address,(address,uint16,uint16)))')
+        '(uint8,uint64,address,(address,uint16,uint16,uint64)))')
 MAX_FEE_BPS = 30
 
 
@@ -75,7 +76,7 @@ def shape(cfg):
         need(g.get('operator'), f'vault guardian {i + 1} operator')
     fees = v['provenance']['fees']
     recipient = addr(fees.get('recipient'), 'fee recipient')
-    dep_bps, rel_bps = int(fees['depositBps']), int(fees['releaseBps'])
+    dep_bps, rel_bps, rel_flat = int(fees['depositBps']), int(fees['releaseBps']), int(fees['releaseFlat'])
     pol, threshold = v['policy'], int(v['signers']['threshold'])
     roles = {'deployer': [deployer], 'token': [token], 'signer': signers, 'guardian': guardians, 'fee recipient': [recipient]}
     seen = {}
@@ -90,6 +91,8 @@ def shape(cfg):
         raise Refuse('a fee above 30 bps')
     if int(pol['minDeposit']) - int(pol['minDeposit']) * dep_bps // 10_000 < int(pol['l2MinBurn']):
         raise Refuse('minDeposit net of the deposit fee is below l2MinBurn')
+    if rel_flat < 0 or rel_flat > int(pol['l2MinBurn']) // 2:
+        raise Refuse('the fixed release fee is above half of l2MinBurn (the vault refuses it)')
     if int(v['provenance']['mode']) != 1 or int(v['provenance']['releaseDelay']) != 0 or v['provenance'].get('mintVerifier'):
         raise Refuse('the launch design is provenance mode 1, releaseDelay 0, no mintVerifier')
     deploy = cfg['deploy']
@@ -100,6 +103,9 @@ def shape(cfg):
             raise Refuse('mainnet shape: 7 signers, 5 to release, 6 to switch, 3 guardians')
         if dep_bps == 0 and rel_bps == 0:
             raise Refuse('mainnet: the bridge fee is not zero (owner rule: the bridge generates revenue)')
+        if rel_flat == 0:
+            raise Refuse('mainnet: the fixed release fee is not zero (a release costs its relayer the same energy '
+                         'whatever its size; review R325-TRX-3)')
         if int(deploy['consumeUserResourcePercent']) != 100:
             raise Refuse('mainnet: consumeUserResourcePercent must be 100')
         if cfg['tron'].get('rehearsal'):
@@ -111,7 +117,7 @@ def shape(cfg):
             'policy': tuple(int(pol[x]) for x in ('windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay', 'minDeposit', 'l2MinBurn')),
             'guardians': sorted(guardians, key=lambda a: int(a, 16)),
             'pause': (int(v['guard']['pauseDuration']), int(v['guard']['pauseCooldown'])),
-            'fees': (recipient, dep_bps, rel_bps), 'deploy': deploy}
+            'fees': (recipient, dep_bps, rel_bps, rel_flat), 'deploy': deploy}
 
 
 def check_token_config(s, token_cfg):
@@ -128,7 +134,7 @@ def ctor_args(node, s):
     values = [*labels, s['token'], str(s['cap']), '1', brackets(s['signers']), str(s['threshold']),
               '(' + ','.join(str(x) for x in s['policy']) + ')',
               f"({brackets(s['guardians'])},{s['pause'][0]},{s['pause'][1]})",
-              f"(1,0,0x{'00' * 20},({s['fees'][0]},{s['fees'][1]},{s['fees'][2]}))"]
+              f"(1,0,0x{'00' * 20},({s['fees'][0]},{s['fees'][1]},{s['fees'][2]},{s['fees'][3]}))"]
     return node.run(node.cast, 'abi-encode', CTOR, *values), labels
 
 
@@ -143,6 +149,15 @@ def creation(node, s, artifact):
     return full, {'constructorArgs': args, 'creationCodeKeccak': node.run(node.cast, 'keccak', '0x' + code),
                   'creationWithArgsSha256': hashlib.sha256(bytes.fromhex(full)).hexdigest(),
                   'creationBytes': len(code) // 2, 'domainHashes': labels}
+
+
+def creation_block(node, vault):
+    """The block that created the vault (the shim's --from-block and every `vault_from_block`), from the solidified
+    receipt of the creation transaction the chain recorded for the contract."""
+    rec = node.post('getcontract', {'value': tronlib.tron_hex(vault), 'visible': False})
+    tx = rec.get('trx_hash')
+    info = node.tx_info(tx, solid=True) if tx else None
+    return info.get('blockNumber') if info and info.get('id') == tx else None
 
 
 def report(ok, **fields):
@@ -163,7 +178,8 @@ def main():
         if a[0] == 'validate':
             report(True, chainId=s['chain'], mainnet=s['mainnet'], feeRecipient=tronlib.base58(s['fees'][0]),
                    signers=[tronlib.base58(x) for x in s['signers']], guardians=[tronlib.base58(x) for x in s['guardians']])
-        node = tronlib.Node(opt('--node', 'http://127.0.0.1:1'), opt('--solidity'), cast=opt('--cast'))
+        node = tronlib.Node(opt('--node', 'http://127.0.0.1:1'), opt('--solidity'), cast=opt('--cast'),
+                            allow_remote='--allow-remote-node' in a)
         full, plan = creation(node, s, opt('--artifact'))
         d = s['deploy']
         settings = {'name': d.get('name', 'TronSourceVault'), 'feeLimitSun': int(d['feeLimitSun']),
@@ -215,7 +231,7 @@ def main():
                 'switchDelay()': s['policy'][3], 'minDeposit()': s['policy'][4], 'l2MinBurn()': s['policy'][5],
                 'pauseDuration()': s['pause'][0], 'pauseCooldown()': s['pause'][1], 'provenanceMode()': 1, 'releaseDelay()': 0,
                 'mintVerifier()': 0, 'feeRecipient()': int(s['fees'][0], 16), 'depositFeeBps()': s['fees'][1],
-                'releaseFeeBps()': s['fees'][2], 'signerCount()': len(s['signers']), 'guardianCount()': len(s['guardians']),
+                'releaseFeeBps()': s['fees'][2], 'releaseFlatFee()': s['fees'][3], 'signerCount()': len(s['signers']), 'guardianCount()': len(s['guardians']),
                 'verifier()': 0, 'depositCount()': None, 'decimals()': 6}
         got = {}
         for sig, expected in want.items():
@@ -235,7 +251,7 @@ def main():
         runtime = node.code(vault)['runtime']
         report(not problems, problems=problems, vault=tronlib.base58(vault), vaultHex=vault, routeId=view('routeId()'),
                mintChainGenesis=view('mintChainGenesis()'), runtimeCodeKeccak=node.run(node.cast, 'keccak', runtime),
-               depositCount=got['depositCount()'], chainId=int(node.block(0)['id'][-8:], 16), **plan)
+               depositCount=got['depositCount()'], creationBlock=creation_block(node, vault), chainId=int(node.block(0)['id'][-8:], 16), **plan)
     except (Refuse, tronlib.TronError, KeyError) as e:
         report(False, reason=f'{type(e).__name__}: {e}' if isinstance(e, KeyError) else str(e))
 

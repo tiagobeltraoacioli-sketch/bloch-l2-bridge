@@ -11,7 +11,9 @@ Config: exactly `vigia.py`'s, where the "Ethereum" side is the TRON side:
   `tron_node`      the operator's own java-tron FullNode HTTP API (for sending), optional `tron_solidity`;
   `eth_relayer_keystore` / `eth_relayer_password_file`   the TRON gas key (a secp256k1 keystore like any other);
   `tron_fee_limit_sun`   the most one release may burn (default 150 TRX), in place of `eth_max_gas_price_gwei`;
-  `tron_valid_s`   lifetime of a relayed transaction (default 90).
+  `tron_valid_s`   lifetime of a relayed transaction (default 90);
+  `tron_max_releases_per_hour`   the most release transactions this relayer signs in an hour (default 120; 0 = no cap).
+                   A burn above the cap stays payable and is paid when the hour has room.
 
 What is overridden, and why:
   unpayable            the Ethereum relayer parks a burn when the token's simulated `transfer` returns false. USDT on
@@ -44,10 +46,12 @@ class VigiaTron(vigia.Vigia):
         if self._tron is None:
             c = self.cfg
             cfg = {'tron_node': c['tron_node'], 'tron_solidity': c.get('tron_solidity'), 'cast': self.cast,
+                   'tron_allow_remote_node': c.get('tron_allow_remote_node'),
                    'tron_chain_id': c['eth_chain_id'], 'vault': self.vault,
                    'journal_dir': c.get('relayer_submission_dir', str(self.shared.parent / '.tron-submissions')),
                    'fee_limit_sun': c.get('tron_fee_limit_sun', tron_send.DEFAULT_FEE_LIMIT),
-                   'valid_s': c.get('tron_valid_s', 90)}
+                   'valid_s': c.get('tron_valid_s', 90),
+                   'max_sends_per_hour': c.get('tron_max_releases_per_hour', 120)}
             sender = tron_send.Sender(cfg)
             sender.wallet = lambda: self.relayer_wallet('eth')
             self._tron = sender
@@ -100,6 +104,12 @@ class VigiaTron(vigia.Vigia):
             out = self.tron().send(key, to, data)
         except tron_send.Refused as e:
             raise RuntimeError(f'TRON send refused: {e}') from e
+        if out['state'] == 'backoff':
+            # The last transaction for this payment landed and failed. Nothing is signed until the back-off ends.
+            vigia.log(kind='alert', severity='hard' if out['failed'] >= 2 else 'soft', id='tron-release-failed-on-chain',
+                      key=key, **out)
+            raise RuntimeError(f"TRON send held: {out['failed']} transaction(s) for this payment landed and failed "
+                               f"({out['last_result']}); next attempt at {out['retry_at']}")
         vigia.log(kind='tron-send', key=key, **out)
         return '0x' + out['txid']
 

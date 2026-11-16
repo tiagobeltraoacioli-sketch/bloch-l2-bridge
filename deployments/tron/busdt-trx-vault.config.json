@@ -6,9 +6,9 @@
     "units": "1 USDT = 1e6 units (6 decimals, read from the token on chain on 2026-11-16)",
     "token": "USDT (TRC-20) TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t = 41a614f803b6fd780986a42c78ec9c7f77e6ded13c, the address in Tether's own list of supported protocols; Circle stopped minting USDC on TRON on 2024-02-21 and its address table lists no TRON contract, which is why the asset here is USDT",
     "addresses": "TRON addresses may be written as Base58Check (T...) or as the 20-byte 0x form; the tool converts and checks the checksum. Signers and guardians are the same secp256k1 keys as on the Ethereum vault, so their 0x addresses are the same 20 bytes (TRON derives an address from a key exactly as Ethereum does and prefixes 0x41)",
-    "limits": "the Ethereum bridge's launch values, proposed for this network: cap 100,000 USDT (must equal the L2 supplyCap), window 10,000 per 24 h (also the largest deposit and the largest burn), minDeposit 11, l2MinBurn 10, 6 of 7 to end a pause or switch, 14 days switch delay, 72 h pause and cooldown",
-    "fees": "5 bps of each deposit and 5 bps of each release (ceiling 30 in the contract), accrued outside the backing; anyone calls sweepFees() and the vault pays the recipient. recipient TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc = 0x1aa1fc9a1b311556132b30af41026ca5c6b6fafc, the owner's TRON address given on 2026-11-16 (Base58Check checksum verified). It is a constructor argument: immutable once deployed",
-    "deploy": "consumeUserResourcePercent 100 and originEnergyLimit 1: callers pay all energy, the deployer account never subsidises a call. TRON lets the creator account change these two settings and clear the stored ABI later; none of them touches funds or logic (docs/TRON-VAULT-DIFF.md section 2). feeLimitSun 1,500 TRX covers the creation (4.31 M energy measured = about 431 TRX at 100 sun) with margin; the chain maximum is 15,000 TRX",
+    "limits": "the Ethereum bridge's launch values, proposed for this network: cap 100,000 USDT (must equal the L2 supplyCap), window 10,000 per 24 h (also the largest deposit and the largest burn), minDeposit 21, l2MinBurn 20 (raised from 11 and 10 with the fixed release fee, review R325-TRX-3), 6 of 7 to end a pause or switch, 14 days switch delay, 72 h pause and cooldown",
+    "fees": "5 bps of each deposit, and 5 bps plus a fixed 8 USDT of each release (releaseFlat 8000000; the bps ceiling is 30 in the contract, the fixed fee is at most half of l2MinBurn). The fixed fee is sized to the energy a release costs its relayer: about 200,000 energy on mainnet = 20 TRX at 100 sun per energy = 6.1 USDT at 0.305 USD per TRX (read 2026-11-16), times 1.3; docs/BRIDGE-TRON-USDT.md section 5 shows how it moves with both prices. OWNER DECISION (revenue): confirm 8 USDT, minDeposit and l2MinBurn before deployment; they are immutable. All fees are accrued outside the backing; anyone calls sweepFees() and the vault pays the recipient. recipient TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc = 0x1aa1fc9a1b311556132b30af41026ca5c6b6fafc, the owner's TRON address given on 2026-11-16 (Base58Check checksum verified). It is a constructor argument: immutable once deployed",
+    "deploy": "consumeUserResourcePercent 100 and originEnergyLimit 1: callers pay all energy, the deployer account never subsidises a call. TRON lets the creator account change these two settings and clear the stored ABI later; none of them touches funds or logic (docs/TRON-VAULT-DIFF.md section 2). feeLimitSun 1,500 TRX covers the creation (4.42 M energy measured = about 442 TRX at 100 sun) with margin; the chain maximum is 15,000 TRX",
     "TBD-owner": "source.revision; deployer.address (a fresh TRON account with at least 600 TRX, used once); the 7 release signers (operator and address, the same keys as the Ethereum vault's release signers); the 3 guardians (operator and address); confirm cap, windowLimit, switchDelay"
   },
   "tron": {
@@ -75,8 +75,8 @@
       "windowSeconds": 86400,
       "switchThreshold": 6,
       "switchDelay": 1209600,
-      "minDeposit": 11000000,
-      "l2MinBurn": 10000000
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000
     },
     "guard": {
       "guardians": [
@@ -103,7 +103,8 @@
       "fees": {
         "recipient": "TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc",
         "depositBps": 5,
-        "releaseBps": 5
+        "releaseBps": 5,
+        "releaseFlat": 8000000
       }
     }
   }

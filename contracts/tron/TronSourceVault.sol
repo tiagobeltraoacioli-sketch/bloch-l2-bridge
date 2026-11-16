@@ -16,6 +16,15 @@ import {IProvenanceReleaseVerifier, IMintVerifier} from "../usdt/ProvenanceSourc
 ///              sender's blacklist entry, so without this a deposit into a frozen vault would succeed and could
 ///              never be paid back. Releases are not gated: they revert in the token itself, with no state change.
 ///      TRON-5  the view `tokenState()` for monitors and frontends.
+///      TRON-6  a release or a fee sweep still pays while the issuer charges its own transfer fee (USDT's
+///              `setParams`, zero today): the vault's balance must fall by EXACTLY the amount sent, and the recipient
+///              may receive less by at most `ISSUER_FEE_MAX_BPS` of it and at most `ISSUER_FEE_MAX` (the limits in
+///              TetherToken's own code). The vault absorbs nothing; the recipient bears the issuer's fee. Without
+///              this an issuer fee of any size would stop every exit for as long as it stays on. Deposits are
+///              unchanged: one that delivers less than its amount is refused.
+///      TRON-7  `Fees.releaseFlat`: a fixed amount taken from every release on top of `releaseFeeBps`, immutable, at
+///              most half of `l2MinBurn`. A release costs its relayer the same energy whatever its size; a
+///              percentage alone lets small burns drain the relayers.
 ///      Everything else, including every digest, id, tag and event, is the Ethereum vault's.
 
 /// @notice Federated source custody for a domain-specific six-decimal token route,
@@ -147,6 +156,11 @@ contract TronSourceVault {
     address public immutable feeRecipient;
     uint16 public immutable depositFeeBps;
     uint16 public immutable releaseFeeBps;
+    /// TRON-7: fixed fee of every release, in token units, on top of `releaseFeeBps`.
+    uint64 public immutable releaseFlatFee;
+    /// TRON-6: the most the issuer's own transfer fee may keep from a payment (TetherToken: below 20 bps, below 50 USDT).
+    uint16 public constant ISSUER_FEE_MAX_BPS = 20;
+    uint64 public constant ISSUER_FEE_MAX = 50_000_000;
     /// Fees held by this vault that are not backing: never released to bridge users, only swept to `feeRecipient`.
     uint64 public feesAccrued;
     /// mode 1: chain head after n deposits (n >= 1; n = 0 is `mintChainGenesis()`).
@@ -194,6 +208,7 @@ contract TronSourceVault {
         address recipient;
         uint16 depositBps;
         uint16 releaseBps;
+        uint64 releaseFlat; // TRON-7
     }
 
     struct PendingRelease {
@@ -252,6 +267,8 @@ contract TronSourceVault {
     event ForgedMintProven(bytes32 indexed mintClaimId, uint64 depositNonce, uint64 amount, address recipient);
     event FeeAccrued(bytes32 indexed id, uint64 fee);
     event FeesSwept(address indexed recipient, uint64 amount);
+    /// TRON-6: the issuer's own transfer fee kept `kept` of the `sent` this vault paid to `recipient`.
+    event IssuerFeeKept(address indexed recipient, uint256 sent, uint256 kept);
     event GuardianPaused(address indexed guardian, uint64 indexed pauseCount, uint64 pausedUntil);
     event Unpaused(uint64 indexed pauseCount, uint64 guardianBlockedUntil);
 
@@ -294,13 +311,15 @@ contract TronSourceVault {
         Fees memory fees = provenance.fees;
         if (
             fees.depositBps > MAX_FEE_BPS || fees.releaseBps > MAX_FEE_BPS
-                || (fees.recipient == address(0)) != (fees.depositBps == 0 && fees.releaseBps == 0)
+                || (fees.recipient == address(0)) != (fees.depositBps == 0 && fees.releaseBps == 0 && fees.releaseFlat == 0)
+                || fees.releaseFlat > policy.l2MinBurn / 2 // TRON-7
                 || fees.recipient == address(this) || fees.recipient == token_
                 || policy.minDeposit - _fee(policy.minDeposit, fees.depositBps) < policy.l2MinBurn
         ) revert InvalidConfiguration();
         feeRecipient = fees.recipient;
         depositFeeBps = fees.depositBps;
         releaseFeeBps = fees.releaseBps;
+        releaseFlatFee = fees.releaseFlat; // TRON-7
         if (
             provenance.mode > 2 || provenance.releaseDelay > MAX_RELEASE_DELAY
                 || (provenance.releaseDelay == 0 && provenance.mintVerifier != address(0))
@@ -618,9 +637,8 @@ contract TronSourceVault {
         uint256 beforeRecipient = _balance(feeRecipient);
         feesAccrued = 0;
         _call(abi.encodeWithSignature("transfer(address,uint256)", feeRecipient, uint256(amount)));
-        if (_balance(address(this)) + amount != beforeVault || _balance(feeRecipient) != beforeRecipient + amount) {
-            revert InvalidTransfer();
-        }
+        if (_balance(address(this)) + amount != beforeVault) revert InvalidTransfer();
+        _received(feeRecipient, beforeRecipient, amount); // TRON-6
         emit FeesSwept(feeRecipient, amount);
     }
 
@@ -787,6 +805,7 @@ contract TronSourceVault {
             item.route != routeId() || item.amount == 0 || item.recipient == address(0)
                 || item.recipient == address(this) || item.nativeBurn == 0 || item.amount > totalLocked
                 || releasedNonce[item.nonce] || releasedBurn[item.nativeBurn]
+                || item.amount <= _fee(item.amount, releaseFeeBps) + releaseFlatFee // TRON-7
         ) revert InvalidRelease();
         if (!provenanceMatches(item.mintCount, item.mintedTotal, item.mintHead)) revert ProvenanceMismatch();
         if (forgeryProvenAt != 0) revert ReleaseFrozen();
@@ -814,7 +833,8 @@ contract TronSourceVault {
         // which moves from backing to `feesAccrued` (the burn already removed the same amount of bUSDC).
         releaseBucket = uint64(available - amount);
         releaseBucketUpdatedAt = uint64(block.timestamp);
-        uint64 fee = _fee(amount, releaseFeeBps);
+        uint64 fee = _fee(amount, releaseFeeBps) + releaseFlatFee; // TRON-7
+        if (fee >= amount) revert InvalidRelease(); // TRON-7: `_checkRelease` already refused it
         uint64 paid = amount - fee;
         uint256 beforeVault = _balance(address(this));
         if (beforeVault < uint256(totalLocked) + feesAccrued) revert InsufficientBacking();
@@ -822,9 +842,8 @@ contract TronSourceVault {
         totalLocked -= amount;
         feesAccrued += fee;
         _call(abi.encodeWithSignature("transfer(address,uint256)", recipient, uint256(paid)));
-        if (_balance(address(this)) + paid != beforeVault || _balance(recipient) != beforeRecipient + paid) {
-            revert InvalidTransfer();
-        }
+        if (_balance(address(this)) + paid != beforeVault) revert InvalidTransfer();
+        _received(recipient, beforeRecipient, paid); // TRON-6
         if (fee != 0) emit FeeAccrued(id, fee);
         if (releaseDelay != 0) emit ReleaseExecuted(id, recipient, amount);
     }
@@ -873,6 +892,19 @@ contract TronSourceVault {
     function _tokenAcceptsDeposits(address token_) private view returns (bool) {
         (bool known, bool blacklisted, bool replaced) = _tokenFlags(token_);
         return known && !blacklisted && !replaced;
+    }
+
+    /// @dev TRON-6: `to` received `sent`, less at most the issuer's own transfer fee. Never more than `sent`, never a
+    ///      loss; the caller has already checked that the vault's balance fell by exactly `sent`.
+    function _received(address to, uint256 beforeBalance, uint256 sent) private {
+        uint256 afterBalance = _balance(to);
+        if (afterBalance < beforeBalance || afterBalance > beforeBalance + sent) revert InvalidTransfer();
+        uint256 kept = beforeBalance + sent - afterBalance;
+        if (kept == 0) return;
+        uint256 bound = sent * ISSUER_FEE_MAX_BPS / BPS;
+        if (bound > ISSUER_FEE_MAX) bound = ISSUER_FEE_MAX;
+        if (kept > bound) revert InvalidTransfer();
+        emit IssuerFeeKept(to, sent, kept);
     }
 
     function _balance(address owner) private view returns (uint256) {

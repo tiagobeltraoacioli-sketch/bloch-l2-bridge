@@ -8,7 +8,8 @@
 Config: `tron_node` (the operator's own FullNode HTTP API), optional `tron_solidity`, `tron_chain_id`, `vault`
 (`T...` or hex), `keystore` + `password_file` (or `private_key_file`, throwaway rehearsal keys only), `journal_dir`,
 `fee_limit_sun` (the most TRX, in sun, one transaction may burn: the TRON form of the Ethereum tools' gas price
-ceiling; default 150 TRX), `valid_s` (transaction lifetime, default 90), optional `cast`.
+ceiling; default 150 TRX), `valid_s` (transaction lifetime, default 90), `max_sends_per_hour` (0 = no cap), optional
+`cast`, `tron_allow_remote_node` (a node that is not on loopback is refused without it).
 
 What replaces the Ethereum relayer's nonce reservation (release_submission.py). TRON has no account nonce: a
 transaction is valid from a reference block until its `expiration`, at most once (the chain refuses a duplicate id),
@@ -26,6 +27,10 @@ and it cannot be replaced or repriced. So the rule is simpler and stronger:
      transaction still burns its energy), and one that would cost more than `fee_limit_sun` is refused with an alert.
   5. The transaction is built here (tronlib), anchored at the solidified block, with no TRX and no TRC-10 value, and
      decoded again before signing: the node contributes the reference block and nothing else.
+  6. The transaction's own fee limit is the simulated energy at the chain's price times 3/2, never the configured
+     ceiling: a call that runs out of energy burns its whole limit.
+  7. After a transaction that landed and FAILED on chain, nothing is signed for that payment for 60 s, doubling with
+     every further failure (at most an hour). `max_sends_per_hour` caps what one journal signs in an hour.
 """
 import fcntl
 import json
@@ -39,6 +44,8 @@ import tronlib  # noqa: E402
 
 DEFAULT_FEE_LIMIT = 150_000_000
 ENERGY_MARGIN = (3, 2)  # the simulated energy times 3/2 must fit the fee limit
+MIN_FEE_LIMIT = 1_000_000
+BACKOFF_S, BACKOFF_MAX_S = 60, 3600  # after a transaction that landed and failed: 60 s, doubling, at most an hour
 
 
 class Refused(RuntimeError):
@@ -48,10 +55,12 @@ class Refused(RuntimeError):
 class Sender:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.node = tronlib.Node(cfg['tron_node'], cfg.get('tron_solidity'), cast=cfg.get('cast'))
+        self.node = tronlib.Node(cfg['tron_node'], cfg.get('tron_solidity'), cast=cfg.get('cast'),
+                                 allow_remote=bool(cfg.get('tron_allow_remote_node')))
         self.vault = tronlib.evm_address(cfg['vault']) if cfg.get('vault') else None
         self.fee_limit = int(cfg.get('fee_limit_sun', DEFAULT_FEE_LIMIT))
         self.valid_ms = int(cfg.get('valid_s', 90)) * 1000
+        self.max_per_hour = int(cfg.get('max_sends_per_hour', 0) or 0)  # 0: no cap
         self.dir = Path(cfg['journal_dir'])
         self.dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
@@ -145,6 +154,12 @@ class Sender:
                         return {'txid': doc['txid'], 'state': 'pending-other', 'expiration_ms': doc['expiration_ms']}
                     out = self.node.broadcast(bytes.fromhex(doc['raw']), bytes.fromhex(doc['signature']))
                     return {'txid': doc['txid'], 'state': 'resent', 'code': out['code']}
+            held = self.backoff(path.stem)
+            if held:
+                return held
+            if self.max_per_hour and self.sent_since(time.time() - 3600) >= self.max_per_hour:
+                raise Refused(f'rate cap: {self.max_per_hour} transactions were signed in the last hour '
+                              '(max_sends_per_hour); the payment stays payable and is sent when the hour has room')
             owner = self.sender()
             est = self.node.estimate(owner, contract, calldata)
             if not est['ok']:
@@ -156,20 +171,49 @@ class Sender:
             if need > self.fee_limit:
                 raise Refused(f"fee ceiling: the call needs about {need} sun ({est['energy']} energy, "
                               f"{est['penalty']} of it dynamic-energy penalty), above fee_limit_sun {self.fee_limit}")
-            raw = self.node.prepare(owner, contract, calldata, self.fee_limit, self.valid_ms)
+            # The transaction's own limit is what this call needs with the margin, not the configured ceiling: a call
+            # that runs out of energy burns its whole limit (review R325-TRX-6).
+            limit = max(need, MIN_FEE_LIMIT)
+            raw = self.node.prepare(owner, contract, calldata, limit, self.valid_ms)
             seen = tronlib.describe(raw)
             if (seen['kind'], seen['owner'], seen['contract'], seen['data'], seen['fee_limit']) != \
-                    ('trigger', owner, contract, calldata.lower(), self.fee_limit):
+                    ('trigger', owner, contract, calldata.lower(), limit):
                 raise Refused('the transaction built differs from the call asked for')
             signature = self.node.sign(raw, self.wallet())
             doc = {'key': key, 'txid': tronlib.txid(raw), 'raw': raw.hex(), 'signature': signature.hex(),
                    'owner': owner, 'contract': contract, 'data': calldata.lower(), 'expiration_ms': seen['expiration'],
-                   'fee_limit': self.fee_limit, 'estimated_energy': est['energy'], 'written_at': int(time.time())}
+                   'fee_limit': limit, 'estimated_energy': est['energy'], 'written_at': int(time.time())}
             self.write(path, doc)
             out = self.node.broadcast(raw, signature)
             # Whatever the node answered, the journal entry stands until the solidified chain settles it.
             return {'txid': doc['txid'], 'state': 'sent', 'code': out['code'], 'message': out['message'],
                     'estimated_energy': est['energy'], 'energy_penalty': est['penalty']}
+
+    def sent_since(self, t):
+        """Transactions this journal signed since `t` (live and closed entries)."""
+        paths = list(self.dir.glob('*.json')) + list((self.dir / 'closed').glob('*.json'))
+        return sum(1 for p in paths if json.loads(p.read_text()).get('written_at', 0) >= t)
+
+    def backoff(self, stem):
+        """After a transaction for this key landed and FAILED on chain (the simulation passed, the execution did not:
+        another relayer's transaction landed first, or it ran out of energy), wait before signing another: 60 s,
+        doubling with every consecutive failure. Each failed attempt burns TRX; the vault refuses a second payment in
+        any case. -> None, or the answer to give instead of sending."""
+        closed = self.dir / 'closed'
+        docs = [json.loads(p.read_text()) for p in closed.glob(f'{stem}.*.json')] if closed.exists() else []
+        docs.sort(key=lambda d: d.get('closed_at', 0))
+        failed = 0
+        for d in reversed(docs):
+            if d.get('closed') != 'landed' or (d.get('receipt') or {}).get('result') == 'SUCCESS':
+                break
+            failed += 1
+        if not failed:
+            return None
+        retry_at = docs[-1].get('closed_at', 0) + min(BACKOFF_S * 2 ** (failed - 1), BACKOFF_MAX_S)
+        if time.time() >= retry_at:
+            return None
+        return {'txid': docs[-1]['txid'], 'state': 'backoff', 'failed': failed, 'retry_at': retry_at,
+                'last_result': (docs[-1].get('receipt') or {}).get('result')}
 
     def settle_all(self):
         """Closes every entry the solidified chain has settled. -> [(key, 'landed' | 'expired')]."""

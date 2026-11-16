@@ -36,6 +36,7 @@ class GuardianTron(guardiao.Guardian):
         try:
             s = tron_send.Sender({
                 'tron_node': c['tron_node'], 'tron_solidity': c.get('tron_solidity'), 'cast': self.cast,
+                'tron_allow_remote_node': c.get('tron_allow_remote_node'),
                 'tron_chain_id': c['eth_chain_id'], 'vault': c['vault'],
                 'keystore': c.get('eth_keystore', c['keystore']),
                 'password_file': c.get('eth_password_file', c['password_file']),
@@ -44,6 +45,8 @@ class GuardianTron(guardiao.Guardian):
                 'fee_limit_sun': c.get('tron_fee_limit_sun', tron_send.DEFAULT_FEE_LIMIT)})
             key = 'pause-' + s.sender()[2:]
             out = s.send(key, c['vault'], s.node.calldata('guardianPause()'))
+            if out['state'] == 'backoff':
+                return 1, '', f"guardianPause() landed and failed {out['failed']} time(s); next attempt at {out['retry_at']}"
             state, doc = s.wait(key, timeout=int(c.get('tron_wait_s', 180)))
         except (tron_send.Refused, tronlib.TronError) as e:
             return 1, '', str(e)

@@ -5,7 +5,7 @@
     "status": "UNAUDITED, nothing deployed. L2 token of the TRON route: BridgedStablecoinV3, byte-identical to the Ethereum bridge's token (creation keccak 0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7), with other constructor arguments only",
     "schema": "the schema of deployments/mainnet/busdc-mainnet.config.json. The block named `ethereum` describes the SOURCE vault, here on TRON: chainId 728126428 is what the TVM returns for block.chainid on TRON mainnet (the last 4 bytes of the genesis block id; chain parameter 71 is active), vault is the vault's 20-byte address (the T... address without its 0x41 prefix)",
     "tool": "tools/deploy-pontes/deploy_pontes.py refuses ethereum.chainId != 1 on chain 700770 today (its line `mainnet policy: ethereum.chainId must be 1`). Deploying this token needs that policy widened to the decided source networks; it is one cross-area change for all round-16 bridges (agents/R16-CROSS-AREA.md). No contract changes",
-    "limits": "as bUSDC: supplyCap 100,000 (= the vault cap), bucket 10,000 per day (= the vault window), T = 0 (largeMintThreshold 0), 12 h delay, minBurn 10",
+    "limits": "as bUSDC: supplyCap 100,000 (= the vault cap), bucket 10,000 per day (= the vault window), T = 0 (largeMintThreshold 0), 12 h delay, minBurn 20 (the vault takes a fixed 8 USDT from every release on TRON; a burn must be well above it)",
     "committee": "the same 7 L2 mint keys (5 to mint, 6 to unpause or switch) and the same 3 L2 token guardians as bUSDC (coordinator decision, round 16)",
     "TBD-owner": "as busdc-mainnet.config.json, plus the four values read from the deployed TRON vault with tron_deploy.py verify: ethereum.vault (vaultHex), ethereum.route (routeId), ethereum.vaultCodeHash (runtimeCodeKeccak), ethereum.vaultCap"
   },
@@ -104,7 +104,7 @@
     "refillPerSecond": 115740,
     "largeMintThreshold": 0,
     "largeMintDelay": 43200,
-    "minBurn": 10000000
+    "minBurn": 20000000
   },
   "tx": {
     "gasLimit": 5000000,

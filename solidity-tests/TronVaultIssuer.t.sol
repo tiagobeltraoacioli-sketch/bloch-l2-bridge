@@ -5,7 +5,8 @@ import {TronSourceVault} from "../contracts/tron/TronSourceVault.sol";
 import {TronUSDTLike, TronUSDTUpgraded, TronUSDTFaulty} from "./harness/TronUSDTLike.sol";
 import {TronVaultIssuerBase} from "./TronVaultBase.sol";
 
-/// What the USDT issuer can do to the vault on TRON (cases a to g of the brief). Each case ends by proving the books:
+/// What the USDT issuer can do to the vault on TRON (cases a to g of the brief; in case d, TRON-6: releases and sweeps
+/// pay through the issuer's transfer fee). Each case ends by proving the books:
 /// totalLocked, feesAccrued, depositCount and the deposit chain against the test's own ledger (`checkBooks`), the
 /// vault's token balance, and that a refused call consumed no nonce and no burn.
 contract TronVaultIssuerTest is TronVaultIssuerBase {
@@ -141,7 +142,10 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
 
     // ---------------------------------------------------------------- d. transfer fee switched on
 
-    function test_d_issuerFeeOn_depositReleaseSweepRevertThenResume() public {
+    /// TRON-6: while the issuer charges its own transfer fee, deposits are refused (they would deliver less than their
+    /// amount) but a release and a fee sweep still pay. The vault's balance falls by exactly what it sent, the
+    /// recipient bears the issuer's fee, `IssuerFeeKept` states it, and the books are what they are without the fee.
+    function test_d_issuerFeeOn_depositsRefusedReleaseAndSweepPayRecipientBearsTheFee() public {
         seed();
         TronSourceVault.Release memory r = cleanBurn(ALICE, uint64(300 * U), 2);
         TronSourceVault.ReleaseContext memory c = context();
@@ -151,41 +155,71 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
 
         usdt.setParams(10, 49); // 10 bps, at most 49 USDT
         expectDeposit(CAROL, uint64(100 * U), CAROL, TronSourceVault.InvalidTransfer.selector);
-        expectRelease(r, c, s, TronSourceVault.InvalidTransfer.selector);
-        expectSweep(TronSourceVault.InvalidTransfer.selector);
-        require(unchanged(b) && unused(r), "nothing changed");
-        require(usdt.balanceOf(CAROL) == 300 * U && usdt.balanceOf(address(this)) == issuer, "the issuer collected nothing");
+        require(unchanged(b) && usdt.balanceOf(CAROL) == 300 * U, "deposit refused, nothing changed");
+        require(usdt.balanceOf(address(this)) == issuer, "the issuer collected nothing from the refused deposit");
+
+        // Release of 300: the vault's own fee is 0.15 (5 bps), it sends 299.85, the issuer keeps 10 bps of that.
+        uint256 sent = 300 * U - 150_000;
+        uint256 kept = 299_850;
+        vm.recordLogs();
+        expectRelease(r, c, s, OK);
+        require(oneIssuerFeeLog(ALICE, sent, kept), "IssuerFeeKept(recipient, sent, kept)");
+        require(usdt.balanceOf(ALICE) == sent - kept, "the recipient gets the amount sent less the issuer's fee");
+        require(usdt.balanceOf(address(vault)) == b.vaultBalance - sent, "the vault's balance fell by exactly the amount sent");
+        require(usdt.balanceOf(address(this)) == issuer + kept, "the issuer collected exactly its fee");
+        require(vault.totalLocked() == b.locked - 300 * U, "totalLocked fell by the full burned amount");
+        require(vault.feesAccrued() == b.fees + 150_000, "the vault's fee is its own 5 bps, nothing of the issuer's");
+        require(vault.releasedNonce(r.nonce) && vault.releasedBurn(r.nativeBurn), "consumed");
+        expectRelease(r, c, s, TronSourceVault.InvalidRelease.selector);
+        require(usdt.balanceOf(ALICE) == sent - kept, "exactly once");
+        checkBooks();
+        checkBacked();
+
+        // Sweep of 0.9 (0.75 + 0.15): the treasury gets it less 10 bps.
+        uint256 before = usdt.balanceOf(address(vault));
+        expectSweep(OK);
+        require(oneIssuerFeeLog(TREASURY, 900_000, 900), "IssuerFeeKept for the sweep");
+        require(vault.feesAccrued() == 0, "all fees swept");
+        require(usdt.balanceOf(address(vault)) == before - 900_000, "the vault's balance fell by exactly the swept amount");
+        require(usdt.balanceOf(TREASURY) == 900_000 - 900, "the treasury bears the issuer's fee");
+        require(usdt.balanceOf(address(vault)) == vault.totalLocked(), "only backing is left");
+        expectDeposit(CAROL, uint64(100 * U), CAROL, TronSourceVault.InvalidTransfer.selector); // still refused
         checkBooks();
         checkBacked();
 
         usdt.setParams(0, 0);
-        expectRelease(r, c, s, OK);
         expectDeposit(CAROL, uint64(100 * U), CAROL, OK);
-        expectSweep(OK);
-        require(usdt.balanceOf(ALICE) == 300 * U - 150_000, "paid once the fee is off");
+        (bool ok,) = tryRelease(cleanBurn(BOB, uint64(200 * U), 3));
+        require(ok && usdt.balanceOf(BOB) == 200 * U - 100_000 && noIssuerFeeLog(), "fee off: paid in full, no log");
         checkBooks();
         checkBacked();
     }
 
-    /// With the issuer fee on, three kinds of transfer still carry no fee and therefore still go through, each with
-    /// exact deltas and intact books: (1) an amount so small that the fee rounds to zero, (2) a payment to the token
-    /// owner, who receives its own fee back, (3) a rate with a zero maximum fee.
-    function test_d_issuerFeeOn_transfersWithoutAnEffectiveFeeStillPass() public {
+    /// With the issuer fee on, a transfer that carries no effective fee leaves no trace: (1) an amount so small that
+    /// the fee rounds to zero, (2) a payment to the token owner, who receives its own fee back, (3) a rate with a zero
+    /// maximum fee, under which deposits pass too. A normal release pays less the fee (control).
+    function test_d_issuerFeeOn_transfersWithoutAnEffectiveFeeLeaveNoTrace() public {
         seed();
         usdt.setParams(1, 49); // 1 bp: no fee below 0.01 USDT
+        vm.recordLogs();
         TronSourceVault.Release memory tiny = cleanBurn(ALICE, 5_000, 2);
         (bool ok,) = tryRelease(tiny);
         require(ok && usdt.balanceOf(ALICE) == 4_998, "(1) a dust release pays 5,000 less the vault's 2 units");
-        (bool no, bytes4 e) = tryRelease(cleanBurn(ALICE, uint64(100 * U), 2));
-        require(!no && e == TronSourceVault.InvalidTransfer.selector, "control: a normal release is refused");
+        require(noIssuerFeeLog(), "(1) nothing kept, no log");
+        (ok,) = tryRelease(cleanBurn(BOB, uint64(100 * U), 2));
+        require(ok && usdt.balanceOf(BOB) == 99_950_000 - 9_995, "control: a normal release pays less 1 bp");
+        require(oneIssuerFeeLog(BOB, 99_950_000, 9_995), "control: and says so");
 
         address issuer = usdt.owner();
         uint256 before = usdt.balanceOf(issuer);
         (ok,) = tryRelease(cleanBurn(issuer, uint64(100 * U), 2));
         require(ok && usdt.balanceOf(issuer) == before + 100 * U - 50_000, "(2) the token owner is paid in full");
+        require(noIssuerFeeLog(), "(2) nothing kept, no log");
 
         usdt.setParams(19, 0); // a rate, but a maximum fee of zero
         expectDeposit(CAROL, uint64(100 * U), CAROL, OK); // (3)
+        (ok,) = tryRelease(cleanBurn(ALICE, uint64(100 * U), 3));
+        require(ok && usdt.balanceOf(ALICE) == 4_998 + 99_950_000 && noIssuerFeeLog(), "(3) paid in full, no log");
         usdt.setParams(0, 0);
         checkBooks();
         checkBacked();
@@ -224,14 +258,19 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
         checkBooks();
         checkBacked();
 
-        // The upgraded token misbehaves: it delivers one unit less than it takes.
-        up.setShortfall(1);
+        // The upgraded token delivers less than it takes. TRON-6 tolerates up to 20 bps of the amount sent (here
+        // 199.9 sent, so 0.3998) as the issuer's fee; one unit more is refused and consumes nothing.
+        up.setShortfall(399_801);
         b = snap();
         expectRelease(r2, c2, s2, TronSourceVault.InvalidTransfer.selector);
         require(unchanged(b) && unused(r2) && up.balanceOf(BOB) == 0, "refused, nothing consumed");
-        up.setShortfall(0);
+        up.setShortfall(399_800);
+        vm.recordLogs();
         expectRelease(r2, c2, s2, OK);
-        require(up.balanceOf(BOB) == 200 * U - 100_000, "paid once the upgraded token behaves");
+        require(up.balanceOf(BOB) == 200 * U - 100_000 - 399_800, "paid less exactly what the upgraded token kept");
+        require(oneIssuerFeeLog(BOB, 199_900_000, 399_800), "IssuerFeeKept through the forwarder");
+        require(up.balanceOf(address(vault)) == b.vaultBalance - 199_900_000, "the vault lost exactly what it sent");
+        up.setShortfall(0);
         expectDeposit(CAROL, uint64(100 * U), CAROL, TronSourceVault.TokenUnsafe.selector); // deposits never reopen
         checkBooks();
         checkBacked();

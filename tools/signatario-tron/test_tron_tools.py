@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE.parent / 'guardiao'))
 import tronlib  # noqa: E402
 import tron_send  # noqa: E402
 import tron_rpc_shim  # noqa: E402
+import tron_log_index  # noqa: E402
 import tron_deploy  # noqa: E402
 import vigia_tron  # noqa: E402
 import guardiao_tron  # noqa: E402
@@ -58,17 +59,19 @@ def raises(kind, fn, *args, **kw):
     return ''
 
 
-def block_id(n):
+def block_id(n, fork=0):
     tail = GENESIS_TAIL if n == 0 else f'{n:08x}'
-    return f'{n:016x}' + 'cd' * 20 + tail
+    return f'{n:016x}' + f'{0xcd + fork:02x}' * 20 + tail
 
 
 class FakeNode(tronlib.Node):
     """An in-memory chain behind the real Node's HTTP layer. Blocks are 3 s apart; `solid` trails `height`."""
 
     def __init__(self):
-        super().__init__('http://fake.invalid', cast='cast-stub')
+        super().__init__('http://127.0.0.1:9', cast='cast-stub')
         self.height, self.solid = 10, 8
+        self.forked = {}       # block number -> fork marker: that block and every later one has another id
+        self.deposits = []     # the vault's deposit chain in its STATE: (block, nonce, id, amount, pq) in order
         self.txs = {}          # txid -> {'block': n | None, 'raw': bytes, 'ok': bool, 'logs': [...]}
         self.broadcasts = []   # every txid handed to broadcasthex, in order
         self.signed = 0
@@ -91,8 +94,23 @@ class FakeNode(tronlib.Node):
     def _blk(self, n):
         if n > self.height or n < 0:
             return {}
-        return {'blockID': block_id(n), 'block_header': {'raw_data': {'number': n, 'timestamp': T0 + n * 3000,
-                                                                   'parentHash': block_id(n - 1) if n else ''}}}
+        fork = max((v for k, v in self.forked.items() if k <= n), default=0)
+        return {'blockID': block_id(n, fork), 'block_header': {'raw_data': {'number': n, 'timestamp': T0 + n * 3000,
+                                                                         'parentHash': block_id(n - 1) if n else ''}}}
+
+    def deposit(self, amount=5_000_000, in_state=True, in_receipts=True, tx=None):
+        """A vault deposit in a new block: a `Deposited` log in the receipts and a link in the vault's state."""
+        self.mine()
+        nonce = len(self.deposits)
+        dep_id, pq = f'{0xd0000 + nonce:064x}', '00' * 12 + 'ee' * 20
+        tx = tx or f'{0xdd000000 + self.height:064x}'
+        if in_state:
+            self.deposits.append((self.height, nonce, dep_id, amount, pq))
+        if in_receipts:
+            self.txs[tx] = {'raw': b'', 'block': self.height, 'ok': True, 'logs': [{
+                'topics': [tron_log_index.DEPOSITED[2:], dep_id, 'aa' * 32],
+                'data': f'{nonce:064x}' + '00' * 12 + 'ab' * 20 + f'{amount:064x}' + pq}]}
+        return tx
 
     def _info(self, tx, top):
         t = self.txs.get(tx)
@@ -100,9 +118,11 @@ class FakeNode(tronlib.Node):
             return {}
         return {'id': tx, 'blockNumber': t['block'], 'fee': 1,
                 'receipt': {'result': 'SUCCESS' if t['ok'] else 'REVERT', 'energy_usage_total': 5},
-                'log': [{'address': VAULT[2:], 'topics': [x['topic']], 'data': x.get('data', '')} for x in t['logs']]}
+                'log': [{'address': x.get('address', VAULT[2:]), 'topics': x.get('topics') or [x['topic']],
+                         'data': x.get('data', '')} for x in t['logs']]}
 
     def post(self, path, obj=None, solid=False):
+        self.requests[('solid:' if solid else '') + path] += 1
         obj, top = obj or {}, self.solid if solid else self.height
         if path == 'getnowblock':
             return self._blk(top)
@@ -111,6 +131,16 @@ class FakeNode(tronlib.Node):
         if path == 'getchainparameters':
             return {'chainParameter': [{'key': 'getEnergyFee', 'value': self.price}]}
         if path == 'triggerconstantcontract':
+            data = obj.get('data', '')
+            if obj.get('contract_address') == tronlib.tron_hex(VAULT) and data[:8] in (
+                    tron_log_index.SEL_DEPOSIT_COUNT, tron_log_index.SEL_DEPOSIT_MATCHES) and not self.revert:
+                known = [d for d in self.deposits if d[0] <= top]
+                if data[:8] == tron_log_index.SEL_DEPOSIT_COUNT:
+                    word = len(known)
+                else:
+                    nonce, dep_id, amount, recipient = (data[8 + 64 * i:72 + 64 * i] for i in range(4))
+                    word = int(any((f'{d[1]:064x}', d[2], f'{d[3]:064x}', d[4]) == (nonce, dep_id, amount, recipient) for d in known))
+                return {'result': {'result': True}, 'constant_result': [f'{word:064x}']}
             if self.revert:
                 return {'result': {'result': True, 'message': self.revert.encode().hex()}, 'constant_result': ['1cbb0709']}
             return {'result': {'result': True}, 'energy_used': self.energy, 'energy_penalty': self.penalty,
@@ -129,13 +159,22 @@ class FakeNode(tronlib.Node):
         if path == 'gettransactioninfobyid':
             return self._info(obj['value'], top)
         if path == 'gettransactioninfobyblocknum':
-            return [self._info(t, top) for t, v in self.txs.items() if v.get('block') == obj['num'] and obj['num'] <= top]
+            if obj['num'] > top:
+                return []
+            return [self._info(t, top) for t in self.by_block().get(obj['num'], [])]
         if path == 'gettransactionbyid':
             t = self.txs.get(obj['value'])
             return {'txID': obj['value'], 'raw_data_hex': t['raw'].hex()} if t else {}
         if path == 'getcontractinfo':
             return {'runtimecode': '6080' if obj['value'] == tronlib.tron_hex(VAULT) else ''}
         raise AssertionError(f'unexpected node call {path}')
+
+    def by_block(self):
+        if getattr(self, '_by_block_n', None) != len(self.txs):
+            self._by_block, self._by_block_n = {}, len(self.txs)
+            for t, v in self.txs.items():
+                self._by_block.setdefault(v.get('block'), []).append(t)
+        return self._by_block
 
     # cast
     def run(self, *argv):
@@ -412,7 +451,7 @@ def test_shim():
     check('logs: the address filter and topic alternatives work',
           shim.get_logs({**flt, 'address': '0x' + 'cc' * 20, 'toBlock': 'latest'}) == []
           and len(shim.get_logs({**flt, 'topics': [[topic, other]], 'toBlock': 'latest'})) == 3)
-    check('logs: a range above 20,000 blocks and a query by block hash are refused',
+    check('logs: for an address without an index a range above 100 blocks is refused; so is a query by block hash',
           raises(tron_rpc_shim.RpcError, shim.get_logs, {'fromBlock': '0x0', 'toBlock': hex(30_000)}) != ''
           and raises(tron_rpc_shim.RpcError, shim.get_logs, {'blockHash': '0x00'}) != '')
     node.txs['e1' * 32] = {'raw': b'', 'block': None, 'ok': True, 'logs': []}
@@ -439,6 +478,286 @@ def test_shim():
     except SystemExit:
         loop = True
     check('shim: it listens on loopback only', loop)
+
+
+# ── review round 16 (reviewer 325): regressions ──────────────────────────────
+def index_for(node, tmp, **kw):
+    return tron_log_index.LogIndex(node, VAULT, 1, tmp, 728126428, workers=1, **{'grace_s': 0, **kw})
+
+
+def build(idx, budget=10**9):
+    """Advances until the index is verified at the solidified block. -> node requests spent."""
+    before = idx.used()
+    for _ in range(1000):
+        idx.advance(budget)
+        if idx.verified == idx.node.solid:
+            break
+    return idx.used() - before
+
+
+def eth_half_scan(shim, node, topics, chunk=10_000, start=1):
+    """The unchanged source half's own loop (eth_half.py cmd_deposit): the vault's logs from its creation block to
+    `finalized`, `log_chunk` blocks per query. -> (logs, node requests per query)."""
+    finalized, logs, costs = node.solid, [], []
+    for lo in range(start, finalized + 1, chunk):
+        before = sum(node.requests.values())
+        logs += shim.get_logs({'address': VAULT, 'topics': topics, 'fromBlock': hex(lo), 'toBlock': hex(min(lo + chunk - 1, finalized))})
+        costs.append(sum(node.requests.values()) - before)
+    return logs, costs
+
+
+def rpc_error(fn, *args):
+    try:
+        fn(*args)
+    except tron_rpc_shim.RpcError as e:
+        return e.code, e.message
+    return None
+
+
+def test_review_r16(tmp):
+    # R325-TRX-4: the operator's own node
+    check('R325-TRX-4: a node that is not on loopback is refused', all(
+        raises(tronlib.TronError, tronlib.Node, u) for u in ('http://203.0.113.7:8090', 'https://api.example.org', 'http://127.0.0.1.example.org:8090'))
+        and raises(tronlib.TronError, tronlib.Node, 'http://127.0.0.1:8090', 'http://203.0.113.7:8091') != '')
+    check('R325-TRX-4: loopback in its three spellings is accepted; a remote node only with the explicit override',
+          all(tronlib.Node(u) for u in ('http://127.0.0.1:8090', 'http://localhost:8090', 'http://[::1]:8090'))
+          and tronlib.Node('http://203.0.113.7:8090', allow_remote=True) is not None)
+    check('R325-TRX-4: the sender, the shim index hints and the deploy tool go through the same refusal',
+          raises(tronlib.TronError, tron_send.Sender, {'tron_node': 'http://203.0.113.7:8090', 'journal_dir': str(tmp / 'r4')}) != ''
+          and raises(SystemExit, tron_log_index.LogIndex, FakeNode(), VAULT, 1, tmp / 'r4i', 728126428, logs_rpc='http://203.0.113.7:8545') != '')
+
+    # R325-TRX-1: a vault one day old (28,800 blocks of other people's transactions), three deposits
+    node = FakeNode()
+    node.height = node.solid = 0
+    first = node.deposit()
+    for n in range(2, 28_800, 7):                                   # unrelated transactions with unrelated logs
+        node.txs[f'{n:064x}'] = {'raw': b'', 'block': n, 'ok': True, 'logs': [{'address': 'cc' * 20, 'topic': 'a1' * 32}]}
+    node.height = 14_000
+    second = node.deposit()
+    node.height = 28_797
+    third = node.deposit()
+    node.mine(2)
+    node.solid = node.height                                        # 28,800
+    shim = tron_rpc_shim.Shim(node, 728126428)
+    shim.index = index_for(node, tmp / 'i1')
+    cold = rpc_error(shim.get_logs, {'address': VAULT, 'topics': [tron_log_index.DEPOSITED], 'fromBlock': '0x1', 'toBlock': 'finalized'})
+    spent = sum(node.requests.values())
+    check('R325-TRX-1: a query on an index that is still catching up is an ERROR (never a shorter answer) and spends a bounded '
+          'number of node requests (budget 400 plus one batch)', cold is not None and cold[0] == -32005 and spent <= 400 + 256 + 20, (cold, spent))
+    cost = spent + build(shim.index)
+    check('R325-TRX-1: the whole day is read ONCE: about one node request per block (28,800 blocks)',
+          28_800 <= cost <= 28_800 * 1.05 and shim.index.verified == 28_800 and shim.index.deposits == 3, (cost, shim.index.status()))
+    logs, costs = eth_half_scan(shim, node, [tron_log_index.DEPOSITED, '0x' + f'{0xd0001:064x}'])
+    check('R325-TRX-1 (the reviewer\'s test): one attestation of a one-day-old vault costs a bounded number of node requests '
+          '(was 57,605); each query at most 200 (was 20,001)', max(costs) <= 200 and sum(costs) <= 20 and len(logs) == 1
+          and logs[0]['transactionHash'] == '0x' + second, (costs, logs))
+    all_logs, costs = eth_half_scan(shim, node, [tron_log_index.DEPOSITED])
+    check('R325-TRX-1: the release side\'s scan of every deposit finds all three, in order, with the receipts\' own positions',
+          [l['transactionHash'][2:] for l in all_logs] == [first, second, third] and sum(costs) <= 20
+          and all(l['blockHash'] == '0x' + block_id(int(l['blockNumber'], 16)) and l['logIndex'] == '0x0' for l in all_logs), (costs, all_logs))
+    # the same attestation with ten times the history costs the same
+    node.height = node.solid = 288_000
+    build(shim.index)
+    logs, costs10 = eth_half_scan(shim, node, [tron_log_index.DEPOSITED, '0x' + f'{0xd0001:064x}'])
+    check('R325-TRX-1: with ten times the history the same attestation costs the same node requests (none for history)',
+          sum(costs10) <= 20 and len(logs) == 1 and len(costs10) == 29, costs10)
+    before = sum(node.requests.values())
+    node.mine(5, solidify=True)
+    fresh = shim.get_logs({'address': VAULT, 'topics': [tron_log_index.DEPOSITED], 'fromBlock': '0x1', 'toBlock': 'finalized'})
+    check('R325-TRX-1: five new blocks cost a handful of requests (one per block plus the checks), not a rescan',
+          len(fresh) == 3 and sum(node.requests.values()) - before <= 5 + 20, sum(node.requests.values()) - before)
+    shim.fresh_s = 0
+    before = sum(node.requests.values())
+    shim.get_logs({'address': VAULT, 'topics': [tron_log_index.DEPOSITED], 'fromBlock': '0x1', 'toBlock': hex(20_000)})
+    stale = sum(node.requests.values()) - before
+    shim.fresh_s = 10**9
+    before = sum(node.requests.values())
+    shim.get_logs({'address': VAULT, 'topics': [tron_log_index.DEPOSITED], 'fromBlock': '0x1', 'toBlock': hex(20_000)})
+    check('R325-TRX-1: a query for history checks the index against the node first when it is older than fresh_s (a few small '
+          'requests, no block re-read), and costs nothing when it was checked a moment ago',
+          0 < stale <= 12 and sum(node.requests.values()) == before, stale)
+    shim.fresh_s = 1.0
+    check('R325-TRX-1: an address the shim keeps no index of is served for at most 100 blocks (200 node requests)',
+          rpc_error(shim.get_logs, {'address': '0x' + 'cc' * 20, 'fromBlock': '0x1', 'toBlock': hex(101)}) is not None
+          and rpc_error(shim.get_logs, {'address': '0x' + 'cc' * 20, 'fromBlock': '0x1', 'toBlock': hex(100)}) is None)
+
+    # finality: `finalized` never reaches past the verified, solidified block; the head part is separate and short
+    head_tx = node.deposit()
+    q = {'address': VAULT, 'topics': [tron_log_index.DEPOSITED], 'fromBlock': '0x1'}
+    check('index: a deposit in a block that is not solidified is not served up to finalized, and is served from finalized + 1 to latest '
+          '(the source half\'s "deposit not finalized" answer)',
+          len(shim.get_logs({**q, 'toBlock': 'finalized'})) == 3
+          and [l['transactionHash'][2:] for l in shim.get_logs({**q, 'fromBlock': hex(node.solid + 1), 'toBlock': 'latest'})] == [head_tx])
+    node.mine(100)
+    check('index: a query reaching more than 64 blocks above the solidified block is refused',
+          rpc_error(shim.get_logs, {**q, 'toBlock': 'latest'})[0] == -32005)
+    node.solid = node.height
+    check('index: once solidified the deposit is served up to finalized', len(shim.get_logs({**q, 'toBlock': 'finalized'})) == 4)
+
+    # persistence
+    again = index_for(node, tmp / 'i1')
+    before = sum(node.requests.values())
+    again.advance()
+    check('persistence: a restarted shim continues from its checkpoint (no block is read again)',
+          (again.cursor, again.verified, again.deposits, len(again.logs)) == (shim.index.cursor, shim.index.verified, 4, 4)
+          and sum(node.requests.values()) - before <= 20, sum(node.requests.values()) - before)
+    with open(tmp / 'i1' / 'logs.jsonl', 'a') as f:
+        f.write('{"a line written after the last checkpoint: a crash between the two writes"}\n')
+    check('persistence: lines written after the last checkpoint are ignored; an index of another vault or start block is refused',
+          len(index_for(node, tmp / 'i1').logs) == 4
+          and raises(SystemExit, tron_log_index.LogIndex, node, '0x' + 'cc' * 20, 1, tmp / 'i1', 728126428) != ''
+          and raises(SystemExit, tron_log_index.LogIndex, node, VAULT, 2, tmp / 'i1', 728126428) != '')
+
+    # completeness comes from the vault's own state, not from the receipts or the hints
+    def small():
+        n = FakeNode()
+        n.height = n.solid = 0
+        n.deposit()
+        n.mine(20)
+        n.deposit()
+        n.mine(20, solidify=True)
+        return n
+    n1 = small()
+    n1.deposit(in_receipts=False)
+    n1.mine(3, solidify=True)
+    i = index_for(n1, tmp / 'c1')
+    why = raises(tron_log_index.Broken, build, i)
+    s1 = tron_rpc_shim.Shim(n1, 728126428)
+    s1.index = i
+    i._retry_at = 0
+    check('completeness: a node whose receipts lack a deposit the vault\'s state holds is not believed: nothing is served',
+          'counts 3 deposits' in why and i.verified < n1.solid and rpc_error(s1.get_logs, {**q, 'toBlock': 'finalized'})[0] == -32000
+          and i.stats['rescans'] == 2, (why, i.status()))
+    late = small()
+    held_tx = late.deposit(in_receipts=False)
+    late_block = late.height
+    late.mine(3, solidify=True)
+    ig = index_for(late, tmp / 'c1g', grace_s=1000)
+    for _ in range(5):
+        ig.advance()
+    waiting = (ig.verified, ig.stats['rescans'], ig.stats['last_error'])
+    late.txs[held_tx] = {'raw': b'', 'block': late_block, 'ok': True, 'logs': [{
+        'topics': [tron_log_index.DEPOSITED[2:], late.deposits[2][2], 'aa' * 32],
+        'data': f'{2:064x}' + '00' * 12 + 'ab' * 20 + f'{late.deposits[2][3]:064x}' + late.deposits[2][4]}]}
+    ig._short[1] -= 1001                                           # the grace is over
+    build(ig)
+    check('completeness: a deposit the state holds before the receipts show it is first waited for (nothing past the last '
+          'verified block is served, no error), then found by reading the unverified blocks again',
+          waiting[1:] == (0, None) and waiting[0] < late_block
+          and ig.deposits == 3 and ig.verified == late.solid and ig.stats['rescans'] == 1, (waiting, ig.status()))
+    n2 = small()
+    n2.deposit(in_state=False)
+    n2.mine(3, solidify=True)
+    check('completeness: a Deposited log the vault\'s state does not confirm (an invented or altered deposit) stops the index',
+          'not deposit 2' in raises(tron_log_index.Broken, build, index_for(n2, tmp / 'c2')))
+    n3 = small()
+    i3 = index_for(n3, tmp / 'c3', logs_rpc='http://127.0.0.1:9/jsonrpc')
+    hinted = []
+    i3.hinted = lambda lo, hi: hinted.append((lo, hi)) or [1]      # the node's log filter names block 1 only: it omits a deposit
+    cost = build(i3)
+    check('hints: a log filter that omits a deposit costs a rescan, not the deposit (the state count catches it)',
+          i3.deposits == 2 and i3.verified == n3.solid and i3.stats['rescans'] >= 1 and hinted, (i3.status(), hinted))
+    n4 = small()
+    i4 = index_for(n4, tmp / 'c4', logs_rpc='http://127.0.0.1:9/jsonrpc')
+    i4.hinted = lambda lo, hi: [b for b in (1, 22) if lo <= b <= hi]
+    cost = build(i4)
+    check('hints: with honest hints only the vault\'s own blocks are read (a few requests for 42 blocks) and the result is the same',
+          i4.deposits == 2 and i4.verified == n4.solid and i4.stats['blocks_read'] == 2 and cost <= 20, (cost, i4.status()))
+    i5 = index_for(small(), tmp / 'c5', logs_rpc='http://127.0.0.1:9/jsonrpc')
+    build(i5)
+    check('hints: an endpoint that does not answer falls back to reading every block',
+          i5.deposits == 2 and i5.stats['hint_fallbacks'] >= 1 and i5.stats['blocks_read'] >= 42, i5.status())
+
+    # the solidified chain changes after the fact
+    n6 = small()
+    i6 = index_for(n6, tmp / 'c6', recheck_s=0)
+    build(i6)
+    lost_block, lost_dep = n6.deposits[1][0], n6.deposits.pop()
+    lost_tx = next(t for t, v in n6.txs.items() if v['block'] == lost_block)
+    del n6.txs[lost_tx]
+    n6.forked[lost_block] = 1                                      # block 22 and everything after it was replaced
+    build(i6)
+    check('reorg: a solidified block that was replaced is noticed by its id; the logs from it on are dropped and read again',
+          i6.deposits == 1 and len(i6.logs) == 1 and i6.verified == n6.solid and i6.stats['rollbacks'] >= 1
+          and i6.cursor_id == block_id(n6.solid, 1), i6.status())
+    n6.deposits.append((n6.height + 1,) + lost_dep[1:])
+    n6.txs[lost_tx] = {'raw': b'', 'block': n6.height + 1, 'ok': True, 'logs': [{
+        'topics': [tron_log_index.DEPOSITED[2:], lost_dep[2], 'aa' * 32],
+        'data': f'{1:064x}' + '00' * 12 + 'ab' * 20 + f'{lost_dep[3]:064x}' + lost_dep[4]}]}
+    n6.mine(2, solidify=True)
+    build(i6)
+    check('reorg: the same deposit included again in a later block is indexed at its new block',
+          i6.deposits == 2 and int(i6.logs[1]['blockNumber'], 16) == n6.height - 1
+          and i6.logs[1]['blockHash'] == '0x' + block_id(n6.height - 1, 1), i6.logs[-1])
+    n7 = small()
+    i7 = index_for(n7, tmp / 'c7', recheck_s=0)
+    build(i7)
+    gone = next(t for t, v in n7.txs.items() if v['block'] == n7.deposits[1][0])
+    del n7.txs[gone]
+    n7.deposits.pop()
+    build(i7)
+    check('reorg: a deposit whose transaction is no longer in the solidified chain is dropped even when block ids did not change',
+          i7.deposits == 1 and len(i7.logs) == 1 and i7.verified == n7.solid, i7.status())
+    n8 = small()
+    i8 = index_for(n8, tmp / 'c8', recheck_s=10**9)
+    build(i8)
+    del n8.txs[next(t for t, v in n8.txs.items() if v['block'] == n8.deposits[1][0])]
+    n8.deposits.pop()
+    build(i8)
+    check('reorg: fewer deposits in the vault\'s state than in the index drops the index back to the state (without the receipt check)',
+          i8.deposits == 1 and i8.stats['rollbacks'] >= 1, i8.status())
+    n9 = small()
+    n9.txs['ab' * 32] = {'raw': b'', 'block': 30, 'ok': False, 'logs': [{'topics': [tron_log_index.DEPOSITED[2:], 'ff' * 32, 'aa' * 32],
+                                                                        'data': '00' * 128}]}
+    i9 = index_for(n9, tmp / 'c9')
+    build(i9)
+    check('index: logs of a failed receipt are never indexed', i9.deposits == 2 and len(i9.logs) == 2)
+
+    # R325-TRX-6: the transaction's own fee limit, and a back-off after a transaction that landed and failed
+    node = FakeNode()
+    s = sender(node, tmp / 'b1', fee_limit_sun=150_000_000)
+    out = s.send('burn9', VAULT, '0xaa01')
+    doc = json.loads((tmp / 'b1' / 'burn9.json').read_text())
+    check('R325-TRX-6: the transaction\'s own fee limit is the simulated energy x price x 3/2 (15 TRX), not the configured ceiling (150 TRX)',
+          doc['fee_limit'] == 15_000_000 and tronlib.describe(bytes.fromhex(doc['raw']))['fee_limit'] == 15_000_000, doc['fee_limit'])
+    node.include(out['txid'], ok=False)
+    node.solid = node.height
+    first_try = s.send('burn9', VAULT, '0xaa01')
+    held = s.send('burn9', VAULT, '0xaa01')
+    check('R325-TRX-6: after a transaction that landed and FAILED, nothing is signed for that payment for 60 s',
+          first_try['state'] == 'landed' and not first_try['ok'] and held['state'] == 'backoff' and held['failed'] == 1
+          and node.signed == 1 and held['last_result'] == 'REVERT', (first_try, held))
+    closed = next((tmp / 'b1' / 'closed').glob('burn9.*.json'))
+    d = json.loads(closed.read_text())
+    d['closed_at'] -= 61
+    closed.write_text(json.dumps(d))
+    retry = s.send('burn9', VAULT, '0xaa01')
+    node.include(retry['txid'], ok=False)
+    node.solid = node.height
+    s.send('burn9', VAULT, '0xaa01')
+    for path in (tmp / 'b1' / 'closed').glob('burn9.*.json'):
+        d = json.loads(path.read_text())
+        d['closed_at'] -= 61
+        path.write_text(json.dumps(d))
+    held2 = s.send('burn9', VAULT, '0xaa01')
+    check('R325-TRX-6: the second attempt is signed after the back-off; a second failure doubles it (still held after 61 s)',
+          retry['state'] == 'sent' and retry['txid'] != out['txid'] and node.signed == 2 and held2['state'] == 'backoff' and held2['failed'] == 2, (retry, held2))
+    other = s.send('burn10', VAULT, '0xaa02')
+    check('R325-TRX-6: the back-off is per payment; another payment is sent at once; a success ends a streak',
+          other['state'] == 'sent' and s.backoff('burn10') is None)
+    capped = sender(FakeNode(), tmp / 'b2', max_sends_per_hour=2)
+    capped.send('p1', VAULT, '0x01')
+    capped.send('p2', VAULT, '0x02')
+    why = raises(tron_send.Refused, capped.send, 'p3', VAULT, '0x03')
+    check('R325-TRX-3: the sender signs at most max_sends_per_hour transactions in an hour; the third is refused and nothing is signed',
+          'rate cap' in why and capped.node.signed == 2 and not (tmp / 'b2' / 'p3.json').exists()
+          and capped.send('p1', VAULT, '0x01')['state'] == 'resent', why)
+    v = object.__new__(vigia_tron.VigiaTron)
+    v.cfg, v.vault, v._tron = {'eth_rpc': 'http://shim'}, VAULT, s
+    v.cast_out = lambda *a: '0xaa01'
+    check('R325-TRX-6: the relayer reports a held payment as an alert and sends nothing',
+          'landed and failed' in raises(RuntimeError, v.send_locked, 'eth', VAULT, ['release(...)'], 0, False, '0xburn9', None)
+          and node.signed == 3)
 
 
 # ── the daemon subclasses ────────────────────────────────────────────────────
@@ -519,7 +838,7 @@ def test_deploy(tmp):
     s = tron_deploy.shape(base)
     check('config: filled with throwaway addresses it has the decided shape (7 signers, 5 to release, 6 to switch, 3 guardians, 5 + 5 bps)',
           (s['chain'], s['mainnet'], len(s['signers']), s['threshold'], s['policy'][2], len(s['guardians']), s['fees'])
-          == (728126428, True, 7, 5, 6, 3, (OWNER_HEX, 5, 5)), s)
+          == (728126428, True, 7, 5, 6, 3, (OWNER_HEX, 5, 5, 8_000_000)), s)
     check('config: the token is USDT and the fee recipient is the owner address', s['token'] == USDT_HEX and tronlib.base58(s['fees'][0]) == OWNER)
     check('config: signers and guardians are passed to the constructor in ascending order',
           s['signers'] == sorted(s['signers'], key=lambda x: int(x, 16)) and s['guardians'] == sorted(s['guardians'], key=lambda x: int(x, 16)))
@@ -529,6 +848,9 @@ def test_deploy(tmp):
         'a token address with a bad checksum': set_(['vault', 'token'], USDT[:-1] + 'u'),
         'a fee above 30 bps': set_(['vault', 'provenance', 'fees', 'releaseBps'], 31),
         'a zero fee on mainnet': lambda c: c['vault']['provenance']['fees'].update(depositBps=0, releaseBps=0),
+        'no fixed release fee on mainnet (a release costs the relayer the same energy whatever its size)':
+            set_(['vault', 'provenance', 'fees', 'releaseFlat'], 0),
+        'a fixed release fee above half of the minimum burn': set_(['vault', 'provenance', 'fees', 'releaseFlat'], 10_000_001),
         'the fee recipient also being a signer': lambda c: c['vault']['signers']['set'][0].update(address=OWNER),
         'one address as signer and guardian': lambda c: c['vault']['guard']['guardians'][0].update(
             address=c['vault']['signers']['set'][3]['address']),
@@ -539,7 +861,7 @@ def test_deploy(tmp):
         'the creator paying for callers (consumeUserResourcePercent 99)': set_(['deploy', 'consumeUserResourcePercent'], 99),
         'a release delay (not the launch design)': set_(['vault', 'provenance', 'releaseDelay'], 60),
         'a mint verifier at launch': set_(['vault', 'provenance', 'mintVerifier'], '0x' + '55' * 20),
-        'a minimum deposit whose net is below the L2 minimum burn': set_(['vault', 'policy', 'minDeposit'], 10_000_000),
+        'a minimum deposit whose net is below the L2 minimum burn': set_(['vault', 'policy', 'minDeposit'], 20_000_000),
         'a missing operator name': lambda c: c['vault']['signers']['set'][2].update(operator='TBD-owner'),
         'a missing source revision': set_(['source', 'revision'], None),
         'a rehearsal flag on mainnet': set_(['tron', 'rehearsal'], True),
@@ -577,6 +899,7 @@ def main():
         test_node()
         test_sender(tmp)
         test_shim()
+        test_review_r16(tmp)
         test_daemons(tmp)
         test_deploy(tmp)
     print(f'\n{sum(results)}/{len(results)} checks passed')

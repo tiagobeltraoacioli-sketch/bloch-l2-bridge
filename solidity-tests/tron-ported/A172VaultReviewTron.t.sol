@@ -205,7 +205,7 @@ contract A172VaultReviewTestTron {
             addrs(ethKeys), 5,
             TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, MIN, MIN),
             TronSourceVault.Guard(guardians(), 72 hours, 72 hours),
-            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0))
+            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0, 0))
         );
         uint256 until = block.timestamp + 100;
         v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));
@@ -330,7 +330,8 @@ contract A172VaultReviewTestTron {
 
     /// A FiatToken upgrade that adds a transfer fee: exact-delta checks refuse every deposit and release, so nothing is
     /// lost, and nothing moves until the fee is removed. The cap and bucket keep their meaning.
-    function test_U4_feeUpgradeFailsClosed() public {
+    /// NOT PORTED to TRON: it asserts that a token which starts keeping a transfer fee from the recipient makes every release revert. The TRON vault deliberately does not do that (TRON-6, review R325-TRX-2): USDT on TRON has such a switch, and an ownerless vault that fails closed on it would hold every exit for as long as the issuer leaves it on. The vault's side stays exact and the tolerated shortfall is bounded; solidity-tests/TronVaultFees.t.sol and TronVaultIssuer.t.sol test the bounds, and that a deposit still fails closed.
+    function tronNotPorted_test_U4_feeUpgradeFailsClosed() public {
         depositAs(ALICE, 100 * uint64(U), ALICE);
         TronSourceVault.Release memory r = cleanBurn(ALICE, 100 * uint64(U), 1);
         usdc.setFee(1);

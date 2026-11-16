@@ -59,7 +59,7 @@ contract RecoverableReleaseVerifierV3Groth16TestTron {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(new D6UsdcTron()), 100_000e6, 1, s, 5,
             TronSourceVault.Policy(10_000e6, 1 days, 6, 14 days, 10e6, 10e6),
             TronSourceVault.Guard(new address[](0), 0, 0),
-            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0))
+            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0, 0))
         );
     }
 

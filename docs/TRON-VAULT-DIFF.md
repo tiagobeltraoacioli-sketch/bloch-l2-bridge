@@ -3,14 +3,14 @@
 UNAUDITED. Nothing is deployed. Written in round 16 (agent 323) on `codex/bridge-tron-r16-20261116`, from `cc2511a`.
 
 `contracts/tron/TronSourceVault.sol` is `contracts/usdt/ProvenanceSourceVault.sol` (the Ethereum vault of the audit
-scope, creation keccak `0x901d52d0…3a74`, unchanged on this branch) with five marked changes. Check it yourself:
+scope, creation keccak `0x901d52d0…3a74`, unchanged on this branch) with seven marked changes (TRON-6 and TRON-7 were added after the round 16 review, findings R325-TRX-2 and R325-TRX-3). Check it yourself:
 
 ```
 python3 scripts/tron/vault_diff.py
 ```
 
-It prints the whole diff (7 hunks, 43 lines added, 14 removed, most of them the header comment) and fails if the diff
-is not the pinned one.
+It prints the whole diff (82 lines added, 22 removed, a third of them the header comment) and fails if the diff is
+not the pinned one.
 
 ## 1. Source changes
 
@@ -20,10 +20,13 @@ is not the pinned one.
 | TRON-2 | constructor | `transferMode_ > 1` becomes `transferMode_ != 1` | USDT on TRON returns ABI `false` from every successful `transfer` and `true` from `transferFrom` (section 3). In mode 0 the vault would accept deposits (`transferFrom`) and then refuse every release and fee sweep (`transfer`): funds in, never out. Mode 1 ignores the return value and requires exact balance movement on both sides | `test_ctor_transferMode0And2Refused`; on the TVM the creation with mode 0 reverts |
 | TRON-3 | constructor | The token must answer `isBlackListed(address(this))` and `deprecated()` with one ABI word each, both false | A token without these getters is not USDT-on-TRON, and the deposit gate below would then refuse every deposit for good | `test_ctor_tokenWithoutGettersRefused`, `…malformedGettersRefused`, `…preBlacklistedVaultAddressRefused`, `…deprecatedTokenRefused` |
 | TRON-4 | `deposit` | After the pause check: `if (!_tokenAcceptsDeposits(token)) revert TokenUnsafe();` | Measured on the real bytecode: `transferFrom` checks only the blacklist entry of `from`, so a deposit INTO a blacklisted vault succeeds. Without the gate users could keep depositing into a vault whose funds the issuer has frozen and can destroy. The same gate refuses deposits once the issuer has deprecated the token (calls are then forwarded to a contract nobody reviewed) or when a getter stops answering | `test_a_vaultBlacklisted_…`, `test_e_deprecated_…`, `test_h_gettersTurnMalformed_…`, the stateful fuzz; on the TVM the control check "the real token does accept a transfer into the blacklisted vault" |
+| TRON-6 | `_transferOut`, `sweepFees`, new private `_received`, two constants, one event | The payment check is split. The vault's balance must fall by EXACTLY the amount sent (unchanged). The recipient may receive less by at most `ISSUER_FEE_MAX_BPS` (20 bps) of it and at most `ISSUER_FEE_MAX` (50 USDT), never more than was sent, and its balance may not fall; `IssuerFeeKept(recipient, sent, kept)` is emitted when something was kept | USDT on TRON has a transfer fee switch (`setParams`, below 20 bps and below 50 USDT in its own code, zero today). With an exact check on the recipient's side every release and every sweep reverts while it is on, and nothing in an ownerless vault ends that. Now exits continue at the recipient's cost; the vault absorbs nothing. Deposits are unchanged: one that delivers less than its amount is refused | `TronVaultFees.t.sol` (13 bound tests with hostile tokens), `TronVaultIssuer.t.sol::test_d_…`, the stateful fuzz (I6); on the TVM the stage "issuer fee" with the real token |
+| TRON-7 | `struct Fees` (fourth field `releaseFlat`), immutable `releaseFlatFee`, constructor, `_checkRelease`, `_transferOut` | Every release takes `releaseFlatFee` on top of `releaseFeeBps`. The constructor refuses a flat fee above half of `l2MinBurn`. A release whose amount is not above its fee is refused when the certificate is submitted (`InvalidRelease`), on every path, and consumes nothing | A release costs its relayer the same energy whatever its size; with a percentage alone, minimum burns drain the relayers (R325-TRX-3). The constructor ABI changes: the fee tuple has four fields | `TronVaultFees.t.sol` (9 tests, including the delayed and the proof paths), the stateful fuzz; on the TVM every release check of the rehearsal |
 | TRON-5 | new view, two private helpers, one error | `tokenState()` returns `(known, blacklisted, replaced)`; `_tokenFlags` and `_tokenAcceptsDeposits`; `error TokenUnsafe()` | For monitors and frontends, and to serve TRON-3 and TRON-4. `_tokenFlags` never reverts: a failed or malformed answer is `known = false` | - |
 
-Nothing else differs: every digest, id, tag, event, limit, pause rule, switch rule, fee rule and the reentrancy guard
-are the Ethereum vault's lines. Releases are deliberately not gated: a release into a frozen or paused token reverts
+Nothing else differs: every digest, id, tag, limit, pause rule, switch rule and the reentrancy guard are the Ethereum
+vault's lines; so are the events (one added) and the fee rules other than the two above. With `releaseFlat` 0 and a
+token that keeps nothing, the two vaults behave identically (the differential fuzz below). Releases are deliberately not gated: a release into a frozen or paused token reverts
 inside the token and the whole transaction rolls back, so no nonce or nullifier is consumed.
 
 A differential fuzz (`solidity-tests/TronVaultDifferential.t.sol`) drives both vaults with the same sequences on a
@@ -78,13 +81,14 @@ What the vault does in each case (forge suites `TronVaultIssuer`, `TronVaultStat
 | Vault blacklisted | refused, `TokenUnsafe` | revert in the token; nothing consumed; paid once after the listing ends | unchanged |
 | Vault funds destroyed | refused, `InsufficientBacking` | refused, `InsufficientBacking`, until the whole shortfall is returned; no first-come drain | `totalLocked`, `feesAccrued` and the deposit chain still state every liability; `reservas` reports the shortfall |
 | Token paused | revert | revert; paid once after the unpause | unchanged |
-| Transfer fee switched on | revert (`InvalidTransfer`) | revert (`InvalidTransfer`), except amounts whose fee rounds to zero | unchanged |
-| Token deprecated | refused, `TokenUnsafe` | paid only if the new contract moves exact amounts | unchanged |
+| Transfer fee switched on | revert (`InvalidTransfer`): a deposit must deliver its whole amount | **paid** (TRON-6): the recipient bears the issuer's fee, at most 20 bps and 50 USDT; the vault's balance falls by exactly what it sent | exactly those of a fee-free release |
+| Token deprecated | refused, `TokenUnsafe` | paid only if the new contract takes exactly the amount from the vault and keeps at most 20 bps and 50 USDT from the recipient | unchanged |
 | Release recipient blacklisted | - | paid (the token allows it; the issuer then holds the funds at that address) | consistent |
 
 Accepted limits: the issuer can stop exits for as long as it likes (blacklist, pause, fee) and can destroy the
-backing; the vault cannot prevent that, it only refuses new deposits and keeps the books provable. While a transfer
-fee is on, exits wait.
+backing; the vault cannot prevent that, it only refuses new deposits and keeps the books provable. A transfer fee no
+longer stops exits (TRON-6); it stops deposits. A hostile replacement token (after `deprecate`) can take at most 20
+bps and 50 USDT from each exit's recipient, and nothing from the vault.
 
 ## 4. Energy measured on the private TVM (java-tron 4.8.2, runs 3 and 4)
 

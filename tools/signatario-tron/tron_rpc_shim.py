@@ -2,6 +2,8 @@
 """Read-only Ethereum JSON-RPC view of one TRON node, for the unchanged bridge daemons.
 
   tron_rpc_shim.py --node http://127.0.0.1:8090 [--solidity http://127.0.0.1:8091] --port 42320 [--chain-id 728126428]
+                   --vault 0xVAULT --from-block N --index DIR [--logs-rpc http://127.0.0.1:8545/jsonrpc]
+                   [--recheck-s 30] [--fresh-s 1] [--grace-s 10] [--allow-remote-node]
 
 The signer's source half (`eth_half.py`), the relayer's reads (`vigia.py`), the guardian (`guardiao.py`) and the
 reserves monitor (`reservas.py`) speak Ethereum JSON-RPC and take their safety from one word: `finalized`. java-tron's
@@ -18,20 +20,40 @@ rule that carries all the weight:
                  views, set-once flags, append-only chains, counters that only grow), and a value read is never
                  less final than asked.
 
+Logs (`eth_getLogs`). The daemons ask for the vault's logs over its whole history. java-tron's HTTP API can answer
+that only by reading every block, so the shim keeps a persisted, verified index of the vault named by `--vault`
+(`tron_log_index.py`: what it trusts, how it is checked against the vault's own solidified state, how it notices a
+changed solidified chain). A query for the vault costs no node request once the index is current, and at most
+QUERY_BUDGET (400) plus about 250 while it catches up; a query it cannot answer completely yet is an ERROR, never a
+shorter answer. A query for any other address is served for at most MAX_UNINDEXED_RANGE (100) blocks. `--from-block`
+is the vault's creation block (`tron_deploy.py verify` prints it). The index is checked against the node (cursor
+block id, the vault's deposit count, new blocks) by a background round every 2 s and by any query that finds it older
+than `--fresh-s` (1 s); the receipts of the vault's logs of the last day are read again every `--recheck-s` (30 s).
+So a log that left the solidified chain is served for at most about `--fresh-s` + `--recheck-s` after the node knows. `--logs-rpc` (the node's own JSON-RPC endpoint) only
+names candidate blocks faster; nothing is believed from it. `tron_shimStats` reports the index and the node requests.
+
 What it does not do: send transactions (TRON transactions are not Ethereum transactions; `tron_send.py` sends them),
 filters, subscriptions, balances in TRX, traces. Unknown methods are refused, never guessed.
 
-Run one per operator, beside the operator's OWN java-tron node, on loopback. It holds no key and no state.
+Run one per operator, beside the operator's OWN java-tron node, on loopback (a node that is not on loopback is refused
+unless `--allow-remote-node` is given). It holds no key. Its only state is the log index directory, which can be
+deleted at any time: it is rebuilt from the chain.
 """
+import errno
 import json
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tronlib  # noqa: E402
+import tron_log_index  # noqa: E402
 
-MAX_LOG_RANGE = 20_000  # blocks per eth_getLogs; each block is one node request
+MAX_UNINDEXED_RANGE = 100  # blocks per eth_getLogs for an address without an index: two node requests per block
+HEAD_SPAN = 64             # blocks above the solidified one an indexed query may reach (read at the head, not indexed)
+QUERY_BUDGET = 400         # node requests one eth_getLogs may spend bringing the index forward
 
 
 class RpcError(Exception):
@@ -49,6 +71,11 @@ def b32(hexstr):
 
 
 class Shim:
+    index = None  # tron_log_index.LogIndex of the vault, when the shim was started with --vault
+    lock = threading.Lock()
+    query_budget = QUERY_BUDGET
+    fresh_s = 1.0  # a query for history is answered without a round only if the index was checked this recently
+
     def __init__(self, node, chain_id=None):
         self.node = node
         genesis = node.block(0)
@@ -110,18 +137,55 @@ class Shim:
                 index += 1
         return out, block
 
+    def indexed_logs(self, lo, to, topics):
+        """eth_getLogs for the indexed vault: the solidified part from the index (no node request once it is current),
+        at most HEAD_SPAN blocks above it from the head. Never a silently shorter range: an index that has not
+        reached the block asked for is an error, and the caller asks again."""
+        idx = self.index
+        with self.lock:
+            numeric = to not in ('finalized', 'latest')
+            if numeric and int(to, 16) <= idx.verified and time.time() - idx.advanced_at < self.fresh_s:
+                return idx.query(lo, int(to, 16), topics)  # history, checked a moment ago: nothing to read from the node
+            try:
+                solid = idx.advance(self.query_budget)
+            except tron_log_index.Broken as e:
+                raise RpcError(-32000, f'TRON log index refuses to answer: {e}') from e
+            behind = RpcError(-32005, f'TRON log index is catching up: verified to block {idx.verified}, solidified '
+                                      f'{solid}; ask again')
+            if to == 'finalized':
+                if idx.verified < solid:
+                    raise behind
+                return idx.query(lo, idx.verified, topics)
+            hi = self.node.head()['number'] if to == 'latest' else int(to, 16)
+            if hi <= idx.verified:
+                return idx.query(lo, hi, topics)
+            if idx.verified < solid:
+                raise behind
+            if hi - idx.verified > HEAD_SPAN:
+                raise RpcError(-32005, f'eth_getLogs reaches {hi - idx.verified} blocks above the solidified block '
+                                       f'(at most {HEAD_SPAN})')
+            found = idx.query(lo, idx.verified, topics) if lo <= idx.verified else []
+        return found + self.scan_logs(max(lo, idx.verified + 1), hi, {idx.vault}, topics, idx.verified)
+
     def get_logs(self, flt):
         if 'blockHash' in flt:
             raise RpcError(-32602, 'eth_getLogs by blockHash is not supported')
-        solid_height = self.node.solidified()['number']
         lo = int(flt.get('fromBlock', '0x0'), 16)
         to = flt.get('toBlock', 'latest')
-        hi = solid_height if to == 'finalized' else self.node.head()['number'] if to == 'latest' else int(to, 16)
-        if hi - lo >= MAX_LOG_RANGE:
-            raise RpcError(-32005, f'eth_getLogs range above {MAX_LOG_RANGE} blocks')
         addresses = flt.get('address')
         addresses = None if addresses is None else {a.lower() for a in ([addresses] if isinstance(addresses, str) else addresses)}
         topics = flt.get('topics') or []
+        if self.index is not None and addresses == {self.index.vault}:
+            return self.indexed_logs(lo, to, topics)
+        solid_height = self.node.solidified()['number']
+        hi = solid_height if to == 'finalized' else self.node.head()['number'] if to == 'latest' else int(to, 16)
+        if hi - lo >= MAX_UNINDEXED_RANGE:
+            raise RpcError(-32005, f'eth_getLogs over {hi - lo + 1} blocks for an address this shim keeps no index of '
+                                   f'(at most {MAX_UNINDEXED_RANGE}: every block is two node requests). Start the shim '
+                                   'with --vault for the vault\'s logs')
+        return self.scan_logs(lo, hi, addresses, topics, solid_height)
+
+    def scan_logs(self, lo, hi, addresses, topics, solid_height):
         found = []
         for number in range(lo, hi + 1):
             logs, _ = self.block_logs(number, number <= solid_height)
@@ -217,6 +281,10 @@ class Shim:
             return self.transaction(p[0])
         if method == 'eth_getTransactionCount':
             return '0x0'  # TRON accounts have no nonce
+        if method == 'tron_shimStats':
+            with self.lock:
+                return {'node_requests': sum(self.node.requests.values()), 'by_method': dict(self.node.requests),
+                        'index': None if self.index is None else self.index.status()}
         if method == 'eth_gasPrice':
             return '0x0'  # energy is priced by the chain, not bid; tron_send.py caps the fee
         raise RpcError(-32601, f'{method} is not served by the TRON shim (read-only; transactions go through tron_send.py)')
@@ -256,9 +324,37 @@ def serve(shim, host, port):
 
     if host not in ('127.0.0.1', '::1', 'localhost'):
         raise SystemExit('the shim listens on loopback only')
-    server = ThreadingHTTPServer((host, port), Handler)
+    for attempt in range(40):
+        try:
+            server = ThreadingHTTPServer((host, port), Handler)
+            break
+        except OSError as e:
+            # The port may be held for a moment by somebody's outgoing connection (it can lie in the system's ephemeral
+            # range). A listener that really owns it stays, and the shim then gives up after ten seconds.
+            if e.errno != errno.EADDRINUSE or attempt == 39:
+                raise
+            time.sleep(0.25)
     server.daemon_threads = True
     return server
+
+
+def follow(shim, poll_s, budget=4000):
+    """Keeps the index at the solidified block in the background, so that queries find it current."""
+    said = None
+    while True:
+        try:
+            with shim.lock:
+                shim.index.advance(budget)
+            problem = None
+        except tron_log_index.Broken as e:
+            problem = str(e)
+        except Exception as e:  # noqa: BLE001  (a daemon thread must not die silently)
+            problem = f'{type(e).__name__}: {e}'
+        if problem != said:
+            print(json.dumps({'t': int(time.time()), 'kind': 'alert' if problem else 'resolved', 'severity': 'critical',
+                              'id': 'tron-log-index', 'reason': problem}), file=sys.stderr, flush=True)
+            said = problem
+        time.sleep(poll_s)
 
 
 def main():
@@ -269,10 +365,20 @@ def main():
 
     if '--node' not in args or '--port' not in args:
         raise SystemExit(__doc__)
-    node = tronlib.Node(opt('--node'), opt('--solidity'), cast=opt('--cast'))
+    node = tronlib.Node(opt('--node'), opt('--solidity'), cast=opt('--cast'), allow_remote='--allow-remote-node' in args)
     shim = Shim(node, opt('--chain-id'))
+    if opt('--vault'):
+        if opt('--from-block') is None or opt('--index') is None:
+            raise SystemExit('--vault needs --from-block (the vault\'s creation block) and --index (a directory)')
+        shim.index = tron_log_index.LogIndex(node, opt('--vault'), int(opt('--from-block')), opt('--index'), shim.chain_id,
+                                             logs_rpc=opt('--logs-rpc'), recheck_s=float(opt('--recheck-s', '30')),
+                                             grace_s=float(opt('--grace-s', '10')))
+        shim.fresh_s = float(opt('--fresh-s', '1'))
     server = serve(shim, opt('--host', '127.0.0.1'), int(opt('--port')))
-    print(json.dumps({'kind': 'tron-shim', 'chain_id': shim.chain_id, 'port': int(opt('--port'))}), flush=True)
+    if shim.index is not None:
+        threading.Thread(target=follow, args=(shim, float(opt('--poll-s', '2'))), daemon=True).start()
+    print(json.dumps({'kind': 'tron-shim', 'chain_id': shim.chain_id, 'port': int(opt('--port')),
+                      'index': None if shim.index is None else shim.index.status()}), flush=True)
     server.serve_forever()
 
 

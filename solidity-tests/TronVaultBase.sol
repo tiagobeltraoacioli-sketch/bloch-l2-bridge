@@ -100,7 +100,8 @@ library TronVaultFormulas {
 /// Shared fixture of the TronSourceVault suites: the launch shape (7 signers threshold 5, switch 6-of-7 after 14 days,
 /// 3 guardians with 72 h pause and cooldown, cap 100,000 USDT, 10,000 per 86,400 s, minDeposit 11, l2MinBurn 10,
 /// provenance mode 1, releaseDelay 0, no mintVerifier, 5/5 bps to a treasury, transferMode 1), signing helpers, and a
-/// ghost ledger of what the test itself did, against which the vault's books are checked.
+/// ghost ledger of what the test itself did, against which the vault's books are checked. The flat release fee
+/// (TRON-7) is `flatFee`: zero unless a suite sets it before `baseSetUp`.
 abstract contract TronVaultBase {
     TronVm constant vm = TronVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint256 constant U = 1e6;
@@ -126,6 +127,8 @@ abstract contract TronVaultBase {
     TronUSDTLike usdt;
     TronSourceVault vault;
     uint64 burnNonce;
+    /// TRON-7: `Fees.releaseFlat` of the vaults this fixture deploys, and of the ghost ledger.
+    uint64 flatFee;
 
     /// Ghost ledger for `vault`: every deposit the helpers made, and the sums the invariants are stated over.
     struct Dep {
@@ -193,8 +196,8 @@ abstract contract TronVaultBase {
         return TronSourceVault.Policy(BUCKET, WINDOW, 6, 14 days, MIN_DEPOSIT, MIN_BURN);
     }
 
-    function provenance() internal pure returns (TronSourceVault.Provenance memory) {
-        return TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS));
+    function provenance() internal view returns (TronSourceVault.Provenance memory) {
+        return TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS, flatFee));
     }
 
     /// The launch shape with a chosen token and transfer mode; controls still off.
@@ -328,9 +331,14 @@ abstract contract TronVaultBase {
         return TronSourceVault.ReleaseContext(block.timestamp + 600, block.number - 1, h, 7, keccak256("l2"));
     }
 
+    /// What a release of `amount` costs at this fixture's vault: 5 bps rounded down, plus the flat fee (TRON-7).
+    function releaseFee(uint64 amount) internal view returns (uint64) {
+        return fee(amount, REL_BPS) + flatFee;
+    }
+
     function recordRelease(uint64 amount) internal {
         sumReleased += amount;
-        feesTaken += fee(amount, REL_BPS);
+        feesTaken += releaseFee(amount);
     }
 
     /// A certified release that must succeed.
@@ -427,6 +435,7 @@ abstract contract TronVaultIssuerBase is TronVaultBase {
     uint8 constant KNOWN = 1;
     uint8 constant BLACKLISTED = 2;
     uint8 constant REPLACED = 4;
+    bytes32 constant ISSUER_FEE_KEPT = keccak256("IssuerFeeKept(address,uint256,uint256)");
 
     function expectDeposit(address who, uint64 gross, address l2, bytes4 want) internal {
         (bool ok, bytes4 e) = tryDeposit(who, gross, l2);
@@ -452,6 +461,29 @@ abstract contract TronVaultIssuerBase is TronVaultBase {
     function flags() internal view returns (uint8 f) {
         (bool known, bool blacklisted, bool replaced) = vault.tokenState();
         f = (known ? KNOWN : 0) | (blacklisted ? BLACKLISTED : 0) | (replaced ? REPLACED : 0);
+    }
+
+    /// TRON-6: the `IssuerFeeKept` logs `vault` emitted since `vm.recordLogs()` (or since the last call of this
+    /// helper, which empties the record): how many, and the fields of the last one.
+    function issuerFeeLogs() internal returns (uint256 n, address to, uint256 sent, uint256 kept) {
+        TronVm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(vault) || logs[i].topics[0] != ISSUER_FEE_KEPT) continue;
+            ++n;
+            to = address(uint160(uint256(logs[i].topics[1])));
+            (sent, kept) = abi.decode(logs[i].data, (uint256, uint256));
+        }
+    }
+
+    /// True if exactly one `IssuerFeeKept(to, sent, kept)` was emitted since the record was last emptied.
+    function oneIssuerFeeLog(address to, uint256 sent, uint256 kept) internal returns (bool) {
+        (uint256 n, address a, uint256 s, uint256 k) = issuerFeeLogs();
+        return n == 1 && a == to && s == sent && k == kept;
+    }
+
+    function noIssuerFeeLog() internal returns (bool) {
+        (uint256 n,,,) = issuerFeeLogs();
+        return n == 0;
     }
 
     /// Two deposits (1,000 by Alice, 500 by Bob: 1,499.25 locked, 0.75 of fees) and Carol ready to deposit 300.

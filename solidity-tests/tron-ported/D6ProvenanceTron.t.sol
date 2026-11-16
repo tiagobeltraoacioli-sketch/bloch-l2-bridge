@@ -166,7 +166,7 @@ contract D6ProvenanceTestTron {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 1, addrs(ethKeys), 5,
             TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, MIN_BURN, MIN_BURN),
             TronSourceVault.Guard(new address[](0), 0, 0),
-            TronSourceVault.Provenance(mode, delay, mintVerifier, TronSourceVault.Fees(address(0), 0, 0))
+            TronSourceVault.Provenance(mode, delay, mintVerifier, TronSourceVault.Fees(address(0), 0, 0, 0))
         );
         uint256 until = block.timestamp + 100;
         p.vault.setControls(true, true, 0, until, cert(p.vault.controlDigest(true, true, 0, until), 5));

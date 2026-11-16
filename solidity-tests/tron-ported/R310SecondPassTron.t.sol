@@ -130,7 +130,7 @@ contract R310SecondPassTestTron {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 1, addrs(ethKeys), 5,
             TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(11 * U), MIN_BURN),
             TronSourceVault.Guard(new address[](0), 0, 0),
-            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0xFEE), 5, 5))
+            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0xFEE), 5, 5, 0))
         );
         uint256 until = block.timestamp + 100;
         v.setControls(true, true, 0, until, cert(v.controlDigest(true, true, 0, until), 5));

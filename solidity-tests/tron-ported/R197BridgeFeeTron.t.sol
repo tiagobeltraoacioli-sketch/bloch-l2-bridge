@@ -84,7 +84,7 @@ contract R197BridgeFeeTestTron {
         mintKeys = sorted(0x1000);
         ethKeys = sorted(0x2000);
         usdc = new FeeUsdcTron();
-        vault = deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS), MIN_DEPOSIT, 0);
+        vault = deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS, 0), MIN_DEPOSIT, 0);
         token = deployToken(vault);
     }
 
@@ -327,7 +327,7 @@ contract R197BridgeFeeTestTron {
 
     /// The release-delay path (`executeRelease`) charges the same fee once, at payment.
     function test_queuedReleaseChargesAtExecution() public {
-        vault = deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS), MIN_DEPOSIT, 1 days);
+        vault = deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS, 0), MIN_DEPOSIT, 1 days);
         token = deployToken(vault);
         (bytes32 a, uint64 na, uint64 neta) = deposit(uint64(1000 * U), ALICE);
         mintAndCredit(a, na, neta, ALICE);
@@ -342,7 +342,7 @@ contract R197BridgeFeeTestTron {
 
     /// A zero-fee vault behaves exactly as before: gross == net, nothing accrues, sweep is a no-op.
     function test_zeroFeeIsThePreviousBehaviour() public {
-        vault = deployVault(TronSourceVault.Fees(address(0), 0, 0), MIN_BURN, 0);
+        vault = deployVault(TronSourceVault.Fees(address(0), 0, 0, 0), MIN_BURN, 0);
         token = deployToken(vault);
         usdc.mint(address(this), 1000 * U);
         bytes32 id = vault.deposit(uint64(1000 * U), bytes32(uint256(uint160(ALICE))));
@@ -354,14 +354,14 @@ contract R197BridgeFeeTestTron {
     /// The constructor refuses: a rate above 30 bps, a fee with no recipient, a recipient with no fee, the token as
     /// recipient, and a minimum deposit whose net is below the L2 minimum burn (10 USDC at 5 bps; 11 USDC passes).
     function test_constructorRefusesBadFees() public {
-        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 31, 0), MIN_DEPOSIT), "31 bps");
-        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 0, 31), MIN_DEPOSIT), "31 bps release");
-        require(!tryDeploy(TronSourceVault.Fees(address(0), 5, 0), MIN_DEPOSIT), "no recipient");
-        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 0, 0), MIN_DEPOSIT), "recipient without fee");
-        require(!tryDeploy(TronSourceVault.Fees(address(usdc), 5, 5), MIN_DEPOSIT), "token as recipient");
-        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 5, 5), MIN_BURN), "minDeposit 10 nets below minBurn");
-        require(tryDeploy(TronSourceVault.Fees(TREASURY, 30, 30), MIN_DEPOSIT), "30 bps and 11 USDC pass");
-        require(tryDeploy(TronSourceVault.Fees(TREASURY, 0, 5), MIN_BURN), "release-only fee keeps minDeposit 10");
+        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 31, 0, 0), MIN_DEPOSIT), "31 bps");
+        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 0, 31, 0), MIN_DEPOSIT), "31 bps release");
+        require(!tryDeploy(TronSourceVault.Fees(address(0), 5, 0, 0), MIN_DEPOSIT), "no recipient");
+        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 0, 0, 0), MIN_DEPOSIT), "recipient without fee");
+        require(!tryDeploy(TronSourceVault.Fees(address(usdc), 5, 5, 0), MIN_DEPOSIT), "token as recipient");
+        require(!tryDeploy(TronSourceVault.Fees(TREASURY, 5, 5, 0), MIN_BURN), "minDeposit 10 nets below minBurn");
+        require(tryDeploy(TronSourceVault.Fees(TREASURY, 30, 30, 0), MIN_DEPOSIT), "30 bps and 11 USDC pass");
+        require(tryDeploy(TronSourceVault.Fees(TREASURY, 0, 5, 0), MIN_BURN), "release-only fee keeps minDeposit 10");
     }
 
     function tryDeploy(TronSourceVault.Fees memory fees, uint64 minDeposit) internal returns (bool ok) {
@@ -385,8 +385,8 @@ contract R197BridgeFeeTestTron {
             address a = address(uint160(0xA000 + k));
             address b = address(uint160(0xB000 + k));
             vault = k == 0
-                ? deployVault(TronSourceVault.Fees(address(0), 0, 0), MIN_BURN, 0)
-                : deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS), MIN_DEPOSIT, 0);
+                ? deployVault(TronSourceVault.Fees(address(0), 0, 0, 0), MIN_BURN, 0)
+                : deployVault(TronSourceVault.Fees(TREASURY, DEP_BPS, REL_BPS, 0), MIN_DEPOSIT, 0);
             token = deployToken(vault);
             usdc.mint(address(this), 2000 * U);
             vault.deposit(uint64(1000 * U), bytes32(uint256(uint160(a))));

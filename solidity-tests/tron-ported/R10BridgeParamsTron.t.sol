@@ -88,7 +88,7 @@ contract R10BridgeParamsTestTron {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 1, addrs(ethKeys), 5,
             TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
             TronSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
-            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0))
+            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(address(0), 0, 0, 0))
         );
         uint256 until = block.timestamp + 100;
         vault.setControls(true, true, 0, until, cert(vault.controlDigest(true, true, 0, until), 5));
@@ -488,7 +488,7 @@ contract R10BridgeParamsTestTron {
                 keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, uint8(0), addrs(ethKeys),
                 uint8(5), TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(10 * U), uint64(10 * U)),
                 TronSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
-                TronSourceVault.Provenance(1, 15 days, address(0), TronSourceVault.Fees(address(0), 0, 0))
+                TronSourceVault.Provenance(1, 15 days, address(0), TronSourceVault.Fees(address(0), 0, 0, 0))
             )
         );
         address made;
@@ -507,7 +507,7 @@ contract R10BridgeParamsTestTron {
             keccak256("ethereum"), keccak256("bloch-l2"), keccak256("USDC"), address(usdc), CAP, 1, addrs(ethKeys), 5,
             TronSourceVault.Policy(BUCKET, 1 days, 6, 14 days, uint64(11 * U), uint64(10 * U)),
             TronSourceVault.Guard(addrs(vaultGuardKeys), uint64(PAUSE), uint64(PAUSE)),
-            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(treasury, 5, 5))
+            TronSourceVault.Provenance(1, 0, address(0), TronSourceVault.Fees(treasury, 5, 5, 0))
         );
         require(v.guardianCount() == 3 && v.minDeposit() == 11 * U && v.switchThreshold() == 6, "decided values");
         require(v.feeRecipient() == treasury && v.depositFeeBps() == 5 && v.releaseFeeBps() == 5, "fee immutables");
@@ -520,11 +520,11 @@ contract R10BridgeParamsTestTron {
         require(v.totalLocked() == 11 * U - 5_500 && v.feesAccrued() == 5_500, "the chain records the net; the fee is not backing");
         require(v.totalLocked() >= 10 * U, "the net of the minimum deposit is burnable on L2");
         bytes[5] memory refused;
-        refused[0] = abi.encode(uint64(10 * U), TronSourceVault.Fees(treasury, 5, 5)); // net below minBurn
-        refused[1] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 31, 5)); // above 30 bps
-        refused[2] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 5, 31));
-        refused[3] = abi.encode(uint64(11 * U), TronSourceVault.Fees(address(0), 5, 5)); // fee without recipient
-        refused[4] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 0, 0)); // recipient without fee
+        refused[0] = abi.encode(uint64(10 * U), TronSourceVault.Fees(treasury, 5, 5, 0)); // net below minBurn
+        refused[1] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 31, 5, 0)); // above 30 bps
+        refused[2] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 5, 31, 0));
+        refused[3] = abi.encode(uint64(11 * U), TronSourceVault.Fees(address(0), 5, 5, 0)); // fee without recipient
+        refused[4] = abi.encode(uint64(11 * U), TronSourceVault.Fees(treasury, 0, 0, 0)); // recipient without fee
         for (uint256 i; i < refused.length; ++i) {
             (uint64 minDep, TronSourceVault.Fees memory f) = abi.decode(refused[i], (uint64, TronSourceVault.Fees));
             bytes memory code = bytes.concat(

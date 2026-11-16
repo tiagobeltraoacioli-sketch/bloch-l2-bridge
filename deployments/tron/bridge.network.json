@@ -72,9 +72,9 @@
     "cap": "100000000000",
     "window": "10000000000",
     "windowSeconds": 86400,
-    "minDeposit": "11000000",
+    "minDeposit": "21000000",
     "maxDeposit": "10000000000",
-    "l2MinBurn": "10000000",
+    "l2MinBurn": "20000000",
     "l2MaxBurn": "10000000000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
@@ -84,8 +84,8 @@
     "releaseBps": 5,
     "recipient": "TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc",
     "paidOn": "source",
-    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
-    "networkFee": "the depositor pays the deposit transaction (about 115,000 energy on a private TVM, before USDT's dynamic-energy penalty, plus an approval); the relayer pays the release transaction (about 143,000 energy before the penalty)"
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient. A release also pays a FIXED fee of 8 USDT (8000000 units, vault releaseFlatFee()) on top of releaseBps: a burn of A pays out A - floor(A * 5 / 10000) - 8000000. The schema has no field for a fixed fee; frontends must read it here or from the vault",
+    "networkFee": "the depositor pays the deposit transaction in TRX (about 115,000 energy on a private TVM, before USDT's dynamic-energy penalty on mainnet, plus an approval: on the order of 15 TRX); the relayer pays the release transaction (about 200,000 energy on mainnet, about 20 TRX), which the fixed release fee covers"
   },
   "finality": {
     "rule": "A deposit is attested only when the signer's own java-tron node serves it from the solidified state (/walletsolidity): its block has been confirmed by more than 70% of the 27 block producers (19).",
@@ -110,17 +110,17 @@
       "an l2Recipient that is zero or longer than 20 bytes",
       "do not name a contract as l2Recipient unless it can move the token",
       "a deposit while the issuer has blacklisted the vault or replaced (deprecated) the token: the vault refuses it (TokenUnsafe)",
-      "a deposit while the token is paused or charges a transfer fee: the transaction reverts"
+      "a deposit while the token is paused or while the issuer charges a transfer fee: the transaction reverts (a deposit must deliver its whole amount)"
     ]
   },
   "release": {
     "l2Function": "burn(uint64 amount, address sourceRecipient)",
     "recipientEncoding": "the 20-byte form of the TRON address: Base58Check-decode the T... address, check its checksum, drop the leading 0x41 byte",
     "typicalSeconds": 3600,
-    "paysAsset": "USDT (TRC-20), the burned amount less 0.05%",
+    "paysAsset": "USDT (TRC-20), the burned amount less 0.05% and less the fixed 8 USDT; if the issuer charges its own transfer fee (0 today, at most 20 bps and 50 USDT) the recipient also bears that",
     "notes": [
       "USDT on TRON pays a recipient the issuer has blacklisted (the funds are then frozen at that address by the issuer, not by the bridge)",
-      "while the issuer has blacklisted the vault, paused the token or switched a transfer fee on, no release can be paid; burns stay payable and are paid when the condition ends",
+      "while the issuer has blacklisted the vault or paused the token, no release can be paid; burns stay payable and are paid when the condition ends. An issuer transfer fee does not stop exits (the recipient bears it); it stops deposits",
       "the recipient needs no TRX and no activated account to receive USDT"
     ]
   },

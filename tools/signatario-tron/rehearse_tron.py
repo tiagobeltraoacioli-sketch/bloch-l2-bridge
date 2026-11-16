@@ -13,7 +13,7 @@ whose `bytecode` (the REAL TetherToken creation code, constructor arguments incl
 
 Pieces:
   TRON side   the real USDT bytecode; TronSourceVault in the launch shape (7 signers, 5 to release, 6 to unpause or
-              switch, 3 guardians, 72 h pause, cap 100,000, window 10,000 a day, minimum 11, fee 5 + 5 bps to the owner's
+              switch, 3 guardians, 72 h pause, cap 100,000, window 10,000 a day, minimum 21, fee 5 + 5 bps and a fixed 8 USDT per release to the owner's
               address); the shim (`tron_rpc_shim.py`) in front of the node; a lag proxy in front of the node's
               `/walletsolidity` so that "solidified" can be held behind the head or made to lose a block (the quickstart
               node solidifies every block at once and cannot reorg).
@@ -37,6 +37,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import tronlib  # noqa: E402
+import tron_log_index  # noqa: E402
 
 BIN = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin'))
 CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
@@ -54,9 +55,11 @@ L2_GUARD_KEYS = ['0x' + f'{0x6a00 + i:04x}' * 16 for i in range(3)]
 OUTSIDER_KEYS = ['0x' + f'{0x0f00 + i:04x}' * 16 for i in range(5)]
 BOB_KEY = '0x' + 'b0' * 32
 FEE_BPS = 5
+FLAT = 8 * U          # TRON-7: the fixed fee of every release
+MIN_DEPOSIT, MIN_BURN = 21 * U, 20 * U
 VAULT_CTOR = ('constructor(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint8,'
               '(uint64,uint64,uint8,uint64,uint64,uint64),(address[],uint64,uint64),'
-              '(uint8,uint64,address,(address,uint16,uint16)))')
+              '(uint8,uint64,address,(address,uint16,uint16,uint64)))')
 REL = '(bytes32,uint64,address,uint64,bytes32,uint64,uint64,bytes32)'
 CTX = '(uint256,uint256,bytes32,uint64,bytes32)'
 results, energy_table = [], []
@@ -67,7 +70,13 @@ def fee(a):
 
 
 def net_of(a):
+    """What a deposit of `a` locks and mints."""
     return a - fee(a)
+
+
+def paid_of(a):
+    """What a burn of `a` pays out on TRON: less 5 bps, less the fixed release fee."""
+    return a - fee(a) - FLAT
 
 
 def sh(*argv, ok=True, env=None):
@@ -98,6 +107,9 @@ def selector(sig):
 class Lag:
     hold = None  # solidified height to pretend, or None for the node's own
     hidden = set()  # block heights the solidified view has "lost" (a reorg of final blocks)
+    lost = None     # (vault 41-hex, n): the solidified STATE holds only the vault's first n deposits, as on a real
+                    # node while later ones are not solidified yet, or after a reorg dropped them (the quickstart node
+                    # has ONE state, the head's; without this its "solidified" receipts and state would disagree)
 
     @classmethod
     def node(cls, path, body):
@@ -131,6 +143,14 @@ class Lag:
             raw = cls.node(wallet, body)
             n = json.loads(raw or b'{}').get('blockNumber', 0)
             return b'{}' if n > top or n in cls.hidden else raw
+        if name == 'triggerconstantcontract' and cls.lost and req.get('contract_address', '').lower() == cls.lost[0]:
+            data, word = req.get('data', '').lower(), None
+            if data.startswith(tron_log_index.SEL_DEPOSIT_COUNT):
+                word = f'{cls.lost[1]:064x}'
+            elif data.startswith(tron_log_index.SEL_DEPOSIT_MATCHES) and int(data[8:72], 16) >= cls.lost[1]:
+                word = '0' * 64
+            if word is not None:
+                return json.dumps({'result': {'result': True}, 'constant_result': [word]}).encode()
         return cls.node(wallet, body)  # constant calls: head state (the quickstart node has no other)
 
 
@@ -174,20 +194,42 @@ class Net:
         self.l2_guards = [(addr_of(k), k) for k in L2_GUARD_KEYS]
         self.chain = int(self.node.block(0)['id'][-8:], 16)
         start_proxy()
-        self.spawn([sys.executable, HERE / 'tron_rpc_shim.py', '--node', self.proxy, '--solidity', self.proxy,
-                    '--port', SHIM_PORT, '--cast', CAST])
         self.spawn([ANVIL, '--chain-id', L2_CHAIN, '--port', L2_PORT, '--silent'])
-        for _ in range(60):
-            if sh(CAST, 'chain-id', '--rpc-url', self.l2, ok=False).returncode == 0 and \
-                    sh(CAST, 'chain-id', '--rpc-url', self.shim, ok=False).returncode == 0:
-                break
-            time.sleep(0.25)
-        else:
-            raise SystemExit('anvil or the shim did not start')
+        self.wait_for(self.l2, 'anvil')
+        self.deploy(usdt_json)
+        # The shim starts once the vault exists: it keeps the index of that vault's logs from its creation block.
+        # Strict by default here: every query checks the index against the node first (`--fresh-s 0`) and every round
+        # reads the vault's recent receipts again (`--recheck-s 0`), so that a block the rig "loses" is seen by the very
+        # next daemon call. SHIM_PRODUCTION=1 keeps the production defaults (1 s and 30 s), for cost measurements.
+        strict = not os.environ.get('SHIM_PRODUCTION')
+        self.start_shim(SHIM_PORT, self.work / 'shim-index', os.environ.get('SHIM_LOGS_RPC'),
+                        recheck_s=0 if strict else 30, fresh_s=0 if strict else 1)
         check('setup: the shim reports the TVM chain id (last 4 bytes of the genesis id)',
               int(out(CAST, 'chain-id', '--rpc-url', self.shim)) == self.chain, self.chain)
-        self.deploy(usdt_json)
+        check('setup: the log index constants are the vault\'s (Deposited topic, depositCount and depositMatches selectors)',
+              out(CAST, 'keccak', 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)').lower() == tron_log_index.DEPOSITED
+              and selector('depositCount()') == tron_log_index.SEL_DEPOSIT_COUNT
+              and selector('depositMatches(uint64,bytes32,uint64,address)') == tron_log_index.SEL_DEPOSIT_MATCHES)
         self.configs()
+
+    def wait_for(self, url, what):
+        for _ in range(120):
+            if sh(CAST, 'chain-id', '--rpc-url', url, ok=False).returncode == 0:
+                return
+            time.sleep(0.25)
+        raise SystemExit(f'{what} did not start')
+
+    def start_shim(self, port, index_dir, logs_rpc=None, recheck_s=30, fresh_s=1, grace_s=3):
+        argv = [sys.executable, HERE / 'tron_rpc_shim.py', '--node', self.proxy, '--solidity', self.proxy, '--port', port,
+                '--cast', CAST, '--vault', self.vault, '--from-block', self.vault_block, '--index', index_dir,
+                '--recheck-s', recheck_s, '--fresh-s', fresh_s, '--grace-s', grace_s]
+        self.spawn(argv + (['--logs-rpc', logs_rpc] if logs_rpc else []))
+        self.wait_for(f'http://127.0.0.1:{port}', 'the shim')
+
+    def shim_stats(self, url=None):
+        req = urllib.request.Request(url or self.shim, json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tron_shimStats',
+                                                                   'params': []}).encode(), {'content-type': 'application/json'})
+        return json.load(urllib.request.urlopen(req, timeout=60))['result']
 
     def spawn(self, argv):
         self.procs.append(subprocess.Popen([str(a) for a in argv], stdout=subprocess.DEVNULL))
@@ -275,8 +317,8 @@ class Net:
         signers = '[' + ','.join(a for a, _ in self.signers) + ']'
         guards = '[' + ','.join(sorted(self.a[g] for g in ('g1', 'g2', 'g3'))) + ']'
         self.ctor = [k('tron-private-rehearsal'), k('bloch-l2-700771'), k('USDT'), self.usdt, str(100_000 * U), '1', signers, '5',
-                     f'({10_000 * U},86400,6,1209600,{11 * U},{10 * U})', f'({guards},259200,259200)',
-                     f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{FEE_BPS}))']
+                     f'({10_000 * U},86400,6,1209600,{MIN_DEPOSIT},{MIN_BURN})', f'({guards},259200,259200)',
+                     f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{FEE_BPS},{FLAT}))']
         args = out(CAST, 'abi-encode', VAULT_CTOR, *self.ctor)
         vault_code = art('TronSourceVault')['bytecode']['object']
         if os.environ.get('VAULT_CREATION_BIN'):
@@ -318,7 +360,7 @@ class Net:
         dep = out(FORGE, 'create', '--root', self.repo, '--broadcast', '--rpc-url', self.l2, '--private-key', ANVIL_KEY,
                   'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', '--constructor-args',
                   'Bloch Bridged USDT (Tron)', 'bUSDT.trx', str(self.chain), self.vault, self.route, signers, '5',
-                  f'({100_000 * U},{cap},{cap // 86400},0,{DELAY},{10 * U})',
+                  f'({100_000 * U},{cap},{cap // 86400},0,{DELAY},{MIN_BURN})',
                   '([' + ','.join(a for a, _ in self.l2_guards) + '],259200,259200)', '(6,1209600)')
         self.token = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
         check('setup: the L2 token starts from the vault\'s mint chain genesis (pairing)',
@@ -457,7 +499,7 @@ def scenario(net):
     alice20 = net.a['alice']
 
     # 1. deposit; credit only after solidification; the 12 h delay
-    Lag.hold = net.node.head()['number']
+    Lag.hold, Lag.lost = net.node.head()['number'], (tronlib.tron_hex(net.vault), 0)
     dA = net.deposit(100 * U, label='vault.deposit (first)')
     dB = net.deposit(50 * U, label='vault.deposit')
     check('deposit: two USDT deposits accepted (transferFrom returns true; exact balance deltas)', dA['ok'] and dB['ok'], (dA, dB))
@@ -473,7 +515,7 @@ def scenario(net):
     half = sh(sys.executable, HERE.parent / 'signatario-stable' / 'eth_half.py', '--config', net.eth_cfgs[0], 'deposit', '--deposit-id', dep_a, ok=False)
     check('finality: the source half answers "deposit not finalized" for a head-only deposit',
           half.returncode == 1 and 'not finalized' in half.stdout, half.stdout[-300:])
-    Lag.hold = None
+    Lag.hold, Lag.lost = None, None
     net.sign_all()
     relayed = [e for e in net.relay() if e.get('kind') == 'relay-mint']
     check('credit: after solidification 5 of 7 sign and the relayer queues both mints in slot order',
@@ -494,14 +536,14 @@ def scenario(net):
     burn1 = net.burn(net.key['alice'], 30 * U, net.bob)
     sig_lines = net.sign_all()
     done = net.settle_release(burn1)
-    check('release: an L2 burn is certified by 5 of 7 and paid on TRON less 5 bps (USDT transfer returns false; deltas decide)',
-          done is not None and done.get('closed') == 'landed' and net.usdt_bal(net.bob) == net_of(30 * U) and net.released(burn1),
+    check('release: an L2 burn is certified by 5 of 7 and paid on TRON less 5 bps and the fixed 8 USDT (USDT transfer returns false; deltas decide)',
+          done is not None and done.get('closed') == 'landed' and net.usdt_bal(net.bob) == paid_of(30 * U) and net.released(burn1),
           (done, [l for l in sig_lines if 'error' in l or 'stderr' in l][-2:]))
     if done and done.get('receipt'):
         energy_table.append(('vault.release (5-of-7 certificate, relayed)', done['receipt']))
     b = net.books()
     check('release: fees accrue outside backing; vault balance = totalLocked + feesAccrued',
-          b['feesAccrued'] == fee(100 * U) + fee(50 * U) + fee(30 * U) and b['totalLocked'] == net_of(100 * U) + net_of(50 * U) - 30 * U
+          b['feesAccrued'] == fee(100 * U) + fee(50 * U) + fee(30 * U) + FLAT and b['totalLocked'] == net_of(100 * U) + net_of(50 * U) - 30 * U
           and b['balance'] == b['totalLocked'] + b['feesAccrued'], b)
     check('release: bUSDT.trx supply equals totalLocked', int(net.l2view('totalSupply()(uint256)')) == b['totalLocked'])
 
@@ -513,7 +555,7 @@ def scenario(net):
     info = net.node.wait(r['txid'], solid=False, timeout=60)
     check('replay: the same certificate sent again reverts with InvalidRelease and pays nothing',
           not e['ok'] and e['result'][:8] == E['InvalidRelease'] and not tronlib.receipt_ok(info)
-          and net.usdt_bal(net.bob) == net_of(30 * U) and net.books() == b, (e, tronlib.energy(info)))
+          and net.usdt_bal(net.bob) == paid_of(30 * U) and net.books() == b, (e, tronlib.energy(info)))
     energy_table.append(('vault.release replay (reverted)', tronlib.energy(info)))
     dup = net.node.broadcast(bytes.fromhex(done['raw']), bytes.fromhex(done['signature'])) if done else {}
     check('replay: the identical TRON transaction is refused by the chain itself', dup.get('code') in (
@@ -544,7 +586,7 @@ def scenario(net):
           not ok and sel == E['ProvenanceMismatch'], (ok, sel))
 
     # 5. limits
-    for label, amount in (('above the window limit (10,000)', 10_001 * U), ('below the minimum (11)', 10 * U)):
+    for label, amount in (('above the window limit (10,000)', 10_001 * U), ('below the minimum (21)', 20 * U)):
         ok, sel = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', amount, '0x' + '00' * 12 + alice20[2:])
         check(f'limits: a deposit {label} is refused (InvalidTransfer)', not ok and sel == E['InvalidTransfer'], (ok, sel))
     ok, sel = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 100 * U, '0x' + '11' * 32)
@@ -572,13 +614,13 @@ def scenario(net):
     burn2 = net.burn(net.key['alice'], 6_000 * U, net.bob)
     net.sign_all()
     done2 = net.settle_release(burn2)
-    check('limits: a 6,000 release fits the release window', net.usdt_bal(net.bob) - bob0 == net_of(6_000 * U), done2)
+    check('limits: a 6,000 release fits the release window', net.usdt_bal(net.bob) - bob0 == paid_of(6_000 * U), done2)
     burn3 = net.burn(net.key['alice'], 5_000 * U, net.bob)
     lines = net.sign_all()
     net.relay()
     avail = net.vint('availableToRelease()')
     check('limits: the next 5,000 exceeds what the window has left; no signer certifies it and nothing is paid',
-          avail < 5_000 * U and not net.released(burn3) and net.usdt_bal(net.bob) - bob0 == net_of(6_000 * U), avail)
+          avail < 5_000 * U and not net.released(burn3) and net.usdt_bal(net.bob) - bob0 == paid_of(6_000 * U), avail)
     books = net.books()
 
     # 6. token paused by the issuer
@@ -596,7 +638,37 @@ def scenario(net):
     net.sign_all()
     done4 = net.settle_release(burn4)
     check('token paused: after the issuer unpauses, the same burn is paid exactly once',
-          net.released(burn4) and net.usdt_bal(net.bob) - bob1 == net_of(20 * U), done4)
+          net.released(burn4) and net.usdt_bal(net.bob) - bob1 == paid_of(20 * U), done4)
+    books = net.books()
+
+    # 6b. the issuer switches its own transfer fee on (TRON-6): exits still pay, at the recipient's cost; the vault's side is exact
+    net.ttx('issuer', net.usdt, 'setParams(uint256,uint256)', 10, 5)
+    ok, sel = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 100 * U, '0x' + '00' * 12 + alice20[2:])
+    check('issuer fee: a deposit that would deliver less than its amount is refused (InvalidTransfer): nobody mints against less than arrived',
+          not ok and sel == E['InvalidTransfer'], (ok, sel))
+    owner_fee_before, swept = net.usdt_bal(net.fee_to), books['feesAccrued']
+    r = net.ttx('mallory', net.vault, 'sweepFees()', label='vault.sweepFees under an issuer transfer fee', fee_limit=200_000_000)
+    check('issuer fee: sweepFees() still pays the owner address, less the issuer\'s fee; feesAccrued is 0 and backing is untouched',
+          r['ok'] and swept > 0 and net.usdt_bal(net.fee_to) - owner_fee_before == swept - min(swept * 10 // 10_000, 5 * U)
+          and net.vint('feesAccrued()') == 0 and net.usdt_bal(net.vault) == net.vint('totalLocked()'), (r, swept))
+    burn_f = net.burn(net.key['alice'], 1_000 * U, net.bob)
+    bob_f, owner_f = net.usdt_bal(net.bob), net.usdt_bal(net.a['issuer'])
+    net.sign_all()
+    done_f = net.settle_release(burn_f)
+    paid, after = paid_of(1_000 * U), net.books()
+    kept = min(paid * 10 // 10_000, 5 * U)
+    check('issuer fee: the release is still paid; the recipient gets it less exactly the issuer\'s fee (10 bps of the payment)',
+          net.released(burn_f) and kept == 991_500 and net.usdt_bal(net.bob) - bob_f == paid - kept
+          and net.usdt_bal(net.a['issuer']) - owner_f == kept, (done_f, net.usdt_bal(net.bob) - bob_f, paid, kept))
+    check('issuer fee: the vault absorbs nothing: its balance fell by exactly what it sent and the books are those of a fee-free release',
+          after['balance'] == books['balance'] - swept - paid and after['totalLocked'] == books['totalLocked'] - 1_000 * U
+          and after['feesAccrued'] == fee(1_000 * U) + FLAT
+          and after['balance'] == after['totalLocked'] + after['feesAccrued'], (books, after))
+    if done_f and done_f.get('receipt'):
+        energy_table.append(('vault.release under an issuer transfer fee', done_f['receipt']))
+    net.ttx('issuer', net.usdt, 'setParams(uint256,uint256)', 0, 0)
+    ok, _ = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 100 * U, '0x' + '00' * 12 + alice20[2:])
+    check('issuer fee: once it is off again deposits are accepted', ok)
     books = net.books()
 
     # 7. vault blacklisted by the issuer, then its funds destroyed
@@ -661,13 +733,14 @@ def scenario(net):
     net.sign_all()
     done5 = net.settle_release(burn5)
     check('restored backing: once the tokens are back the held burn is paid exactly once; a donation creates no credit',
-          net.released(burn5) and net.usdt_bal(net.bob) - bob2 == net_of(20 * U) and net.vint('depositCount()') == books['depositCount'], done5)
+          net.released(burn5) and net.usdt_bal(net.bob) - bob2 == paid_of(20 * U) and net.vint('depositCount()') == books['depositCount'], done5)
 
     # 8. fee sweep to the owner's address
     fees = net.vint('feesAccrued()')
+    fee_to_before = net.usdt_bal(net.fee_to)
     r = net.ttx('mallory', net.vault, 'sweepFees()', label='vault.sweepFees', fee_limit=200_000_000)
     check(f'fees: sweepFees() (anyone) pays every accrued fee to {OWNER_FEE_ADDRESS} and nothing else',
-          r['ok'] and fees > 0 and net.usdt_bal(net.fee_to) == fees and net.vint('feesAccrued()') == 0
+          r['ok'] and fees > 0 and net.usdt_bal(net.fee_to) - fee_to_before == fees and net.vint('feesAccrued()') == 0
           and net.usdt_bal(net.vault) == net.vint('totalLocked()'), (r, fees))
 
     # 9. a final block is lost after attestation (reorg of solidified history): hold and pause, never a second credit
@@ -675,27 +748,42 @@ def scenario(net):
     net.sign_all()
     net.relay()
     queued = net.l2view('nextSlot()(uint64)')
-    Lag.hidden = {dC['block']}
+    Lag.hidden, Lag.lost = {dC['block']}, (tronlib.tron_hex(net.vault), 4)
     rc1, lines1, err1 = net.guardian(0, 'guard-a')
     rc2, lines2, err2 = net.guardian(1, 'guard-b')
     dep_c = net.tview(net.vault, 'depositId(uint64,address,uint64,bytes32)', '4', alice20, str(net_of(100 * U)), '0x' + '00' * 12 + alice20[2:])
     cancels = net.l2view('mintCancels(bytes32)(uint64)', dep_c)
     check('reorg after attestation: with the deposit gone from the final chain, 2 of 3 guardians cancel the queued mint (never credited)',
           queued == '5' and cancels == '1' and net.l2view('mintCount()(uint64)') == '4', (queued, cancels, lines1[-3:], err1[-300:], lines2[-3:], err2[-300:]))
-    Lag.hidden = set()
+    Lag.hidden, Lag.lost = set(), None
+    # The block is back (the rig's way of "the deposit was included again"): the vault's state counts a deposit the
+    # index dropped. The index waits its grace, reads the unverified blocks again, then further back, and finds it.
+    healed = None
+    for _ in range(90):
+        healed = net.shim_stats()['index']
+        if healed['deposits'] == 5 and healed['verified'] >= net.node.solidified()['number'] - 1 and not healed['last_error']:
+            break
+        time.sleep(1)
+    check('log index: when the lost block returns, the index finds the deposit again by itself and is verified',
+          healed['deposits'] == 5 and not healed['last_error'], healed)
     net.l2warp(259200 + 1)
     burn6 = net.burn(net.key['alice'], 20 * U, net.bob)
     bob3 = net.usdt_bal(net.bob)
     net.sign_all()
     done6 = net.settle_release(burn6)
     check('after the cancel: later burns are still paid (the cancelled mint left no trace in the mint chain)',
-          net.released(burn6) and net.usdt_bal(net.bob) - bob3 == net_of(20 * U), done6 and done6.get('closed'))
+          net.released(burn6) and net.usdt_bal(net.bob) - bob3 == paid_of(20 * U), done6 and done6.get('closed'))
     final = net.books()
     check('final books: vault balance >= totalLocked + feesAccrued, and the deposit chain has 5 links',
           final['balance'] >= final['totalLocked'] + final['feesAccrued'] and final['depositCount'] == 5, final)
     check('final books: L2 supply + the cancelled (unminted) deposit = totalLocked + the unpaid window-held burn',
           int(net.l2view('totalSupply()(uint256)')) + net_of(100 * U) == final['totalLocked'] - 5_000 * U,
           (net.l2view('totalSupply()(uint256)'), final))
+    stats = net.shim_stats()
+    check('log index: verified to the solidified block, holding exactly the vault\'s deposits, and never broken',
+          stats['index']['verified'] >= net.node.solidified()['number'] - 2 and stats['index']['deposits'] == final['depositCount']
+          and stats['index']['last_error'] is None, stats['index'])
+    print('SHIM ' + json.dumps({'node_requests': stats['node_requests'], 'index': stats['index']}), flush=True)
 
 
 def main():

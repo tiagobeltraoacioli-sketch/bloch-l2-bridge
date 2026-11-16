@@ -3,7 +3,7 @@
 
 Reads the suites in solidity-tests/ that construct ProvenanceSourceVault and writes, for each,
 solidity-tests/tron-ported/<Name>Tron.t.sol: the same tests, unchanged, run against
-contracts/tron/TronSourceVault.sol. The transformation is purely textual and has five rules:
+contracts/tron/TronSourceVault.sol. The transformation is purely textual and has six rules:
 
   1. every identifier `ProvenanceSourceVault` becomes `TronSourceVault`, and its import comes from
      contracts/tron/TronSourceVault.sol;
@@ -15,7 +15,10 @@ contracts/tron/TronSourceVault.sol. The transformation is purely textual and has
   4. every top-level contract, interface and library a suite defines gets the suffix `Tron`, so that the ported
      artifacts never share a name with the originals; relative import paths are moved one directory down;
   5. the tests named in NOT_PORTED are kept in the file but renamed so that forge does not run them, with the
-     reason written above them.
+     reason written above them;
+  6. every struct literal `TronSourceVault.Fees(recipient, depositBps, releaseBps)` gains a fourth argument, the
+     literal `0`, for `releaseFlat` (TRON-7: the flat release fee the Ethereum vault does not have). With a flat fee
+     of zero a release costs exactly what it costs on Ethereum, so the ported tests keep their expectations.
 
 Nothing else is changed, so a ported suite that passes is evidence that the TRON vault satisfies the same test as
 the Ethereum vault. Suites named in NOT_PORTED_SUITES are not generated at all.
@@ -71,7 +74,15 @@ NOT_PORTED_SUITES = {
 }
 
 # (suite, test function) -> reason. The test stays in the ported file, renamed `tronNotPorted_<name>`.
-NOT_PORTED = {}
+NOT_PORTED = {
+    ("A172VaultReview.t.sol", "test_U4_feeUpgradeFailsClosed"): (
+        "it asserts that a token which starts keeping a transfer fee from the recipient makes every release revert. "
+        "The TRON vault deliberately does not do that (TRON-6, review R325-TRX-2): USDT on TRON has such a switch, and "
+        "an ownerless vault that fails closed on it would hold every exit for as long as the issuer leaves it on. The "
+        "vault's side stays exact and the tolerated shortfall is bounded; solidity-tests/TronVaultFees.t.sol and "
+        "TronVaultIssuer.t.sol test the bounds, and that a deposit still fails closed."
+    ),
+}
 
 GETTERS = (
     "    // TRON port: the two TetherToken getters TronSourceVault requires (TRON-3, TRON-4), always false.\n"
@@ -148,6 +159,22 @@ def set_transfer_mode(text: str, suite: str) -> str:
     return "".join(out)
 
 
+def add_flat_fee(text: str, suite: str) -> str:
+    """Rule 6."""
+    out, pos = [], 0
+    for m in re.finditer(r"\bTronSourceVault\.Fees\(", text):
+        open_at = m.end() - 1
+        close_at = matching(text, open_at, "(", ")")
+        spans = split_top_level(text[open_at + 1 : close_at])
+        if len(spans) != 3:
+            raise SystemExit(f"{suite}: a Fees literal with {len(spans)} arguments, not 3: port it by hand")
+        out.append(text[pos:close_at])
+        out.append(", 0")
+        pos = close_at
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def add_getters(text: str) -> str:
     """Rule 3."""
     out, pos = [], 0
@@ -192,6 +219,7 @@ def port(suite: str, renames: dict) -> str:
         lines.append(line)
     text = "\n".join(lines)
     text = set_transfer_mode(text, suite)
+    text = add_flat_fee(text, suite)
     text = add_getters(text)
     for (s, test), reason in NOT_PORTED.items():  # rule 5
         if s != suite:

@@ -17,10 +17,14 @@ Ethereum tools cannot reach through JSON-RPC:
 
 Only the standard library plus `cast` (keccak, ABI encoding, signing), as the other tools.
 """
+import collections
 import hashlib
+import ipaddress
 import json
 import subprocess
+import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -199,18 +203,41 @@ def txid(raw_data):
 
 
 # ── the node ────────────────────────────────────────────────────────────────
+def is_loopback(url):
+    host = urllib.parse.urlsplit(url).hostname or ''
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class Node:
     """One java-tron HTTP endpoint (FullNode API; `/walletsolidity` on the same base, as java-tron and TRE serve it,
     or on `solidity_url` when the operator runs a separate SolidityNode port)."""
 
-    def __init__(self, url, solidity_url=None, cast=None, timeout=30):
+    def __init__(self, url, solidity_url=None, cast=None, timeout=30, allow_remote=False):
         self.url, self.solidity_url = url.rstrip('/'), (solidity_url or url).rstrip('/')
+        # Every safety property of the signer, the relayer's journal and the guardian rests on what THIS node calls
+        # solidified. A remote endpoint (a public gateway, or anyone on the path of plain http) would decide that
+        # instead of the operator, so it is refused unless the operator overrides it explicitly (review R325-TRX-4).
+        for u in {self.url, self.solidity_url}:
+            if not is_loopback(u):
+                if not allow_remote:
+                    raise TronError(f'the TRON node {u} is not on loopback: run your own java-tron node on this host '
+                                    '(or set the explicit override, at your own risk)')
+                print(json.dumps({'kind': 'alert', 'severity': 'critical', 'id': 'tron-remote-node', 'node': u,
+                                  'reason': 'a node that is not on loopback decides what this tool sees as final'}),
+                      file=sys.stderr, flush=True)
+        self.requests = collections.Counter()  # node requests by API method, for the shim's statistics
         self.cast = cast or str(Path.home() / '.foundry/bin/cast')
         self.timeout = timeout
 
     def post(self, path, obj=None, solid=False):
         base = self.solidity_url if solid else self.url
         prefix = '/walletsolidity/' if solid else '/wallet/'
+        self.requests[('solid:' if solid else '') + path] += 1
         req = urllib.request.Request(base + prefix + path, json.dumps(obj or {}).encode(),
                                      {'content-type': 'application/json', 'user-agent': 'bridge-tools'})
         try:

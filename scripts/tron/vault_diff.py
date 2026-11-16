@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PINNED = '885de8a469ddaecb5d6cfabd031a3d0bfaaf006fb9a9c176671f1edf72a3cfd9'
+PINNED = 'eedba5d73599d23169e782448c0c31b39f4bebcb3d10173245b613937ac74234'
 a = (ROOT / 'contracts/usdt/ProvenanceSourceVault.sol').read_text().splitlines()
 b = (ROOT / 'contracts/tron/TronSourceVault.sol').read_text().splitlines()
 lines = [l for l in difflib.unified_diff(a, b, 'ProvenanceSourceVault.sol', 'TronSourceVault.sol', lineterm='', n=0)]
