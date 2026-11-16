@@ -93,7 +93,7 @@
     "confirmations": 19,
     "typicalSeconds": 60,
     "worstCaseSeconds": 86400,
-    "reorg": "Signers never read the head for a deposit, so a deposit that leaves the head chain before solidification is never attested. Solidified blocks do not revert while fewer than a third of the block producers are faulty. If a solidified deposit vanished anyway, its mint is still inside the 12 hour L2 delay: the guardians cancel it and pause the vault, and a mint that did credit holds later releases instead of paying them (the vault pays only burns made under its own deposit chain)."
+    "reorg": "Signers never read the head for a deposit, so a deposit that leaves the head chain before solidification is never attested. Solidified blocks do not revert while fewer than a third of the block producers are faulty. If a solidified deposit vanished anyway, its mint is still inside the 12 hour L2 delay: 2 of the 3 guardians cancel it on the L2 (or pause the L2 token when they cannot), so it is never credited. The vault itself is paused by a guardian on a reserves shortfall or on evidence of a forged mint, not on a missing deposit alone. A mint that did credit holds later releases instead of paying them (the vault pays only burns made under its own deposit chain)."
   },
   "deposit": {
     "method": "contract-call",

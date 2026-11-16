@@ -3,6 +3,9 @@
 
   TRON_URL=http://127.0.0.1:42390 PORT_BASE=42300 python3 tools/signatario-tron/rehearse_tron.py REPO_DIR WORK_DIR USDT_GETCONTRACT_JSON
 
+Optional: VAULT_CREATION_BIN=FILE deploys that creation code (hex, the output of `solc --bin`) as the vault instead of
+the forge artifact, to rehearse a build made with TRON's own compiler.
+
 Needs: a private java-tron HTTP API at TRON_URL with funded accounts listed at /admin/accounts-json (the official
 quickstart image `tronbox/tre`, pinned by digest), Foundry 1.7.1 in FOUNDRY_BIN (default ~/.foundry/bin), and
 USDT_GETCONTRACT_JSON = the answer of a public node's `/wallet/getcontract` for TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,
@@ -276,6 +279,13 @@ class Net:
                      f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{FEE_BPS}))']
         args = out(CAST, 'abi-encode', VAULT_CTOR, *self.ctor)
         vault_code = art('TronSourceVault')['bytecode']['object']
+        if os.environ.get('VAULT_CREATION_BIN'):
+            # The vault built by another compiler (TRON's own solc: docs/BRIDGE-TRON-USDT.md section 3): the hex of
+            # `solc --bin`. The L2 token always comes from the frozen forge build.
+            vault_code = '0x' + Path(os.environ['VAULT_CREATION_BIN']).read_text().strip().removeprefix('0x')
+        print('vault creation code: %d bytes, sha256 %s%s' % (
+            len(vault_code) // 2 - 1, hashlib.sha256(bytes.fromhex(vault_code[2:])).hexdigest(),
+            ' (VAULT_CREATION_BIN)' if os.environ.get('VAULT_CREATION_BIN') else ' (forge artifact)'), flush=True)
         self.vault_ctor_args = args
         # transferMode 0 must be refused by the constructor (TRON-2): the creation reverts.
         bad = list(self.ctor)

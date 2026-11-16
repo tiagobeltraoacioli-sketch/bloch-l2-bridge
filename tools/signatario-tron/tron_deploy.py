@@ -3,6 +3,7 @@
 
   tron_deploy.py validate --config CFG.json [--token-config L2TOKEN.json]
   tron_deploy.py plan     --config CFG.json --artifact out/TronSourceVault.sol/TronSourceVault.json
+                          (--artifact is a forge artifact, or FILE.bin = the hex creation code `solc --bin` writes)
   tron_deploy.py create   --config CFG.json --artifact ART.json --node URL --keystore K --password-file P [--broadcast]
   tron_deploy.py verify   --config CFG.json --artifact ART.json --node URL --vault T...
 
@@ -132,7 +133,11 @@ def ctor_args(node, s):
 
 
 def creation(node, s, artifact):
-    code = json.loads(Path(artifact).read_text())['bytecode']['object'].removeprefix('0x')
+    text = Path(artifact).read_text()
+    # A forge artifact (JSON), or the hex file `solc --bin` writes (a build with TRON's own compiler).
+    code = (text.strip() if str(artifact).endswith('.bin') else json.loads(text)['bytecode']['object']).removeprefix('0x')
+    if not code or len(code) % 2 or any(c not in '0123456789abcdefABCDEF' for c in code):
+        raise Refuse('the artifact holds no creation code (unlinked libraries or an empty file?)')
     args, labels = ctor_args(node, s)
     full = code + args[2:]
     return full, {'constructorArgs': args, 'creationCodeKeccak': node.run(node.cast, 'keccak', '0x' + code),
