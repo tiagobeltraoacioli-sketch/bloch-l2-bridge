@@ -716,6 +716,103 @@ class Rehearsal:
               s0['totalLocked'] - s1['totalLocked'] == 10 * U and s1['approvalSeq'] == s0['approvalSeq'] + 1, before=s0, after=s1)
         self.held_burns = held
 
+    def run_r330(self):
+        """Agent 330 (round 17, second pass of the review): cases on the real validator, with the unchanged signer and
+        the real token bytecode. Reviewer's branch only; run with --r330 (the developer's later sections are skipped)."""
+        section('R330-SOL-1: curve points that are not wallets, through the router, the signers and the vault')
+        identity = bytes([1]) + bytes(31)
+        for label, owner, what in (('mint', self.mint, 'the address of the mint itself (a token-program account at a keypair address)'),
+                                   ('identity', identity, 'the identity point of the curve (no private key can exist)')):
+            text = S.b58encode(owner)
+            before_l2 = self.l2_balance()
+            r = l2_send(self.user_l2, self.router, 'burnTo(uint64,string)', str(10 * U), text, ok=False)
+            l2_mine()
+            check(f'R330-SOL-1: the router burns for {what}', r['status'] == '0x1' and before_l2 - self.l2_balance() == 10 * U, answer=r)
+            if r['status'] != '0x1':
+                continue
+            c = self.certify_release(r['transactionHash'], f'r330-{label}')
+            check(f'R330-SOL-1: five signers certify that burn ({label}; found in the router log)',
+                  'cert' in c, answer=c if 'cert' not in c else None)
+            if 'cert' not in c:
+                continue
+            n = str(c['doc']['release']['nonce'])
+            ra = self.vault('approve', '--cert', str(c['cert']), *self.pay)
+            rx = self.vault('execute', '--nonce', n, '--owner', text, '--create-account', *self.pay)
+            ata = S.associated_token_address(owner, self.mint)
+            check(f'R330-SOL-1: the vault pays it into the associated token account of {what}',
+                  ra['ok'] and rx['ok'] and self.sol.balance(ata) == 10 * U - 5_000, approve=ra, execute=rx)
+            _, acc_owner, data, _ = self.sol.rpc.account(owner, 'confirmed')
+            if label == 'mint':
+                check('R330-SOL-1: that "wallet" is an account of the token program (a mint), not a system account',
+                      data is not None and acc_owner == S.TOKEN_PROGRAM, owner=S.b58encode(acc_owner) if acc_owner else None)
+            else:
+                check('R330-SOL-1: that "wallet" does not exist as an account and can never sign', data is None)
+
+        section('R330: a paid record closed and kept alive with lamports in the same transaction')
+        record = self.a.release_record(self.n1)
+        transfer = S.Instruction(S.SYSTEM_PROGRAM, [S.Meta(self.payer.public, True, True), S.Meta(record, False, True)],
+                                 (2).to_bytes(4, 'little') + (5_000_000).to_bytes(8, 'little'))
+        code = None
+        for _ in range(30):
+            code, res = self.sol.tx(self.payer, [self.ix.close_release(self.n1, self.payer.public), transfer])
+            if code != 114:
+                break
+            time.sleep(3)
+        check('the paid record of the first release is closed after the retention, with lamports sent back to its address', code is None, code=code)
+        _, acc_owner, data, lamports = self.sol.rpc.account(record, 'confirmed')
+        check('the emptied account survives: owned by the program, 208 zero bytes',
+              data is not None and acc_owner == self.program.public and len(data) == 208 and not any(data), lamports=lamports)
+        r = self.vault('show', '--commitment', 'confirmed', '--release', str(self.n1))
+        check('the tools read the nonce as paid and closed (the paid page), not as an absent release',
+              r['ok'] and bool(r.get('release')) and r['release'].get('state') == 2 and r['release'].get('closed') is True, answer=r)
+        rel, ctx = self.raw_release(self.cert1['doc'])
+        slot, blockhash = self.sol.rpc.last_block('finalized')
+        ctx = dict(ctx, validUntil=self.cluster_now() + VALID - 20, sourceAnchorNumber=slot, sourceAnchorHash=blockhash)
+        code, _ = self.forged_approve(rel, ctx, self.release_keys[:5])
+        check('a fresh certificate of five committee keys for that nonce is refused (AlreadyReleased)', code == 115, code=code)
+        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(self.n1, self.walletB.public)])
+        check('the payment sent again is refused (InvalidAccount: the surviving account is no record)', code == 101, code=code)
+        code, _ = self.sol.tx(self.payer, [self.ix.close_release(self.n1, self.payer.public)])
+        check('a second close is refused (InvalidAccount)', code == 101, code=code)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        r = self.half(0, 'release', '--intent', str(self.write_intent(rel, ctx)))
+        check('a signer refuses to certify the closed nonce', not r['ok'] and 'already has a release' in r.get('reason', ''), answer=r)
+
+        section('R330: a plain validator restart between attestation, certificate and payment')
+        wallet = self.walletB.public
+        dep = self.deposit(30 * U)
+        m = self.attest_and_mint(dep, 'r330-restart')
+        check('a deposit is attested and its mint queued before the restart', m.get('receipt', {}).get('status') == '0x1', answer=m)
+        burn = self.burn(12 * U, wallet)
+        c = self.certify_release(burn, 'r330-restart-b')
+        check('a burn is certified before the restart', 'cert' in c, answer=c if 'cert' not in c else None)
+        s0 = self.state()
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        stop('validator')
+        self.sol.rpc = start_validator(reset=False)
+        time.sleep(2)
+        s1 = self.state()
+        check('after the restart the vault state is the one before it (count, locked, head)',
+              all(s1.get(k) == s0.get(k) for k in ('depositCount', 'totalLocked', 'approvalSeq', 'pauseCount')), before=s0, after=s1)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 2)
+        r = self.half(0, 'deposit', '--deposit-id', dep['depositId'])
+        check('the attested deposit is still final on every endpoint after the restart', r['ok'], answer=r)
+        before = self.sol.balance(S.associated_token_address(wallet, self.mint))
+        ra = self.vault('approve', '--cert', str(c['cert']), *self.pay)
+        n = str(c['doc']['release']['nonce'])
+        rx = self.vault('execute', '--nonce', n, '--owner', S.b58encode(wallet), *self.pay)
+        check('the certificate signed before the restart approves and pays once after it',
+              ra['ok'] and rx['ok'] and self.sol.balance(S.associated_token_address(wallet, self.mint)) - before == 12 * U - 6_000,
+              approve=ra, execute=rx)
+        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(int(n), wallet)])
+        check('and not twice (AlreadyReleased)', code == 115, code=code)
+        balance = self.l2_balance()
+        r = self.credit(dep)
+        check('the mint queued before the restart credits once', r['status'] == '0x1' and self.l2_balance() - balance == dep['net'])
+        s = self.state()
+        check('backing after the restart: token balance equals locked plus fees not yet swept',
+              s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
+
     def write_intent(self, rel, ctx, name='intent.json'):
         s = self.a.summary()
         doc = {'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': int(s['sourceChainId']), 'vault': s['sourceVault'],
@@ -1392,13 +1489,20 @@ def main():
         r.setup_l2()
         r.open_vault()
         r.run_honest()
-        r.run_forgeries()
-        r.run_limits_and_delay()
-        r.run_pause()
-        if '--skip-daemons' not in sys.argv:
-            r.run_daemons()
-        if '--skip-reorg' not in sys.argv:
-            r.run_reorg()
+        if '--r330' in sys.argv:  # agent 330 (review): its own cases after the honest path, nothing else
+            r.run_r330()
+            evidence = r.evidence
+            raise_after = True
+        else:
+            raise_after = False
+        if not raise_after:
+            r.run_forgeries()
+            r.run_limits_and_delay()
+            r.run_pause()
+            if '--skip-daemons' not in sys.argv:
+                r.run_daemons()
+            if '--skip-reorg' not in sys.argv:
+                r.run_reorg()
         evidence = r.evidence
     finally:
         for name in list(PROCS):
