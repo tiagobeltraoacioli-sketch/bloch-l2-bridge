@@ -28,14 +28,14 @@ DEFAULT_POLICY = {
     'unitSats': 100,              # one token unit (BridgedStablecoinV3 has 6 decimals) = 100 sat
     'depositFeeBps': 5,
     'releaseFeeBps': 5,
-    'minDepositSats': 20_000,
+    'minDepositSats': 100_000,
     'maxDepositSats': 10_000_000,  # at most the L2 token's mint bucket: a larger credit could never mint and would block the order
     'capSats': 100_000_000,        # the L2 token's supply cap in sats: the vault never owes holders more
-    'maxChargeBps': 1_000,        # an item never pays more than 10% of itself to miners; above that it waits
+    'maxChargeBps': 1_000,        # a DEPOSIT is never swept at more than 10% of itself to miners; it waits (refundable)
     'dustSats': 546,
     'ownerPayoutMinSats': 10_000,
     'poolTargetSats': 200_000,    # fee pool kept for fee bumps; the surplus is owed to the owner
-    'maxFeerate': 500,            # sat/vB, hard ceiling for any vault transaction
+    'maxFeerate': 200,            # sat/vB, hard ceiling for any vault transaction; the smallest burn must land at it
     'sweepDepth': 2,              # confirmations of a deposit before the vault spends it
     'minConfirmations': 6,        # of the sweep, before the deposit is attested
     'satsPerExtraConfirmation': 100_000_000,
@@ -94,9 +94,13 @@ class Vault:
         dep_len = len(self.deposit_script(b'\x01' * 20))
         sizes = (self.threshold, len(self.thread_script), dep_len)
         self._sizes = sizes
-        self.overhead_vb = c.vsize(1, 0, [34, 83], *sizes)
-        self.deposit_vb = c.vsize(1, 1, [34, 83], *sizes) - self.overhead_vb
-        self.donation_vb = c.vsize(2, 0, [34, 83], *sizes) - self.overhead_vb
+        # What every item is charged for. The overhead is the whole transaction around one item: thread input, thread
+        # output, the longest marker and the owner's output. Per-item sizes carry one spare vbyte, so the charges of
+        # a transaction always cover its fee whatever the batch (the pool never pays miners).
+        bare = c.vsize(1, 0, [34, 83], *sizes)
+        self.overhead_vb = c.vsize(1, 0, [34, 83, 22], *sizes) + 1
+        self.deposit_vb = c.vsize(1, 1, [34, 83], *sizes) - bare + 1
+        self.donation_vb = c.vsize(2, 0, [34, 83], *sizes) - bare + 1
         self.payout_vb = 31
 
     @staticmethod
@@ -139,9 +143,9 @@ def deposit_credit(vault, value, feerate):
     """(units credited on the L2, bridge fee, miner charge, remainder) for a swept deposit of `value` sats."""
     p = vault.policy
     if value < p['minDepositSats']:
-        raise PolicyError('the deposit is below the minimum; it is never swept or credited', value=value)
+        raise PolicyError('the deposit is below the minimum; it is not credited (its recipient can have it refunded)', value=value)
     if value > p['maxDepositSats']:
-        raise PolicyError('the deposit is above the maximum; it is never swept or credited', value=value)
+        raise PolicyError('the deposit is above the maximum; it is not credited (its recipient can have it refunded)', value=value)
     fee = value * p['depositFeeBps'] // 10_000
     charge = feerate * (vault.deposit_vb + vault.overhead_vb)
     if charge > value * p['maxChargeBps'] // 10_000:
@@ -155,45 +159,62 @@ def deposit_credit(vault, value, feerate):
 
 
 def release_payout(vault, units, feerate):
-    """(sats paid to the user, bridge fee, miner charge) for a burn of `units` token units."""
+    """(sats paid to the user, bridge fee, miner charge) for a burn of `units` token units.
+
+    A burn has no percentage cap on its miner charge: a holder who burned must be paid at whatever fee rate the signers
+    accept. `btc_deploy.py token` refuses a token whose `minBurn` would not clear dust at `maxFeerate`, so every burn
+    the token accepts is payable at every fee rate a vault transaction may use.
+    """
     p = vault.policy
     gross = units * p['unitSats']
     fee = gross * p['releaseFeeBps'] // 10_000
     charge = feerate * (vault.payout_vb + vault.overhead_vb)
-    if charge > gross * p['maxChargeBps'] // 10_000:
-        raise PolicyError('the miner charge exceeds the cap for this burn at this fee rate', wait=True,
-                          gross=gross, charge=charge)
     payout = gross - fee - charge
     if payout < p['dustSats']:
-        raise PolicyError('the payout would be dust', gross=gross)
+        raise PolicyError('the payout would be dust at this fee rate', wait=True, gross=gross, charge=charge)
     return payout, fee, charge
 
 
-def build_vault_tx(vault, tip, deposits, donations, burns, feerate):
+def refund_amount(vault, value, feerate):
+    """(sats returned, bridge fee, miner charge) for an unswept deposit refunded at its L2 recipient's signed request."""
+    p = vault.policy
+    fee = value * p['depositFeeBps'] // 10_000
+    charge = feerate * (vault.deposit_vb + vault.payout_vb + vault.overhead_vb)
+    back = value - fee - charge
+    if back < p['dustSats']:
+        raise PolicyError('the refund would be dust at this fee rate', wait=True, value=value, charge=charge)
+    return back, fee, charge
+
+
+def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=()):
     """The one transaction the rules allow for these items at this fee rate.
 
     tip        {'txid', 'vout', 'value', 'marker': Marker}   the unspent thread output and the state it carries
-    deposits   [{'txid', 'vout', 'value', 'recipient': 20 bytes}]
-    donations  [{'txid', 'vout', 'value'}]                    outputs at the bare thread script
+    deposits   [{'txid', 'vout', 'value', 'recipient': 20 bytes}]                 swept and credited
+    donations  [{'txid', 'vout', 'value'}]                    outputs at the bare thread script (strays)
     burns      [{'nonce', 'units', 'recipient': 20 bytes}]    finalized L2 burns; recipient = P2WPKH key hash
-    Returns {'tx', 'marker', 'credits', 'payouts', 'fee', 'pool', 'owner_paid', 'inputs'}.
+    refunds    [{'txid', 'vout', 'value', 'recipient': 20 bytes, 'dest': 20 bytes}]  unswept deposits sent back to the
+               P2WPKH key hash their L2 recipient signed for (the signature is the signer's check, not this function's)
+    Inputs: tip, deposits, refunds, strays (each group sorted by outpoint). Outputs: thread, marker, payouts by burn
+    nonce, refunds in input order, owner fee.
+    Returns {'tx', 'marker', 'credits', 'payouts', 'refunds', 'fee', 'pool', 'owner_paid', 'inputs'}.
     """
     p = vault.policy
     if type(feerate) is not int or not 1 <= feerate <= p['maxFeerate']:
         raise PolicyError('fee rate outside [1, maxFeerate]', feerate=feerate)
-    if len(deposits) > p['maxDepositsPerTx'] or len(burns) > p['maxReleasesPerTx'] or len(donations) > 20:
+    if len(deposits) + len(refunds) > p['maxDepositsPerTx'] or len(burns) > p['maxReleasesPerTx'] or len(donations) > 20:
         raise PolicyError('too many items for one vault transaction')
     old = tip['marker'].normalised()
-    deposits = sorted(deposits, key=lambda d: (d['txid'], d['vout']))
-    donations = sorted(donations, key=lambda d: (d['txid'], d['vout']))
+    by_point = lambda d: (d['txid'], d['vout'])
+    deposits, refunds, donations = sorted(deposits, key=by_point), sorted(refunds, key=by_point), sorted(donations, key=by_point)
     burns = sorted(burns, key=lambda b: b['nonce'])
-    points = [(tip['txid'], tip['vout'])] + [(d['txid'], d['vout']) for d in deposits + donations]
+    points = [(tip['txid'], tip['vout'])] + [by_point(d) for d in deposits + refunds + donations]
     if len(set(points)) != len(points):
         raise PolicyError('an outpoint is named twice')
     if len({b['nonce'] for b in burns}) != len(burns):
         raise PolicyError('a burn is named twice')
 
-    liabilities, owner_due, credits, payouts = old.liabilities, old.owner_due, [], []
+    liabilities, owner_due, credits, payouts, returned = old.liabilities, old.owner_due, [], [], []
     for i, d in enumerate(deposits):
         units, fee, charge, rest = deposit_credit(vault, d['value'], feerate)
         nonce = old.next_deposit + i
@@ -215,18 +236,31 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate):
         liabilities -= b['units'] * p['unitSats']
         owner_due += fee
         paid.add(b['nonce'])
+    for d in refunds:
+        if len(d['dest']) != 20 or not any(d['dest']) or len(d['recipient']) != 20:
+            raise PolicyError('a refund names no Bitcoin key hash')
+        back, fee, charge = refund_amount(vault, d['value'], feerate)
+        returned.append({'txid': d['txid'], 'vout': d['vout'], 'value': d['value'], 'recipient': d['recipient'],
+                         'sats': back, 'fee': fee, 'charge': charge, 'spk': c.p2wpkh(d['dest'])})
+        owner_due += fee
+    for d in donations:
+        # a stray pays for the bytes it adds; it can never be a way to spend the pool on miners
+        if d['value'] < feerate * vault.donation_vb:
+            raise PolicyError('a stray output does not pay for its own input at this fee rate', wait=True, value=d['value'])
     if liabilities < 0:
         raise PolicyError('the burns exceed what the vault owes: a credited mint has no swept deposit behind it')
     if deposits and liabilities > p['capSats']:
-        raise PolicyError('the sweep would pass the supply cap; the deposits wait for burns', wait=True, cap=p['capSats'])
+        raise PolicyError('the sweep would pass the supply cap; the deposits wait for burns or are refunded', wait=True,
+                          cap=p['capSats'])
 
-    total_in = tip['value'] + sum(d['value'] for d in deposits) + sum(d['value'] for d in donations)
-    paid_out = sum(x['sats'] for x in payouts)
-    out_lens = [34, 83] + [22] * len(payouts)
+    total_in = tip['value'] + sum(d['value'] for d in deposits + refunds + donations)
+    paid_out = sum(x['sats'] for x in payouts) + sum(x['sats'] for x in returned)
+    out_lens = [34, 83] + [22] * (len(payouts) + len(returned))
+    pool_before = tip['value'] - old.liabilities - old.owner_due
 
     def settle(with_owner):
-        fee = feerate * c.vsize(1 + len(donations), len(deposits), out_lens + ([len(vault.owner_spk)] if with_owner else []),
-                                *vault._sizes)
+        fee = feerate * c.vsize(1 + len(donations), len(deposits) + len(refunds),
+                                out_lens + ([len(vault.owner_spk)] if with_owner else []), *vault._sizes)
         pool = total_in - paid_out - fee - liabilities - owner_due
         due = owner_due + max(0, pool - p['poolTargetSats'])
         return fee, pool, due
@@ -235,11 +269,14 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate):
     owner_paid = due if due >= p['ownerPayoutMinSats'] else 0
     if not owner_paid:
         fee, pool, due = settle(False)
-    if pool < 0:
-        raise PolicyError('the fee pool cannot pay this transaction; add items or wait for lower fees', wait=True,
-                          pool=pool)
-    if not (deposits or burns or donations or owner_paid):
+    # No transaction lowers the fee pool: every item pays its own bytes plus the whole fixed overhead, so the miner
+    # fee is always covered by the items in the transaction. Whoever relays cannot spend the pool, and the owner's
+    # fees due are never part of it.
+    if not (deposits or burns or donations or refunds or owner_paid):
         raise PolicyError('an empty vault transaction')
+    if pool < min(pool_before, p['poolTargetSats']):
+        raise PolicyError('this transaction would pay miners out of the fee pool', wait=True, pool_before=pool_before,
+                          pool_after=pool)
     thread_value = total_in - paid_out - owner_paid - fee
     carried = 0 if owner_paid else due
     if thread_value < liabilities + carried or thread_value < p['dustSats']:
@@ -249,16 +286,16 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate):
         marker_spk = marker.encode()
     except ValueError as e:
         raise PolicyError(str(e), wait=True)
-    outputs = [(thread_value, vault.thread_spk), (0, marker_spk)] + [(x['sats'], x['spk']) for x in payouts]
+    outputs = [(thread_value, vault.thread_spk), (0, marker_spk)] + [(x['sats'], x['spk']) for x in payouts + returned]
     if owner_paid:
         outputs.append((owner_paid, vault.owner_spk))
     inputs = [{'txid': tip['txid'], 'vout': tip['vout'], 'value': tip['value'], 'script': vault.thread_script}]
     inputs += [{'txid': d['txid'], 'vout': d['vout'], 'value': d['value'],
-                'script': vault.deposit_script(d['recipient'])} for d in deposits]
+                'script': vault.deposit_script(d['recipient'])} for d in deposits + refunds]
     inputs += [{'txid': d['txid'], 'vout': d['vout'], 'value': d['value'], 'script': vault.thread_script}
                for d in donations]
-    return {'tx': c.Tx(points, outputs), 'marker': marker, 'credits': credits, 'payouts': payouts, 'fee': fee,
-            'pool': thread_value - liabilities - carried, 'owner_paid': owner_paid, 'inputs': inputs}
+    return {'tx': c.Tx(points, outputs), 'marker': marker, 'credits': credits, 'payouts': payouts, 'refunds': returned,
+            'fee': fee, 'pool': thread_value - liabilities - carried, 'owner_paid': owner_paid, 'inputs': inputs}
 
 
 def replay_tx(vault, tip, inputs, outputs):
@@ -267,8 +304,11 @@ def replay_tx(vault, tip, inputs, outputs):
     tip      the parent state, as for build_vault_tx
     inputs   [{'txid', 'vout', 'value', 'script': the witness script the input revealed}]
     outputs  [(sats, spk)]
-    Returns the build result (credits with deposit ids, payouts with units). Raises PolicyError if the transaction is
-    not one the rules produce: then the committee signed outside the rules, and everything after it is suspect.
+    Returns the build result (credits with deposit ids, payouts with units, refunds). Raises PolicyError if the
+    transaction is not one the rules produce: then the committee signed outside the rules, and everything after it is
+    suspect. Not checked here, because Bitcoin does not carry it: that a payout's key hash is the one the L2 burn (or
+    its claim) names, and that a refund was requested by its L2 recipient. Signers check both before signing;
+    btc_reservas.py compares payouts with the L2 burns afterwards.
     """
     if not inputs or (inputs[0]['txid'], inputs[0]['vout']) != (tip['txid'], tip['vout']):
         raise PolicyError('the transaction does not spend the thread tip first')
@@ -278,19 +318,25 @@ def replay_tx(vault, tip, inputs, outputs):
         new = c.Marker.decode(outputs[1][1])
     except ValueError:
         raise PolicyError('output 1 is not a canonical marker')
-    deposits, donations = [], []
+    old = tip['marker'].normalised()
+    scripted, donations = [], []
     for i in inputs[1:]:
         recipient = vault.recipient_of_script(i['script'])
-        (donations if recipient is None else deposits).append(
-            {'txid': i['txid'], 'vout': i['vout'], 'value': i['value'], **({} if recipient is None else {'recipient': recipient})})
-    old = tip['marker'].normalised()
+        if recipient is None:
+            donations.append({'txid': i['txid'], 'vout': i['vout'], 'value': i['value']})
+        else:
+            scripted.append({'txid': i['txid'], 'vout': i['vout'], 'value': i['value'], 'recipient': recipient})
+    swept = new.next_deposit - old.next_deposit
+    if not 0 <= swept <= len(scripted):
+        raise PolicyError('the marker credits more deposits than the transaction spends')
+    deposits, refunds = scripted[:swept], scripted[swept:]
     newly = sorted(n for n in range(old.burn_base + 1, new.burn_base + 1) if n not in old.paid) \
         + sorted(n for n in new.paid if n not in old.paid)
     rest = list(outputs[2:])
-    if rest and rest[-1][1] == vault.owner_spk and len(rest) == len(newly) + 1:
+    if rest and rest[-1][1] == vault.owner_spk and len(rest) == len(newly) + len(refunds) + 1:
         rest = rest[:-1]
-    if len(rest) != len(newly):
-        raise PolicyError('the payouts do not match the burns the marker newly marks paid')
+    if len(rest) != len(newly) + len(refunds):
+        raise PolicyError('the outputs do not match the burns newly marked paid plus the refunds')
     p, burns = vault.policy, []
     charge = new.feerate * (vault.payout_vb + vault.overhead_vb)
     for nonce, (sats, spk) in zip(newly, rest):
@@ -305,7 +351,11 @@ def replay_tx(vault, tip, inputs, outputs):
                 break
         else:
             raise PolicyError('a payout is not what the rules pay for any burn amount', nonce=nonce, sats=sats)
-    built = build_vault_tx(vault, tip, deposits, donations, burns, new.feerate)
+    for d, (sats, spk) in zip(refunds, rest[len(newly):]):
+        if not c.is_standard_payout(spk):
+            raise PolicyError('a refund is not P2WPKH')
+        d['dest'] = spk[2:]
+    built = build_vault_tx(vault, tip, deposits, donations, burns, new.feerate, refunds)
     if built['tx'].inputs != [(i['txid'], i['vout']) for i in inputs] or built['tx'].outputs != [(s, bytes(k)) for s, k in outputs]:
         raise PolicyError('the transaction is not the one the rules build from its own items')
     return built

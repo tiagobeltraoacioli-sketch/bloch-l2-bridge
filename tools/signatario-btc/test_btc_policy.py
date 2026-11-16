@@ -157,11 +157,11 @@ class Builder(unittest.TestCase):
 
     def test_refusals(self):
         v = vault()
-        for kw, word in (({'deposits': [dep(0, 19_999)]}, 'below the minimum'),
+        for kw, word in (({'deposits': [dep(0, 99_999)]}, 'below the minimum'),
                          ({'deposits': [dep(0, 10**9 + 1)]}, 'above the maximum'),
-                         ({'deposits': [dep(0, 30_000)], 'feerate': 60}, 'miner charge exceeds'),
+                         ({'deposits': [dep(0, 100_000)], 'feerate': 60}, 'miner charge exceeds'),
                          ({'feerate': 0, 'deposits': [dep(0, 10**6)]}, 'fee rate'),
-                         ({'feerate': 501, 'deposits': [dep(0, 10**6)]}, 'fee rate'),
+                         ({'feerate': 201, 'deposits': [dep(0, 10**6)]}, 'fee rate'),
                          ({'deposits': [dep(0, 10**6), dep(0, 10**6)]}, 'named twice'),
                          ({}, 'empty vault transaction'),
                          ({'burns': [{'nonce': 0, 'units': 5, 'recipient': b'\x01' * 20}]}, 'already paid'),
@@ -193,28 +193,36 @@ class Builder(unittest.TestCase):
         state = tip(value=250_000)
         nonce, burned, outstanding_units, used = 0, 0, 0, set()
         for step in range(250):
-            deposits = [dep(step * 5 + j, rnd.choice([20_000, 55_555, 123_456, 10**6, 3 * 10**8, rnd.randrange(20_000, 10**7)]),
+            deposits = [dep(step * 5 + j, rnd.choice([100_000, 155_555, 123_456, 10**6, 3 * 10**8, rnd.randrange(100_000, 10**7)]),
                             bytes([rnd.randrange(1, 255)]) * 20) for j in range(rnd.randrange(0, 4))]
             burns = []
             for _ in range(rnd.randrange(0, 4)):
-                units = rnd.randrange(500, 200_000)
+                units = rnd.randrange(1_000, 200_000)
                 if units <= outstanding_units:
                     burned += 1
                     burns.append({'nonce': burned, 'units': units, 'recipient': bytes([rnd.randrange(1, 255)]) * 20})
                     outstanding_units -= units
-            donations = [{'txid': '%064x' % (9_000_000 + step), 'vout': 1, 'value': 4_000}] if rnd.random() < 0.1 else []
-            feerate = rnd.choice([1, 1, 2, 3, 5, 8])
+            donations = [{'txid': '%064x' % (9_000_000 + step), 'vout': 1, 'value': rnd.choice([546, 4_000])}] if rnd.random() < 0.15 else []
+            refunds = [{'txid': '%064x' % (7_000_000 + step), 'vout': 0, 'value': rnd.choice([30_000, 99_999, 5 * 10**9]),
+                        'recipient': b'\x0a' * 20, 'dest': bytes([rnd.randrange(1, 255)]) * 20}] if rnd.random() < 0.2 else []
+            feerate = rnd.choice([1, 1, 2, 3, 5, 8, 40, 200])
+            pool_before = state['value'] - state['marker'].liabilities - state['marker'].owner_due
             try:
-                b = pol.build_vault_tx(v, state, deposits, donations, burns, feerate)
+                b = pol.build_vault_tx(v, state, deposits, donations, burns, feerate, refunds)
             except pol.PolicyError as e:
                 # the only acceptable refusals in this generator
-                self.assertTrue(e.wait or 'empty' in e.reason or 'below' in e.reason, e.reason)
+                self.assertTrue(e.wait or 'empty' in e.reason, e.reason)
                 for x in burns:
                     outstanding_units += x['units']
                 burned -= len(burns)
                 continue
             tx, m = b['tx'], b['marker']
-            total_in = state['value'] + sum(d['value'] for d in deposits) + sum(d['value'] for d in donations)
+            total_in = state['value'] + sum(d['value'] for d in deposits + donations + refunds)
+            # the fee pool never pays miners, whatever the batch and the fee rate (R325-BTC-3)
+            self.assertGreaterEqual(b['pool'], min(pool_before, v.policy['poolTargetSats']))
+            self.assertGreaterEqual(sum(x['charge'] for x in b['credits'] + b['payouts'] + b['refunds'])
+                                    + sum(d['value'] for d in donations), b['fee'])
+            self.assertEqual([(x['txid'], x['spk'][2:]) for x in b['refunds']], [(x['txid'], x['dest']) for x in refunds])
             self.assertEqual(total_in, sum(s for s, _ in tx.outputs) + b['fee'])           # conservation
             self.assertGreaterEqual(tx.outputs[0][0], m.liabilities + m.owner_due)          # solvency
             self.assertEqual(tx.outputs[0][0] - m.liabilities - m.owner_due, b['pool'])
@@ -304,6 +312,117 @@ class Rules(unittest.TestCase):
         self.assertEqual([x[0] for x in chain], [0, 1, 2])
         self.assertEqual(chain[2][1], sum(cr['units'] for cr in b['credits']))
         self.assertEqual(len({x[2] for x in chain}), 3)
+
+
+class ReviewR16(unittest.TestCase):
+    """Reviewer 325's demonstrations (41006b8, test_review_r16.py), turned around: each now passes."""
+
+    def mainnet(self):
+        return vault(windowLimitSats=10_000_000, largeReleaseSats=5_000_000)
+
+    def test_btc1_a_parent_with_a_scriptsig_is_readable(self):
+        v = self.mainnet()
+        legacy = (b'\x01\x00\x00\x00' + b'\x01' + b'\x11' * 32 + b'\x00\x00\x00\x00' + b'\x02\x51\x51' + b'\xff\xff\xff\xff'
+                  + b'\x01' + (546).to_bytes(8, 'little') + c.ser_script(v.thread_spk) + b'\x00\x00\x00\x00')
+        tx, version, locktime, sequences = c.parse_tx(legacy)
+        self.assertEqual((tx.outputs[0][0], tx.script_sigs, version, sequences), (546, [b'\x51\x51'], 1, [0xffffffff]))
+        self.assertEqual(tx.txid(), c.sha256d(legacy)[::-1].hex())
+        coinbase = (b'\x02\x00\x00\x00\x00\x01\x01' + bytes(32) + b'\xff' * 4 + b'\x03\x01\x02\x03' + b'\xff' * 4 + b'\x01'
+                    + (50 * 10**8).to_bytes(8, 'little') + c.ser_script(v.thread_spk) + b'\x01\x20' + bytes(32) + bytes(4))
+        self.assertEqual(c.parse_tx(coinbase)[0].outputs[0][1], v.thread_spk)
+
+    def test_btc1_the_parser_fails_only_with_valueerror(self):
+        rnd = random.Random(325)
+        v = self.mainnet()
+        good = pol.build_vault_tx(v, tip(), [dep(0, 10**6)], [], [], 2)['tx']
+        good.witnesses = [[b'', b'\x30' * 71, good.inputs[0][0].encode()], [b'x' * 300]]
+        seeds = [good.serialize(), good.stripped()]
+        for n in range(4000):
+            raw = bytearray(rnd.choice(seeds))
+            for _ in range(rnd.randrange(1, 6)):
+                kind = rnd.randrange(4)
+                if kind == 0 and raw:
+                    raw[rnd.randrange(len(raw))] = rnd.randrange(256)
+                elif kind == 1 and raw:
+                    del raw[rnd.randrange(len(raw)):rnd.randrange(len(raw)) + 1 + rnd.randrange(8)]
+                elif kind == 2:
+                    raw[rnd.randrange(len(raw) + 1):0] = bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 9)))
+                else:
+                    raw = raw[:rnd.randrange(len(raw) + 1)]
+            try:
+                tx, *_ = c.parse_tx(bytes(raw))
+                tx.txid()
+            except ValueError:
+                pass  # the only failure a caller has to expect
+        for junk in (b'', b'\x00' * 9, bytes(rnd.randrange(256) for _ in range(500)), 'text', None):
+            with self.assertRaises(ValueError):
+                c.parse_tx(junk)
+
+    def test_btc2_a_stray_only_transaction_does_not_spend_the_fee_pool(self):
+        v = self.mainnet()
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, tip(250_000), [], [{'txid': 'cc' * 32, 'vout': 0, 'value': 546}], [], 30)
+        self.assertIn('does not pay for its own input', e.exception.reason)
+        with self.assertRaises(pol.PolicyError) as e:  # pays its input but not the transaction: still not from the pool
+            pol.build_vault_tx(v, tip(200_000), [], [{'txid': 'cc' * 32, 'vout': 0, 'value': 30 * v.donation_vb}], [], 30)
+        self.assertIn('out of the fee pool', e.exception.reason)
+        big = 30 * (v.donation_vb + v.overhead_vb)
+        b = pol.build_vault_tx(v, tip(200_000), [], [{'txid': 'cc' * 32, 'vout': 0, 'value': big}], [], 30)
+        self.assertGreaterEqual(b['pool'] + b['owner_paid'] + b['marker'].owner_due, 200_000)
+        with self.assertRaises(pol.PolicyError):  # an owner-only transaction cannot draw the pool down either
+            pol.build_vault_tx(v, tip(150_000, c.Marker(owner_due=20_000)), [], [], [], 30)
+
+    def test_btc3_a_minimum_burn_is_payable_at_every_fee_rate_the_signers_may_sign(self):
+        v = self.mainnet()
+        m = c.Marker(next_deposit=3, burn_base=0, liabilities=60_000_000)
+        for rate in (1, 14, 100, v.policy['maxFeerate']):
+            b = pol.build_vault_tx(v, tip(60_250_000, m), [], [], [{'nonce': 1, 'units': 1_000, 'recipient': b'\x07' * 20}], rate)
+            self.assertEqual(b['payouts'][0]['sats'], 100_000 - 50 - rate * (31 + v.overhead_vb))
+            self.assertGreaterEqual(b['payouts'][0]['sats'], 546)
+        self.assertEqual((31 + v.overhead_vb, (100_000 - 50 - 546) // (31 + v.overhead_vb)), (402, 247))
+
+    def test_btc4_no_burn_waits_for_fees_so_the_marker_window_is_not_held_by_one(self):
+        # burn 1 (the smallest allowed) is payable at the ceiling even with 328 later burns already paid
+        v = self.mainnet()
+        m = c.Marker(next_deposit=3, burn_base=0, liabilities=60_000_000, paid=range(2, 330))
+        b = pol.build_vault_tx(v, tip(60_250_000, m), [], [], [{'nonce': 1, 'units': 1_000, 'recipient': b'\x07' * 20}], 200)
+        self.assertEqual(b['marker'].burn_base, 329)
+        with self.assertRaises(pol.PolicyError) as e:  # the window itself still exists; it is a wait, never a loss
+            pol.build_vault_tx(v, tip(60_250_000, m), [], [], [{'nonce': 330, 'units': 100_000, 'recipient': b'\x07' * 20}], 14)
+        self.assertTrue(e.exception.wait)
+
+
+class Refunds(unittest.TestCase):
+    def test_a_refund_returns_the_deposit_less_fee_and_charge_and_credits_nobody(self):
+        v = vault()
+        for value in (30_000, 99_999, 5 * 10**9):  # below the minimum, and above the maximum
+            r = {'txid': 'dd' * 32, 'vout': 1, 'value': value, 'recipient': b'\x0a' * 20, 'dest': b'\x0b' * 20}
+            b = pol.build_vault_tx(v, tip(), [], [], [], 3, [r])
+            self.assertEqual(b['refunds'][0]['sats'], value - value * 5 // 10_000 - 3 * (v.deposit_vb + 31 + v.overhead_vb))
+            self.assertEqual((b['marker'].next_deposit, b['marker'].liabilities, b['credits']), (0, 0, []))
+            self.assertIn((b['refunds'][0]['sats'], c.p2wpkh(b'\x0b' * 20)), b['tx'].outputs)
+            again = pol.replay_tx(v, tip(), b['inputs'], b['tx'].outputs)
+            self.assertEqual(again['refunds'][0]['spk'], c.p2wpkh(b'\x0b' * 20))
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, tip(), [], [], [], 3, [{**r, 'value': 2_000}])
+        self.assertIn('dust', e.exception.reason)
+        with self.assertRaises(pol.PolicyError):
+            pol.build_vault_tx(v, tip(), [], [], [], 3, [{**r, 'dest': bytes(20)}])
+        with self.assertRaises(pol.PolicyError):  # one outpoint cannot be both credited and refunded
+            pol.build_vault_tx(v, tip(), [dep(0, 10**6)], [], [], 3, [{**dep(0, 10**6), 'dest': b'\x0b' * 20}])
+
+    def test_sweep_and_refund_in_one_transaction_replay(self):
+        v = vault()
+        r = {'txid': '00' * 31 + '01', 'vout': 0, 'value': 50_000, 'recipient': b'\x0a' * 20, 'dest': b'\x0b' * 20}
+        b = pol.build_vault_tx(v, tip(), [dep(0, 10**6), dep(1, 10**6)], [{'txid': 'ee' * 32, 'vout': 0, 'value': 9_000}],
+                               [], 2, [r])
+        again = pol.replay_tx(v, tip(), b['inputs'], b['tx'].outputs)
+        self.assertEqual((len(again['credits']), len(again['refunds']), again['tx'].txid()), (2, 1, b['tx'].txid()))
+        forged = list(b['tx'].outputs)
+        i = forged.index((b['refunds'][0]['sats'], b['refunds'][0]['spk']))
+        forged[i] = (forged[i][0] + 1, forged[i][1])
+        with self.assertRaises(pol.PolicyError):
+            pol.replay_tx(v, tip(), b['inputs'], forged)
 
 
 if __name__ == '__main__':

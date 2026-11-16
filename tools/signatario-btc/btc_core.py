@@ -368,6 +368,7 @@ class Tx:
                 + self._outs() + wit + b'\x00\x00\x00\x00')
 
     parsed_txid = None
+    script_sigs = None
 
     def txid(self):
         return self.parsed_txid or sha256d(self.stripped())[::-1].hex()
@@ -512,7 +513,14 @@ def mint_chain_step(head, dep_id, amount_units, recipient20):
 
 
 def parse_tx(raw):
-    """A serialized transaction -> (Tx, version, locktime, sequences). Strict: no trailing bytes."""
+    """Any serialized Bitcoin transaction -> (Tx, version, locktime, sequences). General: legacy, nested-segwit,
+    coinbase and taproot spends all parse (the scriptSigs are kept in `tx.script_sigs`). Strict about the encoding:
+    truncated, oversized or trailing bytes raise ValueError and nothing else. What makes a transaction a VAULT
+    transaction (version 2, locktime 0, the fixed sequence, empty scriptSigs) is checked by the caller that needs it
+    (btc_vault.VaultView._replay), never here: this parser also reads strangers' transactions."""
+    if not isinstance(raw, (bytes, bytearray)) or not 10 <= len(raw) <= 4_000_000:
+        raise ValueError('not a transaction')
+    raw = bytes(raw)
     pos = 0
 
     def take(n):
@@ -526,20 +534,21 @@ def parse_tx(raw):
         first = take(1)[0]
         if first < 253:
             return first
-        width = {253: 2, 254: 4, 255: 8}[first]
-        return int.from_bytes(take(width), 'little')
+        value = int.from_bytes(take({253: 2, 254: 4, 255: 8}[first]), 'little')
+        if value > len(raw):
+            raise ValueError('a count larger than the transaction')
+        return value
 
     version = int.from_bytes(take(4), 'little')
     segwit = raw[4:6] == b'\x00\x01'
     if segwit:
         take(2)
     body_start = pos
-    inputs, sequences = [], []
+    inputs, sequences, script_sigs = [], [], []
     for _ in range(varint()):
         txid = take(32)[::-1].hex()
         vout = int.from_bytes(take(4), 'little')
-        if take(varint()):
-            raise ValueError('a vault transaction has empty scriptSigs')
+        script_sigs.append(take(varint()))
         inputs.append((txid, vout))
         sequences.append(int.from_bytes(take(4), 'little'))
     outputs = []
@@ -554,6 +563,7 @@ def parse_tx(raw):
     if pos != len(raw) or not inputs or not outputs:
         raise ValueError('malformed transaction')
     tx = Tx(inputs, outputs, witnesses)
+    tx.script_sigs = script_sigs
     # the identity of the transaction as serialized (any version, sequence or locktime), not as the vault would write it
     tx.parsed_txid = sha256d(raw[:4] + raw[body_start:body_end] + raw[-4:])[::-1].hex()
     return tx, version, locktime, sequences

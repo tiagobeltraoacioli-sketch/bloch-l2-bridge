@@ -81,8 +81,11 @@ class Node:
         got = self.call('getrawtransaction', txid, 1, tolerate=(-5,))
         if got is None:
             return None
-        raw = bytes.fromhex(got['hex'])
-        tx, version, locktime, sequences = c.parse_tx(raw)
+        try:
+            raw = bytes.fromhex(got['hex'])
+            tx, version, locktime, sequences = c.parse_tx(raw)
+        except (ValueError, KeyError, TypeError):
+            raise NodeError(f'transaction {txid} cannot be parsed') from None
         if tx.txid() != txid:
             raise NodeError('the node answered with another transaction')
         conf = int(got.get('confirmations', 0))
@@ -108,6 +111,11 @@ class Node:
     def mempool_spender(self, txid, vout):
         got = self.call('gettxspendingprevout', [{'txid': txid, 'vout': vout}])
         return got[0].get('spendingtxid') if got else None
+
+
+def skipped(txid, error):
+    """A stranger's transaction the tools ignore: one line on stderr, never fatal."""
+    print(json.dumps({'skipped': txid, 'why': f'{type(error).__name__}: {error}'[:200]}), file=sys.stderr)
 
 
 class Held(Exception):
@@ -139,7 +147,10 @@ class VaultView:
         # walk back from the tip to the anchor through input 0, then replay forward
         chain, cursor = [], tip
         while cursor != v.anchor:
-            got = node.tx(cursor[0])
+            try:
+                got = node.tx(cursor[0])
+            except NodeError as e:
+                raise Held(f'the thread cannot be read: {e}')
             if got is None or got['confirmations'] < 1 or cursor[1] != 0:
                 raise Held('the thread tip does not descend from the anchor')
             chain.append(got)
@@ -176,16 +187,24 @@ class VaultView:
             raise Held('the chain moved during the UTXO scan; retry')
         tips = []
         for u in scan['unspents']:
-            if u['vout'] != 0:
-                continue
-            got = node.tx(u['txid'])
+            # Anyone can pay the thread address. Nothing a stranger sends may stop the tools: a candidate that is not
+            # provably a vault transaction is skipped (and logged), whatever it looks like or fails with.
             try:
+                if u['vout'] != 0:
+                    continue
+                got = node.tx(u['txid'])
                 first = got['tx'].inputs[0]
-                parent_is_thread = c.Marker.decode(got['tx'].outputs[1][1]) is not None
-            except (ValueError, IndexError, TypeError):
-                continue
-            if parent_is_thread and self._descends(first):
-                tips.append((u['txid'], 0))
+                # One lookup decides: a vault transaction's first input spends the thread (the anchor, or output 0 of
+                # a transaction paying the thread script). Only the committee can spend such an output, so a
+                # stranger's transaction never passes, and its own ancestry is never walked.
+                if first != v.anchor:
+                    parent = node.tx(first[0])
+                    if first[1] != 0 or parent is None or parent['tx'].outputs[0][1] != v.thread_spk:
+                        continue
+                if self._descends(first):
+                    tips.append((u['txid'], 0))
+            except (NodeError, ValueError, IndexError, KeyError, TypeError) as e:
+                skipped(u.get('txid') if isinstance(u, dict) else None, e)
         if len(tips) != 1:
             raise Held(f'expected exactly one unspent thread output, found {len(tips)}')
         return tips[0]
@@ -193,7 +212,10 @@ class VaultView:
     def _descends(self, point):
         seen = 0
         while point != self.vault.anchor:
-            got = self.node.tx(point[0])
+            try:
+                got = self.node.tx(point[0])
+            except NodeError:
+                return False
             if got is None or point[1] != 0 or got['confirmations'] < 1 or seen > 1_000_000:
                 return False
             point = got['tx'].inputs[0]
@@ -202,12 +224,16 @@ class VaultView:
 
     def _replay(self, state, got):
         v, tx = self.vault, got['tx']
-        if got['version'] != 2 or got['locktime'] != 0 or any(s != c.SEQUENCE for s in got['sequences']):
+        if got['version'] != 2 or got['locktime'] != 0 or any(s != c.SEQUENCE for s in got['sequences']) \
+                or any(tx.script_sigs or [b'x']):
             raise Held(f"thread transaction {tx.txid()} is not in the vault's fixed format")
         inputs = []
         for i, (txid, vout) in enumerate(tx.inputs):
-            parent = self.node.tx(txid)
-            if parent is None:
+            try:
+                parent = self.node.tx(txid)
+            except NodeError as e:
+                raise Held(f'a thread input cannot be read: {e}')
+            if parent is None or vout >= len(parent['tx'].outputs):
                 raise Held('a thread input has no parent on this node')
             wit = tx.witnesses[i] if tx.witnesses else []
             if not wit:
