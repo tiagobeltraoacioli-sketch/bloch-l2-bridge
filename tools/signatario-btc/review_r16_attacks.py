@@ -111,7 +111,7 @@ def setup(rig):
                  'guardians': {'set': guardians, 'pauseDuration': 259200, 'pauseCooldown': 259200},
                  'mintSwitch': {'threshold': 6, 'delay': 1209600},
                  'limits': {'supplyCap': 1_000_000, 'bucketCapacity': 100_000, 'refillPerSecond': 1,
-                            'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 500}}
+                            'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 1000}}
     token_path = rig.work / 'token.json'
     token_path.write_text(json.dumps(token_cfg, indent=1))
     rc, planned = rig.tool('btc_deploy.py', str(vault_path), 'token', '--token-config', str(token_path), '--artifact',
@@ -142,13 +142,15 @@ def setup(rig):
                                       'signatario_config': str(mint), 'keystore': str(keys_dir / f'signer{i}'),
                                       'password_file': str(keys_dir / f'pw{i}'), 'pubkey': pubs[i].hex(),
                                       'journal': str(rig.work / f'signer{i}.journal.json'), 'cast': rig.cast,
-                                      'feerate_ceiling': 30}))
+                                      'burn_router': '0x' + '11' * 20, 'burn_router_code_keccak': '0x' + '00' * 32,
+                                      'feerate_without_estimate': 30}))
         rig.mint_cfg.append(str(mint))
         rig.half_cfg.append(str(half))
         rig.signer_cfg.append(str(signer))
     rig.relay_cfg = str(rig.work / 'relay.json')
     Path(rig.relay_cfg).write_text(json.dumps({'vault': str(vault_path), 'btc_rpc': rig.btc_url, 'btc_cookie': str(rig.cookie),
-                                               'l2_rpc': rig.l2, 'token': rig.token, 'token_from_block': 0}))
+                                               'l2_rpc': rig.l2, 'token': rig.token, 'token_from_block': 0,
+                                               'l2_chain_id': rr.L2_CHAIN, 'burn_router': '0x' + '11' * 20}))
     rig.advance(60)
     return vault
 
@@ -242,6 +244,64 @@ def case_legacy_deposit(rig, vault):
         'itself now contains a parent the parser refuses, so the stop cannot be undone by any vault transaction')
 
 
+def case_strangers(rig, vault):
+    """Second pass (R325-BTC-2P): every kind of stranger's transaction at the thread address, then the tools must
+    still answer, sweep a deposit and take a stray."""
+    alice = rig.alice
+    d1 = rig.pay(dep_addr(rig, alice), '0.05000000')
+    rig.mine(1)
+    r = rig.vault_tx(2, deposits=[(d1[0], d1[1], alice)], tag='x-sweep1')
+    assert r['combine'] and r['combine'][0] == 0, str(r)[:800]
+    rig.mine(1)
+    thread = vault.thread_address()
+    tip0 = rig.status().get('tip')
+    marker_hex = c.Marker(next_deposit=7, liabilities=1).encode()[2:].hex()
+
+    def stranger(kind, extra=None, locktime=0):
+        src = rig.b('getnewaddress', '', kind)
+        funding = rig.b('sendtoaddress', src, '0.05000000')
+        rig.mine(1)
+        raw = rig.b('getrawtransaction', funding, 1)
+        vout = next(o['n'] for o in raw['vout'] if o['scriptPubKey'].get('address') == src)
+        change = rig.b('getnewaddress', '', 'bech32')
+        outs = [{thread: '0.00000546'}] + ([extra] if extra else []) + [{change: '0.04990000'}]
+        tx = rig.b('createrawtransaction', json.dumps([{'txid': funding, 'vout': vout, 'sequence': 0xfffffffd}]), json.dumps(outs), locktime)
+        signed = rig.b('signrawtransactionwithwallet', tx)
+        assert signed['complete']
+        txid = rig.b('sendrawtransaction', signed['hex'])
+        rig.mine(1)
+        return txid
+
+    kinds = [('legacy P2PKH input', lambda: stranger('legacy')),
+             ('nested segwit (P2SH-P2WPKH) input', lambda: stranger('p2sh-segwit')),
+             ('taproot input', lambda: stranger('bech32m')),
+             ('segwit input, output 1 a canonical vault marker', lambda: stranger('bech32', {'data': marker_hex})),
+             ('legacy input, output 1 a canonical vault marker, locktime set', lambda: stranger('legacy', {'data': marker_hex}, 50)),
+             ('a coinbase paying the thread address at output 0', lambda: rig.b('generatetoaddress', 1, thread)[0])]
+    strays = []
+    for name, make in kinds:
+        made = make()
+        rig.sync_index()
+        rc, out, err = rig.tool_raw('btc_half.py', rig.half_cfg[0], 'status')
+        rc2, out2, err2 = rig.tool_raw('btc_reservas.py', rig.relay_cfg, 'check')
+        tip = (rr.js(type('D', (), {'stdout': out, 'stderr': err})()) or {}).get('tip') if rc == 0 else None
+        ok = rc == 0 and 'Traceback' not in err + err2 and rc2 in (0, 3)
+        say(not ok, f'R325-BTC-1 again with {name}', '' if not ok else '')
+        note(f'{name}: status rc {rc}, reserves rc {rc2}, traceback: {"Traceback" in err + err2}, tip unchanged: {tip == tip0 or tip is None and rc != 0}')
+        if name.startswith('legacy P2PKH'):
+            strays.append(made)
+    d2 = rig.legacy_pay(dep_addr(rig, alice), 1_000_000, first=False)
+    rig.mine(1)
+    r = rig.vault_tx(2, deposits=[(d2[0], d2[1], alice)], donations=[(strays[0], 0)], tag='x-sweep2')
+    done = bool(r['combine']) and r['combine'][0] == 0
+    note(f"after all strangers: sweep of a legacy-funded deposit plus one legacy-funded stray: propose rc {r['propose'][0]}, "
+         f"signed {sum(1 for rc, _ in r['signs'] if rc == 0)}, combine {str(r['combine'])[:300]}")
+    rig.mine(4)
+    st = rig.status()
+    say(not (done and st.get('tip') != tip0), 'the vault stops after strangers\' transactions',
+        f"tip moved: {st.get('tip') != tip0}; deposits in the ledger: {len(st.get('deposits', []))}")
+
+
 def case_pool_drain(rig, vault):
     def pool():
         st = rig.status()
@@ -280,7 +340,7 @@ def main():
     rig = Rig()
     try:
         vault = setup(rig)
-        {'stray': case_stray, 'legacy-deposit': case_legacy_deposit, 'pool-drain': case_pool_drain}[opt('--case')](rig, vault)
+        {'stray': case_stray, 'legacy-deposit': case_legacy_deposit, 'pool-drain': case_pool_drain, 'strangers': case_strangers}[opt('--case')](rig, vault)
     finally:
         rig.stop()
 
