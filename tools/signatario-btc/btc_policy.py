@@ -316,9 +316,11 @@ def required_confirmations(policy, exposure_sats):
 
 
 def release_ready_at(policy, burn_time, units):
-    """Earliest clock time (signer's Bitcoin tip median time past) a burn made at L2 time `burn_time` may be paid."""
+    """Earliest clock time (the signer's Bitcoin tip median time past) a burn made at L2 time `burn_time` may be paid;
+    0 for a burn at or below `largeReleaseSats` (no clock applies to it). The median time past runs about an hour
+    behind the wall clock, so a large release waits the delay plus that lag: the conservative side."""
     large = units * policy['unitSats'] > policy['largeReleaseSats']
-    return burn_time + (policy['largeReleaseDelaySeconds'] if large else 0)
+    return burn_time + policy['largeReleaseDelaySeconds'] if large else 0
 
 
 def window_allows(policy, recent, candidate_sats, now):

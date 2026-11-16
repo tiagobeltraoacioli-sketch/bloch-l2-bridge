@@ -89,13 +89,13 @@ def ledger_prefix_problem(token, vault, credits, block='latest'):
     import btc_policy as pol
     count = token.uint('mintCount()', block=block)
     nxt = token.uint('nextSlot()', block=block)
-    if count > len(credits) or nxt > len(credits):
-        return f'the token holds slot {max(count, nxt) - 1} but the Bitcoin ledger has only {len(credits)} deposits'
+    if count > len(credits):
+        return f'the token credited {count} mints but the Bitcoin ledger has only {len(credits)} deposits'
     chain = pol.mint_chain(vault, credits[:count])
     if token.word('mintHead()', block=block) != chain[count][2] or token.uint('mintedTotal()', block=block) != chain[count][1]:
         return f'the token mint chain after {count} credits is not the Bitcoin ledger chain'
     for slot in range(count, nxt):
         key = token.word('slotKey(uint64)', slot, block=block)
-        if any(key) and key != credits[slot]['deposit_id']:
+        if any(key) and (slot >= len(credits) or key != credits[slot]['deposit_id']):
             return f'slot {slot} is held by a mint that is not the Bitcoin ledger deposit of that nonce'
     return None

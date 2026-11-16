@@ -269,7 +269,7 @@ class Rules(unittest.TestCase):
 
     def test_release_delay_and_window(self):
         p = pol.DEFAULT_POLICY
-        self.assertEqual(pol.release_ready_at(p, 1000, 500_000), 1000)
+        self.assertEqual(pol.release_ready_at(p, 1000, 500_000), 0)
         self.assertEqual(pol.release_ready_at(p, 1000, 500_001), 1000 + 43_200)
         ok, used = pol.window_allows(p, [(100, 150_000_000), (90_000, 40_000_000)], 10_000_000, 100_000)
         self.assertTrue(ok and used == 40_000_000)
