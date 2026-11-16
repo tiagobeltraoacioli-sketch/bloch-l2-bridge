@@ -299,7 +299,7 @@ class Rehearsal:
         code, _ = self.sol.tx(self.payer, [self.ix.initialize(self.payer.public)])
         check('initialize refused on chain while the program is upgradeable (ProgramUpgradeable)', code == 118, code=code)
         run(solana, 'program', 'set-upgrade-authority', *common, S.b58encode(self.program.public), '--final')
-        shown = out(solana, 'program', 'show', '-u', SOL_URL, S.b58encode(self.program.public))
+        shown = out(solana, 'program', 'show', *common, S.b58encode(self.program.public))
         check('the program has no upgrade authority after --final', 'Authority: none' in shown, shown=shown)
         r = self.vault('init', *self.pay)
         check('init creates the vault at the address the configuration derives', r['ok'] and r.get('created') and r['vault'] == S.b58encode(self.a.vault), answer=r)
