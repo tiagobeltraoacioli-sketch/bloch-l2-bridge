@@ -15,19 +15,23 @@ symbol `bUSDC.xlm`. One vault, one token, own cap and own books.
 
 | Piece | File | Lines |
 |---|---|---|
-| Vault (Soroban, Rust) | `stellar/vault/src/lib.rs` | 1,118 |
-| Vault unit tests | `stellar/vault/src/test.rs` | 3,428 |
-| L2 exit router (periphery, no power) | `contracts/stellar/StellarBurnRouter.sol` | 80 |
-| Network layer, signer half, signer wrapper | `tools/signatario-stellar/stellar_net.py`, `stellar_half.py`, `signatario_stellar.py` | 364, 381, 184 |
-| Relayer, watcher daemons | `relay_stellar.py`, `vigia_stellar.py` | 137, 357 |
-| Guardian tool, reserves monitor, committee controls | `guardiao_stellar.py`, `reservas_stellar.py`, `comite_stellar.py` | 185, 108, 117 |
+| Vault (Soroban, Rust) | `stellar/vault/src/lib.rs` | 1,156 |
+| Vault unit tests | `stellar/vault/src/test.rs` | 3,296 |
+| L2 exit router (periphery, no power) | `contracts/stellar/StellarBurnRouter.sol` | 88 |
+| Network layer, signer half, signer wrapper | `tools/signatario-stellar/stellar_net.py`, `stellar_half.py`, `signatario_stellar.py` | 382, 407, 203 |
+| Relayer, watcher daemons | `relay_stellar.py`, `vigia_stellar.py` | 134, 392 |
+| Guardian tool, reserves monitor, committee controls | `guardiao_stellar.py`, `reservas_stellar.py`, `comite_stellar.py` | 148, 108, 118 |
 | Pairing reader, Wasm import check | `pairing.py`, `wasm_imports.py` | 146, 78 |
 | Deploy tool, Stellar source path | `tools/deploy-pontes/source_stellar.py` (+ 16 lines in `deploy_pontes.py`) | 210 |
-| Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,094 |
+| Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,218 |
 
-Final vault Wasm: sha256 `b3cca6874e247d46718df3506505ebf53fec06cdbc70b4c7e930823028d0ead3` (33,994 bytes), built on the host with stellar-cli 30.0.1,
-soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`. It imports no `update_current_contract_wasm`, no
-`create_contract` and no `upload_wasm` (`wasm_imports.py`), so its code can never change.
+Final vault Wasm: sha256 `@@WASM@@` (@@SIZE@@ bytes), built on the host with stellar-cli 30.0.1,
+soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`, twice: from two source paths with two target directories,
+same hash. It imports no `update_current_contract_wasm`, no `create_contract` and no `upload_wasm`
+(`wasm_imports.py`), so its code can never change.
+
+Revision 2 (2026-11-17) answers review 325 (`agents/325-bridges-review-r16.md` section 4): the guardian cancel is
+gone, a pause voids, signatures are Ethereum personal messages, and a direct burn has a stated claim rule.
 
 ## 2. Flow
 
@@ -43,10 +47,12 @@ moves exactly 10 stroops per unit. A deposit that is not a multiple of 10 stroop
    guardians, as on the Ethereum bridge.
 3. Exit. The user approves `StellarBurnRouter` and calls `burnTo(amount, "G...")`. The unchanged token's burn names 20
    bytes, so the burn names a commitment: the low 20 bytes of `keccak256(bytes32("BLOCH-XLM-RECIPIENT-v1") ‖ strkey)`.
-   The vault pays only an address with that commitment.
-4. Release. After L2 finality 5 signers certify the burn, each with its own Stellar half. Anyone relays the
-   certificate. The vault checks the committee by secp256k1 recovery, the mint chain, the replay records, the bucket
-   and the backing, takes 5 bps and pays the recipient (or queues the release, section 5).
+   The signers certify a payment only to an address with that commitment. Exits go through the router; a burn made
+   directly on the token is served only by the claim rule of section 4b.
+4. Release. After L2 finality 5 signers certify the burn, each with its own Stellar half, under the vault's current
+   pause count. Anyone relays the certificate. The vault checks the committee by secp256k1 recovery, the pause
+   count, the mint chain, the replay records, the bucket and the backing, takes 5 bps and pays the recipient (or
+   queues the release, section 5).
 5. Fees. `sweep_fees()` (anyone) pays every accrued fee to the address fixed at deployment,
    `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA`. Fees are never part of the backing.
 
@@ -58,16 +64,16 @@ fit 64 bits. `sourceVault` is the low 20 bytes of the vault's contract id. `sour
 
 | Topic | Ethereum | Stellar | Why |
 |---|---|---|---|
-| Committee check | `ecrecover` | Soroban `secp256k1_recover` + `keccak256`, low-s only, `v` 27 or 28 | Same keys. No Stellar (ed25519) key holds any power. |
+| Committee check | `ecrecover` | Soroban `secp256k1_recover` + `keccak256`, low-s only, `v` 27 or 28, over an Ethereum personal message (EIP-191) of a digest that starts with a `BLOCH-XLM-…` tag and binds the network id and the contract id | Same keys, same message scheme as the other routes; a Stellar digest can never equal another route's. No Stellar (ed25519) key holds any power. |
 | Upgrade, admin | none | none; the Wasm cannot replace itself | Same rule. |
-| Light-client switch | one-way switch to a verifier | absent | Out of scope this round (NO-GO). `switch_threshold` remains as the 6-of-7 quorum for unpause and re-certification. |
+| Light-client switch | one-way switch to a verifier | absent | Out of scope this round (NO-GO). `switch_threshold` remains as the 6-of-7 quorum for the unpause. |
 | Decimals | 6 and 6 | asset 7, books 6; multiples of 10 stroops only | Stellar classic assets have 7 decimals. |
 | Deposit recipient | `pqRecipientHash` (padded address) | `BytesN<20>` L2 address | Same content. |
 | Release recipient | 20-byte address | Stellar address, bound by a 20-byte commitment in the burn | The frozen token's burn names 20 bytes. |
-| Source anchor | recent block hash checked on-chain | none on-chain; `valid_until` at most 24 h ahead, digest binds network id and contract id | Soroban exposes no ledger hash, and Stellar has no forks. |
+| Source anchor | recent block hash checked on-chain | none on-chain; `valid_until` at most 24 h ahead; the digest binds the network id, the contract id and the vault's pause count | Soroban exposes no ledger hash, and Stellar has no forks. |
 | Guardian pause | a guardian sends a transaction | a guardian signs a digest; anyone relays it | A secp256k1 key cannot sign a Stellar transaction. Same chain rule, same 6-of-7 unpause, same cooldown. |
 | Release queue | none | releases above `large_release_threshold` wait `release_delay`; both fixed at deployment; delay 0 means no queue | Section 5. Owner decision. |
-| Guardian cancel | none (pause only) | 2 of 3 guardians cancel a QUEUED release, once per nonce | Section 4. Exists only while the delay is above 0. |
+| What a pause does | stops deposits and releases for its duration | the same, and it VOIDS: every release still queued and every certificate signed before it is dead for good; an unpause revives nothing | Section 4. With a queue, a pause that only held would let a forged release be paid when it ends. Guardians have no other power: there is no cancel. |
 | Closing releases | stops new releases | stops new releases and queued ones (they stay queued) | A queue must obey the committee's switch. |
 | A release above `window_limit` | reverts when paid | refused before it is recorded | It could never be paid. |
 | Asset failure | the token's revert | always the vault's `InvalidTransfer` (#2) | The asset contract's error numbers overlap the vault's. |
@@ -75,41 +81,93 @@ fit 64 bits. `sourceVault` is the low 20 bytes of the vault's contract id. `sour
 | Replay records | storage slots, permanent | persistent entries with rent; archived when unpaid, never deleted | Section 9. |
 | Storage rent | none | the instance, the Wasm and the vault's balance entry must stay funded | Runbook, section 10. |
 
-## 4. The guardian cancel (difference accepted by the coordinator, 2026-11-17, under three conditions)
+## 4. Guardians: pause only, and a pause voids (review 325: R325-XLM-1, R325-XLM-4)
 
-On the Ethereum bridge the source-vault guardians can only pause. Here, while the vault is deployed with a release
-delay above 0, a majority of the guardians (2 of 3) can also cancel a release that is waiting in the queue.
+Revision 1 let 2 of 3 guardians cancel a queued release. Reviewer 325 showed that the cancel had no budget: two
+guardian keys could cancel every exit for ever, and each cancelled burn needed 6 of 7 signers and a hand step of
+every operator. The coordinator asked for a bounded cancel (a budget per window, further cancels only under a pause,
+re-certification by the ordinary 5 of 7 with no manual step), or a simpler rule with the same guarantees.
 
-Reason. The delay exists so that watchers can find a forged release (5 stolen signer keys, no burn on the L2) before
-it is paid. Finding it is useless unless something removes it: a pause only holds it, and when the pause chain ends
-(3 guardians, 72 h each, then the cooldown) the forged release is payable again. The vault has no administrator and no
-upgrade, so nothing else can remove a queued entry. On Stellar there is no cheaper way to stop a release the watchers
-found forged during the delay.
+The rule implemented is the simpler one. There is no cancel. Guardians can only pause, exactly as on the Ethereum
+bridge and under the same chain rule, and a pause voids:
 
-The three conditions, and where each is proven:
+- The vault counts its pauses (`pause_count`). Every release certificate names the count it was signed under, and
+  every queued release records the count it was queued under.
+- `release` accepts a certificate only for the current count. `execute_release` pays a queued release only while
+  the count is still the one it was queued under; otherwise it answers `Voided`, for good.
+- A guardian pause raises the count. So one pause kills every certificate signed before it (submitted or not) and
+  every release still in the queue. A 6-of-7 unpause ends the pause early and revives nothing.
+- A voided burn loses nothing. Its nonce is open again for one certificate of the ordinary threshold (5 of 7) under
+  the new count; it queues and waits the full delay again. The signers' tools do this by themselves: the vault
+  answers `burn_status` 0 (open) and they certify the burn like any other. No operator step, no sixth signer.
 
-1. A cancel never loses the user's burn. The cancel removes the queue entry and the burn-id record and marks the nonce
-   cancelled. `switch_threshold` signers (6 of 7, the unpause quorum) certify that nonce again, once (`generation` 1),
-   for the same burn id or, if a forgery had taken the nonce, for the real one. A real burn whose id a forgery used
-   under another nonce is paid by an ordinary certificate under its own nonce.
-   Unit tests: `cancel_then_fresh_certificate_for_the_same_burn_pays_exactly_once`,
-   `cancel_of_a_forgery_that_used_a_real_burn_id_does_not_lose_that_burn`. Rehearsal: sections "cancel" and
-   "false alarm" (cancel of a real release, the same burn certified again by 6 signers with their own tools, paid
-   once, four replay attempts refused).
-2. Guardians alone never move funds, never change a limit and cannot block a burn for good. A cancel pays no one and
-   leaves the configuration, the books and the balance untouched. The re-certified release cannot be cancelled
-   (`NotCancellable`). What remains is the pause, which the same 6-of-7 quorum ends as on Ethereum, after which the
-   guardians are blocked for the cooldown and the release is paid.
-   Unit test: `guardians_alone_cannot_move_funds_change_limits_or_block_a_burn_for_good`.
-3. Documented as a difference, with its reason: this section, the table above, `bridge.network.json` notes.
+Why this is simpler and gives the same guarantees:
 
-With `release_delay` 0 nothing is ever queued, `cancel_release` can never succeed and the guardians are pause-only in
-the strict sense (unit test `without_a_release_delay_guardians_are_pause_only`).
+1. A real forged release can still be stopped during the delay, and by ONE guardian key instead of two: the
+   guardian that finds it pauses. That is what a guardian does on evidence of a forged certificate on every route,
+   because such a certificate means five signer keys are stolen or fooled, and the whole vault should stop.
+2. Honest exits cannot be starved by two keys. All a guardian key has is the pause, and the pause has the Ethereum
+   bridge's budget: each guardian once per chain, then at least `pause_cooldown` in which no guardian can pause.
+   The constructor refuses a `release_delay` above half the cooldown, so an exit certified in that open window is
+   paid in it. Two keys delay exits by at most two pauses per chain; they void, per chain, only what was queued at
+   those two moments. Five signers are enough throughout; six can end a pause early, after which the guardians are
+   blocked for the cooldown.
+3. No new parameter, no window state and no second guardian power to audit: the vault lost `cancel_release`, its
+   digest, the generations and the 6-of-7 re-certification. The difference from the Ethereum vault shrinks to "a
+   pause voids", which the Solana route also has.
 
-Re-certification is a deliberate act of each operator, never automatic: the operator lists the nonce in
-`recertify_nonces` of its half's config. The half then checks that the vault records that nonce as cancelled,
-generation 0, and signs `generation` 1; every other check (the burn read from the L2, the mint chain, the backing)
-is unchanged. The watcher parks such a burn with the alert `release-needs-recertification`.
+What it costs, stated plainly: a pause also voids the honest releases queued at that moment (they are re-signed
+automatically and wait the delay again), and a single forged release can no longer be removed without pausing the
+vault. A persistent attacker who holds five signer keys can queue a forgery again after each pause; the guardians
+then have their pause chain (up to 3 pauses) and after it the cooldown, in which that forgery would be paid. No
+set-once committee design survives five stolen keys for long; the delay and the pauses buy days, not safety.
+
+Where each point is proven:
+
+- Reviewer 325's demonstration, turned into a regression: `r325_xlm1_two_guardian_keys_cannot_starve_exits` (30
+  exits, every release queued, two guardian keys pausing whenever the vault lets them: 2 exits voided, 30 of 30
+  paid, 5-of-7 certificates only).
+- `pause_voids_queued_releases_and_no_unpause_revives_them`, `certificate_signed_before_a_pause_is_dead_after_it`
+  (R325-XLM-4, also with a pause shorter than the certificate's validity),
+  `voided_burn_is_certified_again_by_the_ordinary_threshold_and_paid_exactly_once`,
+  `voided_forgery_leaves_its_nonce_to_the_real_burn`,
+  `voided_forgery_that_used_a_real_burn_id_does_not_lose_that_burn`,
+  `guardians_alone_cannot_move_funds_or_change_limits`,
+  `without_a_release_delay_a_pause_voids_unsubmitted_certificates_only`,
+  `ctor_refuses_a_release_delay_above_half_the_cooldown`.
+- Main rehearsal: a quorum forgery voided by one guardian's pause and the real burn of its nonce certified by 5
+  signers with their own tools; a false alarm paid exactly once afterwards; a burn queued by the watcher daemons,
+  voided, and certified and paid again by the same daemons with nobody in the loop.
+
+## 4a. Signatures (R325-XLM-3)
+
+Every certificate (release, controls, unpause) and every guardian pause is an Ethereum personal message, EIP-191:
+the key signs `keccak256("\x19Ethereum Signed Message:\n32" ‖ digest)`. The Soroban host computes that hash and
+recovers from it; nothing in the recovery path changed. The tools call `cast wallet sign` without `--no-hash`, so no
+tool path of this route signs bare 32 bytes with a bridge key. The digest keeps its own domain: it starts with a
+`BLOCH-XLM-…` tag and binds the network id (sha256 of the passphrase) and the contract id. A signature over the bare
+digest is refused (`signatures_over_the_bare_digest_are_refused`).
+
+## 4b. A burn made directly on the token (R325-XLM-2)
+
+The frozen token's `burn(uint64,address)` takes any 20 bytes. The router makes the normal path safe; its interface
+has the shape of the other routes' routers: `burnTo(uint64 amount, string stellarAddress)` and
+`StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress)`.
+
+A burn made directly on the token is served by this rule only:
+
+- If its 20 bytes are the commitment of a Stellar address the signers are given (a hint file, or the intent), it is
+  certified to that address, as before.
+- Otherwise it is held, and paid only when the ACCOUNT THAT BURNED signs a claim: an Ethereum personal message with
+  the text `stellar_half.py claim-text` prints, naming the L2 chain, the token, the burn id and one Stellar address.
+  Each signer takes the burner from the burn it read from its own L2, never from the claim, and checks the
+  signature itself, in the half and again in the signer wrapper and at combination.
+- A router burn has the router as its burner and a contract cannot sign: router burns are paid only to the
+  committed address. A contract that burns directly towards 20 bytes that are no commitment cannot claim, and that
+  burn stays unpaid (the USDC stays in the vault; nobody else can take it). Integrations must not burn directly.
+
+Rehearsed: a direct burn to the user's own L2 address is refused without a claim, refused with a claim signed by
+another key, and paid to the claimed address with the burner's claim.
 
 ## 5. The release delay: an owner parameter
 
@@ -119,13 +177,13 @@ can change them after deployment. The committed configuration carries a PROPOSAL
 
 | Choice | Exit time | A 5-key forgery of a release | Guardians |
 |---|---|---|---|
-| Delay 0 (Ethereum launch behaviour) | L2 finality only | Paid at once. Loss up to the bucket: 10,000 USDC, then 10,000 a day until a guardian pauses. | Pause only. |
-| 2 h on every release (proposed) | L2 finality + 2 h, and one more transaction (`execute_release`, paid by the relayer) | Visible for 2 h. Paid only if no 2 of 3 guardians cancel within 2 h. | Pause, and cancel of queued releases (section 4). |
-| 2 h above a threshold T > 0 | Small exits instant, large ones + 2 h | Forged releases of at most T each are paid at once, up to the bucket. The worst case is the same as delay 0. | Pause, and cancel of queued releases. |
+| Delay 0 (Ethereum launch behaviour) | L2 finality only | Paid at once. Loss up to the bucket: 10,000 USDC, then 10,000 a day until a guardian pauses. | Pause only; a pause voids certificates not yet submitted. |
+| 2 h on every release (proposed) | L2 finality + 2 h, and one more transaction (`execute_release`, paid by the relayer) | Visible for 2 h. Paid only if no guardian pauses within 2 h. | Pause only; a pause voids the queue (section 4). |
+| 2 h above a threshold T > 0 | Small exits instant, large ones + 2 h | Forged releases of at most T each are paid at once, up to the bucket. The worst case is the same as delay 0. | Pause only; a pause voids the queue. |
 
 The trade-off is exit latency and guardian availability against the loss a signer-key compromise can cause before
-anyone reacts. A delay protects only while 2 of 3 guardians run the check (`guardiao_stellar.py check`) more often
-than the delay. A longer delay gives them more time and users a slower exit.
+anyone reacts. A delay protects only while at least one guardian runs the check (`guardiao_stellar.py check`) more
+often than the delay. The delay must be at most half the pause cooldown (the constructor refuses more). A longer delay gives them more time and users a slower exit.
 
 ## 6. Safety properties kept from the Ethereum bridge
 
@@ -136,7 +194,8 @@ than the delay. A longer delay gives them more time and users a slower exit.
 - Provenance: a release is paid only if the burn states the vault's chain head at its mint count.
 - Replay: one release per burn nonce and per burn id.
 - Controls (open or close deposits and releases): 5 of 7, nonce-ordered, expiring.
-- Guardians: fixed at deployment, never signers, one pause per guardian in a chain, 6 of 7 to unpause, cooldown.
+- Guardians: fixed at deployment, never signers, pause only, one pause per guardian in a chain, 6 of 7 to unpause,
+  cooldown.
 - Signers complete from canonical observations (vault state, not events), hold on a stale or diverging node, keep a
   local database against signing two releases for one nonce or burn, and the relayer journals the signed envelope
   before publication.
@@ -183,21 +242,24 @@ Each operator additionally runs:
 - The signer: `signatario_stellar.py` (the Ethereum signer's code with three replaced functions) with
   `stellar_half.py` as its source half. Same key files: the `l2-mint-signer` key and the `eth-release-signer` key.
   Extra config: `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account` (any existing account; views are
-  simulated, never sent), `vault_switch_threshold` 6.
+  simulated, never sent), and for direct-burn claims `recipient_claims`.
 - The watcher: `vigia_stellar.py sign` per signer and `vigia_stellar.py relay` for the relayers. It executes queued
   releases that are due. It runs only in the shared-directory mode today (section 13).
 - The relayer needs a funded Stellar account (a few XLM; it pays the release, the execution and the sweep) and holds
   no bridge key.
 - Guardians: `guardiao_stellar.py check` on a timer shorter than the release delay. Exit 2 is a finding: sign
-  `pause`, and for a queued release `cancel` (the second guardian passes the first one's `--valid-until`), then
-  `combine-cancel` and any relayer submits it.
+  `pause` and any relayer submits it. A pause is not a hold: it voids every queued release and every certificate
+  signed before it, the honest ones included, and they are certified again by the signers' own tools when the
+  pause is over. One guardian is enough; there is nothing to co-sign and nothing to cancel.
 - Reserves: `reservas_stellar.py check` on a timer. Alerts: `shortfall`, `frozen`, `oversupply`, `rent`, `archived`.
 - Rent: the vault instance, its Wasm and its balance entry must stay live. The vault extends its instance to
   1,555,200 ledgers whenever a call writes state and it is below half. If `rent` alerts, anyone runs
   `stellar contract extend` for the instance and the Wasm; if `archived`, `stellar contract restore`.
-- After a guardian cancel: 6 operators review the burn, add the nonce to `recertify_nonces`, sign
-  (`signatario_stellar.py release --burn-tx ...`, the first one's certificate passed as `--context` to the others),
-  combine and relay. Remove the nonce from the list afterwards.
+- After a pause: nothing by hand. The watchers find every voided burn open again and certify it; the relayer
+  queues it and executes it after the delay. If a forgery had taken a burn's nonce or id, the watcher alerts
+  `release-held-nonce-or-id-taken` until a pause voids the forgery.
+- A direct burn with no known address: the burner signs the text of `stellar_half.py claim-text --burn-id ... --to
+  G...` with the account that burned, and each operator places the signed claim in `recipient_claims/` (section 4b).
 - Unpause and controls: `comite_stellar.py`, 6 of 7 and 5 of 7.
 
 Users: a recipient needs a USDC trustline before the release; muxed (`M...`) addresses are not accepted.
@@ -206,13 +268,15 @@ Users: a recipient needs a USDC trustline before the release; muxed (`M...`) add
 
 New code an auditor must read first, in this order:
 
-1. `stellar/vault/src/lib.rs` (1,118 lines): `release`, `cancel_release`, `execute_release`, `pay`,
-   `check_certificate` and `recover` (low-s, `v`), the replay match in `release`, the digests in `impl Vault`.
+1. `stellar/vault/src/lib.rs` (1,156 lines): `release` (the replay rule and `record_counts`), `execute_release`,
+   `guardian_pause` (the pause count), `pay`, `check_certificate` and `recover` (EIP-191, low-s, `v`), `burn_status`,
+   the digests in `impl Vault`.
 2. The hash pairing with the frozen token: `TAG_MINT_CHAIN`, the deposit head, the genesis, against
    `BridgedStablecoinV3`.
 3. `tools/signatario-stellar/stellar_half.py` (what a signer checks before it signs) and `signatario_stellar.py`
    (the three replaced functions).
-4. `contracts/stellar/StellarBurnRouter.sol` (80 lines; strkey validation and the commitment).
+4. `contracts/stellar/StellarBurnRouter.sol` (88 lines; strkey validation and the commitment) and the claim rule for
+   direct burns in `stellar_half.py` and `signatario_stellar.py`.
 5. `relay_stellar.py` (journal before publication), `vigia_stellar.py`, `source_stellar.py`.
 
 Reused byte-identical: `BridgedStablecoinV3` (L2 token) and every launch contract of the Ethereum bridge; the whole
@@ -222,21 +286,28 @@ of `tools/signatario-stable/` (`signatario.py`, `vigia.py`, `bridge_feed.py` are
 
 Questions for the auditor: the Stellar Asset Contract's behaviour for the real USDC issuer (authorization, clawback,
 trustline limits); archival and automatic restoration across protocol upgrades; resource limits of a release with 7
-signatures; the absence of an on-chain source anchor; the cancel and re-certification state machine.
+signatures; the absence of an on-chain source anchor; the pause count and the void and re-certification rule.
 
-## 12. Tests and results (final Wasm `b3cca687…d0ead3`)
+## 12. Tests and results (final Wasm `@@WASMSHORT@@`)
 
-- Vault unit suite: 168 tests, 168 pass (SDK 29 test host, independent second implementation of every hash,
-  randomized rate-limit and books properties).
-- Router: 9 forge tests (commit `68ed7e7`, unchanged since).
+- Vault unit suite: 159 tests, 159 pass (SDK 29 test host, independent second implementation of every hash,
+  randomized rate-limit and books properties). Fewer than revision 1's 168: the cancel and generation tests are
+  gone with the code they tested.
+- Router: 9 of 9 forge tests, rerun on the host on the final tip.
 - Deploy tool: `test_source_stellar.py`, 12 tests pass; the existing deploy tool suites pass unchanged.
-- Archival rehearsal (private network, entries live 20 ledgers, Wasm `5097fc73…cadb30, the same source with `RECORD_TTL` 30`): 14 of 14 checks pass.
-- Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode): 102 of 102 checks pass.
-  Sections: pairing, controls, limits, deposit and credit, finality margin, release with fee, replay, 11 forged
-  certificates, delay, guardian check, cancel and re-certification, false alarm, pause chain and unpause, rate limit,
-  issuer freeze, clawback, missing trustline, diverging and stale views held, watcher daemons, deploy tool source
-  checks, fee sweep, books, cost.
-- Cost of a release with 5 signatures on the private network (testnet limits): 14,368,168 instructions (the public network allows 400,000,000 per transaction, read 2026-11-16), a 1,796-byte envelope, 2,776 bytes written, 166,104 stroops charged (0.0166 XLM).
+- Wasm built twice on the host, from two source paths with two target directories: the same hash.
+- Archival rehearsal (private network, entries live 20 ledgers, Wasm `@@ARCHWASM@@`, the same source with
+  `RECORD_TTL` 30): 14 of 14 checks pass.
+- Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode, everything run from a
+  git checkout of the tip): @@MAIN@@.
+  Sections: the L2 token deployed by `deploy_pontes.py` (validate, plan twice, dry run, broadcast, record, verify);
+  pairing; controls; limits; deposit and credit; finality margin; release with fee; replay; 11 forged certificates;
+  delay; guardian check; pause, void and re-certification; 6-of-7 unpause; pause chain; false alarm; rate limit;
+  issuer freeze; clawback; missing trustline; direct burn and claim; diverging and stale views held; watcher
+  daemons (deposit, instant release, queued release, voided release); deploy tool source checks; fee sweep; books;
+  cost.
+- Cost of a release with 5 signatures on the private network (per-transaction limits equal to the public network's):
+  @@COST@@.
 
 ## 13. Not done, not proven
 
@@ -245,18 +316,22 @@ signatures; the absence of an on-chain source anchor; the cancel and re-certific
   a config with a `feed` block or `l2_pins`, so the watcher cannot run on chain 700770 as it is. The signer and its
   half can; the transport between operators must be adapted and reviewed first.
 - The signer's L2 half ran against anvil with the tag `finalized`, not against a Bloch L2 node with `l2_pins`.
-- `deploy_pontes.py plan / run / record` were not executed for the Stellar config (they need a forge build at a
-  pinned revision). `validate` and the source checks of `run` and `verify` were, the latter against a live vault.
+- `deploy_pontes.py` deployed the token in the rehearsal on private networks only; never against chain 700770 or the
+  public Stellar network.
 - The asset in the rehearsal is a locally issued classic asset with the revocable and clawback flags, not Circle's
   account. The Stellar Asset Contract is the same built-in contract; the issuer's flags were read from the public
   network.
 - Fees and resource limits were measured with the testnet limits of the quickstart image, not the public network's.
   A release with 6 signatures ran; one with 7 did not.
-- The final Wasm was built once, on one host. A second, independent reproduction of the hash is an owner step.
+- The final Wasm was built on one host (two paths, same hash; reviewer 325 reproduced revision 1's hash in its own
+  clone). A reproduction on a second machine is an owner step.
 - Archival was exercised on protocol 29 only. A change of the archival rules in a later protocol needs a new check.
 - The guardian and shadow daemons of the Ethereum bridge (`tools/guardiao/`) are not adapted; `check` is a one-shot
   command run from a timer.
-- The release keys sign raw 32-byte digests (`cast wallet sign --no-hash`), as the Ethereum half does. A hardware
-  wallet that refuses blind digest signing cannot hold them.
+- The claim rule for direct burns needs the burner to be an account that can sign. A contract that burns directly
+  towards 20 bytes that are no commitment is never paid. Claims travel between operators as files; the watcher does
+  not distribute them.
+- A persistent holder of five signer keys can queue a forgery again after every pause (section 4). The pauses and the
+  delay buy time only.
 - Muxed accounts are not supported. A recipient that never opens a trustline is never paid; there is no timeout or
   redirect.

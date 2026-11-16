@@ -100,7 +100,7 @@ def validate_source(cfg, dp, k, signers, guardians, lim, rehearsal):
     refuse(rehearsal or (len(vs) == dp.POLICY_SIGNERS and st['vaultThreshold'] == dp.POLICY_THRESHOLD
                          and st['vaultSwitchThreshold'] == dp.POLICY_SWITCH_THRESHOLD),
            f'mainnet policy: the vault is {dp.POLICY_THRESHOLD}-of-{dp.POLICY_SIGNERS} with '
-           f'{dp.POLICY_SWITCH_THRESHOLD} to unpause and to certify a cancelled release again')
+           f'{dp.POLICY_SWITCH_THRESHOLD} to unpause')
     vg = st['vaultGuard']
     refuse(isinstance(vg, dict), 'stellar.vaultGuard must be an object')
     exact_keys(vg, ['guardians', 'pauseDuration', 'pauseCooldown'], 'stellar.vaultGuard')
@@ -119,6 +119,8 @@ def validate_source(cfg, dp, k, signers, guardians, lim, rehearsal):
     refuse(not dp.legacy_among(vgs + low), 'committed 2026-10-14 address among the vault signers or guardians: use fresh keys')
     # Owner parameters of the Stellar vault, stated in the reviewed config (docs/STELLAR-BRIDGE.md 5).
     refuse(_uint(st['releaseDelay'], MAX_RELEASE_DELAY), 'stellar.releaseDelay is undecided (0 .. 14 days; 0 = no queue)')
+    refuse(not vgs or st['releaseDelay'] <= vg['pauseCooldown'] // 2,
+           'stellar.releaseDelay must be at most half the vault pauseCooldown (the vault constructor refuses more)')
     refuse(_uint(st['largeReleaseThreshold']), 'stellar.largeReleaseThreshold is undecided')
     try:
         fee_kind, _ = sn.strkey_decode(st['feeRecipient'])

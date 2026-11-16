@@ -493,7 +493,14 @@ def lying_rpc(real, port, mode):
             self.send_header('content-length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    for attempt in range(60):
+        try:
+            srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
+            break
+        except OSError:  # the port is inside the kernel's range for outgoing connections: taken for a moment
+            if attempt == 59:
+                raise
+            time.sleep(1)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -588,7 +595,7 @@ def main_flow(r):
           rc == 0 and r.balance(payee) == 300 * S - 1_500_000 and st['total_locked'] == locked0 - 300 * U
           and st['fees_accrued'] == fees0 + 150_000, sent)
     notes['release_tx'] = sent.get('hash')
-    rc, sent = r.submit(call, key='release-1')
+    rc, sent = r.submit(call, key='release-1-p0')
     check('relayer: the journal answers "already applied" for the same key', rc == 0 and 'already applied' in json.dumps(sent), sent)
     rc, sent = r.submit(call, key='replay-a')
     check('replay: the relayer does not rebuild a release the vault records', rc == 0 and sent.get('status') == 'DONE', sent)
@@ -1089,7 +1096,7 @@ def main_flow(r):
     notes['reservas'] = res
 
     # 15. cost of a release with 5 signatures, from the journaled envelope
-    j = json.loads((r.dir / 'journal' / 'release-1.json').read_text())
+    j = json.loads((r.dir / 'journal' / 'release-1-p0.json').read_text())
     dec = json.loads(r.must(['stellar', 'tx', 'decode'], stdin=j['envelope']))
     tx = dec.get('tx', dec)
     tx = tx.get('tx', tx)

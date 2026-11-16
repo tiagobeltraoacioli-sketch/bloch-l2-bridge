@@ -156,6 +156,7 @@ class StellarSource(unittest.TestCase):
             (('stellar', 'vaultGuard', 'guardians'), st['vaultSigners'][:3], 'also a vault guardian'),
             (('stellar', 'releaseDelay'), None, 'releaseDelay is undecided'),
             (('stellar', 'releaseDelay'), 15 * 86400, 'releaseDelay is undecided'),
+            (('stellar', 'releaseDelay'), 129601, 'half the vault pauseCooldown'),
             (('stellar', 'feeRecipient'), VAULT, 'must be an account'),
             (('stellar', 'depositFeeBps'), 0, '5 bps'),
             (('token', 'contract'), 'BridgedStablecoinV2', 'BridgedStablecoinV3'),
@@ -168,7 +169,7 @@ class StellarSource(unittest.TestCase):
                 self.assertIn(expected, got)
 
     def test_release_delay_is_a_free_parameter_of_the_reviewed_config(self):
-        for delay, threshold in ((0, 0), (7200, 0), (7200, 1_000_000_000), (14 * 86400, 5)):
+        for delay, threshold in ((0, 0), (7200, 0), (7200, 1_000_000_000), (129600, 5)):
             cfg = copy.deepcopy(self.cfg)
             cfg['stellar'].update(releaseDelay=delay, largeReleaseThreshold=threshold)
             self.assertEqual(dp.validate(cfg, False)['sourceStellar']['releaseDelay'], delay)

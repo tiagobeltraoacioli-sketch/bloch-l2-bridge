@@ -11,7 +11,7 @@ Every block is one command. Replace the words in capitals. No block carries a co
 |---|---|
 | The 7 `eth-release-signer` addresses and the 3 `eth-vault-guardian` addresses (the Ethereum bridge's, `docs/BRIDGE-V3-KEY-CEREMONY.md`) | `deployments/stellar/busdc-xlm-vault.config.json`: `signers`, `guardians` (20-byte hex without `0x`, each list ascending) |
 | The 7 `l2-mint-signer` and 3 `l2-token-guardian` addresses with their operators | `deployments/stellar/busdc-xlm-token.config.json`: `signers.set`, `guardians.set` |
-| The release delay (section 5 of the design document): PROPOSED 2 hours on every release | vault config `release_delay`, `large_release_threshold`; token config `stellar.releaseDelay`, `stellar.largeReleaseThreshold` |
+| The release delay (section 5 of the design document): PROPOSED 2 hours on every release; at most half the pause cooldown | vault config `release_delay`, `large_release_threshold`; token config `stellar.releaseDelay`, `stellar.largeReleaseThreshold` |
 | Confirmation of the limits (cap 100,000 USDC, 10,000 a day, minimum deposit 11, minimum burn 10) | both configs |
 | The fee address, funded and with a USDC trustline (section 2) | already filled: `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA` |
 | A fresh Stellar deployer account with about 30 XLM, and a relayer account with about 20 XLM | CLI identities `deployer`, `relayer` |
@@ -124,7 +124,8 @@ equals the one already in the file (release delay, fee address, thresholds, limi
 
 The tool is the Ethereum bridge's `deploy_pontes.py`. The `stellar` section selects the Stellar source path; the
 source RPC is the owner's own Stellar RPC. `plan`, `run` and `record` have not been executed for this configuration
-in round 16 (`docs/STELLAR-BRIDGE.md` section 13); rehearse them on a private network first.
+in round 16 against the L2 or the public Stellar network; they were run end to end on private networks (the main
+rehearsal deploys its token with exactly these commands plus `--rehearsal`).
 
 ```
 python3 tools/deploy-pontes/deploy_pontes.py validate --config deployments/stellar/busdc-xlm-token.config.json
@@ -161,7 +162,8 @@ python3 tools/deploy-pontes/deploy_pontes.py verify --config deployments/stellar
 forge create contracts/stellar/StellarBurnRouter.sol:StellarBurnRouter --rpc-url L2_RPC_URL CAST_WALLET_ARGUMENTS --broadcast --constructor-args L2_TOKEN_ADDRESS
 ```
 
-The router has no power: it forwards a burn of the caller's own tokens and logs the Stellar address.
+The router has no power: it forwards a burn of the caller's own tokens and logs the Stellar address. Exits go
+through it; a burn made directly on the token is served only by the claim rule (`docs/STELLAR-BRIDGE.md` section 4b).
 
 ## 8. Pairing check
 
@@ -226,4 +228,5 @@ python3 tools/evm-nets/network_json.py check deployments/stellar/bridge.network.
 - [ ] Token deployed by the deploy tool; `verify` answers `verified`; pairing check ok.
 - [ ] 7 signers and 3 guardians each proved their keys; guardians are not signers; operators are distinct.
 - [ ] Reserves monitor green; guardian check timer shorter than the release delay; rent alerts wired.
+- [ ] Every guardian knows that a pause voids the queue and that there is nothing else to sign.
 - [ ] First minimum deposit and exit completed before the bridge is announced.

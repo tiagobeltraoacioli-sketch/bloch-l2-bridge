@@ -46,8 +46,7 @@
     "switchThreshold": 6,
     "guardians": "TBD-owner",
     "guardianPower": "pause-only",
-    "pauseSeconds": 259200,
-    "guardianCancelQuorum": 2
+    "pauseSeconds": 259200
   },
   "l2": {
     "chainId": 700770,
@@ -104,13 +103,13 @@
     ]
   },
   "release": {
-    "l2Function": "StellarBurnRouter.burnTo(uint64 amount, string stellarAddress) after approving the router; or token.burn(amount, commitment) directly",
+    "l2Function": "StellarBurnRouter.burnTo(uint64 amount, string stellarAddress) after approving the router; it emits StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress)",
     "recipientEncoding": "a Stellar G... account or C... contract address; the burn names its commitment, the low 20 bytes of keccak256(bytes32('BLOCH-XLM-RECIPIENT-v1') ‖ the 56-character address)",
     "typicalSeconds": 10800,
     "paysAsset": "USDC on Stellar, the burned amount less 0.05%, in stroops (amount * 10)",
     "notes": [
       "a G... recipient must already hold a USDC trustline; until it does the release stays unpaid and can be retried, it is not lost",
-      "every release waits release_delay (proposed 2 hours) in the vault's queue before anyone can execute it",
+      "every release waits release_delay (proposed 2 hours) in the vault's queue before anyone can execute it; a guardian pause voids the queue, and the exit is then re-certified and waits the delay again",
       "a recipient whose authorization the issuer revoked cannot be paid until the issuer restores it",
       "muxed (M...) addresses are not accepted"
     ]
@@ -126,7 +125,8 @@
   "notes": [
     "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
     "limits are in custody units of 6 decimals (asset.unit); one unit is 10 stroops of the 7-decimal asset.",
-    "guardians: one guardian pauses the vault for 72 h by a signature that anyone relays (its secp256k1 key cannot sign a Stellar transaction). DIFFERENCE from the other networks (committee.guardianCancelQuorum): while the release delay is above 0, 2 of 3 guardians can also cancel a QUEUED release; a cancel pays no one, loses no burn (the burn id is free again) and 6 of 7 signers certify that burn again, once; that release cannot be cancelled. With delay 0 nothing queues and the guardians are pause-only in the strict sense. docs/STELLAR-BRIDGE.md section 4.",
+    "guardians: pause-only, as on the other networks. One guardian pauses the vault for 72 h by a signature (an Ethereum personal message) that anyone relays. A pause VOIDS: every release still queued and every certificate signed before it is dead for good, and the committee certifies those burns again by itself (ordinary 5 of 7) once the pause is over; they wait the delay again. A frontend must show a queued exit that a pause voided as 'held, will be re-certified', never as lost. There is no cancel (committee.guardianCancelQuorum is absent). docs/STELLAR-BRIDGE.md section 4.",
+    "exits go through StellarBurnRouter.burnTo. A burn made directly on the token towards 20 bytes that are not the commitment of a Stellar address is held and paid only when the account that burned signs a claim naming a Stellar address (docs/STELLAR-BRIDGE.md section 4b); a contract cannot claim. Integrations must not burn bUSDC.xlm directly.",
     "release delay (limits.releaseDelaySeconds with largeItemThreshold 0: every release queues): 7200 s is a PROPOSAL. The delay is a deployment parameter the owner decides; 0 gives the Ethereum launch behaviour. docs/STELLAR-BRIDGE.md section 5."
   ]
 }
