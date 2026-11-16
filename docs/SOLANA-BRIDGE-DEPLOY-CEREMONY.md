@@ -170,17 +170,19 @@ solana program deploy --final --program-id program-keypair.json --keypair deploy
 export PROGRAM_ID=$(solana-keygen pubkey program-keypair.json)
 ```
 ```
-solana program show $PROGRAM_ID --url $RPC
+solana program show $PROGRAM_ID --keypair deployer.json --url $RPC
 ```
 
-`show` must report the upgradeable loader as owner and **no upgrade authority** (`Authority: none`). If it shows
+`show` must report the upgradeable loader as owner and **no upgrade authority** (`Authority: none`). (The CLI of Agave v4.4.1
+asks for a signer even for this read when the machine has no default keypair: the first rehearsal run stopped on
+`No default signer found`, hence `--keypair` here and on `dump`.) If it shows
 an authority, the program is not final: do not initialize anything on it (the program would refuse anyway), and
 start again with a new program keypair.
 
 Compare the deployed binary with the built one:
 
 ```
-solana program dump $PROGRAM_ID deployed.so --url $RPC
+solana program dump $PROGRAM_ID deployed.so --keypair deployer.json --url $RPC
 ```
 ```
 cmp --bytes=$(stat -c %s solana/bloch-sol-vault/target/deploy/bloch_sol_vault.so) deployed.so solana/bloch-sol-vault/target/deploy/bloch_sol_vault.so

@@ -482,11 +482,13 @@ itself runs in the native program and is not counted in these compute units.
 | `initialize` (7 signers, 3 guardians) | 0 | 850 | not measured |
 
 On a real validator (solana-test-validator of Agave v4.4.1, the local rehearsal, `computeUnitsConsumed` of the
-transaction): `approve_release` with 5 signatures 15,550; `execute_release` 13,994 for the wallet of one run (the
-program searches the bump of the recipient's associated token address, about 1,500 units per miss, so the figure
-depends on the wallet: each further miss has probability one half, and a wallet ground to cost 40 misses would
-still stay under 80,000); `guardian_pause` 6,120; `unpause` with 6 signatures 6,473. The figures of each run are
-in the rehearsal's `result.json`.
+transaction, three runs): `approve_release` with 5 signatures 14,050 to 18,550; `execute_release` 12,492 to
+13,994; `deposit` 15,639; `set_controls` with 5 signatures 6,448; `guardian_pause` 6,120; `unpause` with 6
+signatures 6,473. `approve_release`, `execute_release` and `deposit` vary in steps of about 1,500 units: each
+searches the bump of a program-derived address (the release record of the nonce, the recipient's associated token
+address, the deposit record), and every miss costs that much. Each further miss has probability one half; a
+wallet ground to cost 40 misses would still keep `execute_release` under 80,000. The figures of each run are in
+the rehearsal's `result.json`.
 
 All are far below the default limit of 200,000 compute units per instruction; no compute budget instruction is
 needed. The canonical certificate is `61 + 96 n` bytes for `n` signatures.
