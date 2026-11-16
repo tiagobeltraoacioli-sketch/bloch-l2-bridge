@@ -20,7 +20,7 @@
   },
   "source": {
     "revision": null,
-    "wasmSha256": "b3cca6874e247d46718df3506505ebf53fec06cdbc70b4c7e930823028d0ead3"
+    "wasmSha256": "ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9"
   },
   "deployer": {
     "account": "TBD-owner"

@@ -25,7 +25,7 @@ symbol `bUSDC.xlm`. One vault, one token, own cap and own books.
 | Deploy tool, Stellar source path | `tools/deploy-pontes/source_stellar.py` (+ 16 lines in `deploy_pontes.py`) | 210 |
 | Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,218 |
 
-Final vault Wasm: sha256 `@@WASM@@` (@@SIZE@@ bytes), built on the host with stellar-cli 30.0.1,
+Final vault Wasm: sha256 `ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9` (34,547 bytes), built on the host with stellar-cli 30.0.1,
 soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`, twice: from two source paths with two target directories,
 same hash. It imports no `update_current_contract_wasm`, no `create_contract` and no `upload_wasm`
 (`wasm_imports.py`), so its code can never change.
@@ -288,7 +288,7 @@ Questions for the auditor: the Stellar Asset Contract's behaviour for the real U
 trustline limits); archival and automatic restoration across protocol upgrades; resource limits of a release with 7
 signatures; the absence of an on-chain source anchor; the pause count and the void and re-certification rule.
 
-## 12. Tests and results (final Wasm `@@WASMSHORT@@`)
+## 12. Tests and results (final Wasm `ebe14e4b…f25e9`)
 
 - Vault unit suite: 159 tests, 159 pass (SDK 29 test host, independent second implementation of every hash,
   randomized rate-limit and books properties). Fewer than revision 1's 168: the cancel and generation tests are
@@ -296,7 +296,7 @@ signatures; the absence of an on-chain source anchor; the pause count and the vo
 - Router: 9 of 9 forge tests, rerun on the host on the final tip.
 - Deploy tool: `test_source_stellar.py`, 12 tests pass; the existing deploy tool suites pass unchanged.
 - Wasm built twice on the host, from two source paths with two target directories: the same hash.
-- Archival rehearsal (private network, entries live 20 ledgers, Wasm `@@ARCHWASM@@`, the same source with
+- Archival rehearsal (private network, entries live 20 ledgers, Wasm `510ec101…32ea3`, the same source with
   `RECORD_TTL` 30): 14 of 14 checks pass.
 - Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode, everything run from a
   git checkout of the tip): @@MAIN@@.

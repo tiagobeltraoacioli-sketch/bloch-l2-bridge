@@ -902,6 +902,15 @@ def main_flow(r):
     check('direct burn: the burner signs the claim text (an Ethereum personal message naming the chain, the token, the '
           'burn id and one Stellar address); 5 signers certify, the address is paid 60 less 5 bps',
           ok and rc == 0 and r.balance(p2) == bal2 + 60 * S - 300_000, sent)
+    rc_with, out_with = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-1.json', 'check')
+    hidden = claim_file.with_suffix('.hidden')
+    claim_file.rename(hidden)
+    rc_without, out_without = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-1.json', 'check')
+    hidden.rename(claim_file)
+    check('direct burn: the guardian check accepts that release with the burner\'s signed claim, and reports it as a '
+          'finding without the claim', rc_with == 0 and rc_without == 2
+          and [x['nonce'] for x in out_without.get('findings', [])] == [cd['call']['args']['item']['nonce']] if ok else False,
+          [out_with, out_without])
     notes['direct_burn_claim'] = {'burn_tx': txd, 'burn_id': burnd, 'text': text}
 
     # 13. diverging and stale views are held
@@ -934,7 +943,10 @@ def main_flow(r):
     for i in range(7):
         c = json.loads((r.dir / f'signer-{i}.json').read_text())
         c.update(shared_dir=str(shared), signer_name=f's{i}', stellar_rpc=r.rpc, view_account=r.addr['relayer'],
-                 vault_wasm_hash=r.wasm_hash, stellar_config_dir=str(r.xdg), finality_ledgers=12)
+                 vault_wasm_hash=r.wasm_hash, stellar_config_dir=str(r.xdg), finality_ledgers=12,
+                 # In this local mode all daemons share one directory, so the per-burn hourly budget (6 for each
+                 # operator's own directory in production) is shared by five signers.
+                 max_release_signs_per_hour=30)
         (r.dir / f'vigia-{i}.json').write_text(json.dumps(c, indent=1))
     c.update(signer_name='relay', l2_chain_id=31337, l2_relayer_key=str(gas_key), relayer=r.addr['relayer'],
              relayer_identity='relayer', journal=str(r.dir / 'journal'), relayer_state=str(r.dir / 'vigia-nonces.json'))
@@ -1195,7 +1207,8 @@ def main():
             setup(*x, **k)
             ks = r.dir / 'keystores'
             for i in range(3):
-                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600}
+                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600,
+                     'recipient_claims': str(r.dir / 'claims')}
                 if r.anvil_port:
                     g.update(l2_rpc=r.l2, l2_finalized_tag='finalized')
                 (r.dir / f'guard-{i}.json').write_text(json.dumps(g, indent=1))

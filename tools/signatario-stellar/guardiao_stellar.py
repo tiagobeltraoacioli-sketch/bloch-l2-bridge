@@ -18,7 +18,8 @@ check    read-only: every release the vault paid or queued (its events in the RP
          voided pays no one: it is listed under `voided`, not as a finding.
 
 Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`, `keystore`, `password_file`; for `check` also
-`l2_rpc`, `token`, optional `l2_finalized_tag` (default "finalized"), `from_ledger`; optional `cast`, `stellar_cli`.
+`l2_rpc`, `token`, optional `l2_finalized_tag` (default "finalized"), `from_ledger`, `recipient_claims` (the signed
+claims of direct burns, as the signers hold them); optional `cast`, `stellar_cli`.
 """
 import json
 from pathlib import Path
@@ -76,6 +77,26 @@ class Guardian:
         Path(out).write_text(json.dumps(call, indent=2) + '\n')
         print(json.dumps(call, indent=2))
 
+    def claimed(self, log, burn, recipient):
+        """A direct burn paid on the burner's claim (docs/STELLAR-BRIDGE.md 4b): the claim file is in
+        `recipient_claims`, names this recipient and is signed by the account in the burn's own log."""
+        claims = self.cfg.get('recipient_claims')
+        path = Path(claims) / f'{burn}.json' if claims else None
+        if path is None or not path.exists():
+            return False
+        try:
+            claim = json.loads(path.read_text())
+            burner = '0x' + log['topics'][3][-40:]
+            chain = int(self.run([self.cast, 'chain-id', '--rpc-url', self.cfg['l2_rpc']]))
+            text = sn.claim_text(chain, self.cfg['token'], burn, recipient)
+            if claim.get('stellar_address') != recipient:
+                return False
+            done = subprocess.run([self.cast, 'wallet', 'verify', '--address', burner, text, str(claim.get('signature'))],
+                                  capture_output=True, text=True)
+            return done.returncode == 0
+        except (OSError, ValueError, KeyError, TypeError, sn.StellarError):
+            return False
+
     def check(self):
         tok, l2 = self.cfg['token'], self.cfg['l2_rpc']
         fin_tag = self.cfg.get('l2_finalized_tag', 'finalized')
@@ -105,9 +126,11 @@ class Guardian:
                     dec = self.run([self.cast, 'abi-decode', '--input', 'f(uint64,address,uint64,uint64,bytes32)',
                                     logs[0]['data']]).splitlines()
                     amount = int(dec[0].split()[0])
-                    if amount != int(f['amount']) or \
-                            dec[1].strip().lower() != '0x' + sn.recipient_commitment(f['recipient']).hex():
-                        reason = 'the L2 burn has another amount or recipient'
+                    if amount != int(f['amount']):
+                        reason = 'the L2 burn has another amount'
+                    elif dec[1].strip().lower() != '0x' + sn.recipient_commitment(f['recipient']).hex() \
+                            and not self.claimed(logs[0], burn, f['recipient']):
+                        reason = 'the L2 burn names another recipient, and the account that burned signed no claim for it'
                 if reason:
                     findings.append({'release': rid, 'event': e['name'], 'nonce': nonce, 'ledger': e['ledger'],
                                      'reason': reason})
