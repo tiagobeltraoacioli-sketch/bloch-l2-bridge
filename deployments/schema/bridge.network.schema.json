@@ -5,54 +5,206 @@
   "description": "Published as deployments/<network>/bridge.network.json in bloch-l2-bridge. Read by the DEX and bridge frontends and by integrators. It carries no secret and no operator host. Amounts are decimal strings in the smallest unit of the side they describe. A value not known before the owner deploys is the string \"TBD-deploy\"; a value the owner must decide is \"TBD-owner\". A consumer must refuse to move funds while any address it needs is TBD.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "status", "network", "asset", "custody", "committee", "l2", "limits", "fee", "finality", "deposit", "release", "explorers"],
+  "required": [
+    "schema",
+    "status",
+    "network",
+    "asset",
+    "custody",
+    "committee",
+    "l2",
+    "limits",
+    "fee",
+    "finality",
+    "deposit",
+    "release",
+    "explorers"
+  ],
   "$defs": {
-    "tbd": {"enum": ["TBD-deploy", "TBD-owner"]},
-    "amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
-    "amountOrTbd": {"anyOf": [{"$ref": "#/$defs/amount"}, {"$ref": "#/$defs/tbd"}]},
-    "stringOrTbd": {"type": "string", "minLength": 1},
-    "uint": {"type": "integer", "minimum": 0}
+    "tbd": {
+      "enum": [
+        "TBD-deploy",
+        "TBD-owner"
+      ]
+    },
+    "amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "amountOrTbd": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/amount"
+        },
+        {
+          "$ref": "#/$defs/tbd"
+        }
+      ]
+    },
+    "stringOrTbd": {
+      "type": "string",
+      "minLength": 1
+    },
+    "uint": {
+      "type": "integer",
+      "minimum": 0
+    }
   },
   "properties": {
-    "schema": {"const": "bloch.bridge.network.v1"},
+    "schema": {
+      "const": "bloch.bridge.network.v1"
+    },
     "status": {
       "description": "unaudited-not-deployed until the owner deploys; rehearsal for a local private instance; live only after deployment and verification.",
-      "enum": ["unaudited-not-deployed", "rehearsal", "live", "paused", "retired"]
+      "enum": [
+        "unaudited-not-deployed",
+        "rehearsal",
+        "live",
+        "paused",
+        "retired"
+      ]
     },
     "network": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "kind", "chainId"],
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "chainId"
+      ],
       "properties": {
-        "id": {"description": "Stable lowercase key, also the directory name: ethereum, arbitrum-one, base, op-mainnet, linea, bnb, bitcoin, solana, tron, stellar.", "type": "string", "pattern": "^[a-z0-9-]{2,24}$"},
-        "name": {"type": "string"},
-        "kind": {"enum": ["evm", "utxo", "svm", "tvm", "stellar"]},
-        "chainId": {"description": "EVM: the decimal chain id as a string. Others: the network's own identifier (Bitcoin: genesis block hash; Solana: genesis hash; Tron: the chain id of the genesis block; Stellar: the network passphrase).", "type": "string", "minLength": 1},
-        "nativeCurrency": {"description": "What pays transaction fees on the source network.", "type": "object", "additionalProperties": false, "required": ["symbol", "decimals"], "properties": {"symbol": {"type": "string"}, "decimals": {"$ref": "#/$defs/uint"}}}
+        "id": {
+          "description": "Stable lowercase key, also the directory name: ethereum, arbitrum-one, base, op-mainnet, linea, bnb, bitcoin, solana, tron, stellar.",
+          "type": "string",
+          "pattern": "^[a-z0-9-]{2,24}$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "evm",
+            "utxo",
+            "svm",
+            "tvm",
+            "stellar"
+          ]
+        },
+        "chainId": {
+          "description": "EVM: the decimal chain id as a string. Others: the network's own identifier (Bitcoin: genesis block hash; Solana: genesis hash; Tron: the chain id of the genesis block; Stellar: the network passphrase).",
+          "type": "string",
+          "minLength": 1
+        },
+        "nativeCurrency": {
+          "description": "What pays transaction fees on the source network.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "symbol",
+            "decimals"
+          ],
+          "properties": {
+            "symbol": {
+              "type": "string"
+            },
+            "decimals": {
+              "$ref": "#/$defs/uint"
+            }
+          }
+        }
       }
     },
     "asset": {
       "description": "The asset locked on the source network.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["symbol", "name", "decimals", "id", "issuer", "verified"],
+      "required": [
+        "symbol",
+        "name",
+        "decimals",
+        "id",
+        "issuer",
+        "verified"
+      ],
       "properties": {
-        "symbol": {"type": "string"},
-        "name": {"type": "string"},
-        "decimals": {"$ref": "#/$defs/uint"},
-        "id": {"description": "EVM / Tron: token contract address. Solana: mint. Stellar: CODE:ISSUER or the contract id. Bitcoin: the string native.", "type": "string", "minLength": 1},
-        "issuer": {"description": "Who issues or custodies the asset (for example Circle; Binance for a peg token; none for BTC).", "type": "string"},
-        "issuerNative": {"type": "boolean"},
-        "issuerPowers": {"description": "What the issuer can do to a holder: any of blacklist, pause, upgrade, seize, burn.", "type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "symbol": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "decimals": {
+          "$ref": "#/$defs/uint"
+        },
+        "id": {
+          "description": "EVM / Tron: token contract address. Solana: mint. Stellar: CODE:ISSUER or the contract id. Bitcoin: the string native.",
+          "type": "string",
+          "minLength": 1
+        },
+        "issuer": {
+          "description": "Who issues or custodies the asset (for example Circle; Binance for a peg token; none for BTC).",
+          "type": "string"
+        },
+        "issuerNative": {
+          "type": "boolean"
+        },
+        "issuerPowers": {
+          "description": "What the issuer can do to a holder: any of blacklist, pause, upgrade, seize, burn.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
         "verified": {
           "description": "How the asset id was verified: at least one issuer document and one on-chain reading.",
-          "type": "array", "minItems": 1,
-          "items": {"type": "object", "additionalProperties": false, "required": ["source", "date"], "properties": {"source": {"type": "string"}, "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, "note": {"type": "string"}}}
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "date"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
         },
         "unit": {
           "description": "Present only when the vault counts a unit other than the asset's smallest unit (BNB Smart Chain: the vault holds a 6-decimal unit token over an 18-decimal asset).",
-          "type": "object", "additionalProperties": false, "required": ["adapter", "decimals", "assetUnitsPerUnit"],
-          "properties": {"adapter": {"$ref": "#/$defs/stringOrTbd"}, "decimals": {"$ref": "#/$defs/uint"}, "assetUnitsPerUnit": {"$ref": "#/$defs/amount"}, "note": {"type": "string"}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "adapter",
+            "decimals",
+            "assetUnitsPerUnit"
+          ],
+          "properties": {
+            "adapter": {
+              "$ref": "#/$defs/stringOrTbd"
+            },
+            "decimals": {
+              "$ref": "#/$defs/uint"
+            },
+            "assetUnitsPerUnit": {
+              "$ref": "#/$defs/amount"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -60,128 +212,401 @@
       "description": "Where the asset is held on the source network.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "address"],
+      "required": [
+        "type",
+        "address"
+      ],
       "properties": {
-        "type": {"enum": ["evm-vault", "tvm-vault", "svm-program", "soroban-contract", "btc-script"]},
-        "address": {"description": "Vault contract, program id plus vault account, contract id, or the deposit script descriptor; TBD-deploy before deployment.", "$ref": "#/$defs/stringOrTbd"},
-        "contract": {"description": "Source path and name of the code, in this repository.", "type": "string"},
-        "codeHash": {"description": "Hash the signers pin (EVM: keccak256 of the runtime code).", "$ref": "#/$defs/stringOrTbd"},
-        "route": {"description": "The route id that deposits and releases bind (EVM vault: routeId()).", "$ref": "#/$defs/stringOrTbd"},
-        "fromBlock": {"description": "First block, slot or ledger to scan for deposits.", "anyOf": [{"$ref": "#/$defs/uint"}, {"$ref": "#/$defs/tbd"}]}
+        "type": {
+          "enum": [
+            "evm-vault",
+            "tvm-vault",
+            "svm-program",
+            "soroban-contract",
+            "btc-script"
+          ]
+        },
+        "address": {
+          "description": "Vault contract, program id plus vault account, contract id, or the deposit script descriptor; TBD-deploy before deployment.",
+          "$ref": "#/$defs/stringOrTbd"
+        },
+        "contract": {
+          "description": "Source path and name of the code, in this repository.",
+          "type": "string"
+        },
+        "codeHash": {
+          "description": "Hash the signers pin (EVM: keccak256 of the runtime code).",
+          "$ref": "#/$defs/stringOrTbd"
+        },
+        "route": {
+          "description": "The route id that deposits and releases bind (EVM vault: routeId()).",
+          "$ref": "#/$defs/stringOrTbd"
+        },
+        "fromBlock": {
+          "description": "First block, slot or ledger to scan for deposits.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uint"
+            },
+            {
+              "$ref": "#/$defs/tbd"
+            }
+          ]
+        }
       }
     },
     "committee": {
       "description": "The set-once secp256k1 committee; addresses are the Ethereum-style 20-byte addresses of the keys, the same keys on every network.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["scheme", "signers", "threshold", "guardians"],
+      "required": [
+        "scheme",
+        "signers",
+        "threshold",
+        "guardians"
+      ],
       "properties": {
-        "scheme": {"const": "secp256k1"},
-        "signers": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"$ref": "#/$defs/tbd"}]},
-        "threshold": {"$ref": "#/$defs/uint"},
-        "switchThreshold": {"$ref": "#/$defs/uint"},
-        "guardians": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"$ref": "#/$defs/tbd"}]},
-        "guardianPower": {"const": "pause-only"},
-        "pauseSeconds": {"$ref": "#/$defs/uint"}
+        "scheme": {
+          "const": "secp256k1"
+        },
+        "signers": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "$ref": "#/$defs/tbd"
+            }
+          ]
+        },
+        "threshold": {
+          "$ref": "#/$defs/uint"
+        },
+        "switchThreshold": {
+          "$ref": "#/$defs/uint"
+        },
+        "guardians": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "$ref": "#/$defs/tbd"
+            }
+          ]
+        },
+        "guardianPower": {
+          "const": "pause-only"
+        },
+        "pauseSeconds": {
+          "$ref": "#/$defs/uint"
+        },
+        "guardianCancelQuorum": {
+          "description": "Optional (requested by the Stellar bridge). How many guardians cancel a QUEUED source-side release while releaseDelaySeconds is above 0. Absent: guardians cannot cancel a release there. guardianPower stays pause-only: a cancel moves no funds.",
+          "$ref": "#/$defs/uint"
+        }
       }
     },
     "l2": {
       "description": "The wrapped token on the Bloch L2. One token per (asset, source network).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["chainId", "token", "name", "symbol", "decimals", "contract"],
+      "required": [
+        "chainId",
+        "token",
+        "name",
+        "symbol",
+        "decimals",
+        "contract"
+      ],
       "properties": {
-        "chainId": {"const": 700770},
-        "token": {"$ref": "#/$defs/stringOrTbd"},
-        "name": {"type": "string"},
-        "symbol": {"type": "string", "pattern": "^[A-Za-z0-9.]{1,11}$"},
-        "decimals": {"$ref": "#/$defs/uint"},
-        "contract": {"type": "string"},
-        "creationCodeKeccak": {"description": "keccak256 of the creation code without constructor arguments.", "type": "string"},
-        "codeHash": {"$ref": "#/$defs/stringOrTbd"}
+        "chainId": {
+          "const": 700770
+        },
+        "token": {
+          "$ref": "#/$defs/stringOrTbd"
+        },
+        "name": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.]{1,11}$"
+        },
+        "decimals": {
+          "$ref": "#/$defs/uint"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "creationCodeKeccak": {
+          "description": "keccak256 of the creation code without constructor arguments.",
+          "type": "string"
+        },
+        "codeHash": {
+          "$ref": "#/$defs/stringOrTbd"
+        }
       }
     },
     "limits": {
       "description": "Fixed at deployment. Source-side amounts are in custody units (asset.unit.decimals when present, otherwise asset.decimals); l2 amounts in l2.decimals.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["cap", "window", "windowSeconds", "minDeposit", "maxDeposit", "l2MinBurn", "l2MaxBurn", "mintDelaySeconds"],
+      "required": [
+        "cap",
+        "window",
+        "windowSeconds",
+        "minDeposit",
+        "maxDeposit",
+        "l2MinBurn",
+        "l2MaxBurn",
+        "mintDelaySeconds"
+      ],
       "properties": {
-        "cap": {"description": "Largest total locked; equals the L2 supply cap.", "$ref": "#/$defs/amountOrTbd"},
-        "window": {"description": "Release (and mint) token bucket capacity.", "$ref": "#/$defs/amountOrTbd"},
-        "windowSeconds": {"description": "Seconds for a full refill of the bucket.", "$ref": "#/$defs/uint"},
-        "minDeposit": {"$ref": "#/$defs/amountOrTbd"},
-        "maxDeposit": {"$ref": "#/$defs/amountOrTbd"},
-        "l2MinBurn": {"$ref": "#/$defs/amountOrTbd"},
-        "l2MaxBurn": {"$ref": "#/$defs/amountOrTbd"},
-        "mintDelaySeconds": {"description": "Every mint waits this long on the L2 and can be cancelled by the guardians meanwhile (large-item delay with threshold 0).", "$ref": "#/$defs/uint"},
-        "largeItemThreshold": {"description": "Amount at or above which the delay applies; 0 = every item.", "$ref": "#/$defs/amountOrTbd"}
+        "cap": {
+          "description": "Largest total locked; equals the L2 supply cap.",
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "window": {
+          "description": "Release (and mint) token bucket capacity.",
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "windowSeconds": {
+          "description": "Seconds for a full refill of the bucket.",
+          "$ref": "#/$defs/uint"
+        },
+        "minDeposit": {
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "maxDeposit": {
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "l2MinBurn": {
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "l2MaxBurn": {
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "mintDelaySeconds": {
+          "description": "Every mint waits this long on the L2 and can be cancelled by the guardians meanwhile (large-item delay with threshold 0).",
+          "$ref": "#/$defs/uint"
+        },
+        "largeItemThreshold": {
+          "description": "Amount at or above which the delay applies; 0 = every item.",
+          "$ref": "#/$defs/amountOrTbd"
+        },
+        "releaseDelaySeconds": {
+          "description": "Optional (requested by the Stellar bridge). Seconds a release at or above largeItemThreshold waits in the source-side custody before it is paid. Absent or 0: releases are paid at once.",
+          "$ref": "#/$defs/uint"
+        }
       }
     },
     "fee": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["depositBps", "releaseBps", "recipient", "paidOn"],
+      "required": [
+        "depositBps",
+        "releaseBps",
+        "recipient",
+        "paidOn"
+      ],
       "properties": {
-        "depositBps": {"$ref": "#/$defs/uint"},
-        "releaseBps": {"$ref": "#/$defs/uint"},
-        "recipient": {"description": "The owner's fee address on the source network, immutable at deployment.", "type": "string", "minLength": 1},
-        "paidOn": {"const": "source"},
-        "collection": {"description": "How the fee reaches the recipient (for example accrued in the vault and swept by anyone; an output of the release transaction).", "type": "string"},
-        "networkFee": {"description": "Who pays the source network's transaction fee of a release and by which rule (Bitcoin: taken from the user's amount).", "type": "string"}
+        "depositBps": {
+          "$ref": "#/$defs/uint"
+        },
+        "releaseBps": {
+          "$ref": "#/$defs/uint"
+        },
+        "recipient": {
+          "description": "The owner's fee address on the source network, immutable at deployment.",
+          "type": "string",
+          "minLength": 1
+        },
+        "paidOn": {
+          "const": "source"
+        },
+        "collection": {
+          "description": "How the fee reaches the recipient (for example accrued in the vault and swept by anyone; an output of the release transaction).",
+          "type": "string"
+        },
+        "networkFee": {
+          "description": "Who pays the source network's transaction fee of a release and by which rule (Bitcoin: taken from the user's amount).",
+          "type": "string"
+        }
       }
     },
     "finality": {
       "description": "The rule every signer applies on its own node before attesting a deposit.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["rule", "typicalSeconds", "reorg"],
+      "required": [
+        "rule",
+        "typicalSeconds",
+        "reorg"
+      ],
       "properties": {
-        "rule": {"description": "One sentence a user can read.", "type": "string"},
-        "tag": {"description": "RPC tag or commitment level the signer reads (finalized, solidified, ...).", "type": "string"},
-        "confirmations": {"description": "Extra blocks, slots or ledgers on top of the tag (Bitcoin: N).", "$ref": "#/$defs/uint"},
-        "typicalSeconds": {"description": "Typical time from the deposit transaction to attestable.", "$ref": "#/$defs/uint"},
-        "worstCaseSeconds": {"$ref": "#/$defs/uint"},
-        "reorg": {"description": "What happens if the source network reorganises after attestation; must be fail-safe (hold, never a second credit).", "type": "string"}
+        "rule": {
+          "description": "One sentence a user can read.",
+          "type": "string"
+        },
+        "tag": {
+          "description": "RPC tag or commitment level the signer reads (finalized, solidified, ...).",
+          "type": "string"
+        },
+        "confirmations": {
+          "description": "Extra blocks, slots or ledgers on top of the tag (Bitcoin: N).",
+          "$ref": "#/$defs/uint"
+        },
+        "typicalSeconds": {
+          "description": "Typical time from the deposit transaction to attestable.",
+          "$ref": "#/$defs/uint"
+        },
+        "worstCaseSeconds": {
+          "$ref": "#/$defs/uint"
+        },
+        "reorg": {
+          "description": "What happens if the source network reorganises after attestation; must be fail-safe (hold, never a second credit).",
+          "type": "string"
+        }
       }
     },
     "deposit": {
       "description": "How a user deposits and names the L2 recipient.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["method", "recipientEncoding", "steps"],
+      "required": [
+        "method",
+        "recipientEncoding",
+        "steps"
+      ],
       "properties": {
-        "method": {"enum": ["contract-call", "program-instruction", "tagged-address", "memo"]},
-        "recipientEncoding": {"description": "How the 20-byte L2 address is carried (EVM vault: bytes32, the address left-padded with zeros).", "type": "string"},
-        "function": {"description": "EVM / Tron / Soroban: the function signature to call on custody.address (or on asset.unit.adapter).", "type": "string"},
-        "approvalTarget": {"description": "The address the user approves the asset to, when an approval is needed.", "$ref": "#/$defs/stringOrTbd"},
-        "steps": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        "refusals": {"description": "Deposits that are refused or would be stuck (contract recipients, amounts outside the limits, ...).", "type": "array", "items": {"type": "string"}}
+        "method": {
+          "enum": [
+            "contract-call",
+            "program-instruction",
+            "tagged-address",
+            "memo"
+          ]
+        },
+        "recipientEncoding": {
+          "description": "How the 20-byte L2 address is carried (EVM vault: bytes32, the address left-padded with zeros).",
+          "type": "string"
+        },
+        "function": {
+          "description": "EVM / Tron / Soroban: the function signature to call on custody.address (or on asset.unit.adapter).",
+          "type": "string"
+        },
+        "approvalTarget": {
+          "description": "The address the user approves the asset to, when an approval is needed.",
+          "$ref": "#/$defs/stringOrTbd"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "refusals": {
+          "description": "Deposits that are refused or would be stuck (contract recipients, amounts outside the limits, ...).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "release": {
       "description": "How a burn on the L2 is paid on the source network.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["l2Function", "recipientEncoding", "typicalSeconds"],
+      "required": [
+        "l2Function",
+        "recipientEncoding",
+        "typicalSeconds"
+      ],
       "properties": {
-        "l2Function": {"type": "string"},
-        "recipientEncoding": {"type": "string"},
-        "typicalSeconds": {"$ref": "#/$defs/uint"},
-        "paysAsset": {"description": "What the recipient receives (the asset itself, or a unit token the recipient unwraps).", "type": "string"},
-        "notes": {"type": "array", "items": {"type": "string"}}
+        "l2Function": {
+          "type": "string"
+        },
+        "recipientEncoding": {
+          "type": "string"
+        },
+        "typicalSeconds": {
+          "$ref": "#/$defs/uint"
+        },
+        "paysAsset": {
+          "description": "What the recipient receives (the asset itself, or a unit token the recipient unwraps).",
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "explorers": {
       "description": "URL patterns with {tx}, {address} or {block}.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["source", "l2"],
+      "required": [
+        "source",
+        "l2"
+      ],
       "properties": {
-        "source": {"type": "object", "additionalProperties": false, "required": ["tx", "address"], "properties": {"tx": {"type": "string"}, "address": {"type": "string"}, "block": {"type": "string"}}},
-        "l2": {"type": "object", "additionalProperties": false, "required": ["tx", "address"], "properties": {"tx": {"type": "string"}, "address": {"type": "string"}, "block": {"type": "string"}}}
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tx",
+            "address"
+          ],
+          "properties": {
+            "tx": {
+              "type": "string"
+            },
+            "address": {
+              "type": "string"
+            },
+            "block": {
+              "type": "string"
+            }
+          }
+        },
+        "l2": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tx",
+            "address"
+          ],
+          "properties": {
+            "tx": {
+              "type": "string"
+            },
+            "address": {
+              "type": "string"
+            },
+            "block": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
-    "notes": {"type": "array", "items": {"type": "string"}}
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
   }
 }

@@ -36,7 +36,7 @@ stellar contract build --package bloch-stellar-vault
 sha256sum target/wasm32v1-none/release/bloch_stellar_vault.wasm
 ```
 
-The hash must be `@@WASM@@`. If it differs, stop. A second person
+The hash must be `b3cca6874e247d46718df3506505ebf53fec06cdbc70b4c7e930823028d0ead3`. If it differs, stop. A second person
 reproduces it on another machine before the deployment.
 
 ```
@@ -110,7 +110,7 @@ stellar contract deploy --wasm stellar/target/wasm32v1-none/release/bloch_stella
 The last line printed is the vault's contract address (`C...`). Record it and the transaction hash.
 
 Write `xlm.json` for the read-only tools: `{"stellar_rpc": "...", "network_passphrase": "...", "vault": "C...",
-"vault_wasm_hash": "@@WASM@@", "view_account": "ANY_EXISTING_G_ACCOUNT"}`.
+"vault_wasm_hash": "b3cca6874e247d46718df3506505ebf53fec06cdbc70b4c7e930823028d0ead3", "view_account": "ANY_EXISTING_G_ACCOUNT"}`.
 
 ```
 python3 tools/signatario-stellar/pairing.py args --config xlm.json --token-config deployments/stellar/busdc-xlm-token.config.json

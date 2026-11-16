@@ -25,7 +25,7 @@ symbol `bUSDC.xlm`. One vault, one token, own cap and own books.
 | Deploy tool, Stellar source path | `tools/deploy-pontes/source_stellar.py` (+ 16 lines in `deploy_pontes.py`) | 210 |
 | Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,094 |
 
-Final vault Wasm: sha256 `@@WASM@@` (33,994 bytes), built on the host with stellar-cli 30.0.1,
+Final vault Wasm: sha256 `b3cca6874e247d46718df3506505ebf53fec06cdbc70b4c7e930823028d0ead3` (33,994 bytes), built on the host with stellar-cli 30.0.1,
 soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`. It imports no `update_current_contract_wasm`, no
 `create_contract` and no `upload_wasm` (`wasm_imports.py`), so its code can never change.
 
@@ -224,19 +224,19 @@ Questions for the auditor: the Stellar Asset Contract's behaviour for the real U
 trustline limits); archival and automatic restoration across protocol upgrades; resource limits of a release with 7
 signatures; the absence of an on-chain source anchor; the cancel and re-certification state machine.
 
-## 12. Tests and results (final Wasm `@@WASMSHORT@@`)
+## 12. Tests and results (final Wasm `b3cca687…d0ead3`)
 
 - Vault unit suite: 168 tests, 168 pass (SDK 29 test host, independent second implementation of every hash,
   randomized rate-limit and books properties).
 - Router: 9 forge tests (commit `68ed7e7`, unchanged since).
 - Deploy tool: `test_source_stellar.py`, 12 tests pass; the existing deploy tool suites pass unchanged.
-- Archival rehearsal (private network, entries live 20 ledgers, Wasm `@@ARCHWASM@@`): 14 of 14 checks pass.
-- Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode): @@MAIN@@.
+- Archival rehearsal (private network, entries live 20 ledgers, Wasm `5097fc73…cadb30, the same source with `RECORD_TTL` 30`): 14 of 14 checks pass.
+- Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode): 102 of 102 checks pass.
   Sections: pairing, controls, limits, deposit and credit, finality margin, release with fee, replay, 11 forged
   certificates, delay, guardian check, cancel and re-certification, false alarm, pause chain and unpause, rate limit,
   issuer freeze, clawback, missing trustline, diverging and stale views held, watcher daemons, deploy tool source
   checks, fee sweep, books, cost.
-- Cost of a release with 5 signatures on the private network (testnet limits): @@COST@@.
+- Cost of a release with 5 signatures on the private network (testnet limits): 14,368,168 instructions (the public network allows 400,000,000 per transaction, read 2026-11-16), a 1,796-byte envelope, 2,776 bytes written, 166,104 stroops charged (0.0166 XLM).
 
 ## 13. Not done, not proven
 
@@ -256,8 +256,6 @@ signatures; the absence of an on-chain source anchor; the cancel and re-certific
 - Archival was exercised on protocol 29 only. A change of the archival rules in a later protocol needs a new check.
 - The guardian and shadow daemons of the Ethereum bridge (`tools/guardiao/`) are not adapted; `check` is a one-shot
   command run from a timer.
-- The schema has no field for the release delay or the cancel quorum; both were requested from agent 320 as optional
-  properties and are stated in the notes of `bridge.network.json` meanwhile.
 - The release keys sign raw 32-byte digests (`cast wallet sign --no-hash`), as the Ethereum half does. A hardware
   wallet that refuses blind digest signing cannot hold them.
 - Muxed accounts are not supported. A recipient that never opens a trustline is never paid; there is no timeout or
