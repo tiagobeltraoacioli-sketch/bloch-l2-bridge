@@ -14,9 +14,12 @@ throwaway generated here: 7 L2 mint keys, 7 vault release keys, 3 L2 guardians, 
 Main flow (default): deploy and pair; open the vault with a 5-of-7 certificate; deposit; the signer refuses before
 the ledger margin and signs after it; mint, wait the L2 delay, credit; burn through the router; 5 signers certify the
 release, each on its own half; the relayer pays it with the fee; replay refused; forged certificates refused; a quorum
-forgery is found by the guardian check and cancelled in the queue; limits; the large-release delay; guardian pause
-chain and 6-of-7 unpause; issuer freeze; issuer clawback; a recipient without a trustline; a diverging and a stale
-Stellar view held; the fee sweep; books.
+forgery is found by the guardian check and cancelled in the queue, and the real burn of that nonce is certified
+again by 6 signers with their own tools; a false alarm (the guardians cancel a REAL release) and the same burn paid
+exactly once afterwards; limits; the large-release delay; guardian pause chain and 6-of-7 unpause; issuer freeze;
+issuer clawback; a recipient without a trustline; a diverging and a stale Stellar view held; one deposit and one
+burn carried by the watcher daemons (vigia_stellar.py); the deploy tool's Stellar source checks against the live
+vault; the fee sweep; books; the cost of a release.
 `--only archival`: on a network whose ledger entries live only a few ledgers (a limits file with a small
 `min_persistent_ttl` and `max_entry_ttl`), a paid release's replay record is left to expire, and the replay is tried
 before and after restoring it.
@@ -49,7 +52,9 @@ notes = {}
 
 def check(name, cond, detail=''):
     results.append({'check': name, 'pass': bool(cond)})
-    print(('PASS ' if cond else 'FAIL ') + name + (f'  :: {str(detail)[-900:]}' if detail and not cond else ''), flush=True)
+    text = str(detail)
+    text = text if len(text) <= 1200 else text[:700] + ' [...] ' + text[-500:]
+    print(('PASS ' if cond else 'FAIL ') + name + (f'  :: {text}' if detail and not cond else ''), flush=True)
     return bool(cond)
 
 
@@ -213,6 +218,17 @@ class Rig:
         while self.now() < t:
             time.sleep(1)
 
+    def wait_bucket(self, units):
+        """Until the release bucket allows `units` (a signer's half refuses to certify above it)."""
+        while int(self.net.view('available_to_release')) < units:
+            time.sleep(3)
+
+    def recertify(self, nonces):
+        """Every operator lists the cancelled nonces it agrees to certify again (a deliberate act, per operator)."""
+        for i in range(7):
+            path = self.dir / f'half-{i}.json'
+            path.write_text(json.dumps({**json.loads(path.read_text()), 'recertify_nonces': nonces}, indent=1))
+
     def open_vault(self):
         """Deposits and releases opened by 5 signers, each with comite_stellar.py on its own config."""
         parts, valid = [], None
@@ -304,7 +320,8 @@ class Rig:
             tpl = [sys.executable, str(HERE / 'stellar_half.py'), '--config', str(self.dir / f'half-{i}.json')]
             cfg = {'l2_rpc': self.l2, 'l2_chain_id': 31337, 'token': self.l2token, 'token_code_keccak': self.code_keccak,
                    'source_chain_id': int(self.derived['network_id'], 16), 'source_vault': '0x' + self.derived['vault20'],
-                   'source_route': '0x' + self.derived['route'], 'threshold': 5, 'vault_threshold': 5, 'provenance': True,
+                   'source_route': '0x' + self.derived['route'], 'threshold': 5, 'vault_threshold': 5,
+                   'vault_switch_threshold': 6, 'provenance': True,
                    'l2_source': 'rpc', 'db': str(self.dir / f'signer-db-{i}.json'),
                    'keystore': str(ks / f'mint{i}'), 'password_file': str(self.dir / 'pw'),
                    'eth_signer': self.keys['vault'][i][0], 'network_passphrase': PASSPHRASE, 'vault': self.vault,
@@ -340,6 +357,7 @@ class Rig:
         self.l2send(ANVIL_KEYS[1], self.l2token, 'approve(address,uint256)', self.router, str(amount))
         tx = self.l2send(ANVIL_KEYS[1], self.router, 'burnTo(uint64,string)', str(amount), recipient)
         self.cast('rpc', 'anvil_mine', '0x80', '--rpc-url', self.l2)
+        self.wait_bucket(min(amount, self.config['window_limit']))
         return tx['transactionHash']
 
     def certify(self, burn_tx, tag, signers=range(5)):
@@ -594,10 +612,18 @@ def main_flow(r):
     g1, _ = r.direct_release(2, payee, 1_500 * U, mc, [0, 1, 2, 3, 4], generation=1, burn=burn2[2:])
     ok, out = r.invoke('relayer', r.vault, 'release', **g1['args'])
     check('cancel: a generation-1 certificate with only 5 signatures is refused', not ok and '#4' in out, out)
-    g1, g1id = r.direct_release(2, payee, 1_500 * U, mc, [0, 1, 2, 3, 4, 5], generation=1, burn=burn2[2:])
-    ok, sent = r.invoke('relayer', r.vault, 'release', **g1['args'])
-    check('cancel: 6 of 7 certify the REAL burn of that nonce (generation 1); it queues, locked',
-          ok and r.net.view('pending', id=g1id), sent)
+    # Each of 6 operators lists nonce 2 for re-certification; their own tools then read the burn from the L2 as always.
+    r.recertify([2])
+    ok, g1call = r.certify(tx2, 'g1', signers=range(6))
+    rc5, five = r.signer(0, 'combine', *sum((['--sig', r.dir / f'release-g1-{i}.json'] for i in range(5)), []),
+                         '--out', r.dir / 'g1-five.json')
+    check('cancel: the signer tool does not combine 5 partials into a generation-1 certificate',
+          rc5 != 0 and 'need 6' in json.dumps(five), five)
+    g1id = sn.release_id(g1call['call']['args']['item']).hex() if ok else ''
+    rc, sent = r.submit(g1call) if ok else (1, g1call)
+    check('cancel: 6 of 7 signers certify the REAL burn of that nonce with their own tools (generation 1); the relayer '
+          'sends it; it queues, locked', ok and rc == 0 and g1call['call']['args']['item']['generation'] == 1
+          and g1call['call']['args']['item']['native_burn'] == burn2[2:] and r.net.view('pending', id=g1id), sent)
     part2 = sn.cancel_digest(PASSPHRASE, r.vault, d['route'], g1id, r.now() + 300)
     lock = {'fn': 'cancel_release', 'args': {'id': g1id, 'valid_until': r.now() + 300, 'signatures': []}}
     lock['args']['signatures'] = r.cert(sn.cancel_digest(PASSPHRASE, r.vault, d['route'], g1id, lock['args']['valid_until']),
@@ -650,6 +676,62 @@ def main_flow(r):
     check('pause chain: guardian B renews at once', rc == 0 and r.net.view('paused'), sent)
     r.wait_until(r.state()['paused_until'] + 1)
 
+    # 8b. a false alarm: the guardians cancel a REAL release. The SAME burn is certified again and paid exactly once.
+    tx3 = r.burn(1_200 * U, payee)
+    ok, c3 = r.certify(tx3, 'fa')
+    rc, sent = r.submit(c3)
+    item3 = c3['call']['args']['item']
+    id3 = sn.release_id(item3).hex()
+    check('false alarm: a real burn of 1,200 is certified by 5 signers and queued', ok and rc == 0
+          and r.net.view('pending', id=id3) is not None, sent)
+    rc0, p0 = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-0.json', 'cancel', '--id', id3, '--out', r.dir / 'fa-c0.json')
+    rc2, p2 = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-2.json', 'cancel', '--id', id3, '--valid-until',
+                     str(p0.get('valid_until')), '--out', r.dir / 'fa-c2.json')
+    rcc, cancel = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-0.json', 'combine-cancel', '--sig',
+                         r.dir / 'fa-c0.json', '--sig', r.dir / 'fa-c2.json', '--out', r.dir / 'fa-cancel.json')
+    st0, bal = r.state(), r.balance(payee)
+    rc, sent = r.submit(cancel)
+    rec = r.net.view('burn_record', nonce=item3['nonce'])
+    check('false alarm: 2 of 3 guardians, each with its own tool, cancel it; books and balances do not move; the '
+          'nonce is recorded cancelled and the burn id is free again',
+          rc0 == 0 and rc2 == 0 and rcc == 0 and rc == 0 and rec and rec['cancelled']
+          and r.net.view('released_burn', burn=item3['native_burn']) is None and r.net.view('pending', id=id3) is None
+          and r.state() == st0 and r.balance(payee) == bal, sent)
+    rc, out = r.signer(6, 'release', '--burn-tx', tx3, '--out', r.dir / 'fa-unlisted.json')
+    check('false alarm: a signer that did not list the nonce does not certify it again',
+          rc and 'already recorded' in json.dumps(out), out)
+    r.recertify([2, item3['nonce']])
+    ok, c3b = r.certify(tx3, 'fa1', signers=range(6))
+    item3b = c3b['call']['args']['item'] if ok else {}
+    id3b = sn.release_id(item3b).hex() if ok else ''
+    rc, sent = r.submit(c3b) if ok else (1, c3b)
+    pend3 = r.net.view('pending', id=id3b) if ok else None
+    check('false alarm: 6 signers certify the SAME burn again (same nonce, id, recipient and amount; generation 1); '
+          'it queues', ok and rc == 0 and pend3 is not None and item3b.get('generation') == 1
+          and {k: item3b[k] for k in ('nonce', 'native_burn', 'recipient', 'amount')}
+          == {k: item3[k] for k in ('nonce', 'native_burn', 'recipient', 'amount')}, sent)
+    rc, sent = r.submit(cancel, key='fa-cancel-again')
+    two = {'fn': 'cancel_release', 'args': {'id': id3b, 'valid_until': r.now() + 300, 'signatures': []}}
+    two['args']['signatures'] = r.cert(sn.cancel_digest(PASSPHRASE, r.vault, d['route'], id3b, two['args']['valid_until']),
+                                       'guard', [0, 1, 2])
+    rc2, sent2 = r.submit(two)
+    check('false alarm: the guardians cannot cancel a second time (the old cancel: NotQueued #12; a new one by all '
+          'three: NotCancellable #14)', rc and refused(sent, 12) and rc2 and refused(sent2, 14), [sent, sent2])
+    if pend3:
+        r.wait_until(pend3['ready_at'] + 1)
+    r.wait_bucket(1_200 * U)
+    rc, sent = r.submit({'fn': 'execute_release', 'args': {'id': id3b}}, key='fa-execute')
+    paid3 = r.balance(payee)
+    check('false alarm: after the delay the burn is paid: 1,200 less 5 bps', rc == 0 and paid3 == bal + 1_200 * S - 6_000_000, sent)
+    tries = [r.invoke('relayer', r.vault, 'release', **c3['call']['args']),
+             r.invoke('relayer', r.vault, 'release', **c3b['call']['args']) if ok else (False, '#3'),
+             r.invoke('relayer', r.vault, 'execute_release', id=id3),
+             r.invoke('relayer', r.vault, 'execute_release', id=id3b)]
+    check('false alarm: paid exactly once: both certificates (InvalidRelease #3) and both queue ids (NotQueued #12) '
+          'pay nothing more', all(not t[0] for t in tries) and '#3' in tries[0][1] and '#3' in tries[1][1]
+          and '#12' in tries[2][1] and '#12' in tries[3][1] and r.balance(payee) == paid3, [t[1][-200:] for t in tries])
+    notes['false_alarm'] = {'burn_tx': tx3, 'nonce': item3['nonce'], 'cancelled_release': id3, 'paid_release': id3b}
+
     # 9. rate limit: two 6,000 releases back to back
     txa, txb = r.burn(6_000 * U, payee), r.burn(6_000 * U, payee)
     ok, ca = r.certify(txa, 'ra')
@@ -660,6 +742,7 @@ def main_flow(r):
     check('limits: two 6,000 releases certified and queued', ok and ok2 and rc == 0 and rc2 == 0
           and r.net.view('pending', id=ida) and r.net.view('pending', id=idb), [sa, sb])
     r.wait_until(r.net.view('pending', id=idb)['ready_at'] + 1)
+    r.wait_bucket(6_000 * U)
     bal = r.balance(payee)
     ok, out = r.invoke('relayer', r.vault, 'execute_release', id=ida)
     ok2, out2 = r.invoke('relayer', r.vault, 'execute_release', id=idb)
@@ -673,17 +756,17 @@ def main_flow(r):
 
     # 10. issuer freeze (authorization revoked on the vault's balance)
     tx = r.burn(200 * U, payee)
-    ok, cf = r.certify(tx, 'frz')
+    okc, cf = r.certify(tx, 'frz')
     ok, out = r.invoke('issuer', r.token, 'set_authorized', id=r.vault, authorize=False)
-    check('freeze: the issuer revokes the vault\'s authorization', ok, out)
+    check('freeze: the issuer revokes the vault\'s authorization', okc and ok, [cf, out])
     rc, res = r.tool('reservas_stellar.py', '--config', r.dir / 'reservas.json', 'check')
     check('freeze: the reserves monitor reports "frozen" (exit 2)', rc == 2 and any(a['kind'] == 'frozen' for a in res['alerts']), res)
     okd, outd = r.deposit(100 * S, r.alice)
     st0 = r.state()
     rc, sent = r.submit(cf)
-    check('freeze: deposits and releases fail and consume nothing',
-          not okd and rc and sent.get('status') == 'REFUSED' and r.net.view('burn_record', nonce=cf['call']['args']['item']['nonce']) is None
-          and r.state() == st0, [outd, sent])
+    check('freeze: deposits and releases fail as the vault\'s own InvalidTransfer #2 and consume nothing',
+          not okd and '#2' in outd and rc and refused(sent, 2)
+          and r.net.view('burn_record', nonce=cf['call']['args']['item']['nonce']) is None and r.state() == st0, [outd, sent])
     notes['freeze_errors'] = {'deposit': outd[-300:], 'release': json.dumps(sent)[-300:]}
     ok, out = r.invoke('issuer', r.token, 'set_authorized', id=r.vault, authorize=True)
     bal = r.balance(payee)
@@ -692,8 +775,9 @@ def main_flow(r):
 
     # 11. issuer clawback
     tx = r.burn(100 * U, payee)
-    ok, cc = r.certify(tx, 'claw')
+    okc, cc = r.certify(tx, 'claw')
     ok, out = r.invoke('issuer', r.token, 'clawback', **{'from': r.vault, 'amount': str(50 * S)})
+    ok = ok and okc
     backing = r.net.view('backing')
     check('clawback: the issuer claws 50 TUSD back from the vault; backing() shows the shortfall',
           ok and int(backing['required']) - int(backing['balance']) == 50 * S, [out, backing])
@@ -749,6 +833,119 @@ def main_flow(r):
     ok, call = r.mint(dep, 'd4')
     check('held: the deposit is then credited once', ok, call)
 
+    # 13b. the watcher daemons (vigia_stellar.py) carry a deposit, an instant burn and a queued burn with nobody in the loop
+    shared = r.dir / 'shared'
+    gas_key = r.dir / 'l2-relayer.key'
+    gas_key.write_text(ANVIL_KEYS[0] + '\n')
+    gas_key.chmod(0o600)
+    for i in range(7):
+        c = json.loads((r.dir / f'signer-{i}.json').read_text())
+        c.update(shared_dir=str(shared), signer_name=f's{i}', stellar_rpc=r.rpc, view_account=r.addr['relayer'],
+                 vault_wasm_hash=r.wasm_hash, stellar_config_dir=str(r.xdg), finality_ledgers=12)
+        (r.dir / f'vigia-{i}.json').write_text(json.dumps(c, indent=1))
+    c.update(signer_name='relay', l2_chain_id=31337, l2_relayer_key=str(gas_key), relayer=r.addr['relayer'],
+             relayer_identity='relayer', journal=str(r.dir / 'journal'), relayer_state=str(r.dir / 'vigia-nonces.json'))
+    (r.dir / 'vigia-relay.json').write_text(json.dumps(c, indent=1))
+    daemon_log = []
+
+    def daemon(name, mode):
+        done = r.run([sys.executable, HERE / 'vigia_stellar.py', '--config', r.dir / f'vigia-{name}.json', mode, '--once'])
+        daemon_log.append(f'--- {name} {mode} rc={done.returncode}\n{done.stdout[-3000:]}{done.stderr[-1500:]}')
+        return done
+
+    r.l2_time(86400)
+    ok, depw = r.deposit(700 * S, r.alice)
+    depw = '0x' + depw
+    txw, txq = r.burn(40 * U, payee), r.burn(1_100 * U, payee)
+    burned = r.cast('keccak', 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)')
+    burnw, burnq = [[l['topics'][1] for l in json.loads(r.cast('receipt', t, '--rpc-url', r.l2, '--json'))['logs']
+                     if l['topics'][0] == burned][0] for t in (txw, txq)]
+    r.wait_ledgers(14)
+    alice0 = int(r.l2call(r.l2token, 'balanceOf(address)(uint256)', r.alice).split()[0])
+    bal, journal0 = r.balance(payee), len(list((r.dir / 'journal').glob('*.json')))
+    for i in range(5):
+        daemon(i, 'sign')
+    mints = list((shared / 'mint' / depw[2:]).glob('s*.json')) if (shared / 'mint' / depw[2:]).exists() else []
+    certs = {b: list((shared / 'release' / b[2:]).glob('r-*/s*.json')) for b in (burnw, burnq)}
+    check('watcher: 5 signer daemons, one pass each, sign the new deposit and both new burns from their own nodes, '
+          'and nothing else', len(mints) == 5 and all(len(v) == 5 for v in certs.values())
+          and len(list((shared / 'mint').glob('*'))) == 1 and len(list((shared / 'release').glob('*/r-*'))) == 2,
+          daemon_log[-2:])
+    daemon('relay', 'relay')
+    queued_now = r.net.view('burn_record', nonce=int(json.loads(certs[burnq][0].read_text())['release']['nonce'])) \
+        if certs[burnq] else None
+    check('watcher: the relayer daemon sends the mint to the L2, pays the instant release (40 less 5 bps) and queues '
+          'the large one', r.balance(payee) == bal + 40 * S - 200_000 and queued_now is not None
+          and r.l2call(r.l2token, 'minted(bytes32)(bool)', depw) == 'true', daemon_log[-1:])
+    r.l2_time(43200)
+    idq = None
+    if certs[burnq]:
+        relq = json.loads(certs[burnq][0].read_text())
+        idq = sn.release_id({'route': relq['release']['route'], 'nonce': relq['release']['nonce'],
+                             'recipient': relq['eth']['stellar_recipient'], 'amount': relq['release']['amount'],
+                             'native_burn': relq['release']['nativeBurn'], 'mint_count': relq['release']['mintCount'],
+                             'minted_total': relq['release']['mintedTotal'], 'mint_head': relq['release']['mintHead'],
+                             'generation': 0}).hex()
+        pq = r.net.view('pending', id=idq)
+        if pq:
+            r.wait_until(pq['ready_at'] + 1)
+    r.wait_bucket(1_100 * U)
+    daemon('relay', 'relay')
+    alice1 = int(r.l2call(r.l2token, 'balanceOf(address)(uint256)', r.alice).split()[0])
+    check('watcher: on its next pass the relayer daemon credits the mint after the L2 delay (700 less 5 bps, once) '
+          'and executes the queued release after its delay (1,100 less 5 bps, once)',
+          alice1 == alice0 + 700 * U - 350_000 and r.balance(payee) == bal + 40 * S - 200_000 + 1_100 * S - 5_500_000
+          and idq is not None and r.net.view('pending', id=idq) is None, daemon_log[-1:])
+    journal1 = len(list((r.dir / 'journal').glob('*.json')))
+    for i in range(5):
+        daemon(i, 'sign')
+    daemon('relay', 'relay')
+    check('watcher: further passes of every daemon sign nothing, send nothing and pay nothing',
+          len(list((r.dir / 'journal').glob('*.json'))) == journal1 and journal1 == journal0 + 3
+          and r.balance(payee) == bal + 40 * S - 200_000 + 1_100 * S - 5_500_000
+          and int(r.l2call(r.l2token, 'balanceOf(address)(uint256)', r.alice).split()[0]) == alice1
+          and len(list((shared / 'release').glob('*/r-*'))) == 2, daemon_log[-1:])
+    (r.dir / 'daemons.log').write_text('\n'.join(daemon_log))
+
+    # 13c. the deploy tool's Stellar source path against the live vault (tools/deploy-pontes/source_stellar.py)
+    sys.path.insert(0, str(HERE.parent / 'deploy-pontes'))
+    import deploy_pontes as dp  # noqa: E402
+    import source_stellar as ss  # noqa: E402
+    c = r.config
+    sv = {'kind': 'stellar', 'passphrase': PASSPHRASE, 'contract': r.vault, 'address': '0x' + d['vault20'],
+          'codeHash': '0x' + r.wasm_hash, 'route': '0x' + d['route'], 'cap': c['cap'],
+          'guard': {'guardians': ['0x' + g for g in c['guardians']], 'pauseDuration': c['pause_duration'],
+                    'pauseCooldown': c['pause_cooldown']},
+          'windowLimit': c['window_limit'], 'signers': ['0x' + x for x in c['signers']], 'threshold': 5,
+          'switchThreshold': 6, 'releaseDelay': c['release_delay'], 'largeReleaseThreshold': c['large_release_threshold'],
+          'feeRecipient': c['fee_recipient'], 'depositFeeBps': 5, 'releaseFeeBps': 5}
+    exp = {'supplyCap': c['cap'], 'bucketCapacity': c['window_limit'], 'minBurn': c['l2_min_burn']}
+    get = lambda sig, returns: r.l2call(r.l2token, sig + returns)  # noqa: E731
+
+    def refusal(f):
+        try:
+            f()
+        except dp.Refused as e:
+            return str(e)
+        return ''
+    try:
+        out = ss.verify({'sourceVault': sv}, r.rpc, exp, get, dp.refuse)
+    except dp.Refused as e:
+        out = {'refused': str(e)}
+    count = r.state()['deposit_count']
+    check('deploy tool: verify reads the live vault from its ledger entries (Wasm hash, route, cap, committee, '
+          'guardians, release delay, fee address) and the token\'s mint head equals the vault\'s chain head after the '
+          'same number of deposits', out.get('mintChain', {}).get('mintCount') == count == out['sourceVault']['depositCount']
+          and out['mintChain']['mintHead'] == '0x' + r.net.view('chain_head_at', count=count), out)
+    used = refusal(lambda: ss.unused_vault({'sourceVault': sv}, r.rpc, dp.refuse))
+    check('deploy tool: run refuses a token over this vault, because it has been used', 'has been used' in used, used)
+    wrong = [refusal(lambda k=k, v=v: ss.verify({'sourceVault': {**sv, k: v}}, r.rpc, exp, get, dp.refuse))
+             for k, v in (('releaseDelay', c['release_delay'] + 1), ('feeRecipient', r.addr['payee']),
+                          ('codeHash', '0x' + 'ee' * 32), ('switchThreshold', 5), ('passphrase', 'Test SDF Network ; September 2015'))]
+    check('deploy tool: a config that differs from the vault in the release delay, the fee address, the Wasm hash, '
+          'the switch quorum or the network is refused', all(wrong), wrong)
+    notes['deploy_tool_verify'] = out
+
     # 14. fees and books
     fees = r.state()['fees_accrued']
     before = r.balance(r.addr['feeacct'])
@@ -766,7 +963,7 @@ def main_flow(r):
     check('books: the reserves monitor is green', rc == 0 and res['ok'], res)
     rc, out = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-0.json', 'check')
     check('books: the guardian check ends with no open finding (the cancelled forgery is listed as cancelled)',
-          rc == 0 and len(out.get('cancelled', [])) == 1 and out.get('releases_checked', 0) >= 8, out)
+          rc == 0 and len(out.get('cancelled', [])) == 1 and out.get('releases_checked', 0) >= 12, out)
     notes['reservas'] = res
 
     # 15. cost of a release with 5 signatures, from the journaled envelope

@@ -232,7 +232,9 @@ class Net:
             env['STELLAR_CONFIG_HOME'] = str(Path(self.cfg['stellar_config_dir']) / 'stellar')
         done = subprocess.run([self.cli] + argv, capture_output=True, text=True, input=stdin, env=env)
         if done.returncode:
-            raise StellarError(f'{what} failed: {(done.stderr or done.stdout).strip()[-1500:]}')
+            # The CLI prints the contract's error first and the call's arguments last: keep both ends.
+            text = (done.stderr or done.stdout).strip()
+            raise StellarError(f'{what} failed: ' + (text if len(text) <= 1600 else text[:1000] + ' [...] ' + text[-500:]))
         return done.stdout.strip()
 
     def _net_args(self):

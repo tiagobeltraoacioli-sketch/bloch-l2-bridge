@@ -96,7 +96,7 @@ def submit(cfg, call, key):
     try:
         envelope = net.sign(net.build(cfg['relayer'], fn, **args), cfg['relayer_identity'])
     except sn.StellarError as e:
-        out(False, key=key, status='REFUSED', error=str(e)[-1200:])
+        out(False, key=key, status='REFUSED', error=str(e)[:1700])
     tx_hash = net.tx_hash(envelope)
     write_json(path, {'key': key, 'fn': fn, 'args': args, 'hash': tx_hash, 'envelope': envelope,
                       'reserved_at': int(time.time()), 'previous': entry})
@@ -105,7 +105,7 @@ def submit(cfg, call, key):
     except sn.StellarError as e:
         st = wait(net, tx_hash, 10)
         if st['status'] != 'SUCCESS':
-            out(False, key=key, hash=tx_hash, status=st['status'], error=str(e)[-1200:])
+            out(False, key=key, hash=tx_hash, status=st['status'], error=str(e)[:1700])
     st = wait(net, tx_hash)
     out(st['status'] == 'SUCCESS', key=key, hash=tx_hash, status=st['status'], ledger=st['ledger'])
 
@@ -130,7 +130,7 @@ def main():
         else:
             raise SystemExit(__doc__)
     except sn.StellarError as e:
-        out(False, status='ERROR', error=str(e)[-1200:])
+        out(False, status='ERROR', error=str(e)[:1700])
 
 
 if __name__ == '__main__':
