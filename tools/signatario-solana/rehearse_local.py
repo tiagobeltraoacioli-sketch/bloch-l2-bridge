@@ -90,7 +90,20 @@ def section(title):
 
 
 # ── processes ───────────────────────────────────────────────────────────────
-def start_validator(reset):
+def start_validator(reset, attempts=4):
+    """Starts the validator. Its ports lie inside the host's ephemeral range, so another process's outgoing
+    connection can hold one for a moment ("Address already in use"): an immediate exit is tried again."""
+    for attempt in range(attempts):
+        try:
+            return start_validator_once(reset)
+        except RuntimeError as e:
+            if 'exited' not in str(e) or attempt == attempts - 1:
+                raise
+            PROCS.pop('validator', None)
+            time.sleep(5)
+
+
+def start_validator_once(reset):
     log = open(WORK / 'validator.log', 'a')
     argv = [str(SOLBIN / 'solana-test-validator'), '--ledger', str(WORK / 'ledger'), '--bind-address', '127.0.0.1',
             '--rpc-port', str(BASE + 10), '--faucet-port', str(BASE + 12), '--gossip-port', str(BASE + 13),
