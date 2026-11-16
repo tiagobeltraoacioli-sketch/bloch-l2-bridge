@@ -196,12 +196,17 @@ def unhex(text, length=None, what='value'):
 
 # ── configuration ───────────────────────────────────────────────────────────
 MAX_SIGNERS, MAX_GUARDIANS = 16, 7
-CONFIG_FIXED = 280
-VAULT_LEN = 4 + 32 + CONFIG_FIXED + 20 * MAX_SIGNERS + 20 * MAX_GUARDIANS + 20 + 20 + 32 * 4 + 32 + 8 * 4 + 2 + 8 * 6 + 8 * MAX_GUARDIANS + 16
+CONFIG_FIXED = 288
+VAULT_LEN = 4 + 32 + CONFIG_FIXED + 20 * MAX_SIGNERS + 20 * MAX_GUARDIANS + 20 + 20 + 32 * 4 + 32 + 8 * 4 + 2 + 8 * 6 + 8 * MAX_GUARDIANS + 24
 DEPOSIT_LEN = 211
-RELEASE_LEN = 176
+RELEASE_LEN = 208
+LAYOUT_VERSION = 2
+PAGE_NONCES = 8192            # burn nonces per paid page
+PAGE_HEADER = 43
+PAGE_LEN = PAGE_HEADER + PAGE_NONCES // 8
+DEPOSIT_WINDOW = 4            # record addresses a deposit names by default (the program takes up to 8)
 CONFIG_U64 = ('cap', 'window_limit', 'window_seconds', 'min_deposit', 'l2_min_burn', 'large_release_threshold',
-              'release_delay', 'pause_duration', 'pause_cooldown', 'max_valid_seconds')
+              'release_delay', 'pause_duration', 'pause_cooldown', 'max_valid_seconds', 'record_retention')
 
 
 class Config:
@@ -237,6 +242,7 @@ class Config:
             large_release_threshold=int(v['policy']['largeReleaseThreshold']),
             release_delay=int(v['policy']['releaseDelay']), pause_duration=int(v['guard']['pauseDuration']),
             pause_cooldown=int(v['guard']['pauseCooldown']), max_valid_seconds=int(v['policy']['maxValidSeconds']),
+            record_retention=int(v['policy']['recordRetention']),
             deposit_fee_bps=int(v['fees']['depositBps']), release_fee_bps=int(v['fees']['releaseBps']),
             threshold=int(v['signers']['threshold']), switch_threshold=int(v['policy']['unpauseThreshold']),
             signers=addresses(v['signers']['set'], 'signer'), guardians=addresses(v['guard']['guardians'], 'guardian'))
@@ -281,6 +287,7 @@ class Config:
             (self.release_delay <= 14 * 86400, 'release delay above 14 days'),
             (self.release_delay != 0 or self.large_release_threshold == 0, 'large threshold without a delay'),
             (60 <= self.max_valid_seconds <= 86400, 'max valid seconds must be within 60 and 86400'),
+            (0 <= self.record_retention <= 30 * 86400, 'record retention above 30 days'),
             (self.source_domain != self.native_domain, 'source and native domain are equal'),
             (sorted(set(self.signers)) == self.signers and all(any(s) for s in self.signers), 'signers must be strictly ascending'),
             (sorted(set(self.guardians)) == self.guardians and not set(self.guardians) & set(self.signers),
@@ -288,7 +295,9 @@ class Config:
             ((g == 0 and self.pause_duration == 0 and self.pause_cooldown == 0)
              or (g != 0 and 0 < self.pause_duration <= 14 * 86400 and self.pause_duration <= self.pause_cooldown <= 14 * 86400),
              'pause duration / cooldown'),
-            (self.threshold <= 6, 'a release certificate of more than 6 signatures does not fit one transaction'),
+            (g == 0 or self.pause_duration > self.max_valid_seconds,
+             'a guardian pause must outlast every certificate (pauseDuration > maxValidSeconds); the program refuses it too'),
+            (self.threshold <= 5, 'a release certificate of more than 5 signatures does not fit one transaction'),
         ]
         if mainnet:
             checks += [
@@ -296,9 +305,6 @@ class Config:
                 (g == 3, 'mainnet policy: exactly 3 guardians'),
                 (self.deposit_fee_bps == 5 and self.release_fee_bps == 5, 'mainnet policy: 5 + 5 bps'),
                 (on_curve(self.fee_owner), 'the fee owner is not a wallet address (off curve)'),
-                (g == 0 or self.pause_duration > self.max_valid_seconds,
-                 'mainnet policy: a guardian pause must outlast every certificate (pauseDuration > maxValidSeconds), '
-                 'so an approval it voided cannot be approved again with the same certificate'),
             ]
         return [text for ok, text in checks if not ok]
 
@@ -326,6 +332,10 @@ class Addresses:
     def release_record(self, nonce):
         return find_program_address([b'release', self.vault, nonce.to_bytes(8, 'little')], self.program_id)[0]
 
+    def paid_page(self, nonce):
+        """The page whose bit says "the release of this burn nonce was paid and its record closed"."""
+        return find_program_address([b'paid', self.vault, (nonce // PAGE_NONCES).to_bytes(8, 'little')], self.program_id)[0]
+
     def summary(self):
         return {'programId': b58encode(self.program_id), 'vault': b58encode(self.vault),
                 'vaultTokenAccount': b58encode(self.tokens), 'feeTokenAccount': b58encode(self.fee_account),
@@ -352,7 +362,7 @@ class _Reader:
 
 
 def decode_vault(data):
-    if len(data) != VAULT_LEN or data[0] != 1 or data[1] != 1:
+    if len(data) != VAULT_LEN or data[0] != 1 or data[1] != LAYOUT_VERSION:
         raise Refused('not a vault account of this layout', length=len(data))
     r = _Reader(data)
     r.take(2)
@@ -376,6 +386,7 @@ def decode_vault(data):
     v['guardian_last_chain'] = [r.u64() for _ in range(MAX_GUARDIANS)]
     v['approval_seq'] = r.u64()
     v['void_through_seq'] = r.u64()
+    v['last_pause_at'] = r.u64()
     return v
 
 
@@ -386,7 +397,7 @@ def available_to_release(v, now):
 
 
 def decode_deposit(data):
-    if len(data) != DEPOSIT_LEN or data[0] != 2 or data[1] != 1:
+    if len(data) != DEPOSIT_LEN or data[0] != 2 or data[1] != LAYOUT_VERSION:
         raise Refused('not a deposit record of this layout', length=len(data))
     r = _Reader(data)
     r.take(2)
@@ -396,13 +407,32 @@ def decode_deposit(data):
 
 
 def decode_release(data):
-    if len(data) != RELEASE_LEN or data[0] != 3 or data[1] != 1:
+    if len(data) != RELEASE_LEN or data[0] != 3 or data[1] != LAYOUT_VERSION:
         raise Refused('not a release record of this layout', length=len(data))
     r = _Reader(data)
     r.take(2)
     return {'bump': r.take(1)[0], 'state': r.take(1)[0], 'vault': r.take(32), 'nonce': r.u64(),
             'release_id': r.take(32), 'recipient': r.take(20), 'amount': r.u64(), 'native_burn': r.take(32),
-            'ready_at': r.u64(), 'seq': r.u64(), 'approved_at': r.u64(), 'paid_at': r.u64(), 'paid_amount': r.u64()}
+            'ready_at': r.u64(), 'seq': r.u64(), 'approved_at': r.u64(), 'paid_at': r.u64(), 'paid_amount': r.u64(),
+            'payer': r.take(32)}
+
+
+def decode_page(data):
+    """{'vault', 'page', 'bits'} of a paid page."""
+    if len(data) != PAGE_LEN or data[0] != 4 or data[1] != LAYOUT_VERSION:
+        raise Refused('not a paid page of this layout', length=len(data))
+    return {'bump': data[2], 'vault': data[3:35], 'page': int.from_bytes(data[35:43], 'little'), 'bits': data[PAGE_HEADER:]}
+
+
+def page_bit(page, nonce):
+    i = nonce % PAGE_NONCES
+    return bool(page['bits'][i // 8] & (1 << (i % 8)))
+
+
+def page_nonces(page):
+    """Every burn nonce a paid page marks as paid and closed."""
+    base = page['page'] * PAGE_NONCES
+    return [base + 8 * i + b for i, byte in enumerate(page['bits']) if byte for b in range(8) if byte & (1 << b)]
 
 
 def decode_token_account(data):
@@ -516,12 +546,19 @@ class VaultIx:
                                           Meta(a.config.mint), Meta(a.program_data), Meta(TOKEN_PROGRAM),
                                           Meta(SYSTEM_PROGRAM)], b'\x00' + a.config.encode())
 
-    def deposit(self, depositor, source, nonce, amount, l2_recipient):
+    def deposit(self, depositor, source, nonce, amount, l2_recipient, window=1):
+        """`nonce` is the vault's deposit count as the depositor read it; `window` record addresses are named
+        (counts nonce .. nonce + window - 1, at most 8), so deposits that land in between do not make this one
+        fail: the program uses the record of the count it finds."""
         a = self.a
+        if not 1 <= window <= 8:
+            raise Refused('a deposit names 1 to 8 record addresses')
         return Instruction(a.program_id, [
             Meta(depositor, True, True), Meta(source, False, True), Meta(a.vault, False, True),
             Meta(a.tokens, False, True), Meta(a.config.mint), Meta(a.deposit_record(nonce), False, True),
-            Meta(TOKEN_PROGRAM), Meta(SYSTEM_PROGRAM)], b'\x01' + amount.to_bytes(8, 'little') + l2_recipient)
+            Meta(TOKEN_PROGRAM), Meta(SYSTEM_PROGRAM)]
+            + [Meta(a.deposit_record(nonce + i), False, True) for i in range(1, window)],
+            b'\x01' + amount.to_bytes(8, 'little') + l2_recipient)
 
     def approve_release(self, payer, rel, ctx):
         a = self.a
@@ -532,7 +569,15 @@ class VaultIx:
                 + ctx['nativeFinalizedNumber'].to_bytes(8, 'little') + ctx['nativeFinalizedHash'])
         return Instruction(a.program_id, [
             Meta(payer, True, True), Meta(a.vault, False, True), Meta(a.release_record(rel['nonce']), False, True),
-            Meta(a.deposit_record(max(rel['mintCount'], 1) - 1)), Meta(INSTRUCTIONS_SYSVAR), Meta(SYSTEM_PROGRAM)], data)
+            Meta(a.deposit_record(max(rel['mintCount'], 1) - 1)), Meta(a.paid_page(rel['nonce']), False, True),
+            Meta(INSTRUCTIONS_SYSVAR), Meta(SYSTEM_PROGRAM)], data)
+
+    def close_release(self, nonce, rent_payer):
+        """Closes a paid release record after the retention; its rent returns to `rent_payer` (the record names it)."""
+        a = self.a
+        return Instruction(a.program_id, [
+            Meta(a.vault, False, True), Meta(a.release_record(nonce), False, True),
+            Meta(a.paid_page(nonce), False, True), Meta(rent_payer, False, True)], b'\x08' + nonce.to_bytes(8, 'little'))
 
     def execute_release(self, nonce, owner):
         a = self.a
@@ -777,4 +822,4 @@ VAULT_ERRORS = {100: 'InvalidConfiguration', 101: 'InvalidAccount', 102: 'Invali
                 104: 'InvalidCertificate', 105: 'InvalidControls', 106: 'InsufficientBacking', 107: 'InvalidContext',
                 108: 'RateLimited', 109: 'NotGuardian', 110: 'InvalidPause', 111: 'Paused', 112: 'ProvenanceMismatch',
                 113: 'NotApproved', 114: 'NotReady', 115: 'AlreadyReleased', 116: 'Voided', 117: 'NotTopLevel',
-                118: 'ProgramUpgradeable', 119: 'WrongRecipient', 120: 'Expired'}
+                118: 'ProgramUpgradeable', 119: 'WrongRecipient', 120: 'Expired', 121: 'StaleCertificate'}

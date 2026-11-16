@@ -17,6 +17,9 @@ parent reads from an Ethereum vault is read here from the vault's accounts on th
                       a PAID record without a matching L2 burn -> `release-unknown:<nonce>`; one that differs from
                       its burn -> `release-mismatch:<nonce>`; a burn not final on this guardian's L2 ->
                       `release-before-final:<nonce>`.
+                      A paid record closed after the retention leaves its bit in a paid page: the nonce must
+                      still belong to a burn (`release-unknown:<nonce>`); its amount and recipient were checked
+                      while the record existed, so a guardian must run at least once per `record_retention`.
   APPROVALS (new)     a STANDING approval (not paid, not voided) without a matching L2 burn ->
                       `release-unknown:approval-<nonce>-<seq>`; one that differs from its burn ->
                       `release-mismatch:approval-<nonce>-<seq>`. The Solana vault pays in two steps, so a wrong
@@ -157,6 +160,17 @@ class SolGuardian(Guardian):
                 raise Unverifiable('a release record is not at the address of its nonce')
             r['key'] = row['pubkey']
             out.append(r)
+        # Releases paid and closed after the retention: only their bit in a paid page is left.
+        pages = self.sol(lambda: n.rpc.call('getProgramAccounts', [S.b58encode(n.a.program_id), {
+            'encoding': 'base64', 'commitment': 'finalized',
+            'filters': [{'dataSize': S.PAGE_LEN}, {'memcmp': {'offset': 3, 'bytes': S.b58encode(n.a.vault)}}]}]))
+        for row in pages or []:
+            page = self.sol(lambda row=row: S.decode_page(base64.b64decode(row['account']['data'][0])))
+            if page['vault'] != n.a.vault or n.a.paid_page(page['page'] * S.PAGE_NONCES) != S.pubkey(row['pubkey']):
+                raise Unverifiable('a paid page is not at the address of its range')
+            have = {r['nonce'] for r in out}
+            out += [{'nonce': nonce, 'state': 2, 'closed': True, 'seq': 0, 'key': row['pubkey']}
+                    for nonce in S.page_nonces(page) if nonce not in have]
         return sorted(out, key=lambda r: r['nonce'])
 
     def eth_source(self, burns, fin=None):
@@ -176,6 +190,15 @@ class SolGuardian(Guardian):
             paid = r['state'] == 2
             if not paid and r['seq'] <= v['void_through_seq']:
                 continue  # voided by a guardian pause: it can never be paid
+            if r.get('closed'):
+                # Paid, then closed after the retention: the record's fields were checked while it existed; what
+                # is left to check for good is that the nonce belongs to a burn.
+                if b is None:
+                    findings.append(('hard', f'release-unknown:{r["nonce"]}', self.provenance_grace,
+                                     {'reason': 'vault release (closed record) without a matching L2 burn', 'nonce': r['nonce']}))
+                else:
+                    released[b['burn_id']] = r['key']
+                continue
             shown = {'nonce': r['nonce'], 'recipient': S.hx(r['recipient']), 'amount': r['amount'],
                      'burn_id': S.hx(r['native_burn']), 'record': r['key'], 'paid': paid, 'ready_at': r['ready_at']}
             tag = str(r['nonce']) if paid else f"approval-{r['nonce']}-{r['seq']}"

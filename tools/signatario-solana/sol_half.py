@@ -46,6 +46,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import solana_lib as S  # noqa: E402
+import sol_recipient  # noqa: E402
 
 
 def answer(ok, **fields):
@@ -62,12 +63,21 @@ def elf_digest(data):
     return S.sha256(bytes(data).rstrip(b'\0')).hex()
 
 
+def endpoints(cfg):
+    """`sol_rpc` is one URL or a list of URLs (each a different operator's node or provider)."""
+    urls = cfg['sol_rpc'] if isinstance(cfg['sol_rpc'], (list, tuple)) else [cfg['sol_rpc']]
+    if not urls or len(set(urls)) != len(urls) or not all(isinstance(u, str) and u for u in urls):
+        raise S.Refused('sol_rpc must be one URL or a list of distinct URLs')
+    return list(urls)
+
+
 class Node:
     """This operator's view of the vault on its own node, pinned to the configuration file."""
 
-    def __init__(self, cfg, commitment='finalized', check_pins=True):
+    def __init__(self, cfg, commitment='finalized', check_pins=True, url=None):
         self.cfg = cfg
-        self.rpc = S.Rpc(cfg['sol_rpc'])
+        self.url = url or endpoints(cfg)[0]
+        self.rpc = S.Rpc(self.url)
         self.commitment = commitment
         doc = json.loads(Path(cfg['vault_config']).read_text())
         self.doc = doc
@@ -140,9 +150,24 @@ class Node:
         d['key'] = key
         return d
 
-    def release(self, nonce):
-        _, owner, data = self.account(self.a.release_record(nonce))
+    def page(self, nonce):
+        """The paid page that covers `nonce`, or None while nobody approved a release in its range."""
+        _, owner, data = self.account(self.a.paid_page(nonce))
         if data is None or owner != self.a.program_id:
+            return None
+        page = S.decode_page(data)
+        if page['vault'] != self.a.vault or page['page'] != nonce // S.PAGE_NONCES:
+            raise S.Refused('the paid page belongs to another vault or range', nonce=nonce)
+        return page
+
+    def release(self, nonce):
+        """The release record of a burn nonce. A release that was paid and whose record was closed after the
+        retention is reported from its bit in the paid page: state 2, `closed`, and no other field."""
+        _, owner, data = self.account(self.a.release_record(nonce))
+        if data is None or owner != self.a.program_id or not any(data[:2]):
+            page = self.page(nonce)
+            if page is not None and S.page_bit(page, nonce):
+                return {'state': 2, 'closed': True, 'standing': True, 'nonce': nonce, 'vault': self.a.vault}
             return None
         r = S.decode_release(data)
         if r['vault'] != self.a.vault or r['nonce'] != nonce:
@@ -159,22 +184,54 @@ class Node:
         return S.decode_token_account(data)
 
 
-def cmd_deposit(cfg, deposit_id):
-    dep_id = S.unhex(deposit_id, 32, 'deposit id')
-    node = Node(cfg)
+def observe_deposit(cfg, url, dep_id):
+    """One endpoint's answer for a deposit id: its record at `finalized`, old enough, or a refusal."""
+    node = Node(cfg, url=url)
     nonce = int.from_bytes(dep_id[:8], 'big')
     v = node.vault
     if nonce >= v['deposit_count']:
-        refuse('no such deposit at finalized commitment', nonce=nonce, deposit_count=v['deposit_count'])
+        raise S.Refused('no such deposit at finalized commitment', nonce=nonce, deposit_count=v['deposit_count'])
     d = node.deposit(nonce)
     if d is None:
-        refuse('the deposit record is not on this node at finalized commitment', nonce=nonce)
+        raise S.Refused('the deposit record is not on this node at finalized commitment', nonce=nonce)
     if d['id'] != dep_id:
-        refuse('the deposit of that nonce has another id', nonce=nonce, chain=S.hx(d['id']))
+        raise S.Refused('the deposit of that nonce has another id', nonce=nonce, chain=S.hx(d['id']))
     finalized = node.rpc.slot('finalized')
     margin = int(cfg.get('finality_margin_slots', 150))
     if d['slot'] + margin > finalized:
-        refuse('the deposit is finalized but younger than the margin', slot=d['slot'], finalized=finalized, margin=margin)
+        raise S.Refused('the deposit is finalized but younger than the margin', slot=d['slot'], finalized=finalized, margin=margin)
+    return node, d, finalized
+
+
+def cmd_deposit(cfg, deposit_id):
+    """Every configured endpoint must show the same deposit record at `finalized` (review 325, R325-SOL-3): a mint
+    is attested on the word of at least `sol_rpc_min` endpoints (default 2 on a public cluster, 1 in a rehearsal),
+    and one endpoint that fails, lags or disagrees stops the signature. Fail closed."""
+    dep_id = S.unhex(deposit_id, 32, 'deposit id')
+    urls = endpoints(cfg)
+    rehearsal = bool(json.loads(Path(cfg['vault_config']).read_text())['solana'].get('rehearsal'))
+    need = int(cfg.get('sol_rpc_min', 1 if rehearsal else 2))
+    if need < 1 or (not rehearsal and need < 2):
+        refuse('sol_rpc_min below 2 on a public cluster: mint signing needs two independent endpoints')
+    if len(urls) < need:
+        refuse('mint signing needs agreement of independent Solana endpoints', configured=len(urls), needed=need)
+    seen = []
+    for url in urls:
+        try:
+            seen.append(observe_deposit(cfg, url, dep_id))
+        except S.Refused as e:
+            refuse('an endpoint does not show this deposit as final: ' + e.reason, endpoint=urls.index(url),
+                   **{k: (S.hx(v) if isinstance(v, bytes) else v) for k, v in e.detail.items()})
+        except S.RpcError as e:
+            refuse('an endpoint failed; every configured endpoint must answer', endpoint=urls.index(url), error=str(e))
+    node, d, finalized = seen[0]
+    fields = ('id', 'vault', 'nonce', 'depositor', 'sender20', 'l2_recipient', 'amount', 'fee', 'head_after', 'slot', 'timestamp')
+    for i, (_, other, _) in enumerate(seen[1:], 1):
+        if any(other[f] != d[f] for f in fields):
+            refuse('the endpoints disagree about this deposit', endpoint=i,
+                   differ=[f for f in fields if other[f] != d[f]])
+    finalized = min(f for _, _, f in seen)
+    nonce = d['nonce']
     sigs = []
     try:
         sigs = node.rpc.signatures_for(d['key'], 'finalized', 5) or []
@@ -191,7 +248,8 @@ def cmd_deposit(cfg, deposit_id):
            tx_hash=sigs[-1]['signature'] if sigs else None, log_index=0, block_number=d['slot'],
            block_hash=S.hx(block_hash) if block_hash else None, finalized=True, finalized_number=finalized,
            solana={'vault': S.b58encode(node.a.vault), 'record': S.b58encode(d['key']),
-                   'depositor': S.b58encode(d['depositor']), 'fee': d['fee'], 'timestamp': d['timestamp']})
+                   'depositor': S.b58encode(d['depositor']), 'fee': d['fee'], 'timestamp': d['timestamp'],
+                   'endpoints_agreeing': len(seen)})
 
 
 def cmd_release(cfg, intent_path):
@@ -228,7 +286,8 @@ def cmd_release(cfg, intent_path):
         refuse('amount above what the release bucket allows now', available=S.available_to_release(v, int(cluster_now)))
     standing = node.release(rel['nonce'])
     if standing is not None and standing['standing']:
-        refuse('this burn nonce already has a release', state=standing['state'], release_id=S.hx(standing['release_id']))
+        refuse('this burn nonce already has a release', state=standing['state'], closed=bool(standing.get('closed')),
+               release_id=S.hx(standing['release_id']) if 'release_id' in standing else None)
     # Provenance: HOLD unless the burn's mint chain is this vault's deposit chain after the same count.
     if not 1 <= rel['mintCount'] <= v['deposit_count']:
         refuse('provenance: the burn names more mints than this vault has deposits (held)', mintCount=rel['mintCount'],
@@ -237,6 +296,15 @@ def cmd_release(cfg, intent_path):
     if backing is None or backing['head_after'] != rel['mintHead']:
         refuse('provenance: the burn was made under a mint chain the deposits do not back (held)',
                mintHead=got['mintHead'], vault=S.hx(backing['head_after']) if backing else None)
+
+    # The recipient must be a wallet (R325-SOL-1): held until one is known for these 20 bytes.
+    rehearsal = bool(node.doc['solana'].get('rehearsal'))
+    if not rehearsal and not (cfg.get('l2_rpc') and cfg.get('burn_router')):
+        refuse('`l2_rpc` and `burn_router` are required on a public cluster: without them no recipient can be checked')
+    wallet, found_in = sol_recipient.find_wallet(cfg, rel['recipient'], got['nativeBurn'])
+    if wallet is None:
+        direct = str((intent.get('l2') or {}).get('from', '')).lower() != str(cfg.get('burn_router', '')).lower()
+        refuse(sol_recipient.HELD, recipient=got['recipient'], burn=got['nativeBurn'], direct_burn=direct)
 
     # Anchor and validity.
     finalized = node.rpc.slot('finalized')
@@ -255,6 +323,11 @@ def cmd_release(cfg, intent_path):
         valid_until = now + int(cfg.get('valid_seconds', 1800))
     if not now < valid_until <= now + max_valid or valid_until - int(cluster_now) > node.config.max_valid_seconds:
         refuse('validUntil outside the allowed window', validUntil=valid_until, now=now)
+    # The vault refuses a certificate that could have been signed before its last guardian pause (R325-SOL-2).
+    if v['last_pause_at'] and valid_until <= v['last_pause_at'] + node.config.max_valid_seconds:
+        refuse('the vault would refuse this certificate as older than its last guardian pause; signing resumes at '
+               'the time given', resumes_at=v['last_pause_at'] + node.config.max_valid_seconds - (valid_until - now) + 1,
+               validUntil=valid_until, last_pause_at=v['last_pause_at'])
     ctx.update(validUntil=valid_until, sourceAnchorNumber=anchor[0], sourceAnchorHash=anchor[1])
     digest = S.eip191(S.release_authorization(node.config.source_chain_id, a.vault20, rel, ctx))
 
@@ -293,7 +366,8 @@ def cmd_release(cfg, intent_path):
                     'sourceAnchorHash': S.hx(ctx['sourceAnchorHash']),
                     'nativeFinalizedNumber': ctx['nativeFinalizedNumber'],
                     'nativeFinalizedHash': S.hx(ctx['nativeFinalizedHash'])},
-           digest=S.hx(digest), signature=done.stdout.strip().lower(), finalized_slot=finalized)
+           digest=S.hx(digest), signature=done.stdout.strip().lower(), finalized_slot=finalized,
+           wallet=S.b58encode(wallet), wallet_found_in=found_in)
 
 
 def main():

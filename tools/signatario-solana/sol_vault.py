@@ -17,6 +17,8 @@ Transactions (need --fee-payer KEYPAIR.json, an Ed25519 key that only pays fees 
   deposit --keypair USER.json --amount N --l2-recipient 0x..   (a user's deposit; reference client and rehearsal)
   approve --cert CERT.json             CERT = `signatario.py combine` output for a release
   execute --nonce N --owner WALLET     pay an approved release to the wallet the burn committed to
+  close --nonce N                      close a release record paid longer ago than the retention: its rent returns
+                                       to the account that paid it, and the nonce stays spent in the paid page
   pause-submit --cert F  controls-submit --sig F [--sig F ...]  unpause-submit --sig F [--sig F ...]
   sweep                pay accrued fees to the fee owner's associated token account
 Signatures (need --keystore and --password-file, a `cast` keystore of a committee or guardian secp256k1 key):
@@ -199,7 +201,7 @@ def state_of(node):
             'controlNonce': v['control_nonce'], 'releaseBucket': v['release_bucket'],
             'bucketUpdatedAt': v['bucket_updated_at'], 'pausedUntil': v['paused_until'], 'pauseCount': v['pause_count'],
             'guardianBlockedUntil': v['guardian_blocked_until'], 'pauseChain': v['pause_chain'],
-            'approvalSeq': v['approval_seq'], 'voidThroughSeq': v['void_through_seq']}
+            'approvalSeq': v['approval_seq'], 'voidThroughSeq': v['void_through_seq'], 'lastPauseAt': v['last_pause_at']}
 
 
 def cmd_show(args):
@@ -291,17 +293,27 @@ def cmd_deposit(args):
     amount = int(need(args, '--amount'))
     l2 = S.unhex(need(args, '--l2-recipient'), 20, 'L2 recipient')
     source = S.pubkey(opt(args, '--source')) if opt(args, '--source') else S.associated_token_address(user.public, node.config.mint)
-    nonce = node.vault['deposit_count']
-    res = S.send_and_confirm(node.rpc, user, [S.VaultIx(node.a).deposit(user.public, source, nonce, amount, l2)],
-                             commitment=opt(args, '--commitment', 'confirmed'))
+    # The record address depends on the vault's deposit count when the deposit EXECUTES. The deposit names the
+    # records of the next `--window` counts (default 4, at most 8); if more deposits than that land in between,
+    # it fails without moving anything (InvalidAccount) and is sent again against the fresh count.
+    window = int(opt(args, '--window', str(S.DEPOSIT_WINDOW)))
+    res, nonce, attempts = None, None, 0
+    for attempts in range(1, int(opt(args, '--attempts', '4')) + 1):
+        node = node_of(args)
+        nonce = node.vault['deposit_count']
+        ix = S.VaultIx(node.a).deposit(user.public, source, nonce, amount, l2, window)
+        res = S.send_and_confirm(node.rpc, user, [ix], commitment=opt(args, '--commitment', 'confirmed'))
+        if S.custom_error(res['err']) != 101 or node_of(args).vault['deposit_count'] == nonce:
+            break  # landed, or refused for a reason that another count does not change
     code = S.custom_error(res['err'])
     record = None
     if res['err'] is None:
         after = node_of(args)
-        d = after.deposit(nonce)
-        if d is not None and d['depositor'] == user.public:
-            record = {'nonce': nonce, 'depositId': d['id'], 'net': d['amount'], 'fee': d['fee'], 'slot': d['slot']}
-    out(res['err'] is None, deposit=record, error_name=S.VAULT_ERRORS.get(code), **res)
+        for n in range(nonce, min(nonce + window, after.vault['deposit_count'])):
+            d = after.deposit(n)
+            if d is not None and d['depositor'] == user.public and d['slot'] == res.get('slot'):
+                record = {'nonce': n, 'depositId': d['id'], 'net': d['amount'], 'fee': d['fee'], 'slot': d['slot']}
+    out(res['err'] is None and record is not None, deposit=record, attempts=attempts, error_name=S.VAULT_ERRORS.get(code), **res)
 
 
 def cmd_approve(args):
@@ -324,7 +336,12 @@ def cmd_approve(args):
         raise S.Refused('the certificate digest differs from the one recomputed here')
     standing = node.release(rel['nonce'])
     if standing is not None and standing['standing']:
-        out(True, already=True, state=standing['state'], sameRelease=standing['release_id'] == S.release_id(rel))
+        out(True, already=True, state=standing['state'], closed=bool(standing.get('closed')),
+            sameRelease=None if standing.get('closed') else standing['release_id'] == S.release_id(rel))
+    if node.vault['last_pause_at'] and ctx['validUntil'] <= node.vault['last_pause_at'] + node.config.max_valid_seconds:
+        raise S.Refused('this certificate is not newer than the last guardian pause: the vault refuses it for good '
+                        '(StaleCertificate); the signers certify the burn again', validUntil=ctx['validUntil'],
+                        lastPauseAt=node.vault['last_pause_at'])
     signers = [(S.unhex(addr, 20), S.unhex(sig, 65)) for addr, sig in zip(cert['signers'], cert['signatures'])]
     if any(addr not in node.config.signers for addr, _ in signers) or len(signers) < node.config.threshold:
         raise S.Refused('the certificate lacks a threshold of vault signers')
@@ -343,7 +360,7 @@ def cmd_execute(args):
     if record is None:
         raise S.Refused('no approval for this burn nonce', nonce=nonce)
     if record['state'] == 2:
-        out(True, already=True, paidAmount=record['paid_amount'], paidAt=record['paid_at'])
+        out(True, already=True, closed=bool(record.get('closed')), paidAmount=record.get('paid_amount'), paidAt=record.get('paid_at'))
     if S.account_id(owner) != record['recipient']:
         raise S.Refused('this wallet is not the one the burn committed to', commitment=record['recipient'])
     payer = S.Keypair(need(args, '--fee-payer'))
@@ -360,10 +377,27 @@ def cmd_execute(args):
         paidAmount=after['paid_amount'] if after else None, **res)
 
 
+def cmd_close(args):
+    node = node_of(args)
+    nonce = int(need(args, '--nonce'))
+    record = node.release(nonce)
+    if record is None:
+        raise S.Refused('no release record for this burn nonce', nonce=nonce)
+    if record.get('closed'):
+        out(True, already=True, nonce=nonce)
+    now = int(node.rpc.block_time(node.vault['context_slot']))
+    if record['state'] != 2 or now < record['paid_at'] + node.config.record_retention:
+        raise S.Refused('only a release paid longer ago than the retention can be closed', state=record['state'],
+                        paidAt=record['paid_at'], retention=node.config.record_retention, now=now)
+    res = send(args, node, [S.VaultIx(node.a).close_release(nonce, record['payer'])])
+    after = node_of(args).release(nonce) if res['ok'] else None
+    out(res['ok'] and bool(after and after.get('closed')), nonce=nonce, rentReturnedTo=S.b58encode(record['payer']), **res)
+
+
 def cmd_pause_sign(args):
     node = node_of(args)
     count = node.vault['pause_count'] + 1
-    valid_until = int(time.time()) + int(opt(args, '--valid-seconds', '600'))
+    valid_until = int(time.time()) + int(opt(args, '--valid-seconds', str(min(600, node.config.max_valid_seconds - 10))))
     auth = S.guardian_pause_authorization(node.config.source_chain_id, node.a.vault20, node.a.route, count, valid_until)
     signer, signature = cast_sign(args, S.eip191(auth))
     if S.unhex(signer, 20) not in node.config.guardians:
@@ -462,7 +496,7 @@ def cmd_sweep(args):
 COMMANDS = {'address': cmd_address, 'elf-sha256': cmd_elf_sha256, 'validate': cmd_validate, 'verify': cmd_verify, 'show': cmd_show,
             'deposits': cmd_deposits, 'reserves': cmd_reserves, 'init': cmd_init,
             'create-fee-account': cmd_create_fee_account, 'deposit': cmd_deposit, 'approve': cmd_approve,
-            'execute': cmd_execute, 'pause-sign': cmd_pause_sign, 'pause-submit': cmd_pause_submit,
+            'execute': cmd_execute, 'close': cmd_close, 'pause-sign': cmd_pause_sign, 'pause-submit': cmd_pause_submit,
             'controls-sign': cmd_controls_sign, 'controls-submit': cmd_controls_submit,
             'unpause-sign': cmd_unpause_sign, 'unpause-submit': cmd_unpause_submit, 'sweep': cmd_sweep}
 

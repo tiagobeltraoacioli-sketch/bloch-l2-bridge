@@ -16,6 +16,11 @@ node, through sol_half.Node (program pin, cluster, vault equal to the configurat
   released      the release record of the burn's nonce is PAID at `finalized` and names this burn.
   held burns    a burn made under a mint chain the vault's deposits do not back is parked and alerted
                 (`release-held-provenance`), as in the parent.
+  the recipient a burn is signed, and later paid, only when a WALLET is known for its 20-byte recipient
+                (sol_recipient.py: the burn router's log, a registry announcement or a hint). A burn without one
+                is parked and alerted (`release-held-no-wallet`).
+  rent          a release record this relayer paid for is closed once it has been paid for the vault's
+                `record_retention`; its rent comes back and the paid page keeps the nonce spent.
   relay         two steps, as the vault has them: `approve` (the threshold certificate, any fee payer), then
                 `execute` once the approval is ready (large-release delay), the vault is not paused and the
                 release bucket allows it. The wallet to pay is read from the SolanaRecipientRegistry on the L2
@@ -30,7 +35,9 @@ Config: the signer's signatario.py config plus the parent's keys (`shared_dir`, 
 for the L2 side, `feed`, relay role ...) and
   `sol_half_config`      this operator's sol_half.py config (its `sol_rpc` and `vault_config` are used here)
   `sol_fee_payer`        relay only: an Ed25519 keypair file that pays Solana fees and rent; no power over the vault
-  `recipient_registry`   relay only: the SolanaRecipientRegistry address on the L2; `registry_from_block` (0)
+  `burn_router`, `recipient_registry`, `router_from_block`, `registry_from_block`, `recipient_hints`
+                         where a burn's wallet is looked for (also read from the Solana half's config)
+  `sol_close_records`    relay only, default true: close paid records this fee payer paid for, after the retention
   `sol_create_recipient_account`  relay only, default false: pay the rent of a recipient's missing associated
                          token account (about 0.002 SOL each); otherwise the release waits and is alerted
   `anchor_max_age`       slots, default 9000 (as the Solana half)
@@ -47,10 +54,10 @@ sys.path.insert(0, str(HERE.parent / 'signatario-stable'))
 import solana_lib as S  # noqa: E402
 from sol_half import Node  # noqa: E402
 import bridge_feed  # noqa: E402
+import sol_recipient  # noqa: E402
 import vigia  # noqa: E402
 from vigia import Vigia, WORD, log, option  # noqa: E402
 
-REGISTRY_EVENT = 'SolanaRecipient(address,bytes32)'
 
 
 class SolVigia(Vigia):
@@ -70,6 +77,13 @@ class SolVigia(Vigia):
     def new_pass(self):
         super().new_pass()
         self._nodes, self._burns_pass = {}, None
+
+    def rounds(self, d, margin):
+        """The parent's live rounds, without those the vault would refuse as older than its last guardian pause
+        (R325-SOL-2): after a pause the signers open a new round at once instead of waiting for the old to expire."""
+        v, limit = self.node().vault, self.node().config.max_valid_seconds
+        return [(valid_until, r) for valid_until, r in super().rounds(d, margin)
+                if not v['last_pause_at'] or valid_until > v['last_pause_at'] + limit]
 
     def eth_now(self):
         if self.cfg.get('eth_clock') == 'chain':
@@ -183,15 +197,34 @@ class SolVigia(Vigia):
             return None if block_hash is None else {'number': tag, 'hash': S.hx(block_hash)}
         return self.chain_read(('block', tag), read)
 
+    def recipient_cfg(self):
+        """Where a burn's wallet is looked for: the Solana half's keys, or this config's (the relayer has no half)."""
+        return {k: self.cfg.get(k, self.sol_cfg.get(k)) if k != 'l2_rpc' else (self.sol_cfg.get(k) or self.cfg.get(k))
+                for k in ('l2_rpc', 'burn_router', 'router_from_block', 'recipient_registry', 'registry_from_block',
+                          'recipient_hints')}
+
+    def wallet_for(self, b):
+        """The wallet behind a burn's 20-byte recipient (sol_recipient.py), or None: looked up once per burn."""
+        key = b['burn_id']
+        if self._wallets.get(key) is None:
+            self._wallets[key] = sol_recipient.find_wallet(self.recipient_cfg(), S.unhex(b['recipient'], 20), key)[0]
+        return self._wallets[key]
+
     def unpayable(self, b):
-        """Held, not lost: the burn was made under a mint chain this vault's deposits do not back. The vault refuses it
-        (ProvenanceMismatch) whatever is signed, so no rebuild and no certificate; alerted."""
+        """Held, not lost. (1) The burn was made under a mint chain this vault's deposits do not back: the vault
+        refuses it (ProvenanceMismatch) whatever is signed. (2) No wallet is known for the burn's 20-byte recipient
+        (R325-SOL-1): the Solana half would refuse it. Neither costs a rebuild or a certificate; both are alerted."""
         if 'mint_head' not in b:
             return False
         n = self.node()
         backing = n.deposit(b['mint_count'] - 1) if 1 <= b['mint_count'] <= n.vault['deposit_count'] else None
         if backing is not None and S.hx(backing['head_after']) == b['mint_head']:
-            return False
+            if self.wallet_for(b) is not None:
+                return False
+            if b['burn_id'] not in self.parked_logged:
+                log(kind='alert', severity='critical', id='release-held-no-wallet', burn=b['burn_id'], nonce=b.get('nonce'),
+                    recipient=b['recipient'], reason=sol_recipient.HELD)
+            return True
         if b['burn_id'] not in self.parked_logged:
             log(kind='alert', severity='critical', id='release-held-provenance', burn=b['burn_id'], mint_count=b['mint_count'],
                 mint_head=b['mint_head'], reason='the burn was made under a mint chain the vault deposits do not back')
@@ -206,8 +239,10 @@ class SolVigia(Vigia):
         return b, self.node(commitment).release(b['nonce'])
 
     def released(self, burn_id):
+        """Paid at `finalized`: the record says so and names this burn, or the record was closed after the retention
+        and the paid page holds the nonce's bit (the nonce is the vault's replay key)."""
         b, r = self.release_state(burn_id)
-        return bool(r and r['state'] == 2 and S.hx(r['native_burn']) == burn_id)
+        return bool(r and r['state'] == 2 and (r.get('closed') or S.hx(r['native_burn']) == burn_id))
 
     def release_finished(self, burn_id):
         """Paid at `finalized`, read every pass: the parent's finished-item cache is an Ethereum block anchor and is
@@ -254,25 +289,6 @@ class SolVigia(Vigia):
         except ValueError:
             return {'ok': False, 'reason': 'no JSON from sol_vault.py: ' + err.strip()[-300:]}
 
-    def wallet_of(self, commitment):
-        """The Solana wallet announced on the L2 for a 20-byte burn recipient. An announcement is only a preimage:
-        it counts when it hashes to the commitment, whoever published it."""
-        if commitment in self._wallets:
-            return self._wallets[commitment]
-        registry = self.cfg.get('recipient_registry')
-        if not registry:
-            raise SystemExit('relay needs `recipient_registry` (the SolanaRecipientRegistry on the L2)')
-        topic = self.cast_out('keccak', REGISTRY_EVENT).lower()
-        logs = self.rpc(self.cfg['l2_rpc'], 'eth_getLogs', [{
-            'address': registry, 'topics': [topic, '0x' + '00' * 12 + commitment[2:]],
-            'fromBlock': hex(int(self.cfg.get('registry_from_block', 0))), 'toBlock': 'latest'}])
-        for entry in logs:
-            wallet = bytes.fromhex(entry['data'][2:66])
-            if S.hx(S.account_id(wallet)) == commitment:
-                self._wallets[commitment] = wallet
-                return wallet
-        return None
-
     def relay_release(self, d):
         burn_id = '0x' + d.name
         if not WORD.fullmatch(burn_id):
@@ -281,11 +297,15 @@ class SolVigia(Vigia):
         if state:
             if state == 'new':
                 log(kind='relay-release', burn=burn_id, done=True)
+            b, record = self.release_state(burn_id, 'confirmed')
+            if b is not None and record is not None:
+                self.close_if_due(burn_id, b, record)
             return
         b, record = self.release_state(burn_id, 'confirmed')
         if b is None:
             return  # not a burn of this relayer's finalized L2: a directory alone is no reason to act
         if record is not None and record['state'] == 2:
+            self.close_if_due(burn_id, b, record)
             return  # paid at `confirmed`; `burn_done` records it once it is final
         if record is None or not record['standing']:
             live = self.quorum_release(d, burn_id)
@@ -310,6 +330,21 @@ class SolVigia(Vigia):
             return
         self.execute(burn_id, b, record)
 
+    def close_if_due(self, burn_id, b, record):
+        """A record this relayer's fee payer paid for, paid longer ago than the retention: closing it returns its rent
+        (review 325, R325-SOL-4). The paid page keeps the nonce spent. Other relayers' records are left to them."""
+        if record.get('closed') or self.cfg.get('sol_close_records') is False:
+            return
+        n = self.node('confirmed')
+        if record['payer'] != S.Keypair(self.cfg['sol_fee_payer']).public:
+            return
+        now = int(n.rpc.block_time(n.vault['context_slot']))
+        if now < record['paid_at'] + n.config.record_retention:
+            return
+        res = self.sol_vault('close', '--nonce', str(b['nonce']))
+        log(kind='relay-close', burn=burn_id, nonce=b['nonce'], ok=res.get('ok'), tx=res.get('signature'), units=res.get('units'),
+            reason=res.get('reason') or res.get('error_name'))
+
     def execute(self, burn_id, b, record):
         n = self.node('confirmed')
         now = int(n.rpc.block_time(n.vault['context_slot']))
@@ -319,11 +354,11 @@ class SolVigia(Vigia):
         if wait:
             log(kind='relay-execute', burn=burn_id, nonce=b['nonce'], waiting=True, reason=wait, ready_at=record['ready_at'])
             return
-        wallet = self.wallet_of(b['recipient'])
+        wallet = self.wallet_for(b)
         if wallet is None:
-            log(kind='alert', severity='soft', id='recipient-not-announced', burn=burn_id, commitment=b['recipient'],
-                reason='no SolanaRecipient announcement hashes to the burn\'s recipient: the holder calls '
-                       'announce(wallet) on the registry; the approval stays payable')
+            log(kind='alert', severity='critical', id='approved-without-wallet', burn=burn_id, commitment=b['recipient'],
+                reason='the vault holds an approval for a burn with no known wallet: honest signers do not certify one. '
+                       'Not paid by this relayer')
             return
         argv = ['--nonce', str(b['nonce']), '--owner', S.b58encode(wallet)]
         if n.token_balance(S.associated_token_address(wallet, n.config.mint)) is None:
