@@ -21,6 +21,7 @@ What is overridden, and why:
                        journals before broadcasting, and signs again only after the solidified chain shows the first
                        one expired. The Ethereum nonce record and release journal are not used on this side.
   replace_stuck_release  nothing to do: a TRON transaction lands or expires within `tron_valid_s`.
+  relay_round          first closes the journal entries the solidified chain has settled.
 The L2 side (mints, executes, drains) is `vigia.py`'s code, untouched.
 """
 import hashlib
@@ -82,6 +83,11 @@ class VigiaTron(vigia.Vigia):
 
     def replace_stuck_release(self, d, burn_id, rnd):
         return
+
+    def relay_round(self):
+        for key, state in self.tron().settle_all():
+            vigia.log(kind='tron-settled', key=key, state=state)
+        super().relay_round()
 
     def send_locked(self, side, to, call, gas, replace, release_id, locks):
         if side != 'eth':

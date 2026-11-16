@@ -171,6 +171,17 @@ class Sender:
             return {'txid': doc['txid'], 'state': 'sent', 'code': out['code'], 'message': out['message'],
                     'estimated_energy': est['energy'], 'energy_penalty': est['penalty']}
 
+    def settle_all(self):
+        """Closes every entry the solidified chain has settled. -> [(key, 'landed' | 'expired')]."""
+        done = []
+        with open(self.dir / '.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for path in sorted(self.dir.glob('*.json')):
+                state, _ = self.settle(path)
+                if state != 'pending':
+                    done.append((path.stem, state))
+        return done
+
     def energy_price(self):
         for p in self.node.post('getchainparameters').get('chainParameter', []):
             if p.get('key') == 'getEnergyFee':
