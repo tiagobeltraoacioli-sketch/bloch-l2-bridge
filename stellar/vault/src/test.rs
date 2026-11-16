@@ -3294,3 +3294,163 @@ fn books_invariant_holds_under_randomized_operations() {
     assert_eq!(3 * 2_000_000 * U as i128 * 10 - held, fx.bal(&fx.vault) + out + swept as i128 * 10);
     assert!(count[0] > 40 && count[2] > 40 && count[4] > 10 && count[5] > 2 && count[6] > 0, "{:?}", count);
 }
+
+// ── review 331 (round 17, second pass): demonstrations only ──────────────────────
+
+/// R325-XLM-1 against the fix, with the schedule that hurts most instead of "pause whenever the vault lets them":
+/// every guardian key is hostile and each pause lands one second before the queued exit matures. The delay of one
+/// exit is bounded by one chain (each guardian once), and the next chain can only start a full cooldown later, in
+/// which every exit certified in time is paid. Three chains in a row behave the same.
+#[test]
+fn r331_hostile_guardians_with_the_worst_schedule_delay_an_exit_by_one_chain_at_most() {
+    let fx = fx_with(|c, _| {
+        c.release_delay = 2 * HOUR;
+        c.large_release_threshold = 0;
+    });
+    fx.controls(true, true);
+    fx.dep(5_000 * U);
+    let mut nonce = 0u64;
+    for _chain in 0..3 {
+        nonce += 1;
+        let to = Address::generate(&fx.env);
+        let item = fx.item(nonce, &to, 20 * U);
+        let id = fx.release_id(&item);
+        let start = fx.now();
+        let mut voids = 0u32;
+        loop {
+            fx.release(&item);
+            assert_eq!(fx.v.burn_status(&nonce, &item.native_burn), 1);
+            fx.advance(2 * HOUR - 1);
+            let hit = (0..3).any(|g| matches!(fx.try_pause(&fx.guardians[g]), Ok(Ok(()))));
+            if !hit {
+                break;
+            }
+            voids += 1;
+            // Open again at once (also while paused), and nothing but a new certificate after the pause helps.
+            assert_eq!(fx.v.burn_status(&nonce, &item.native_burn), 0);
+            assert_eq!(err_of(fx.try_release(&item)), Error::Paused);
+            fx.advance(72 * HOUR);
+            assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Voided);
+        }
+        fx.advance(1);
+        fx.v.execute_release(&id);
+        assert_eq!(fx.v.burn_status(&nonce, &item.native_burn), 2);
+        assert_eq!(fx.bal(&to), (20 * U as i128 - 10_000) * 10);
+        assert_eq!(voids, 3);
+        assert_eq!(fx.now() - start, 3 * (72 * HOUR + 2 * HOUR - 1) + 2 * HOUR);
+        // No guardian can pause before the cooldown after the last pause has passed: exits queued until
+        // `cooldown - delay` after the chain are paid without a void.
+        let free_until = fx.v.state().paused_until + 72 * HOUR;
+        while fx.now() + 2 * HOUR < free_until {
+            nonce += 1;
+            let to = Address::generate(&fx.env);
+            let item = fx.item(nonce, &to, 20 * U);
+            fx.release(&item);
+            fx.advance(2 * HOUR);
+            for g in 0..3 {
+                assert_eq!(err_of(fx.try_pause(&fx.guardians[g])), Error::InvalidPause);
+            }
+            fx.v.execute_release(&fx.release_id(&item));
+            assert_eq!(fx.bal(&to), (20 * U as i128 - 10_000) * 10);
+        }
+        fx.advance(free_until - fx.now());
+    }
+    fx.assert_whole();
+}
+
+/// What `burn_status` (and `pending`) report in each state a page or a tool can meet.
+#[test]
+fn r331_burn_status_in_every_state() {
+    let fx = fx_queue();
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, 2_000 * U);
+    let id = fx.release_id(&item);
+    let burn = item.native_burn.clone();
+    // never released
+    assert_eq!(fx.v.burn_status(&1, &burn), 0);
+    // queued
+    fx.release(&item);
+    assert_eq!(fx.v.burn_status(&1, &burn), 1);
+    // queued, the committee closed releases: still "queued"
+    fx.controls(true, false);
+    assert_eq!(fx.v.burn_status(&1, &burn), 1);
+    fx.advance(HOUR);
+    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::InvalidRelease);
+    fx.controls(true, true);
+    // another burn id under the same nonce, and the same id under another nonce: held
+    assert_eq!(fx.v.burn_status(&1, &fx.burn(77)), 3);
+    assert_eq!(fx.v.burn_status(&2, &burn), 3);
+    // a guardian pauses: the answer is "open" at once, although nothing is accepted while the pause lasts
+    fx.pause(0);
+    assert_eq!(fx.v.burn_status(&1, &burn), 0);
+    assert_eq!(fx.v.burn_status(&2, &burn), 0);
+    assert_eq!(err_of(fx.try_release(&item)), Error::Paused);
+    // the dead queue entry is still returned by `pending`, with its old `ready_at` (already in the past)
+    let dead = fx.v.pending(&id).unwrap();
+    assert!(dead.ready_at <= fx.now() && dead.pause_count + 1 == fx.v.state().pause_count);
+    assert_eq!(fx.v.burn_record(&1).unwrap().paid, false);
+    fx.advance(72 * HOUR);
+    assert_eq!(fx.v.burn_status(&1, &burn), 0);
+    assert_eq!(err_of(fx.v.try_execute_release(&id)), Error::Voided);
+    // certified again: queued, then paid
+    fx.release(&item);
+    assert_eq!(fx.v.burn_status(&1, &burn), 1);
+    fx.advance(HOUR);
+    fx.v.execute_release(&id);
+    assert_eq!(fx.v.burn_status(&1, &burn), 2);
+    assert_eq!(fx.v.burn_status(&1, &fx.burn(77)), 3);
+    assert_eq!(fx.v.burn_status(&2, &burn), 3);
+    assert_eq!(fx.v.pending(&id), None);
+    // a later pause changes nothing for a paid burn
+    fx.advance(72 * HOUR);
+    fx.pause(1);
+    assert_eq!(fx.v.burn_status(&1, &burn), 2);
+    assert_eq!(fx.bal(&to), (2_000 * U as i128 - 1_000_000) * 10);
+    fx.assert_whole();
+}
+
+/// A guardian's signed pause is a bearer instrument until the pause count moves: whoever holds it submits it at any
+/// time before `valid_until`, which the vault only requires to be at most a day ahead AT SUBMISSION. A signature
+/// made for a far `valid_until` therefore stays usable for as long as nobody else pauses.
+#[test]
+fn r331_a_signed_pause_with_a_far_valid_until_stays_usable() {
+    let fx = fx_queue();
+    let valid_until = fx.now() + 30 * DAY;
+    let d = fx.pause_digest_x(0, valid_until);
+    let sig = BytesN::from_array(&fx.env, &sign(&fx.guardians[0], &d));
+    assert_eq!(err_of(fx.v.try_guardian_pause(&valid_until, &sig)), Error::InvalidPause);
+    fx.advance(29 * DAY + 1);
+    let to = Address::generate(&fx.env);
+    let item = fx.item(1, &to, 2_000 * U);
+    fx.release(&item);
+    fx.v.guardian_pause(&valid_until, &sig);
+    assert_eq!(fx.v.burn_status(&1, &item.native_burn), 0);
+}
+
+/// The release bucket is not reserved by a queued release, and anyone executes. An exit of the whole window that
+/// matures first takes the bucket; smaller honest exits behind it stay queued (not lost) until it refills.
+#[test]
+fn r331_one_full_window_exit_holds_the_queue_behind_it() {
+    let fx = fx_with(|c, _| {
+        c.release_delay = 2 * HOUR;
+        c.large_release_threshold = 0;
+    });
+    fx.controls(true, true);
+    fx.dep(9_000 * U);
+    fx.dep(9_000 * U);
+    fx.advance(DAY);
+    let whale = Address::generate(&fx.env);
+    let big = fx.item(1, &whale, 10_000 * U);
+    fx.release(&big);
+    let to = Address::generate(&fx.env);
+    let small = fx.item(2, &to, 20 * U);
+    fx.release(&small);
+    fx.advance(2 * HOUR);
+    fx.v.execute_release(&fx.release_id(&big));
+    assert_eq!(err_of(fx.v.try_execute_release(&fx.release_id(&small))), Error::RateLimited);
+    assert_eq!(fx.v.burn_status(&2, &small.native_burn), 1);
+    // 20 coins refill in 20 / 10,000 of a day.
+    fx.advance(DAY * 20 / 10_000 + 1);
+    fx.v.execute_release(&fx.release_id(&small));
+    fx.assert_whole();
+}
