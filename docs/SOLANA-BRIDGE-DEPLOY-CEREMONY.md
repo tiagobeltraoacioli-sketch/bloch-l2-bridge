@@ -151,7 +151,7 @@ solana-keygen pubkey deployer.json
 ```
 
 Write the two addresses into `program.id` and `deployer.address`. Fund the deployer with SOL for the program's
-rent (the program data account holds the binary: by the rent formula about 0.7 SOL for the current 99,744-byte
+rent (the program data account holds the binary: by the rent formula about 0.75 SOL for the current 106,984-byte
 binary), the vault and token accounts, the fee account and fees; 1.5 SOL leaves a margin. Then:
 
 ```
@@ -299,7 +299,32 @@ cluster, and a vault that was already used. It has not run against chain 700770 
 `deploy_pontes.py` also checks the committed operator templates of the ETHEREUM bridge
 (`deployments/mainnet/busdc-ops`); Solana operator templates do not exist yet (runbook delta, section 10).
 
-## 8. The registry
+## 8. The burn router and the registry
+
+Exits go through `contracts/solana/SolanaBurnRouter.sol` (one constructor argument: the token; no owner, no
+state). It is deployed once on the L2 by any funded account after the token is verified, and its address goes
+into `router.address` of the token config, into every signer's Solana half (`burn_router`), into the relayers and
+into the frontend. No page or integration of this bridge calls `burn` on the token directly
+(`docs/SOLANA-VAULT.md` 11.1).
+
+```
+forge create contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter --rpc-url $L2_RPC --legacy --ledger --mnemonic-derivation-path "$REGISTRY_PATH" --broadcast --constructor-args $TOKEN
+```
+```
+cast call $ROUTER "token()(address)" --rpc-url $L2_RPC
+```
+```
+cast call $ROUTER "commitment(string)(address)" BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8 --rpc-url $L2_RPC
+```
+```
+cast call $ROUTER "commitment(string)(address)" 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg --rpc-url $L2_RPC
+```
+
+The first must print the token; the second `0xdF5a03Ae91Aca56d37572127c03e371a9563F8A0` (the fee wallet's
+commitment, a vector of the test suite); the third must REVERT (`NotASolanaWallet`): that address is a token
+account.
+
+The registry is how a burn made directly on the token becomes payable (its wallet is announced there).
 
 `contracts/solana/SolanaRecipientRegistry.sol` has no constructor argument, no owner and no state. It is deployed
 once on the L2 by any funded account, and its address goes into `registry.address` of the token config and into

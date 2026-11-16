@@ -8,7 +8,7 @@
     "source": "sourceChainId is keccak256(\"BLOCH-SVM-CHAIN-ID-v1\" || genesis hash bytes) as a uint256; sourceVault is the vault's 20-byte identity vault20 = last 20 bytes of keccak256(\"BLOCH-SVM-VAULT-ID-v1\" || program id || vault address); sourceRoute is the vault's route. Both come from `sol_vault.py verify` after the vault is initialized",
     "limits": "the same as bUSDC: supply cap 100,000 USDC, bucket 10,000 USDC refilled in 24 h, T = 0 (every mint waits largeMintDelay 12 h and stays cancellable by 2 of 3 guardians), minBurn 10 USDC",
     "keys": "signers: the seven l2-mint-signer keys; guardians: the three l2-token-guardian keys (docs/BRIDGE-V3-KEY-CEREMONY.md). The same keys as bUSDC: the token's EIP-712 domain contains the token address and the L2 chain id, so a mint certificate of one token is not valid on another",
-    "burn": "a holder burns to the 20-byte commitment of a Solana wallet (SolanaRecipientRegistry.commitmentOf) and announces the wallet once on the registry",
+    "burn": "a holder exits through SolanaBurnRouter on the L2: approve(router, amount) on the token, then burnTo(uint64 amount, string recipient) with the wallet's base58 address; the router refuses what is not a wallet address and burns to the 20-byte commitment. A burn made directly on the token is held by the signers until a wallet for its 20 bytes is announced on SolanaRecipientRegistry (docs/SOLANA-VAULT.md 11.1)",
     "TBD-owner": "source.revision; deployer.address; deployer.fundedBy.safe; signers.set; guardians.set; tx.maxGasPriceWei; solana.vaultAddress, solana.programId, solana.vault20, solana.route (TBD-deploy, from the vault's verify output); registry.address (TBD-deploy)"
   },
   "network": {
@@ -56,6 +56,11 @@
   },
   "registry": {
     "contract": "contracts/solana/SolanaRecipientRegistry.sol:SolanaRecipientRegistry",
+    "address": "TBD-deploy"
+  },
+  "router": {
+    "contract": "contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter",
+    "constructor": "the token address",
     "address": "TBD-deploy"
   },
   "signers": {

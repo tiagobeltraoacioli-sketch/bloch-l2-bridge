@@ -63,7 +63,7 @@ def wallet_of_text(text):
 
 def l2_logs(url, address, topics, from_block=0):
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_getLogs', 'params': [{
-        'address': address, 'topics': topics, 'fromBlock': hex(int(from_block)), 'toBlock': 'latest'}]}).encode()
+        'address': address, 'topics': topics, 'fromBlock': hex(int(from_block or 0)), 'toBlock': 'latest'}]}).encode()
     req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json', 'User-Agent': 'generic-client'})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -95,12 +95,12 @@ def find_wallet(cfg, commitment, burn_id=None):
     url = cfg.get('l2_rpc')
     router, registry = cfg.get('burn_router'), cfg.get('recipient_registry')
     if url and router and burn_id:
-        for entry in l2_logs(url, router, [topic(ROUTER_EVENT), burn_id], cfg.get('router_from_block', 0)):
+        for entry in l2_logs(url, router, [topic(ROUTER_EVENT), burn_id], cfg.get('router_from_block') or 0):
             wallet = wallet_of_text(exit_text(entry.get('data', '0x')))
             if is_wallet(wallet, commitment):
                 return wallet, 'router'
     if url and registry:
-        for entry in l2_logs(url, registry, [topic(REGISTRY_EVENT), '0x' + '00' * 12 + hexed[2:]], cfg.get('registry_from_block', 0)):
+        for entry in l2_logs(url, registry, [topic(REGISTRY_EVENT), '0x' + '00' * 12 + hexed[2:]], cfg.get('registry_from_block') or 0):
             try:
                 wallet = bytes.fromhex(entry['data'][2:66])
             except (ValueError, KeyError):

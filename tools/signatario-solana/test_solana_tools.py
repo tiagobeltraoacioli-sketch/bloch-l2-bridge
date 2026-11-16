@@ -304,7 +304,8 @@ class Recipients(unittest.TestCase):
             return list(router_logs if topic0 == sol_recipient.topic(sol_recipient.ROUTER_EVENT) else registry_logs)
         fake = Fake(answer)
         self.addCleanup(fake.close)
-        return {'l2_rpc': fake.url, 'burn_router': '0x' + '11' * 20, 'recipient_registry': '0x' + '22' * 20}
+        return {'l2_rpc': fake.url, 'burn_router': '0x' + '11' * 20, 'recipient_registry': '0x' + '22' * 20,
+                'router_from_block': None, 'registry_from_block': None, 'recipient_hints': None}  # unset keys may be present as null
 
     def test_router_log_names_the_wallet(self):
         self.assertEqual(sol_recipient.exit_text(self.exit_data(FEE_WALLET)), FEE_WALLET)

@@ -46,10 +46,11 @@ chain id is a 256-bit hash, and `vault20` is a hash that contains the program id
 
 | Account | Seeds (under the vault program) | Owner | Size | Created by | Closed |
 |---|---|---|---|---|---|
-| Vault state | `"vault"`, `sha256("BLOCH-SVM-VAULT-CONFIG-v1" || configuration bytes)` | the program | 1,130 | `initialize` (payer pays rent) | never |
+| Vault state | `"vault"`, `sha256("BLOCH-SVM-VAULT-CONFIG-v1" || configuration bytes)` | the program | 1,146 | `initialize` (payer pays rent) | never |
 | Vault token account | `"tokens"`, vault address | the classic SPL Token program; token authority = the vault address | 165 | `initialize` | never |
 | Deposit record | `"deposit"`, vault address, nonce (u64 little-endian) | the program | 211 | `deposit` (the depositor pays rent) | never |
-| Release record | `"release"`, vault address, burn nonce (u64 little-endian) | the program | 176 | `approve_release` (the relayer pays rent) | never |
+| Release record | `"release"`, vault address, burn nonce (u64 little-endian) | the program | 208 | `approve_release` (the relayer pays rent) | by `close_release`, once paid for `record_retention`; the rent returns to who paid it |
+| Paid page | `"paid"`, vault address, page number = burn nonce / 8,192 (u64 little-endian) | the program | 1,067 | `approve_release`, by the first approval in its range | never |
 
 The vault address is a function of the whole configuration. A vault with any other value (another signer, another
 limit, another fee owner) is another vault at another address. `initialize` is therefore permissionless: the only
@@ -67,7 +68,7 @@ allocated and assigned instead. The helper requires the target to be owned by th
 
 ### Account validation, per kind
 
-- **Vault state**: owned by the program, writable, length 1,130, tag 1, layout version 1, and its address equals
+- **Vault state**: owned by the program, writable, length 1,146, tag 1, layout version 2, and its address equals
   `create_program_address("vault", stored config hash, stored bump)`.
 - **Vault token account**: its address equals the one stored in the vault state; owned by the token program;
   165 bytes; initialized.
@@ -82,6 +83,10 @@ allocated and assigned instead. The helper requires the target to be owned by th
 - **Release record**: at approval its address equals `find_program_address("release", vault, nonce)`; at payment it
   is owned by the program, tag 3, its address is rederived from its stored bump, and its stored vault and nonce
   match.
+- **Paid page**: at approval its address equals `find_program_address("paid", vault, nonce / 8192)`; if it exists it
+  is owned by the program, 1,067 bytes, tag 4, and its stored vault and page number match; if it does not, the
+  approval creates it. At `close_release` it must exist, with the same checks and its address rederived from its
+  stored bump.
 - **Recipient token account**: equals the associated token account of the named wallet and the configured mint;
   owned by the token program, initialized; its mint and owner fields equal the mint and the wallet.
 - **Fee token account**: equals the address stored at initialization (the fee owner's associated token account);
@@ -94,18 +99,19 @@ allocated and assigned instead. The helper requires the target to be owned by th
 ## 3. Instructions
 
 The first data byte selects the instruction. Integers are little-endian. Every instruction requires its exact
-number of accounts and refuses trailing data.
+number of accounts (`deposit`: 8 to 15) and refuses trailing data.
 
 | # | Instruction | Accounts, in order | Data after the first byte |
 |---|---|---|---|
 | 0 | `initialize` | payer (signer, writable); vault (writable); vault token account (writable); mint; program data account; token program; system program | the configuration (section 4.1) |
-| 1 | `deposit` | depositor (signer, writable); depositor token account (writable); vault (writable); vault token account (writable); mint; deposit record (writable); token program; system program | amount u64; L2 recipient (20 bytes) |
-| 2 | `approve_release` | payer (signer, writable); vault (writable); release record (writable); deposit record of nonce `mint_count - 1`; instructions sysvar; system program | nonce u64; recipient (20); amount u64; native burn (32); mint count u64; minted total u64; mint head (32); valid until u64; source anchor slot u64; source anchor hash (32); native finalized number u64; native finalized hash (32). 204 bytes |
+| 1 | `deposit` | depositor (signer, writable); depositor token account (writable); vault (writable); vault token account (writable); mint; deposit record (writable); token program; system program; then up to 7 more candidate deposit records (writable) | amount u64; L2 recipient (20 bytes) |
+| 2 | `approve_release` | payer (signer, writable); vault (writable); release record (writable); deposit record of nonce `mint_count - 1`; paid page of the nonce (writable); instructions sysvar; system program | nonce u64; recipient (20); amount u64; native burn (32); mint count u64; minted total u64; mint head (32); valid until u64; source anchor slot u64; source anchor hash (32); native finalized number u64; native finalized hash (32). 204 bytes |
 | 3 | `execute_release` | vault (writable); vault token account (writable); mint; release record (writable); recipient token account (writable); token program | nonce u64; recipient wallet address (32) |
 | 4 | `guardian_pause` | vault (writable); instructions sysvar | valid until u64 |
 | 5 | `unpause` | vault (writable); instructions sysvar | pause count u64; valid until u64 |
 | 6 | `set_controls` | vault (writable); instructions sysvar | deposits u8 (0 or 1); releases u8 (0 or 1); nonce u64; valid until u64 |
 | 7 | `sweep_fees` | vault (writable); vault token account (writable); mint; fee token account (writable); token program | none |
+| 8 | `close_release` | vault (writable); release record (writable); paid page of the nonce (writable); the account that paid the record's rent (writable) | nonce u64 |
 
 Instructions 2, 4, 5 and 6 need a certificate: the instruction immediately before them in the transaction must be
 the canonical secp256k1 instruction of section 6.
@@ -131,6 +137,15 @@ The deposit is its **net** amount from there on: `fee = amount * deposit_fee_bps
 `net = amount - fee`. `total_locked += net`, `fees_accrued += fee`. The deposit id, the chain step and the record
 carry the net amount, which is exactly what the L2 token mints.
 
+**Which record account.** The record of deposit `n` is at the address derived from the vault and `n`, and `n` is
+the vault's deposit count when the deposit EXECUTES, not when it was signed. A deposit therefore names the record
+addresses of the next counts as it read them (the sixth account, and up to seven more after the system program);
+the program derives the address of the count it finds and uses the account with that address, leaving the others
+untouched. Deposits signed against the same count then land one after another instead of all but one failing. If
+more deposits land in between than the window names, the deposit fails (`InvalidAccount`) and moves nothing; the
+tool sends it again against the new count. The order of deposits, their nonces and the hash chain are unchanged:
+they are still assigned by the vault at execution, one count each (review 325, R325-SOL-4).
+
 ### 3.3 `approve_release`
 
 Refused while paused or while releases are disabled. Checks, in order: validity (`now <= valid_until` and
@@ -139,9 +154,26 @@ Refused while paused or while releases are disabled. Checks, in order: validity 
 (`1 <= mint_count <= deposit_count` and the deposit record of nonce `mint_count - 1` has `head_after == mint_head`);
 the certificate, with the threshold, over the release authorization (section 5).
 
+**No certificate from before a guardian pause** (review 325, R325-SOL-2). After the validity check the program
+requires `valid_until > last_pause_at + max_valid_seconds`, where `last_pause_at` is when the last guardian pause
+began (`StaleCertificate`). Signers date `valid_until` at most `max_valid_seconds` ahead (the vault and their own
+half both refuse more), so a certificate signed at or before the moment a guardian paused ends at or before that
+bound. Whatever such a certificate approved is voided by the pause, and neither it nor any other certificate
+from before the pause can approve anything afterwards, whoever ends the pause and however soon. No operator
+configuration is involved: the bound is computed from the vault's own state. The configuration additionally
+requires `pause_duration > max_valid_seconds`, so that when a pause runs its full length a certificate dated the
+moment it ends is already acceptable and signing resumes without a gap; after a 6-of-7 unpause signing resumes
+`max_valid_seconds` less the signers' own validity after the pause began (25 s in the rehearsal, 30 minutes with
+1,800 s certificates under a 3,600 s limit).
+
+**The paid page.** A set bit for this nonce in its paid page means the release was paid and its record closed
+(section 3.9): `AlreadyReleased`. A page that does not exist yet is created here (1,067 bytes, about 0.0083 SOL,
+once per 8,192 burn nonces).
+
 Then the release record: created if the address is new. If a record exists, it must be an approval that a guardian
 pause voided (`state == approved` and `seq <= void_through_seq`); a standing approval and a paid release are final
-for their nonce (`AlreadyReleased`). The record gets the next approval number and
+for their nonce (`AlreadyReleased`). The record keeps the address that paid its rent at the first approval. It
+gets the next approval number and
 `ready_at = now + release_delay` when `release_delay != 0` and `amount > large_release_threshold`, else `now`.
 
 ### 3.4 `execute_release`
@@ -177,12 +209,12 @@ the burn again and it is approved and paid once. The local rehearsal does exactl
 approval voided by a pause is refused with `Voided`, the same burn is certified again by the unchanged signer,
 approved again and paid once.
 
-A voided approval can be approved again with the SAME certificate while that certificate is still valid. With the
-mainnet values the pause (259,200 s) outlasts every certificate (`max_valid_seconds` 3,600 s), so a voided
-certificate is dead when the pause ends; `sol_vault.py validate` refuses a mainnet configuration in which
-`pauseDuration` is not above `maxValidSeconds`. The program itself does not enforce that relation. A 6-of-7
-unpause that ends a pause within the hour re-opens the window for a still valid certificate: the six signers who
-end a pause early are stating that the voided approvals may stand.
+A voided approval cannot be approved again with the certificate that approved it, nor with any certificate that
+could have been signed before the pause: `approve_release` refuses them for good (`StaleCertificate`, section
+3.3). Before review 325 this rested on the configured pause outlasting the configured certificate life, which
+only the tool checked, and a 6-of-7 unpause inside the hour re-opened the window. Now the program enforces it
+from its own state, and the rehearsal shows it on a validator: after a pause ended early by six signers, the
+voided certificate, still inside its validity, is refused, and a certificate signed after the pause is accepted.
 
 ### 3.5 `guardian_pause`
 
@@ -191,7 +223,7 @@ The certificate must hold exactly one signature, of a guardian, over the pause a
 used once because it names the pause it starts. Conditions as on Ethereum: not already paused, not within the
 cooldown after a committee unpause, and each guardian starts at most one pause per chain of consecutive pauses.
 The pause lasts `pause_duration`, stops deposits, approvals and payments, and **voids every approval not yet paid**
-(`void_through_seq = approval_seq`).
+(`void_through_seq = approval_seq`). It records when it began (`last_pause_at`): section 3.3.
 
 ### 3.6 `unpause`
 
@@ -210,9 +242,24 @@ the balance covers `total_locked + fees_accrued`. It is not stopped by a pause, 
 accrued it succeeds and does nothing. If the fee token account does not exist the instruction fails and the fees
 stay accrued.
 
+### 3.9 `close_release`
+
+Anyone may call it. The release record must be PAID and `now >= paid_at + record_retention`; the fourth account
+must be the address the record names as having paid its rent. The program sets the nonce's bit in the paid page,
+logs the record, moves the record's lamports to that address and zeroes the record, which the runtime then
+removes. From here on the bit is the nonce's replay state: `approve_release` refuses a nonce whose bit is set,
+`execute_release` and `close_release` find no record. A record that is approved, waiting or voided cannot be
+closed. Lamports sent to a closed record's address do not bring the nonce back (tested).
+
+Why: a release record costs its relayer about 0.0023 SOL of rent, far more than the 5 bps of a small exit, which
+go to the fee owner (review 325, R325-SOL-4). With closing, the relayer's cost per release is two transaction fees
+and the rent comes back after the retention; what stays is one bit, in a page whose rent (about 0.0083 SOL) is
+shared by 8,192 nonces. The retention (7 days proposed, at most 30) is the time a watcher has to read the full
+record of a paid release; after it, a watcher can still check that every paid nonce belongs to an L2 burn.
+
 ## 4. Layouts
 
-Every program account starts with a type tag and a layout version (1). Nothing is reallocated after creation.
+Every program account starts with a type tag and a layout version (2). Nothing is reallocated after creation.
 
 ### 4.1 Configuration (instruction data of `initialize`, and the bytes hashed into the vault address)
 
@@ -234,13 +281,14 @@ Every program account starts with a type tag and a layout version (1). Nothing i
 | 248 | 8 | `pause_duration` |
 | 256 | 8 | `pause_cooldown` |
 | 264 | 8 | `max_valid_seconds` |
-| 272 | 2 | `deposit_fee_bps` |
-| 274 | 2 | `release_fee_bps` |
-| 276 | 1 | `threshold` |
-| 277 | 1 | `switch_threshold` |
-| 278 | 1 | `signer_count` (at most 16) |
-| 279 | 1 | `guardian_count` (at most 7) |
-| 280 | 20 each | the signers, then the guardians; nothing after them |
+| 272 | 8 | `record_retention` |
+| 280 | 2 | `deposit_fee_bps` |
+| 282 | 2 | `release_fee_bps` |
+| 284 | 1 | `threshold` |
+| 285 | 1 | `switch_threshold` |
+| 286 | 1 | `signer_count` (at most 16) |
+| 287 | 1 | `guardian_count` (at most 7) |
+| 288 | 20 each | the signers, then the guardians; nothing after them |
 
 Validation (the rules of the `ProvenanceSourceVault` constructor, plus the Solana-only values): each fee at most
 30 bps; fee owner, mint, chain id, the three labels non-zero; source and native domain different; `cap > 0`;
@@ -248,45 +296,47 @@ Validation (the rules of the `ProvenanceSourceVault` constructor, plus the Solan
 `0 < window_limit <= cap`; `window_seconds > 0`; `l2_min_burn > 0`;
 `l2_min_burn <= min_deposit <= window_limit`; `min_deposit` less its deposit fee is at least `l2_min_burn`;
 `release_delay <= 14 days`, and `large_release_threshold` must be zero when `release_delay` is zero;
-`60 <= max_valid_seconds <= 86400`; without guardians both pause values are zero, with guardians
-`0 < pause_duration <= 14 days` and `pause_duration <= pause_cooldown <= 14 days`; signers strictly ascending
+`60 <= max_valid_seconds <= 86400`; `record_retention <= 30 days`; without guardians both pause values are zero,
+with guardians `max_valid_seconds < pause_duration <= 14 days` (a pause outlasts every certificate) and
+`pause_duration <= pause_cooldown <= 14 days`; signers strictly ascending
 (so non-zero and distinct); guardians strictly ascending and none of them a signer. At `initialize` also: the fee
 owner is not the vault, its token account or the mint.
 
-### 4.2 Vault state (1,130 bytes)
+### 4.2 Vault state (1,146 bytes)
 
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 1 | tag = 1 |
-| 1 | 1 | layout version = 1 |
+| 1 | 1 | layout version = 2 |
 | 2 | 1 | vault bump |
 | 3 | 1 | token account bump |
 | 4 | 32 | configuration hash |
-| 36 | 280 | the fixed part of the configuration, verbatim |
-| 316 | 320 | signers, 16 slots of 20 bytes (unused slots zero) |
-| 636 | 140 | guardians, 7 slots of 20 bytes |
-| 776 | 20 | `vault20` |
-| 796 | 20 | `mint20` |
-| 816 | 32 | `route` |
-| 848 | 32 | mint chain genesis |
-| 880 | 32 | vault token account address |
-| 912 | 32 | fee token account address |
-| 944 | 32 | `head`: deposit chain head after `deposit_count` deposits |
-| 976 | 8 | `deposit_count` |
-| 984 | 8 | `total_locked` |
-| 992 | 8 | `fees_accrued` |
-| 1000 | 8 | `control_nonce` |
-| 1008 | 1 | `deposits_enabled` |
-| 1009 | 1 | `releases_enabled` |
-| 1010 | 8 | `release_bucket` |
-| 1018 | 8 | `bucket_updated_at` |
-| 1026 | 8 | `paused_until` |
-| 1034 | 8 | `pause_count` |
-| 1042 | 8 | `guardian_blocked_until` |
-| 1050 | 8 | `pause_chain` |
-| 1058 | 56 | `guardian_last_chain`, one u64 per guardian slot |
-| 1114 | 8 | `approval_seq` |
-| 1122 | 8 | `void_through_seq` |
+| 36 | 288 | the fixed part of the configuration, verbatim |
+| 324 | 320 | signers, 16 slots of 20 bytes (unused slots zero) |
+| 644 | 140 | guardians, 7 slots of 20 bytes |
+| 784 | 20 | `vault20` |
+| 804 | 20 | `mint20` |
+| 824 | 32 | `route` |
+| 856 | 32 | mint chain genesis |
+| 888 | 32 | vault token account address |
+| 920 | 32 | fee token account address |
+| 952 | 32 | `head`: deposit chain head after `deposit_count` deposits |
+| 984 | 8 | `deposit_count` |
+| 992 | 8 | `total_locked` |
+| 1000 | 8 | `fees_accrued` |
+| 1008 | 8 | `control_nonce` |
+| 1016 | 1 | `deposits_enabled` |
+| 1017 | 1 | `releases_enabled` |
+| 1018 | 8 | `release_bucket` |
+| 1026 | 8 | `bucket_updated_at` |
+| 1034 | 8 | `paused_until` |
+| 1042 | 8 | `pause_count` |
+| 1050 | 8 | `guardian_blocked_until` |
+| 1058 | 8 | `pause_chain` |
+| 1066 | 56 | `guardian_last_chain`, one u64 per guardian slot |
+| 1122 | 8 | `approval_seq` |
+| 1130 | 8 | `void_through_seq` |
+| 1138 | 8 | `last_pause_at`: when the last guardian pause began (0: never) |
 
 ### 4.3 Deposit record (211 bytes)
 
@@ -309,7 +359,7 @@ owner is not the vault, its token account or the mint.
 
 A deposit record is written once and never changed or closed. It is the canonical record a watcher reads.
 
-### 4.4 Release record (176 bytes)
+### 4.4 Release record (208 bytes)
 
 | Offset | Size | Field |
 |---|---|---|
@@ -328,6 +378,21 @@ A deposit record is written once and never changed or closed. It is the canonica
 | 152 | 8 | `approved_at` |
 | 160 | 8 | `paid_at` |
 | 168 | 8 | paid amount (amount less the fee) |
+| 176 | 32 | the address that paid the record's rent at the first approval |
+
+### 4.5 Paid page (1,067 bytes)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | tag = 4 |
+| 1 | 1 | layout version |
+| 2 | 1 | bump |
+| 3 | 32 | vault address |
+| 35 | 8 | page number (burn nonce / 8,192) |
+| 43 | 1,024 | one bit per burn nonce of the page, least significant bit first: set = paid and closed |
+
+The vault's replay state for releases is the release records that exist plus the paid pages. A page is never
+closed and a bit is never cleared.
 
 ## 5. Digests
 
@@ -412,7 +477,7 @@ Custom error codes (`ProgramError::Custom`):
 | 107 | InvalidContext | 118 | ProgramUpgradeable |
 | 108 | RateLimited | 119 | WrongRecipient |
 | 109 | NotGuardian | 120 | Expired |
-| 110 | InvalidPause | | |
+| 110 | InvalidPause | 121 | StaleCertificate |
 
 Data logs (`sol_log_data`; the first field is the tag):
 
@@ -420,7 +485,8 @@ Data logs (`sol_log_data`; the first field is the tag):
 |---|---|
 | `BLOCH-SVM-VAULT-INITIALIZED-v1` | vault address, `vault20`, route |
 | `BLOCH-SVM-DEPOSITED-v1` | the 211 bytes of the deposit record |
-| `BLOCH-SVM-RELEASE-APPROVED-v1` | the 176 bytes of the release record |
+| `BLOCH-SVM-RELEASE-APPROVED-v1` | the 208 bytes of the release record |
+| `BLOCH-SVM-RELEASE-CLOSED-v1` | the release record as it was when closed |
 | `BLOCH-SVM-RELEASED-v1` | the release record, the recipient wallet |
 | `BLOCH-SVM-GUARDIAN-PAUSED-v1` | guardian address (20), pause count, paused until |
 | `BLOCH-SVM-UNPAUSED-v1` | pause count, guardian blocked until |
@@ -435,23 +501,26 @@ log is not state. They read the deposit and release record accounts at `finalize
 | # | Ethereum vault | Solana vault | Why |
 |---|---|---|---|
 | 1 | `release()` verifies and pays in one call (launch `releaseDelay` 0) | Two steps: `approve_release` (certificate) then `execute_release` (payment), in two transactions | A transaction is at most 1,232 bytes. The certificate of 5 signatures alone is 541 bytes; with the accounts of a payment it does not fit (section 10) |
-| 2 | Optional uniform `releaseDelay` with a forged-mint challenge; 0 at launch | `release_delay` applies to releases above `large_release_threshold`; a guardian pause voids every approval not yet paid, which then needs a new certificate | The two steps exist anyway, so a waiting period for large items costs nothing. Voiding makes a pause-only guardian effective against a wrong approval that honest signers will not sign again; against five compromised keys it only delays. No forged-mint challenge (`proveForgedMint`) is ported: it belongs to `releaseDelay` mode with a mint verifier, which is not the launch design |
+| 2 | Optional uniform `releaseDelay` with a forged-mint challenge; 0 at launch | `release_delay` applies to releases above `large_release_threshold`; a guardian pause voids every approval not yet paid, and the program then refuses every certificate that could have been signed before that pause (`StaleCertificate`) | The two steps exist anyway, so a waiting period for large items costs nothing. Voiding makes a pause-only guardian effective against a wrong approval: the certificate behind it is dead for good, however the pause ends. Against five keys that stay compromised it delays: they can sign a new certificate after the pause. No forged-mint challenge (`proveForgedMint`) is ported: it belongs to `releaseDelay` mode with a mint verifier, which is not the launch design |
 | 3 | One-way light-client switch (`proposeVerifier`, `cancelVerifier`, `activateVerifier`, `releaseWithProof`) | None | The light-client path is out of scope in round 16. Consequence: the committee can never be retired on this vault; the only succession is a migration to a new vault |
 | 4 | The certificate binds an Ethereum block hash, checked with `blockhash` (256 blocks) | The certificate carries an anchor slot and hash that are signed but not compared with chain history; the program requires the slot to be below the clock, and bounds a certificate's life with `max_valid_seconds` | The SlotHashes sysvar covers 512 slots (a few minutes), less than the time to collect signatures. The provenance check already binds a release to this vault's own deposit history, which is what the fork binding protects on Ethereum |
-| 5 | `validUntil` only has to be in the future | Also at most `max_valid_seconds` ahead | Replaces the 256-block lifetime bound of item 4; a certificate cannot be kept for later, and a certificate voided by a 72 h pause is dead when the pause ends |
+| 5 | `validUntil` only has to be in the future | Also at most `max_valid_seconds` ahead, and above `last_pause_at + max_valid_seconds` | Replaces the 256-block lifetime bound of item 4; a certificate cannot be kept for later, and no certificate survives a guardian pause (section 3.3). The configuration must also satisfy `pause_duration > max_valid_seconds` |
 | 6 | A guardian pauses by sending the transaction (`msg.sender`) | A guardian signs a pause authorization with its secp256k1 key; anyone delivers it | No new key type for guardians. The authorization names the pause it starts, so it is used once |
 | 7 | The burn's `ethRecipient` is the paid address | The burn names a 20-byte commitment to a 32-byte wallet; payment goes to that wallet's associated token account, and the wallet is supplied at payment | The unchanged token's `burn` carries 20 bytes. A wallet other than the committed one needs a second preimage of 160 bits |
-| 8 | `releasedNonce` and `releasedBurn` | One release record per burn nonce; the native burn id is stored in it and bound by the certificate, but is not a second replay key | Each replay key on Solana is an account with rent. The burn nonce is the token's own counter. Consequence: if the committee certified one burn id under two nonces, the Ethereum vault would refuse the second and this vault would not |
+| 8 | `releasedNonce` and `releasedBurn`, kept for ever in contract storage | One release record per burn nonce while it is approved or recently paid; after `record_retention` anyone may close a paid record, and one bit in a paid page keeps the nonce spent. The native burn id is stored in the record and bound by the certificate, but is not a second replay key | Each replay key on Solana is an account with rent; the record's rent returns to the relayer and the bit costs about 0.000001 SOL. The burn nonce is the token's own counter. Consequence: if the committee certified one burn id under two nonces, the Ethereum vault would refuse the second and this vault would not |
 | 9 | Deposits are events; the chain head per count is a mapping | Each deposit is an account (the depositor pays its rent); the head after each deposit is stored in it | A release must be checked against the head at an earlier count, and state is what a watcher can read reliably at `finalized` |
 | 10 | `feeRecipient` is an address | The fee owner is a wallet; fees go to its associated token account, which must exist before the first sweep | A token account is needed to receive SPL tokens. Fees are swept separately, so a missing or frozen fee account never blocks a release |
 | 11 | The constructor deploys one vault | `initialize` is permissionless and configuration-addressed | No deployer power, no front-running of the address |
 | 12 | `depositsEnabled` and `releasesEnabled` start false | The same | Unchanged: a 5-of-7 `set_controls` opens the vault |
 | 13 | The issuer can blacklist addresses and pause or upgrade the token | The issuer's freeze authority can freeze any USDC token account | Section 12 |
-| 14 | No storage cost for the user | Rent: deposit record paid by the depositor, release record by the relayer | Section 10 |
+| 14 | No storage cost for the user | Rent: the deposit record is paid by the depositor and stays (about 0.00236 SOL); the release record is paid by the relayer and returns to it when the record is closed (about 0.00233 SOL, section 3.9); a paid page per 8,192 nonces (about 0.0083 SOL) stays | Section 10 |
 | 15 | `nonReentrant` guard | None | The runtime refuses reentrancy into a program that is already on the call stack (other than direct self-recursion, which the program never does), and the classic token program calls no other program |
 | 16 | `transferMode` for tokens that return nothing | Classic SPL Token only | Section 12 |
-| 17 | Up to 16 signers with any threshold | Up to 16 signers; in practice the release threshold is at most 6 | A 7-signature approval is 1,310 bytes. An address lookup table would lift this; none is used |
+| 17 | Up to 16 signers with any threshold | Up to 16 signers; in practice the release threshold is at most 5 | A 5-signature approval is 1,151 bytes with the paid page account; a sixth signature makes 1,247. An address lookup table would lift this; none is used. The tool refuses a configuration with a threshold above 5 |
 | 18 | `executeRelease` of a queued release checks only the pause | The same: `execute_release` does not check `releases_enabled` | Kept as on Ethereum |
+| 19 | A deposit cannot conflict with another one | A deposit names up to 8 candidate record addresses; the program uses the one of the count it finds | The record address depends on the count at execution (section 3.2). Order, nonces and the hash chain are unchanged |
+| 20 | The burn's recipient is checked by nobody, and need not be: it is an address | Exits go through `SolanaBurnRouter` on the L2, which refuses what is not a wallet address; signers certify a burn only when a wallet (on the curve, hashing to the 20 bytes) is published | The frozen token takes any 20 bytes; section 11 |
+| 21 | A signer reads one Ethereum node | A signer attests a deposit only when every configured Solana endpoint, at least two on a public cluster, shows the same record at `finalized` | A mainnet Solana RPC node is costly and operators will use providers; one provider must not be able to supply five mint signatures (section 13) |
 
 ## 9. No upgrade authority
 
@@ -515,16 +584,53 @@ Its semantics fit with constructor arguments alone: 6 decimals, `sourceChainId_`
 section 1, `sourceVault_` = `vault20`, `sourceRoute_` = the vault's route. Its mint chain genesis
 `keccak256(abi.encode(MINT_CHAIN_TAG, sourceChainId_, sourceVault_, sourceRoute_))` is then the vault's.
 
-The one place where 20 bytes are not enough is the burn recipient. A holder burns to the commitment of their
-Solana wallet, and publishes the wallet once on `contracts/solana/SolanaRecipientRegistry.sol`
-(`announce(bytes32 solanaWallet)`), a stateless notice board with no owner, no funds and no approvals. The
-registry is a convenience for relayers. Safety rests on the vault's own hash check: an announcement by anyone, true
-or false, cannot redirect a payment.
+### 11.1 The burn recipient (review 325, R325-SOL-1)
 
-A burn to a commitment whose wallet nobody knows cannot be paid until the wallet is supplied. A burn to a
-commitment computed wrongly (for example the hash of a token account instead of the wallet) is paid to the
-associated token account of whatever 32 bytes hash to it, if anyone ever finds them: in practice it is lost.
-Frontends must compute the commitment with the registry's `commitmentOf`.
+The one place where 20 bytes are not enough is the burn recipient. `burn(uint64,address)` takes ANY 20 bytes. On
+bUSDC they are the holder's Ethereum address; here they must be the commitment of a Solana wallet,
+`keccak256("BLOCH-SVM-ACCOUNT-ID-v1" || wallet)[12..]`, and the frozen token cannot check that. Two mistakes
+follow from it: a burn to an Ethereum address (typed by habit, or sent by an integration written for bUSDC)
+names 20 bytes no wallet hashes to and can never be paid; a commitment to a token account's address would be
+paid into the associated token account OF that token account, which no key controls.
+
+**Where the destination is checked: `contracts/solana/SolanaBurnRouter.sol`.** Exits are made with
+`approve(router, amount)` on the token, then `router.burnTo(uint64 amount, string recipient)`, the recipient being
+the base58 text a Solana wallet shows. The router decodes it, requires 32 bytes in canonical base58, not zero and
+ON the Ed25519 curve, computes the commitment itself, burns through the token and logs
+`SolanaExit(bytes32 indexed burnId, address indexed from, uint64 amount, address commitment, string recipient)`
+in the same transaction. Every associated token account, and every other program-derived address, is off the
+curve by construction, so pasting a token account's address is refused before anything is burned; so is an
+Ethereum address, in any spelling. The router has no owner, no storage and holds nothing between calls. It has
+the shape of `StellarBurnRouter` and `BitcoinBurnRouter`: `token()`, a pure function from the destination text to
+the 20 bytes (`commitment(string)`), `burnTo(uint64, string)`, and one `<Network>Exit` log.
+
+What the curve check does not do: it does not prove that anyone holds the key (a mistyped address fails base58
+canonical form or the curve check with probability about one half, not always); a token account created at a
+keypair address is on the curve; and a wallet that is itself a program-derived address (a multisig vault) is
+refused, so such a holder exits to a key wallet.
+
+**What the signers do: a burn is certified only when a wallet is known for it** (`tools/signatario-solana/
+sol_recipient.py`, applied by the Solana half before it signs, by the sign daemon before it rebuilds anything, by
+the relayer before it pays). A wallet is 32 bytes, not zero, on the curve, hashing to the burn's 20 bytes. It is
+looked for in the router's `SolanaExit` log of that burn id, then in a `SolanaRecipient` log of
+`SolanaRecipientRegistry` for those 20 bytes, then in an operator's hint file. Where it comes from does not
+matter, because the hash decides. On a public cluster the Solana half refuses to run without `l2_rpc` and
+`burn_router`.
+
+**A burn made directly on the token** (outside the router) is therefore one of three things:
+
+| Its 20 bytes | What happens |
+|---|---|
+| The commitment of a wallet, and the wallet is announced on the registry (by the burner or anyone: `announce(bytes32)`) | Certified, approved and paid like any other exit. This is the recovery rule: announce the wallet |
+| The commitment of a wallet nobody has published | HELD: not certified, not approved, alerted by every sign daemon (`release-held-no-wallet`). Paid once the wallet is announced |
+| Not a commitment of any wallet (an Ethereum address, the commitment of a token account) | HELD for good by the same rule. Nothing is paid to anyone, the amount stays in the vault's `total_locked`, and it is visible: the alert names the burn. It is not silently approved, and it cannot be paid into an account nobody controls |
+
+The third row is a loss for the holder that this design does not undo: paying it would need a release whose
+recipient differs from the one in the burn, and the unchanged signer (`signatario.py`) refuses to sign a release
+that is not exactly the burn's (`the Ethereum half signed another release`). A recovery path (a signed claim by
+the burner naming a wallet, certified as a release with a substituted recipient, and accepted by the guardian
+watch) is a change to the frozen signer and is not built; until it is, the defence is that no interface of the
+bridge calls `token.burn` and the router refuses the mistake. The rehearsal shows all three rows on a validator.
 
 ## 12. Token-2022 versus classic SPL Token; the issuer's powers
 
@@ -554,8 +660,13 @@ The freeze authority is Circle's. It can freeze any USDC token account:
 
 ## 13. Finality rule and reorganisation
 
-A signer attests a deposit only when its deposit record account is read at `finalized` commitment on the signer's
-own node and the record's slot is at least `finality_margin_slots` (default 150) below the finalized slot. Skipped
+A signer attests a deposit only when its deposit record account is read at `finalized` commitment and the record's
+slot is at least `finality_margin_slots` (default 150) below the finalized slot, on EVERY Solana endpoint the
+signer is configured with, at least two on a public cluster (`sol_rpc` a list, `sol_rpc_min`; review 325,
+R325-SOL-3), and all of them show the same record, field for field. One endpoint that fails, lags, serves another
+cluster or disagrees stops the signature. The endpoints should be of different operators (an own node and a
+provider, or two providers no other signer shares): the tool can require two answers, not their independence,
+which the ceremony inventory records. Skipped
 slots do not matter: the signer reads account state at a commitment, not blocks by number.
 
 The L2 token's 12-hour queue with guardian cancel is the second line. If a deposit vanishes after it was attested

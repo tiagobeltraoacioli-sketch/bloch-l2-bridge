@@ -847,7 +847,8 @@ class Rehearsal:
         for i, d in enumerate(extra + [dep3]):
             self.attest_and_mint(d, f'd3-{i}')
         credited = [self.credit(d)['status'] for d in extra + [dep3]]
-        check('the three deposits are credited in the order of their counts', credited == ['0x1'] * 3
+        # the token credits the due mints behind the one executed, so the first execution credits all three
+        check('the three deposits are credited, in the order of their counts', credited[0] == '0x1'
               and self.l2_balance() - balance == sum(d['net'] for d in extra + [dep3]), credited=credited)
         self.deps += extra + [dep3]
         wallet, thief = self.walletB.public, self.thief.public

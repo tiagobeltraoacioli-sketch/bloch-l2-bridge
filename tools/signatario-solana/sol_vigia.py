@@ -52,7 +52,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / 'signatario-stable'))
 import solana_lib as S  # noqa: E402
-from sol_half import Node  # noqa: E402
+from sol_half import Node, endpoints  # noqa: E402
 import bridge_feed  # noqa: E402
 import sol_recipient  # noqa: E402
 import vigia  # noqa: E402
@@ -283,7 +283,7 @@ class SolVigia(Vigia):
     # ── relay: approve, then execute ────────────────────────────────────────
     def sol_vault(self, command, *argv):
         rc, out, err = self.run([sys.executable, HERE / 'sol_vault.py', command, '--config', self.sol_cfg['vault_config'],
-                                 '--rpc', self.sol_cfg['sol_rpc'], '--fee-payer', self.cfg['sol_fee_payer'], *argv])
+                                 '--rpc', endpoints(self.sol_cfg)[0], '--fee-payer', self.cfg['sol_fee_payer'], *argv])
         try:
             return json.loads(out)
         except ValueError:

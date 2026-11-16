@@ -16,6 +16,8 @@
     "guard": "the three eth-vault-guardian secp256k1 keys, as 0x addresses, ascending, none of them a signer. A guardian signs a pause authorization; anyone delivers it. 72 h pause, 72 h cooldown. A pause voids approvals not yet paid",
     "largeRelease": "Solana only: a release above largeReleaseThreshold (proposed 1,000 USDC) waits releaseDelay (proposed 1,800 s) between approval and payment. The Ethereum launch vault has releaseDelay 0: this is a difference for the coordinator to confirm or set to 0 / 0",
     "maxValidSeconds": "a certificate's validUntil may be at most this far ahead (proposed 3,600 s)",
+    "recordRetention": "a paid release record may be closed by anyone this long after its payment (proposed 604,800 s = 7 days, at most 30 days); its rent returns to the relayer that paid it and the nonce stays spent in a paid page. A guardian watch must run at least once in this time to see every paid record in full",
+    "pauseRule": "the program requires guard.pauseDuration above policy.maxValidSeconds (a pause outlasts every certificate), and refuses every release certificate that could have been signed before the last guardian pause",
     "minDeposit": "proposed 11 USDC: with the 5 bps deposit fee it nets 10.9945 USDC, above l2MinBurn 10",
     "fees": "5 bps of each deposit and 5 bps of each release, ceiling 30 bps in the program. Fees accrue outside the backing; anyone calls sweep_fees and the vault pays the associated token account of fees.owner. owner: BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8, the owner's address on Solana (round 16 brief, 2026-11-16); it is a point on the ed25519 curve (a wallet address) and had no account on chain on 2026-11-16. Its USDC associated token account is 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg (seeds: owner, token program, mint; bump 253), which must be created before the first sweep. Immutable once the vault is initialized",
     "TBD-owner": "source.revision; program.id and program.elfSha256 (from the build and the program keypair); deployer.address (the fee payer that deploys); the 7 signer operators and addresses; the 3 guardian operators and addresses; confirm cap, windowLimit, largeReleaseThreshold, releaseDelay"
@@ -83,7 +85,8 @@
       "l2MinBurn": 10000000,
       "largeReleaseThreshold": 1000000000,
       "releaseDelay": 1800,
-      "maxValidSeconds": 3600
+      "maxValidSeconds": 3600,
+      "recordRetention": 604800
     },
     "guard": {
       "guardians": [

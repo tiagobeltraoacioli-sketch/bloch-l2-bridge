@@ -26,6 +26,12 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   signatures. This is rule 2.1 of the main runbook, for Solana.
 - The node must report the genesis hash `5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d`. The tools derive the
   source chain id from it and refuse another cluster.
+- **Two endpoints for mint signing.** `sol_rpc` in the Solana half's config is a list, and on mainnet-beta the
+  half refuses to attest a deposit with fewer than two endpoints (`sol_rpc_min`, default 2 there). Every
+  endpoint must show the same deposit record at `finalized`, old enough; one that fails, lags, serves another
+  cluster or disagrees stops the signature. Use two different operators' endpoints (the operator's own node and a
+  provider, or two providers), and never a provider another signer of this bridge uses: the tool counts answers,
+  it cannot see who runs them. The ceremony inventory records each signer's two endpoints.
 - Everything a signer signs is read at `finalized` commitment. A deposit is attested only when its deposit record
   account exists at `finalized` and its slot is at least `finality_margin_slots` (default 150) below the finalized
   slot. Do not lower the margin and do not switch a signer to `confirmed`.
@@ -53,9 +59,21 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   an operator who does not yet know the reason for the pause stops its sign daemon before the pause ends; the
   pause exists so that a wrong approval is looked at first. A pause never loses an exit: the burn stays on the
   L2, no paid record exists for its nonce, and five signers can always certify it again (shown in the rehearsal).
+- **After a pause, older certificates are dead.** The vault refuses every release certificate whose `validUntil`
+  is not above the start of the last guardian pause plus `maxValidSeconds` (`StaleCertificate`), and the Solana
+  half refuses to sign one. After a pause that ran its 72 h this changes nothing. After a 6-of-7 unpause, release
+  signing resumes `maxValidSeconds - valid_seconds` after the pause BEGAN (30 minutes with the defaults 3,600 and
+  1,800); the sign daemon logs the time (`resumes_at`) and opens a new round then, ignoring older rounds.
+- **A burn needs a wallet.** The half certifies a burn only when a wallet is known for its 20-byte recipient
+  (section 5 and `docs/SOLANA-VAULT.md` 11.1); on mainnet-beta it refuses to run without `l2_rpc` and
+  `burn_router` in its config. A burn made directly on the token with no published wallet is HELD and alerted by
+  the sign daemon (`release-held-no-wallet`): tell the owner; if the holder announces the wallet on the registry
+  it is certified on the next pass. Do not add a hint file for a wallet you did not verify against the commitment
+  (the tool verifies the hash, not the holder's intent).
 - A certificate lives at most `maxValidSeconds` (3,600 s). If five partial signatures are not collected and
   submitted within that time, the round is repeated with a new `validUntil`.
-- A release approval carries exactly the threshold of signatures (5). Six fit a transaction; seven do not.
+- A release approval carries exactly the threshold of signatures (5). Six no longer fit a transaction (1,247
+  bytes with the paid page account).
 - The signer refuses a burn whose mint chain does not equal the vault's deposit chain at the same count. The
   vault refuses it too (`ProvenanceMismatch`, error 112). Such a burn is a held exit: page the owner; do not try to
   work around it.
@@ -74,6 +92,9 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   match a deposit record at `finalized`. An approval with no matching burn is the reason to pause the vault at
   once: with `releaseDelay` it is still unpaid for 30 minutes if it is above the threshold, and the pause voids it.
   A queued mint with no deposit record is cancelled on the L2 by 2 of 3 guardians, as in the main runbook (2.7).
+- Run the watch continuously, and never less often than `recordRetention`: a paid release record can be closed
+  after it, and from then on only "this nonce was paid" is left to compare with the L2 (the watch still raises
+  `release-unknown:<nonce>` for a paid nonce without a burn).
 - Two L2 views before a vault pause (rule 2.4) applies unchanged.
 - The automatic watch is `tools/signatario-solana/sol_guardiao.py` (`check`, `watch`): a subclass of
   `tools/guardiao/guardiao.py` that keeps the L2 side, the findings, the grace periods, the token pause and the
@@ -86,12 +107,18 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
 
 ## 5. Relayers
 
-- The relayer pays, per release: two transaction fees and the rent of the release record, about 0.0021 SOL by the
-  rent formula, which is never returned. The 5 bps release fee goes to the fee owner, not to the relayer. Budget
-  SOL by the number of releases, not by their size.
-- The relayer needs the recipient's wallet to pay a release: it reads the `SolanaRecipient` log of the registry on
-  the L2 for the burn's commitment. With no announcement, the release stays approved and unpaid until the wallet is
-  known. Anyone who knows the wallet, the user included, can send the payment.
+- The relayer pays, per release: two transaction fees, and it ADVANCES the rent of the release record, about
+  0.0023 SOL. That rent comes back: once a release has been paid for `recordRetention` (7 days proposed),
+  `sol_vigia.py relay` closes the records its own fee payer paid for (`relay-close` in its log; `sol_vault.py
+  close --nonce N` by hand; anyone may send it, and the rent always goes to the address the record names). So the
+  float a relayer needs is the rent of the releases of one retention period, not a cost per release. The first
+  approval in each range of 8,192 burn nonces also creates that range's paid page (about 0.0083 SOL, not
+  returned). The 5 bps release fee goes to the fee owner, not to the relayer.
+- The relayer needs the recipient's wallet to pay a release: it reads the `SolanaExit` log of the burn router for
+  the burn id, then the `SolanaRecipient` log of the registry, then a hint file (`sol_recipient.py`). The signers
+  applied the same rule before certifying, so an approval without a known wallet should not exist; if the relayer
+  meets one it alerts `approved-without-wallet` and does not pay. Anyone who knows the wallet, the user included,
+  can send the payment.
 - The relayer does **not** create a recipient's missing USDC token account by default. A user could close the
   account after each payment and collect the rent the relayer paid. The payment waits until the account exists;
   the user creates it or relays their own release. Changing this default is an owner decision
@@ -106,9 +133,11 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
   release record back, and sends `execute` when the record is ready, the vault is not paused and the release
   bucket allows the amount. The feed transport was NOT exercised in the Solana rehearsal (it used a local shared
   directory); treat the feed over this bridge as untested.
-- Relayer config beyond the Ethereum one: `sol_half_config`, `sol_fee_payer`, `recipient_registry`,
-  `registry_from_block`, `sol_create_recipient_account` (default false). `eth_rpc` and the `eth_relayer_*` keys
-  are not used.
+- Relayer config beyond the Ethereum one: `sol_half_config`, `sol_fee_payer`, `burn_router`,
+  `recipient_registry`, `router_from_block`, `registry_from_block`, `recipient_hints`,
+  `sol_create_recipient_account` (default false), `sol_close_records` (default true). `eth_rpc` and the
+  `eth_relayer_*` keys are not used. A backup relayer lists the primary's L2 gas address and Solana fee payer in
+  `relay_other_gas_addresses` and refuses to start on either (rehearsed, with the stagger).
 - `sweep_fees` is permissionless and cheap. Any relayer may run `sol_vault.py sweep` on a schedule; it fails
   harmlessly while the fee owner's token account does not exist or is frozen.
 
@@ -116,7 +145,7 @@ Specification: `docs/SOLANA-VAULT.md`. Deployment and keys: `docs/SOLANA-BRIDGE-
 
 | Key | Pays | Alert when below |
 |---|---|---|
-| Relayer fee payer | fees and about 0.0021 SOL per release | the cost of one day of releases at the bucket rate; at the 10 USDC minimum burn that is at most 1,000 releases, about 2.2 SOL |
+| Relayer fee payer | fees, and about 0.0023 SOL advanced per release until the record is closed after the retention | the rent of the releases of one retention period; at the 10 USDC minimum burn the bucket allows at most 1,000 releases a day, so 7 days are at most about 16 SOL of float, all of it returned |
 | Guardian fee payer | one pause transaction | 0.01 SOL |
 | Deployer | the deployment, once | not kept funded afterwards |
 
