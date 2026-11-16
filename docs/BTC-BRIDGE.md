@@ -14,8 +14,12 @@ Deployment and ceremony: `docs/BTC-BRIDGE-DEPLOYMENT.md`.
 Bitcoin has no contract. On Ethereum the vault contract enforces the window, the pause and the replay rules even
 against the committee's own keys. On Bitcoin **5 of the 7 keys can spend the whole vault at once**, and nothing
 on-chain stops them: every limit on the Bitcoin side is a rule that each honest signer applies before it signs. What
-bounds the loss is the L2 token's supply cap (the vault never holds more than the cap plus fees), and what detects a
-breach is the public replay of the vault's history (section 8). This is the first thing an auditor and the owner
+bounds the vault is the L2 token's supply cap (the vault never holds more than the cap plus fees). **The cap does not
+bound the loss**: every deposit address is a script of the same seven keys, so coins that were paid in and not yet
+swept (waiting for depth, for lower fees, for the cap, outside the bounds, or never hinted) are spendable by the same
+five keys. The true worst case on a five-key compromise is the vault plus everything unswept at that moment; the
+refund rule (section 3a) lets each depositor take unswept coins back, but nothing limits how much strangers choose to
+send. What detects a breach is the public replay of the vault's history (section 8). This is the first thing an auditor and the owner
 must accept or refuse. Everything else in this document is how the rules are made deterministic, replay-proof by
 Bitcoin consensus and checkable by anyone from the two chains.
 
@@ -31,12 +35,11 @@ Bitcoin consensus and checkable by anyone from the two chains.
 The keys are sorted (BIP67 order) and compressed, as P2WSH requires. Witness of every vault input: empty item, five
 DER signatures in key order, the script.
 
-**Which keys.** The coordinator's rule is one committee on every network. The Bitcoin script takes the public keys of
-the operators' vault-side (release) keys; the L2 token takes their L2 mint addresses, as for bUSDC. A digest signed
-for Bitcoin (double SHA-256 of a BIP143 preimage) cannot be an Ethereum release digest (Keccak of an EIP-191 text),
-so one key serving both vaults adds no cross-protocol forgery. It does couple the two vaults' fate: five stolen
-release keys empty both. The config takes any seven keys, so the owner can instead have each operator generate a
-separate Bitcoin key with the same tool (owner decision 2 in the report).
+**Which keys.** The same seven operators, each with a **separate Bitcoin vault key** (role `btc-vault-signer`, same
+tool, same keystore format): this is the default in the templates and what the rehearsal runs. The L2 token takes the
+operators' L2 mint addresses, as for bUSDC. A digest signed for Bitcoin (double SHA-256 of a BIP143 preimage) cannot
+be an Ethereum release digest, so a shared key would add no cross-protocol forgery (review 325, BTC-11), but
+`cast wallet sign --no-hash` signs any 32 bytes: one intrusion on a signer host would then forge for both vaults.
 
 ## 3. Deposits: one address per L2 recipient
 
@@ -50,18 +53,37 @@ P2WSH. The vault id is a hash of the network and the vault's anchor output, so a
 | Trust in the sender | None. The recipient is read from the script the coins are locked to, which the vault itself reveals on-chain when it sweeps them. A relayer's hint ("output X is a deposit for R") is checked by hashing: a wrong hint is refused by every signer (rehearsal A3) |
 | How signers find deposits | They cannot scan for unknown scripts, so a hint (outpoint, recipient) reaches the relayer from the bridge page or the user. Hints are untrusted and permissionless |
 | Change | The sender's wallet handles it: change returns to the sender's own address. Every output paying a deposit address is its own deposit, keyed by outpoint |
-| Dust and bounds | Below `minDepositSats` or above `maxDepositSats` an output is never swept: it stays at the deposit address, which only the committee can spend, and the rules give them no transaction for it. **Not refunded automatically** (gap 3). The maximum equals the token's mint bucket: a larger credit could never be minted, and since the token credits strictly in deposit order it would block every later deposit |
+| Bounds | Below `minDepositSats` (0.001 BTC) or above `maxDepositSats` an output is not swept or credited; it is **refundable** (section 3a). The maximum equals the token's mint bucket: a larger credit could never be minted, and since the token credits strictly in deposit order it would block every later deposit |
+| What the deposit was paid from | Anything. Only the output matters; the paying transaction may spend P2PKH, P2SH, P2WPKH, P2WSH or taproot inputs, or be a coinbase. The tools parse every Bitcoin transaction (`btc_core.parse_tx`) and require the vault's own format only of vault transactions (rehearsal S, A: deposits paid from legacy, nested-segwit and taproot inputs) |
+| Strangers' coins at the public thread address | Never fatal. A candidate for the thread tip must spend a thread-script output with its first input, which only the committee can do: one lookup, no walk through a stranger's ancestry. Anything else is skipped and logged (rehearsal S1: dust from four input types, a fake marker, a coinbase) |
 | Replace-by-fee, double spend | Nothing is read from the mempool. A deposit is swept at `sweepDepth` confirmations (rehearsal A2, D1) |
 | Sent to the bare vault address | Names nobody. A vault transaction may take it as a stray input; it joins the fee pool (rehearsal F3) |
 | Sent to an address computed for another recipient | Credited to that recipient. Not reversible |
+
+## 3a. Refunds
+
+Any deposit output that has not been swept can be sent back: below the minimum, above the maximum, waiting for the
+cap or for lower fees, or simply unwanted. The L2 address the deposit names signs a request (an EIP-191 personal
+message, `btc_core.refund_text`: vault id, outpoint, a P2WPKH address); the relayer puts it in a proposal; every
+signer checks the outpoint, that it is the deposit address of that L2 address, and the signature, and the vault
+transaction pays `value - 5 bps - fee rate x 605 vbytes` to the address named. Nobody is credited. The spend makes it
+single-use by consensus (rehearsal J).
+
+- Why the L2 recipient and not "the sender": Bitcoin has no sender. The first input's script is often an exchange's
+  hot wallet, which would not credit the user. The L2 address is the one party the depositor named.
+- Limits: an L2 address that is a contract and cannot sign cannot ask; an output too small to pay its own charge
+  stays. The request is checked by the signers, not carried on Bitcoin: a replay of the chain shows that a refund
+  happened and where it went, not who asked.
+- Coins sent to the bare thread address name nobody and cannot be refunded by rule; they join the fee pool and reach
+  the owner as surplus. Returning them is the owner's manual decision.
 
 ## 4. The vault state lives on Bitcoin: the thread
 
 All vault coins sit in one output, the thread. Every vault transaction spends the thread and creates the next one:
 
 ```
-inputs   [0] thread tip   [1..] deposits swept (sorted by outpoint)   [..] strays at the bare thread script
-outputs  [0] new thread   [1] OP_RETURN marker   [2..] one P2WPKH payout per burn, by burn nonce   [last] owner fee
+inputs   [0] thread tip   [1..] deposits swept   [..] deposits refunded   [..] strays at the bare thread script
+outputs  [0] new thread   [1] OP_RETURN marker   [2..] one P2WPKH payout per burn, by nonce   [..] refunds   [last] owner fee
 ```
 
 The marker (at most 80 bytes) is the vault's state after the transaction: next deposit nonce, the set of paid burn
@@ -114,19 +136,28 @@ credited forgery, and needs the owner's settlement.
 
 - **Consolidation is automatic**: every sweep moves deposits into the single thread output. The vault's UTXO set is
   one output plus not-yet-swept deposits.
-- **Miner fees are the users', by a fixed rule.** A swept deposit pays `fee rate x (202 + 339) vbytes`; a release
-  pays `fee rate x (31 + 339) vbytes` (its own size plus the whole fixed overhead, so the pool can never run dry
-  whatever the batch size). An item never pays more than `maxChargeBps` (10%) of itself: above that it waits for
-  lower fees. Examples: at 5 sat/vB a deposit pays 2,705 sat and a release 1,850 sat; at 50 sat/vB 27,050 and
-  18,500. The fee rate is in the marker, so anyone can recompute every credit and payout.
-- **Fee pool.** Charges collected minus fees paid stay in the thread, up to `poolTargetSats`; it pays for
-  replacements. Anything above the target is added to the owner's fees due (revenue flows; nothing is burned).
+- **Miner fees are the users', by a fixed rule.** Every item pays `fee rate x (its own vbytes + the whole fixed
+  overhead of 371 vbytes)`: a swept deposit 574 vbytes, a release 402, a refund 605. Because each item pays the whole
+  overhead, the items of a transaction always cover its fee: **no transaction lowers the fee pool**
+  (`build_vault_tx` refuses one that would), a stray must pay for its own input, and the owner's fees due are never
+  part of the pool. Whoever relays cannot spend the pool on miners (rehearsal S2 to S4).
+- **Who sets the fee rate.** The relayer proposes it; every signer refuses a rate above 1.5 times its own node's
+  estimate for two blocks, and above the policy ceiling `maxFeerate` (200 sat/vB). A mainnet signer whose node has no
+  estimate signs nothing. So a relayer cannot make users overpay the market (rehearsal I2).
+- **Exits always land.** A burn has no percentage cap: it is paid at whatever rate the signers accept. The token's
+  `minBurn` (0.001 BTC) is checked at deployment against the ceiling: at 200 sat/vB the smallest burn still pays out
+  `100,000 - 50 - 200 x 402 = 19,550 sat`. By arithmetic it would clear dust up to 247 sat/vB; above the 200 ceiling
+  no vault transaction is signed at a higher rate, it is signed at 200 and waits in the mempool. Cost at ordinary
+  rates: 5 sat/vB takes 2,010 sat of a release, 20 sat/vB 8,040, 50 sat/vB 20,100.
+- **Deposits keep a cap.** A deposit is not swept while its charge exceeds 10% of it (the minimum deposit sweeps up
+  to 17 sat/vB); it waits and is refundable meanwhile.
+- **Fee pool.** Seeded by the anchor; charges above the fee paid stay in the thread up to `poolTargetSats`; anything
+  above is added to the owner's fees due (revenue flows; nothing is burned).
 - **Bridge fee**: 5 bps of every deposit and every release, accrued in the marker and paid as an output to the
   owner's address in the next vault transaction once at least `ownerPayoutMinSats` (10,000, far above dust) is due.
 - **Stuck release: replace-by-fee.** Every vault transaction signals BIP125. The relayer proposes the same items on
   the same tip at a higher fee rate; signers rebuild and sign it only if it pays more than the pending one and is
-  under their ceiling (the larger of a configured 30 sat/vB and three times their own node's estimate, never above the policy's `maxFeerate`). The payouts shrink by exactly
-  the rule (rehearsal B5, B6). The replaced transaction can never confirm (B8).
+  inside their band. The payouts shrink by exactly the rule (rehearsal B5, B6). The replaced transaction can never confirm (B8).
 - **Why not CPFP.** The only output the committee could spend is the thread itself, so a child needs the same five
   signatures as a replacement and would chain the vault on an unconfirmed parent. The vault never builds on an
   unconfirmed tip. A recipient is free to CPFP with its own payout.
@@ -146,11 +177,14 @@ credited forgery, and needs the owner's settlement.
 | Release delay (`releaseDelay`, 0 at launch) | `largeReleaseSats` / `largeReleaseDelaySeconds`: a large burn waits 12 h from its L2 timestamp | **Signers** |
 | Vault guardians pause deposits and releases for 72 h | The token's guardian pause: while `paused()` no signer signs any vault transaction (rehearsal C1). One guardian set, not two | L2 token for mints; **signers** for the vault |
 | `minDeposit`, deposit and release fee, immutable `feeRecipient`, `sweepFees()` | `minDepositSats`, `maxDepositSats`, 5 + 5 bps, the owner's address inside the route, paid as an output | **Signers** (and the route binds the values) |
+| A release pays the recipient the burn names | Burns go through `BitcoinBurnRouter` (section 9): the destination is a checked P2WPKH address. A burn made directly on the token is paid to the address its burner signs a claim for, or after 3 days to the 20 bytes it names | L2 contract for the check; **signers** for the rule |
+| No refund of a deposit (a deposit is credited or reverts) | Refund of any unswept deposit at its L2 recipient's signed request (section 3a) | **Signers** |
 | Verifier switch to a light client; `RecoverableReleaseVerifier` | None on the Bitcoin side. The token's mint switch exists in the bytecode and stays unused: there is no Bitcoin mint verifier | - |
 | No owner, no setter, no upgrade | The policy hash, keys, anchor and fee address are inside the token's `sourceRoute`; a change is a new vault and a new token | L2 token binding |
 
 What an auditor must accept as signer-enforced: the release window, the large-release delay, the pause on the
-Bitcoin side, the mint-chain check, the fee split and the fee-rate ceiling. Each is a deterministic function of the
+Bitcoin side, the mint-chain check, the fee split, the fee-rate band, the authorisation of refunds and the
+destination of direct burns. Each is a deterministic function of the
 two chains, so any party can recompute what the signers should have done, and a violation needs five signers. But a
 violation is not prevented by any script, and unlike on Ethereum the guardians cannot stop a five-key spend.
 
@@ -174,7 +208,7 @@ Yes, with two consequences that constructor arguments do not cover.
 | Point | Finding |
 |---|---|
 | Decimals | **Not an argument.** `BridgedStablecoinV2`'s constructor passes the literal 6. The byte-identical token therefore has 6 decimals: one unit is 100 sat, 1 bBTC = 1 BTC, smallest amount 0.000001 BTC. Chosen over a copy of the contract with 8 decimals because a copy is new bytecode: a new audit identity, a new DEX gate pin, and a second token line to keep in step. Cost: credits round down to 100 sat (the remainder joins the fee pool) and integrators must read `decimals()`. An 8-decimal variant is one changed literal in a copied V2/V3 pair if the owner prefers it |
-| Burn recipient | `burn(uint64, address)` carries 20 bytes. They are read as the witness program of a **P2WPKH** address (`bc1q…`, 42 characters). Taproot, P2WSH and legacy addresses cannot be named. A wrapper contract that carries a full script, committed by its hash160 in those 20 bytes, is possible later without touching the token |
+| Burn recipient | `burn(uint64, address)` carries any 20 bytes; on bUSDC they are the user's Ethereum address, and here they would be paid as a Bitcoin key hash nobody may hold. So exits go through **`contracts/btc/BitcoinBurnRouter.sol`** (new periphery, no owner, holds nothing): `burnTo(amount, "bc1q…")` checks prefix, bech32 checksum, witness version 0 and the 20-byte program, then burns with exactly that program; an Ethereum address string reverts and burns nothing. Signers pin the router's code hash and pay a router burn as named. A burn made **directly** on the token is not paid blind: its burner signs a claim naming a Bitcoin address (which rescues a mistaken burn), or, unclaimed for `directBurnClaimSeconds` (3 days), the 20 bytes it names are paid (so a contract that burned on purpose is not stuck, and one unclaimed burn cannot hold the marker window for longer). Only P2WPKH can be named |
 | Issuer blacklist | The token has none (USDC's is on the issuer's own contract). Nothing differs |
 | Name, symbol, caps, committee, guardians, delays | Constructor arguments |
 | `sourceChainId` | The Bitcoin genesis block hash as an integer (no EVM chain id can collide) |
@@ -185,23 +219,32 @@ Yes, with two consequences that constructor arguments do not cover.
 
 ## 10. Rehearsal and tests
 
-`tools/signatario-btc/rehearse_regtest.py`: Bitcoin Core 31.2 regtest (release tarball sha256
-`2f38996afaa74dfa469a23bf4727887133dfc09784df1f21ddf1c74d0dc82300`, `SHA256SUMS` with two builders' PGP signatures)
-and anvil 1.7.1 with the token deployed from the frozen creation code. Seven throwaway keys in `cast` keystores; the
-mint side is the unchanged `signatario.py`. 58 checks: deposit to credit; forged and replayed attestations; release;
-a stuck release replaced at a higher fee rate; replayed and forged releases (another recipient, a larger amount, a
-burn that does not exist, four signatures, an outsider's signature refused by Bitcoin itself); guardian pause;
-large-release delay; window; a deposit double-spent before confirmation; a reorganisation after attestation; a mint
-forged by five stolen keys cancelled by the guardians; strays; proof of reserves; and the known limit (five stolen
-keys spend the vault: detected, not prevented).
+`tools/signatario-btc/rehearse_regtest.py`: Bitcoin Core 31.2 regtest with `-acceptnonstdtxn=0` (mainnet relay
+policy; release tarball sha256 `2f38996afaa74dfa469a23bf4727887133dfc09784df1f21ddf1c74d0dc82300`, `SHA256SUMS` with
+two builders' PGP signatures) and anvil 1.7.1 with the token deployed from the frozen creation code and the router
+over it. Seven operators with two throwaway keys each, in separate `cast` keystores (L2 mint key, Bitcoin vault key);
+the mint side is the unchanged `signatario.py`. 73 checks:
 
-Unit and property tests: `python3 -m unittest test_btc_policy test_btc_deploy` in `tools/signatario-btc/`.
+- S: dust at the thread address from legacy, nested-segwit, segwit and taproot inputs, a fake marker and a coinbase,
+  sent first and left there for the whole run; pool-drain attempts.
+- A: deposits paid from legacy and nested-segwit inputs, to credit; forged and replayed attestations.
+- B: release; a stuck release replaced at a higher fee rate; replayed and forged releases (another recipient, a
+  larger amount, a burn that does not exist, four signatures, an outsider's signature refused by Bitcoin itself).
+- C: guardian pause; large-release delay; window. D: a deposit double-spent before confirmation.
+- E: a reorganisation after attestation. F: a mint forged by five stolen mint keys; strays; proof of reserves.
+- I: the fee band and the smallest burn at the highest accepted rate. J: refunds. K: router, direct burn, claims.
+- G: the known limit (five stolen vault keys spend the vault: detected, not prevented).
+
+Unit and property tests: `python3 -m unittest test_btc_policy test_btc_deploy test_btc_signer` in
+`tools/signatario-btc/` (parser fuzz, pool invariant, refunds, reviewer 325's demonstrations turned around).
+Contract tests: `forge test --offline --match-path solidity-tests/BitcoinBurnRouter.t.sol`.
 
 ## 11. Audit scope note
 
-New code, all Python, standard library only: `btc_core.py` (primitives, 559 lines), `btc_policy.py` (the rules,
-347), `btc_vault.py` (node view and replay, 252), `btc_signer.py` (273), `btc_half.py` (109), `btc_l2.py` (101),
-`btc_relay.py` (167), `btc_reservas.py` (131), `btc_deploy.py` (256): 2,195 lines. Tests 403, rehearsal 775.
+New Python, standard library only: `btc_core.py` (primitives, 603 lines), `btc_policy.py` (the rules, 404),
+`btc_vault.py` (node view and replay, 278), `btc_signer.py` (349), `btc_half.py` (114), `btc_l2.py` (101),
+`btc_relay.py` (205), `btc_reservas.py` (158), `btc_deploy.py` (278): 2,490 lines. Tests 600, rehearsal 962.
+New Solidity: `contracts/btc/BitcoinBurnRouter.sol` (104 lines), its test (104).
 
 Reused byte-identical: `BridgedStablecoinV3` and its parents (the token); `tools/signatario-stable/signatario.py`
 (mint attestation, combine, and the L2 finality and burn decoding that `btc_signer.py` imports: `own_l2`,
@@ -212,25 +255,48 @@ source half behind an argv interface, signing what the signer verified itself): 
 with burn markers, which Bitcoin lacks.
 
 Look first at: (1) `build_vault_tx` and `replay_tx`: one transaction per input set, conservation, solvency, the
-marker; (2) `btc_signer.py` checks 1 to 6 and that nothing from the proposal is used unverified; (3) the pure-Python
-secp256k1, DER and BIP143 code (verification and recovery are in the trust path; signing is test-only);
-(4) `ledger_prefix_problem` and the reorganisation argument of section 5; (5) `VaultView._confirmed_tip` (how the
-tip is found and why a stranger's output cannot pose as it); (6) the charge rule's rounding and the pool invariant.
+pool invariant, the marker; (2) `btc_signer.py` checks and that nothing from the proposal is used unverified,
+including refund requests and burn claims; (3) the pure-Python secp256k1, DER and BIP143 code (verification and
+recovery are in the trust path; signing is test-only); (4) `ledger_prefix_problem` and the reorganisation argument of
+section 5; (5) `VaultView._confirmed_tip` and `parse_tx` on hostile input; (6) the charge sizes and their rounding;
+(7) `BitcoinBurnRouter.keyHashOf`.
 
-## 12. Known gaps
+## 12. Known gaps and known issues
 
-1. Five keys move the vault (section 1). Not solvable by script on today's Bitcoin.
-2. Releases only to P2WPKH (section 9).
-3. Deposits outside the bounds are stuck: no refund rule exists. The bridge page must enforce the bounds.
+1. Five keys move the vault and every unswept deposit (section 1). Not solvable by script on today's Bitcoin.
+2. Releases only to P2WPKH.
+3. Refund requests and burn claims are checked by the signers and are not on either chain; the reserves monitor
+   lists direct burns paid to a claimed address but cannot verify the claim (review 325, BTC-6: router burns are
+   compared exactly).
 4. Transaction pinning: a recipient can attach a large low-fee child to an unconfirmed payout and make the
    replacement expensive (BIP125 rule 3). It delays one batch; it cannot redirect coins. Version-3 (TRUC)
    transactions would close it and were not tried.
-5. `signatario.py` and the relayer are driven by hand or by the rehearsal; there is no daemon loop for bBTC
-   (`vigia.py` is Ethereum-vault specific) and no hint intake service. No systemd units.
-6. The guardian daemon (`tools/guardiao`) is not wired to `btc_reservas.py guard`; the rehearsal casts the votes
-   from its output.
-7. The L2 finality path with the launch pins (`l2_source: rebuild`) is reused code but was not exercised here: the
-   rehearsal uses anvil's `finalized` tag.
-8. `scantxoutset` finds the tip; on mainnet it takes about a minute per call and one call runs at a time.
-9. Fee estimation was not exercised (regtest has no estimate; the fixed ceiling applied).
-10. No independent review of any of this code.
+5. No daemon loop for bBTC (`vigia.py` is Ethereum-vault specific), no hint or request intake service, no systemd
+   units. `tools/guardiao` is not wired to `btc_reservas.py guard`; the rehearsal casts the votes from its output.
+6. The L2 finality path with the launch pins (`l2_source: rebuild`) is reused code but was not exercised here: the
+   rehearsal uses anvil's `finalized` tag. A mainnet vault config is refused without the pins.
+7. The guardian pause is read from the configured RPC for sweeps and refunds, and additionally from the verified L2
+   only when a transaction pays burns (BTC-7 a, part).
+8. Every run replays the whole thread and runs `scantxoutset` (about a minute on mainnet, one at a time); no cache
+   (BTC-8, part: the stranger-ancestry walk is gone).
+9. The sweep takes deposits up to the cap at once while the token mints at most its bucket per refill period, so
+   swept coins can wait days for their credit, and one party can fill the cap and the queue for about 0.1% in fees
+   (BTC-9). A swept deposit is no longer refundable. The bridge page should show the queue.
+10. The marker holds 328 burn nonces above the oldest unpaid one. Burns never wait for fees now, but a burn can
+    still wait up to 12 h (large), a day (window) or 3 days (an unclaimed direct burn); burns more than 328 nonces
+    later wait with it.
+11. The fee band was exercised with the regtest node's estimate; a mainnet fee market was not.
+12. No independent review of the changes made after review 325.
+
+## 13. Review 325 (first pass) and what changed
+
+| Finding | Change |
+|---|---|
+| BTC-1 High: a stray from a legacy input stopped every tool | General parser; vault format required only of vault transactions; tip candidates filtered by one lookup; every tool ends in a refusal, never a traceback; rehearsal S and deposits from three input types; parser fuzz |
+| BTC-2 Medium: exits froze above 13 sat/vB | No percentage cap on burns; `minBurn` 0.001 BTC checked against the 200 sat/vB ceiling at deployment; numbers in section 6 |
+| BTC-3 Medium: the relayer chose the fee rate and could drain the pool | Signers' band of 1.5 times their own estimate; no transaction lowers the pool; strays pay their own input |
+| BTC-4 Medium: the cap does not bound the loss; no refund | Stated in section 1; refund rule built (section 3a) for every unswept deposit |
+| BTC-5 Medium: a burn naming an Ethereum address was paid to an unspendable key hash | `BitcoinBurnRouter`; direct burns need a claim or wait 3 days |
+| BTC-6, -7 b, -8 (walk), -10, -12 | Fixed (reserves compare router payouts; mainnet needs pins; one-lookup filter; `-acceptnonstdtxn=0`; documented) |
+| BTC-7 a, -8 (cache), -9 | Partly or not fixed: known issues 7, 8, 9 |
+| BTC-11 Info: shared keys | Separate Bitcoin vault keys are the default in templates and rehearsal |

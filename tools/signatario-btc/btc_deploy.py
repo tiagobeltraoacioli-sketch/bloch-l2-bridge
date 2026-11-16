@@ -3,7 +3,7 @@
 
 Offline unless a node is named. It never reads a key, a keystore or a password, and sends nothing.
 
-  keys     --inventory INVENTORY.json [--role eth-release-signer | btc-vault-signer]
+  keys     --inventory INVENTORY.json [--role eth-release-signer | btc-vault-signer --other-inventory BUSDC_INVENTORY.json]
            The 7 compressed public keys of the committee, recovered from proof-of-possession signatures.
            eth-release-signer: the keys of the bUSDC ceremony (docs/BRIDGE-V3-KEY-CEREMONY.md 4.1), no new step.
            btc-vault-signer: a separate Bitcoin key per operator, attested with the same text and tool, listed in an
@@ -92,6 +92,16 @@ def cmd_keys(args):
         text = attestation_text(key_inventory, role, k['index'], k['operator'], k['address'], k['date'])
         out.append({'index': k['index'], 'operator': k['operator'], 'address': k['address'].lower(),
                     'pubkey': recover_key(text, k['attestation'], k['address']).hex()})
+    other = option(args, '--other-inventory', '')
+    if role == BTC_ROLE:
+        if not other:
+            refuse('--other-inventory (the bUSDC key inventory) is required: a Bitcoin vault key must hold no other role')
+        used = {str(k.get('address') or '').lower() for k in json.loads(Path(other).read_text())['keys']}
+        shared = sorted(k['address'] for k in out if k['address'] in used)
+        if shared:
+            refuse('a Bitcoin vault key also appears in the other inventory: generate a separate key', addresses=shared)
+    if len({k['address'] for k in out}) != len(out) or len({k['operator'] for k in out}) != len(out):
+        refuse('one key or one operator appears twice')
     if len(out) != MAINNET_POLICY['signers']:
         refuse(f"expected {MAINNET_POLICY['signers']} keys of role {role}, found {len(out)}")
     print(json.dumps({'decision': 'ok', 'role': role, 'keys': sorted(out, key=lambda x: x['index'])}, indent=2))

@@ -52,16 +52,26 @@ class Deploy(unittest.TestCase):
 
     def test_separate_bitcoin_keys_have_their_own_role_and_text(self):
         path = self.inventory(role='btc-vault-signer')
+        other = self.dir / 'busdc.json'
+        other.write_text(json.dumps({'keys': [{'role': 'eth-release-signer', 'address': '0x' + '12' * 20}]}))
         rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer')
+        self.assertIn('--other-inventory', out['reason'])
+        rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer', '--other-inventory', other)
         self.assertEqual(rc, 0, out)
+        shared = json.loads(path.read_text())['keys'][2]['address']
+        other.write_text(json.dumps({'keys': [{'role': 'eth-release-signer', 'address': shared.upper().replace('0X', '0x')}]}))
+        rc, bad = run('keys', '--inventory', path, '--role', 'btc-vault-signer', '--other-inventory', other)
+        self.assertIn('also appears in the other inventory', bad['reason'])
+        other.write_text(json.dumps({'keys': []}))
         self.assertEqual([k['pubkey'] for k in out['keys']], [c.pubkey(p).hex() for p in PRIVS])
         # an attestation made for the Ethereum release role is not accepted as a Bitcoin vault key, nor the reverse
         inv = json.loads(self.inventory().read_text())
         for k in inv['keys']:
             k['role'] = 'btc-vault-signer'
         path.write_text(json.dumps(inv))
-        rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer')
+        rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer', '--other-inventory', other)
         self.assertEqual((rc, out['decision']), (1, 'refused'))
+        self.assertIn('does not recover', out['reason'])
 
     def test_an_attestation_for_another_address_or_slot_is_refused(self):
         def swap(keys):
