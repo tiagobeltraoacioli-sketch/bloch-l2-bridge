@@ -507,3 +507,46 @@ def mint_chain_genesis(chain_id, vault20, route):
 
 def mint_chain_step(head, dep_id, amount_units, recipient20):
     return keccak256(head + dep_id + abi_word(amount_units) + abi_word(recipient20))
+
+
+def parse_tx(raw):
+    """A serialized transaction -> (Tx, version, locktime, sequences). Strict: no trailing bytes."""
+    pos = 0
+
+    def take(n):
+        nonlocal pos
+        if n < 0 or pos + n > len(raw):
+            raise ValueError('truncated transaction')
+        pos += n
+        return raw[pos - n:pos]
+
+    def varint():
+        first = take(1)[0]
+        if first < 253:
+            return first
+        width = {253: 2, 254: 4, 255: 8}[first]
+        return int.from_bytes(take(width), 'little')
+
+    version = int.from_bytes(take(4), 'little')
+    segwit = raw[4:6] == b'\x00\x01'
+    if segwit:
+        take(2)
+    inputs, sequences = [], []
+    for _ in range(varint()):
+        txid = take(32)[::-1].hex()
+        vout = int.from_bytes(take(4), 'little')
+        if take(varint()):
+            raise ValueError('a vault transaction has empty scriptSigs')
+        inputs.append((txid, vout))
+        sequences.append(int.from_bytes(take(4), 'little'))
+    outputs = []
+    for _ in range(varint()):
+        sats = int.from_bytes(take(8), 'little')
+        outputs.append((sats, take(varint())))
+    witnesses = None
+    if segwit:
+        witnesses = [[take(varint()) for _ in range(varint())] for _ in inputs]
+    locktime = int.from_bytes(take(4), 'little')
+    if pos != len(raw) or not inputs or not outputs:
+        raise ValueError('malformed transaction')
+    return Tx(inputs, outputs, witnesses), version, locktime, sequences
