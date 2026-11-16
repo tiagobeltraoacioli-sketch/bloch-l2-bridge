@@ -5,3 +5,4 @@ target/
 /cache/
 __pycache__/
 .wrangler/
+/solana/**/target/
