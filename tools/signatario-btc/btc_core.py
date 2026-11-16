@@ -367,8 +367,10 @@ class Tx:
         return (b'\x02\x00\x00\x00\x00\x01' + compact(len(self.inputs)) + self._ins() + compact(len(self.outputs))
                 + self._outs() + wit + b'\x00\x00\x00\x00')
 
+    parsed_txid = None
+
     def txid(self):
-        return sha256d(self.stripped())[::-1].hex()
+        return self.parsed_txid or sha256d(self.stripped())[::-1].hex()
 
     def sighash(self, index, script_code, value):
         """BIP143, SIGHASH_ALL."""
@@ -531,6 +533,7 @@ def parse_tx(raw):
     segwit = raw[4:6] == b'\x00\x01'
     if segwit:
         take(2)
+    body_start = pos
     inputs, sequences = [], []
     for _ in range(varint()):
         txid = take(32)[::-1].hex()
@@ -543,10 +546,14 @@ def parse_tx(raw):
     for _ in range(varint()):
         sats = int.from_bytes(take(8), 'little')
         outputs.append((sats, take(varint())))
+    body_end = pos
     witnesses = None
     if segwit:
         witnesses = [[take(varint()) for _ in range(varint())] for _ in inputs]
     locktime = int.from_bytes(take(4), 'little')
     if pos != len(raw) or not inputs or not outputs:
         raise ValueError('malformed transaction')
-    return Tx(inputs, outputs, witnesses), version, locktime, sequences
+    tx = Tx(inputs, outputs, witnesses)
+    # the identity of the transaction as serialized (any version, sequence or locktime), not as the vault would write it
+    tx.parsed_txid = sha256d(raw[:4] + raw[body_start:body_end] + raw[-4:])[::-1].hex()
+    return tx, version, locktime, sequences
