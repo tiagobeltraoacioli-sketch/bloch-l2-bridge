@@ -430,7 +430,9 @@ class Net:
 
     def certificate(self, rel, keys, anchor=None):
         """A release call signed by `keys` over the vault's own digest, anchored at the solidified block."""
-        ref = anchor or self.node.solidified()
+        # One block below the solidified one: the vault needs an anchor strictly below block.number, and a TVM constant
+        # call (the simulation) runs with the head's own number, not the next block's.
+        ref = anchor or self.node.block(self.node.solidified()['number'] - 1)
         ctx = f"({int(time.time()) + 300},{ref['number']},0x{ref['id']},1,0x{'11' * 32})"
         d = self.tview(self.vault, f'releaseDigest({REL},{CTX})', rel, ctx)
         signed = sorted((addr_of(k), out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)) for k in keys)
@@ -616,8 +618,35 @@ def scenario(net):
     rc, lines = net.reserves()
     check('destroyed funds: no release is paid, and reservas reports the shortfall', not net.released(burn5)
           and (rc not in (0, 3) or any(l.get('status') in ('held', 'shortfall', 'violation') or l.get('severity') == 'critical' for l in lines)), (rc, lines[-2:]))
+    # 7b. the guardian (unchanged rules, TRON sender) pauses the vault on the reserves finding; 6 of 7 end the pause
+    rc3, lines3, err3 = net.guardian(2, 'guard-c')
+    paused = net.vint('pausedUntil()')
+    check('guardian pause: on the reserves shortfall guardiao_tron sends guardianPause() as a TRON transaction; the vault is paused for 72 h',
+          paused > int(time.time()) + 250_000 and net.vint('pauseCount()') == 1,
+          (paused, [l for l in lines3 if 'vault' in json.dumps(l) or l.get('kind') == 'alert'][-4:], err3[-400:]))
+    closed = net.work / '.tron-guardian-2' / 'closed'
+    for f in (sorted(closed.glob('*.json')) if closed.exists() else []):
+        energy_table.append(('vault.guardianPause (guardian daemon)', json.loads(f.read_text())['receipt']))
     missing = books['totalLocked'] + books['feesAccrued']
     net.ttx('issuer', net.usdt, 'transfer(address,uint256)', net.vault, missing)
+    ok, sel = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 100 * U, '0x' + '00' * 12 + alice20[2:])
+    check('guardian pause: deposits are refused while paused (Paused), also with the backing restored', not ok and sel == E['Paused'], (ok, sel))
+    net.sign_all()
+    net.relay()
+    check('guardian pause: no release is certified or paid while paused', not net.released(burn5))
+    ok, _ = net.sim('g3', net.vault, 'guardianPause()')
+    ok3, _ = net.sim('mallory', net.vault, 'guardianPause()')
+    check('guardian pause: a guardian cannot pause twice in a chain; a stranger cannot pause at all', not ok and not ok3)
+    count, vu = net.vint('pauseCount()'), str(int(time.time()) + 3600)
+    d = net.tview(net.vault, 'unpauseDigest(uint64,uint256)', count, vu)
+    five = sorted((a, out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)) for a, k in net.signers[:5])
+    six = sorted((a, out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)) for a, k in net.signers[:6])
+    ok, sel = net.sim('mallory', net.vault, 'unpause(uint64,uint256,bytes[])', count, vu, '[' + ','.join(x for _, x in five) + ']')
+    r = net.ttx('mallory', net.vault, 'unpause(uint64,uint256,bytes[])', count, vu, '[' + ','.join(x for _, x in six) + ']',
+                label='vault.unpause (6-of-7 certificate)', fee_limit=200_000_000)
+    check('unpause: 5 of 7 cannot end a pause (InvalidCertificate); 6 of 7 can', not ok and sel == E['InvalidCertificate'] and r['ok']
+          and net.vint('pausedUntil()') <= int(time.time()) + 5, (ok, sel, r))
+    net.l2warp(259200 + 1)  # the guardian paused the L2 token as well (mints only); its 72 h pass on the stand-in
     bob2 = net.usdt_bal(net.bob)
     net.sign_all()
     done5 = net.settle_release(burn5)
@@ -641,38 +670,16 @@ def scenario(net):
     rc2, lines2, err2 = net.guardian(1, 'guard-b')
     dep_c = net.tview(net.vault, 'depositId(uint64,address,uint64,bytes32)', '4', alice20, str(net_of(100 * U)), '0x' + '00' * 12 + alice20[2:])
     cancels = net.l2view('mintCancels(bytes32)(uint64)', dep_c)
-    paused = net.vint('pausedUntil()')
     check('reorg after attestation: with the deposit gone from the final chain, 2 of 3 guardians cancel the queued mint (never credited)',
           queued == '5' and cancels == '1' and net.l2view('mintCount()(uint64)') == '4', (queued, cancels, lines1[-3:], err1[-300:], lines2[-3:], err2[-300:]))
-    check('guardian pause: guardiao_tron sends guardianPause() as a TRON transaction; the vault is paused for 72 h',
-          paused > int(time.time()) + 250_000 and net.vint('pauseCount()') >= 1, (paused, [l for l in lines1 if 'vault' in json.dumps(l)][-2:]))
-    for n in range(2):
-        closed = net.work / f'.tron-guardian-{n}' / 'closed'
-        for f in (sorted(closed.glob('*.json')) if closed.exists() else []):
-            energy_table.append(('vault.guardianPause', json.loads(f.read_text())['receipt']))
-    ok, sel = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 100 * U, '0x' + '00' * 12 + alice20[2:])
-    check('guardian pause: deposits are refused while paused (Paused)', not ok and sel == E['Paused'], (ok, sel))
-    burn6 = net.burn(net.key['alice'], 20 * U, net.bob)
-    lines = net.sign_all()
-    net.relay()
-    check('guardian pause: no release is certified or paid while paused', not net.released(burn6))
-    ok, _ = net.sim('g1', net.vault, 'guardianPause()')
-    ok3, _ = net.sim('mallory', net.vault, 'guardianPause()')
-    check('guardian pause: a guardian cannot pause twice in a chain; a stranger cannot pause at all', not ok and not ok3)
     Lag.hidden = set()
-    count, vu = net.vint('pauseCount()'), str(int(time.time()) + 3600)
-    d = net.tview(net.vault, 'unpauseDigest(uint64,uint256)', count, vu)
-    five = sorted((a, out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)) for a, k in net.signers[:5])
-    six = sorted((a, out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', k, d)) for a, k in net.signers[:6])
-    ok, sel = net.sim('mallory', net.vault, 'unpause(uint64,uint256,bytes[])', count, vu, '[' + ','.join(s for _, s in five) + ']')
-    r = net.ttx('mallory', net.vault, 'unpause(uint64,uint256,bytes[])', count, vu, '[' + ','.join(s for _, s in six) + ']',
-                label='vault.unpause (6-of-7 certificate)', fee_limit=200_000_000)
-    check('unpause: 5 of 7 cannot end a pause (InvalidCertificate); 6 of 7 can', not ok and sel == E['InvalidCertificate'] and r['ok']
-          and net.vint('pausedUntil()') <= int(time.time()) + 5, (ok, sel, r))
+    net.l2warp(259200 + 1)
+    burn6 = net.burn(net.key['alice'], 20 * U, net.bob)
     bob3 = net.usdt_bal(net.bob)
     net.sign_all()
     done6 = net.settle_release(burn6)
-    check('after the pause: the held burn is paid exactly once', net.released(burn6) and net.usdt_bal(net.bob) - bob3 == net_of(20 * U), done6)
+    check('after the cancel: later burns are still paid (the cancelled mint left no trace in the mint chain)',
+          net.released(burn6) and net.usdt_bal(net.bob) - bob3 == net_of(20 * U), done6 and done6.get('closed'))
     final = net.books()
     check('final books: vault balance >= totalLocked + feesAccrued, and the deposit chain has 5 links',
           final['balance'] >= final['totalLocked'] + final['feesAccrued'] and final['depositCount'] == 5, final)
@@ -689,9 +696,9 @@ def main():
         scenario(net)
     finally:
         net.stop()
-        print('\nENERGY (private TVM, energy price 100 sun; no dynamic-energy penalty on a fresh private token)')
+        print('\nENERGY (private TVM, energy price 100 sun, all energy bought by burning TRX; the quickstart node applies the dynamic-energy penalty to the local USDT after a few calls)')
         for label, e in energy_table:
-            print(f"  {label:48s} energy {e.get('energy_total', 0):>9}  bandwidth {e.get('bandwidth', 0):>5}  "
+            print(f"  {label:48s} energy {e.get('energy_total', 0):>9} (of it dynamic penalty {e.get('energy_penalty', 0):>7})  "
                   f"fee {e.get('fee_sun', 0) / 1e6:>9.3f} TRX  {e.get('result')}")
         (net.work / 'energy.json').write_text(json.dumps(energy_table, indent=1))
         failed = [n for n, ok in results if not ok]

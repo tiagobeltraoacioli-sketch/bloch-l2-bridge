@@ -117,7 +117,7 @@ def check_token_config(s, token_cfg):
     lim = token_cfg['limits']
     if int(lim['supplyCap']) != s['cap'] or int(lim['bucketCapacity']) != s['policy'][0] or int(lim['minBurn']) != s['policy'][5]:
         raise Refuse('the L2 token config differs: supplyCap must equal cap, bucketCapacity windowLimit, minBurn l2MinBurn')
-    if int(token_cfg['source']['chainId']) != s['chain']:
+    if int(token_cfg['ethereum']['chainId']) != s['chain']:
         raise Refuse('the L2 token config names another source chain id')
 
 
