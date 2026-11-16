@@ -854,12 +854,22 @@ def run(rig):
     rig.l2_mine(3)
     r = rig.vault_tx(201, burns=[small], tag='i-over')
     check('I1 no vault transaction above the policy fee ceiling (200 sat/vB)', r['propose'][0] != 0 and 'fee rate' in r['propose'][1].get('reason', ''))
+    # 200 sat/vB is the policy ceiling. A signer also refuses anything above 1.5 times its own node's estimate; once
+    # this regtest node has seen enough transactions it has one, and the relayer's 200 is then refused.
     r = rig.vault_tx(200, burns=[small], tag='i-ceiling')
+    rate, band = 200, None
+    if not r['combine']:
+        band = all_refuse(r['signs'], '1.5 times its own estimate')
+        rate = r['signs'][0][1].get('ceiling', 0)
+        r = rig.vault_tx(rate, burns=[small], tag='i-band')
     rig.mine(1)
     rc, res = rig.reserves()
-    check('I2 the smallest burn lands at the fee ceiling: 100,000 - 50 - 200 x 402 = 19,550 sat paid; the pool did not fall',
-          r['combine'] and r['combine'][0] == 0 and received(small['address']) == 19_550 == 100_000 - 50 - 200 * (vault.payout_vb + vault.overhead_vb)
-          and rc == 0 and res['fee_pool_sats'] >= pool0, (r, res))
+    note(f'smallest burn (0.001 BTC) paid at {rate} sat/vB' + (' (the signers refused 200: above 1.5 x their estimate)' if band else ''))
+    check('I2 the relayer cannot lift the fee rate above the signers\' own band, and the smallest burn lands at the highest '
+          'rate they accept: 100,000 - 50 - rate x 402 sat paid; the pool did not fall',
+          band is not False and 1 <= rate <= 200 and r['combine'] and r['combine'][0] == 0
+          and received(small['address']) == 100_000 - 50 - rate * (vault.payout_vb + vault.overhead_vb) >= 546
+          and vault.payout_vb + vault.overhead_vb == 402 and rc == 0 and res['fee_pool_sats'] >= pool0, (r, res))
 
     # ── J. refunds (review R325-BTC-4) ───────────────────────────────────────
     def refund_request(dep, recipient, key):
