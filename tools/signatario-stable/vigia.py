@@ -385,6 +385,13 @@ class Vigia:
                     (b['mint_count'], b['minted_total'], b['mint_head']):
                 return False
             number = int(ctx['sourceAnchorNumber'])
+            if self.cfg.get('anchor_policy') == 'probe' and int(self.cfg.get('eth_chain_id', 0)) != 1:
+                # Networks whose `blockhash` window is not the finalized block by number (evm_anchor.py, eth_half.py).
+                import evm_anchor
+                rpc = lambda method, params: self.rpc(self.cfg['eth_rpc'], method, params)  # noqa: E731
+                evm_number, got, _ = evm_anchor.evm_view(rpc, 'latest', number)
+                return 0 < evm_number - number <= self.anchor_max_age and int(got, 16) != 0 \
+                    and got == str(ctx['sourceAnchorHash']).lower()
             head = int(self.eth_block('latest')['number'], 16)
             if not 0 <= head - number <= self.anchor_max_age:
                 return False

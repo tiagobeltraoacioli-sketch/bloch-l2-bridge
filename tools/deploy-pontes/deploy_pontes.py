@@ -330,7 +330,12 @@ def validate(cfg, rehearsal):
                    f'(mintSwitch.threshold), config has {ms["threshold"]}')
         params['switchThreshold'], params['switchDelay'] = ms['threshold'], ms['delay']
         refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId is undecided')
-        refuse(rehearsal or eth['chainId'] == ETH_MAINNET, 'mainnet policy: ethereum.chainId must be 1')
+        # Round 16: the source may be one of the EVM networks of tools/evm-nets/networks.json (one token per network).
+        evm_nets = ROOT / 'tools/evm-nets/networks.json'
+        sources = {ETH_MAINNET} | ({int(n['chainId']) for n in json.loads(evm_nets.read_text())['networks'].values()}
+                                   if evm_nets.exists() else set())
+        refuse(rehearsal or eth['chainId'] in sources,
+               'mainnet policy: ethereum.chainId must be 1' + (f' or one of {sorted(sources - {ETH_MAINNET})}' if len(sources) > 1 else ''))
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
         refuse(is_hash(eth['route']) and int(eth['route'], 16), 'ethereum.route is undecided (vault.routeId())')
         refuse(is_hash(eth['vaultCodeHash']), 'ethereum.vaultCodeHash is undecided')

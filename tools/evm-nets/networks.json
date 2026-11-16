@@ -1,0 +1,233 @@
+{
+  "domain": "bloch.bridge.evm-networks.v1",
+  "notes": "Source networks of the round 16 EVM bridges. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge. `signer`: per-network settings of eth_half.py and vigia.py; on Base and BNB Smart Chain the 256-block window is 51 s and 115 s, so the daemons must run at `--interval 5` (docs/BRIDGE-EVM-NETWORKS.md section 4).",
+  "feeRecipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+  "networks": {
+    "arbitrum-one": {
+      "name": "Arbitrum One",
+      "chainId": 42161,
+      "rpc": "https://arb1.arbitrum.io/rpc",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "arbitrum-one",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Arbitrum)",
+        "symbol": "bUSDC.arb"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 200,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 Ethereum block numbers (24 s of a 51 min window): ArbOS fills the value for a number only once it has seen the next one"
+      },
+      "measured": {
+        "blockTimeSeconds": 0.29,
+        "finalizedLagSeconds": 1161,
+        "blockhashWindowSeconds": 3072,
+        "numberSpace": "Ethereum block numbers"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://arbiscan.io",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1200,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "base": {
+      "name": "Base",
+      "chainId": 8453,
+      "rpc": "https://mainnet.base.org",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "base-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Base)",
+        "symbol": "bUSDC.base"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 5,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 5 blocks (1 s of 51 s): 0.2 s blocks, so five blocks cost 2% of the window and cover a one-second reordering of the newest blocks"
+      },
+      "measured": {
+        "blockTimeSeconds": 0.2,
+        "finalizedLagSeconds": 1133,
+        "blockhashWindowSeconds": 51,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://basescan.org",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1200,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "op-mainnet": {
+      "name": "OP Mainnet",
+      "chainId": 10,
+      "rpc": "https://mainnet.optimism.io",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "op-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (OP Mainnet)",
+        "symbol": "bUSDC.op"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate"
+      },
+      "measured": {
+        "blockTimeSeconds": 2.0,
+        "finalizedLagSeconds": 1278,
+        "blockhashWindowSeconds": 512,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://optimistic.etherscan.io",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1300,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "linea": {
+      "name": "Linea",
+      "chainId": 59144,
+      "rpc": "https://rpc.linea.build",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "linea-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
+        "symbol": "USDC",
+        "name": "USDC",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Linea)",
+        "symbol": "bUSDC.linea"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet"
+      },
+      "measured": {
+        "blockTimeSeconds": 9.0,
+        "finalizedLagSeconds": 16481,
+        "blockhashWindowSeconds": 2300,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://lineascan.build",
+      "finality": {
+        "meaning": "the proof covering it was verified on Ethereum and that Ethereum block is finalized",
+        "typicalSeconds": 7200,
+        "worstCaseSeconds": 57600
+      }
+    },
+    "bnb": {
+      "name": "BNB Smart Chain",
+      "chainId": 56,
+      "rpc": "https://bsc-dataseed.bnbchain.org",
+      "nativeSymbol": "BNB",
+      "sourceDomainLabel": "bnb-smart-chain",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "symbol": "USDC",
+        "name": "Binance-Peg USD Coin",
+        "decimals": 18,
+        "issuer": "Binance (peg token)",
+        "issuerNative": false,
+        "kind": "peg-18",
+        "unit": {
+          "name": "Bloch bridge unit of Binance-Peg USD Coin",
+          "symbol": "uUSDC.bnb",
+          "address": null,
+          "runtimeCodeKeccak": null
+        }
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (BNB Chain)",
+        "symbol": "bUSDC.bnb"
+      },
+      "signer": {
+        "anchor_policy": "finalized",
+        "anchor_max_age": 250,
+        "finalized_margin": 135,
+        "deposit_cursor": true,
+        "why": "the finalized block itself (1 to 2 blocks back), the Ethereum rule"
+      },
+      "measured": {
+        "blockTimeSeconds": 0.45,
+        "finalizedLagSeconds": 1,
+        "blockhashWindowSeconds": 115,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 1
+      },
+      "explorer": "https://bscscan.com",
+      "finality": {
+        "meaning": "fast finality, two more blocks voted by two thirds of the validators",
+        "typicalSeconds": 62,
+        "worstCaseSeconds": 600
+      },
+      "v1": false
+    }
+  }
+}

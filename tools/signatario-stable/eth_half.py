@@ -28,6 +28,19 @@ Config (one JSON per signer, written once at deploy): `eth_rpc`, `eth_chain_id`,
 `anchor_max_age` (blocks, default 160: the vault's blockhash window is 256), `valid_seconds` (default 1800),
 `max_valid_seconds` (default 3600), `log_chunk` (default 10000 blocks per eth_getLogs), `release_hold` (default false),
 `accepted_unbacked_mints` (deposit ids reviewed by the operators, default none).
+
+Networks other than Ethereum (round 16, the same vault bytecode on Arbitrum One, Base, OP Mainnet, Linea, BNB Smart Chain):
+`anchor_policy` (default `finalized`, the Ethereum rule above, also right for BNB Smart Chain). `probe` is for networks
+whose finalized block is outside the vault's 256-entry `blockhash` window or whose `blockhash` is not the hash by
+number (evm_anchor.py): the anchor is `block.number - 1 - anchor_depth` (default depth 2) and its `blockhash` as the
+node's own EVM returns them at the head, or the proposed one when the EVM returns exactly it and it is at most
+`anchor_max_age` behind. Such an anchor is not final; a reorganised anchor makes the vault refuse the certificate.
+What must be final is checked instead: with `probe` the burn's mint chain must match the vault's deposit chain at the
+node's `finalized` block as well as at the head. `finalized_margin` (blocks, default 0): `deposit` also requires the
+deposit's block to be that many blocks below `finalized` (a margin for networks whose finality is a vote of a small
+validator set). `deposit_cursor` (default false): `deposit` locates the log through a persisted index of the vault's
+`Deposited` logs instead of scanning the vault's whole history for each deposit (networks that make hundreds of
+thousands of blocks a day); every check on the log itself is unchanged. `probe` is refused on chain 1.
 """
 import fcntl
 import hashlib
@@ -119,6 +132,16 @@ class Eth:
         if chain != int(c['eth_chain_id']):
             refuse('this Ethereum node serves another chain', node=chain, config=int(c['eth_chain_id']))
         self.chain_id = chain
+        self.anchor_policy = c.get('anchor_policy', 'finalized')
+        self.anchor_depth = int(c.get('anchor_depth', 2))
+        self.finalized_margin = int(c.get('finalized_margin', 0))
+        if self.anchor_policy == 'probe' and chain == 1:
+            # Review R325-EVM-3: on Ethereum the anchor is the signer's finalized block, by code and not by convention.
+            refuse('config: anchor_policy probe is not allowed on Ethereum (chain 1): its anchor is the finalized block')
+        self.deposit_cursor = c.get('deposit_cursor') is True
+        if self.anchor_policy not in ('finalized', 'probe') or self.finalized_margin < 0 \
+                or (self.anchor_policy == 'probe' and not 0 <= self.anchor_depth < self.anchor_max_age):
+            refuse('config: anchor_policy must be finalized or probe, anchor_depth in [0, anchor_max_age), finalized_margin >= 0')
         self.provenance = bool(c.get('provenance'))
         if self.provenance:
             use_provenance()
@@ -163,6 +186,17 @@ class Eth:
         ref = hex(block) if isinstance(block, int) else block
         return self.rpc('eth_call', [{'to': self.vault, 'data': data}, ref])
 
+    def evm_view(self, block, number=None):
+        """(block.number, blockhash(number), chain id) as the vault would see them on top of `block` (evm_anchor.py)."""
+        import evm_anchor  # only the per-network anchor paths load it
+        try:
+            n, h, chain = evm_anchor.evm_view(self.rpc, hex(block) if isinstance(block, int) else block, number)
+        except ValueError as e:
+            refuse(str(e))
+        if chain != self.chain_id:
+            refuse('the anchor probe ran on another chain', probe=chain, config=self.chain_id)
+        return n, h
+
     def word(self, hexdata, i=0):
         return int(hexdata[2 + 64 * i:2 + 64 * (i + 1)], 16)
 
@@ -187,6 +221,45 @@ class Eth:
 
 
 # ── deposit ─────────────────────────────────────────────────────────────────
+def deposit_block(eth, dep_id, topic0, start, chunk, finalized):
+    """The block of the `Deposited` log with this id at or below `finalized`, from a persisted index (`deposit_cursor`).
+
+    The index (`<db>.deposits-index.json`) holds, for every `Deposited` log of the vault up to a checkpoint, id -> block
+    number, plus the checkpoint's number and block hash. A pass scans only the blocks after the checkpoint, up to this
+    node's `finalized`. The checkpoint is trusted only while this node still has that hash at that number; otherwise
+    (another node, a restored database, a finality failure) the index is dropped and rebuilt from `vault_from_block`.
+    The index only LOCATES a block: the caller then reads that one block's log from the node and applies every
+    check of the full scan (one log, canonical block, receipt, the vault recomputing the id), so a wrong or stale
+    index entry can make an attestation fail, never succeed."""
+    path = Path(str(eth.cfg['db']) + '.deposits-index.json')
+    with open(str(path) + '.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        idx = None
+        if path.exists():
+            try:
+                idx = json.loads(path.read_text())
+                if idx.get('vault') != eth.vault or idx.get('chain') != eth.chain_id or int(idx['from']) != start \
+                        or int(idx['to']) > finalized or eth.block(int(idx['to']))['hash'].lower() != idx['to_hash']:
+                    idx = None
+            except (ValueError, KeyError, TypeError):
+                idx = None
+        if idx is None:
+            idx = {'vault': eth.vault, 'chain': eth.chain_id, 'from': start, 'to': start - 1, 'to_hash': None, 'ids': {}}
+        lo = int(idx['to']) + 1
+        while lo <= finalized:
+            hi = min(lo + chunk - 1, finalized)
+            for l in eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0], 'fromBlock': hex(lo), 'toBlock': hex(hi)}]):
+                if len(l['topics']) == 3 and not l.get('removed'):
+                    idx['ids'].setdefault(l['topics'][1].lower(), int(l['blockNumber'], 16))
+            lo = hi + 1
+        if int(idx['to']) != finalized:
+            idx['to'], idx['to_hash'] = finalized, eth.block(finalized)['hash'].lower()
+            tmp = Path(str(path) + '.tmp')
+            tmp.write_text(json.dumps(idx) + '\n')
+            os.replace(tmp, path)
+    return idx['ids'].get(dep_id)
+
+
 def cmd_deposit(eth, args):
     dep_id = hex32(args[args.index('--deposit-id') + 1], 'deposit id')
     fin = eth.block('finalized')
@@ -194,9 +267,16 @@ def cmd_deposit(eth, args):
     eth.check_code(finalized)
     topic0 = eth.run([eth.cast, 'keccak', DEPOSITED], 'cast keccak').lower()
     start, chunk, logs = int(eth.cfg.get('vault_from_block', 0)), int(eth.cfg.get('log_chunk', 10000)), []
-    for lo in range(start, finalized + 1, chunk):
-        logs += eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0, dep_id], 'fromBlock': hex(lo),
-                                         'toBlock': hex(min(lo + chunk - 1, finalized))}])
+    if eth.deposit_cursor:
+        # Review R325-EVM-5 (fast networks): one persisted pass over the vault's history instead of one per deposit.
+        at = deposit_block(eth, dep_id, topic0, start, chunk, finalized)
+        if at is not None:
+            logs = eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0, dep_id], 'fromBlock': hex(at),
+                                            'toBlock': hex(at)}])
+    else:
+        for lo in range(start, finalized + 1, chunk):
+            logs += eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0, dep_id], 'fromBlock': hex(lo),
+                                             'toBlock': hex(min(lo + chunk - 1, finalized))}])
     if not logs:
         later = eth.rpc('eth_getLogs', [{'address': eth.vault, 'topics': [topic0, dep_id],
                                          'fromBlock': hex(finalized + 1), 'toBlock': 'latest'}])
@@ -208,6 +288,9 @@ def cmd_deposit(eth, args):
     number = int(log['blockNumber'], 16)
     if eth.block(number)['hash'].lower() != log['blockHash'].lower():
         refuse('deposit log is not on the canonical chain')
+    if eth.finalized_margin and number > finalized - eth.finalized_margin:
+        refuse('deposit not finalized on Ethereum', finalized_number=finalized, finalized_margin=eth.finalized_margin,
+               block_number=number)
     receipt = eth.rpc('eth_getTransactionReceipt', [log['transactionHash']])
     if not receipt or receipt.get('status') != '0x1' or receipt['blockHash'].lower() != log['blockHash'].lower() \
             or not any(l['logIndex'] == log['logIndex'] and l['address'].lower() == eth.vault
@@ -343,7 +426,32 @@ def cmd_release(eth, args):
 
     finalized = int(eth.block('finalized')['number'], 16)
     prop = intent.get('proposed_context')
-    if prop:
+    if eth.anchor_policy == 'probe':
+        # What must be final: the deposits that back this burn. The anchor below is only a fork binding.
+        if eth.provenance and not eth.word(eth.call('provenanceMatches(uint64,uint64,bytes32)', rel['mintCount'],
+                                                    rel['mintedTotal'], rel['mintHead'], block=finalized)):
+            refuse('the deposits that back this burn are not finalized on the source network yet; retry later',
+                   finalized_number=finalized, head_number=head)
+        evm_number, default_hash = eth.evm_view(head, None)
+        if prop:
+            number = uint(prop['sourceAnchorNumber'], 256, 'sourceAnchorNumber')
+            anchor_hash = hex32(prop['sourceAnchorHash'], 'sourceAnchorHash')
+            if not 0 < evm_number - number <= eth.anchor_max_age or int(anchor_hash, 16) == 0 \
+                    or eth.evm_view(head, number)[1] != anchor_hash:
+                refuse('proposed anchor is not what this node\'s EVM returns for a recent block', evm_number=evm_number,
+                       head_number=head)
+            valid_until = uint(prop['validUntil'], 256, 'validUntil')
+            if not now < valid_until <= now + eth.max_valid_seconds:
+                refuse('proposed validUntil outside policy', now=now, max_valid_seconds=eth.max_valid_seconds)
+        else:
+            number = evm_number - 1 - eth.anchor_depth
+            anchor_hash = eth.evm_view(head, number)[1] if eth.anchor_depth else default_hash
+            if int(anchor_hash, 16) == 0:
+                refuse('this node\'s EVM returns no blockhash for the anchor', anchor_number=number, evm_number=evm_number)
+            valid_until = now + eth.valid_seconds
+        if evm_number == head and eth.block(number)['hash'].lower() != anchor_hash:
+            refuse('the anchor probe and the block hash by number disagree on this node', anchor_number=number)
+    elif prop:
         number = uint(prop['sourceAnchorNumber'], 256, 'sourceAnchorNumber')
         anchor_hash = hex32(prop['sourceAnchorHash'], 'sourceAnchorHash')
         if number > finalized or head - number > eth.anchor_max_age \
