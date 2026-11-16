@@ -13,14 +13,16 @@ pub const MAX_PAUSE_DURATION: u64 = 14 * 86_400;
 pub const MAX_RELEASE_DELAY: u64 = 14 * 86_400;
 pub const MIN_VALID_SECONDS: u64 = 60;
 pub const MAX_VALID_SECONDS: u64 = 86_400;
+pub const MAX_RECORD_RETENTION: u64 = 30 * 86_400;
 pub const DECIMALS: u8 = 6;
 
 pub const TAG_VAULT: u8 = 1;
 pub const TAG_DEPOSIT: u8 = 2;
 pub const TAG_RELEASE: u8 = 3;
-pub const LAYOUT_VERSION: u8 = 1;
+pub const TAG_PAID: u8 = 4;
+pub const LAYOUT_VERSION: u8 = 2;
 
-pub const CONFIG_FIXED_LEN: usize = 6 * 32 + 10 * 8 + 2 * 2 + 4;
+pub const CONFIG_FIXED_LEN: usize = 6 * 32 + 11 * 8 + 2 * 2 + 4;
 
 pub struct Reader<'a> {
     data: &'a [u8],
@@ -108,6 +110,8 @@ pub struct Config {
     pub pause_duration: u64,
     pub pause_cooldown: u64,
     pub max_valid_seconds: u64,
+    /// How long a paid release record stays before anyone may close it (its rent returns to who paid it).
+    pub record_retention: u64,
     pub deposit_fee_bps: u16,
     pub release_fee_bps: u16,
     pub threshold: u8,
@@ -141,6 +145,7 @@ impl Config {
             pause_duration: r.u64()?,
             pause_cooldown: r.u64()?,
             max_valid_seconds: r.u64()?,
+            record_retention: r.u64()?,
             deposit_fee_bps: r.u16()?,
             release_fee_bps: r.u16()?,
             threshold: r.u8()?,
@@ -169,6 +174,7 @@ impl Config {
         w.u64(self.pause_duration);
         w.u64(self.pause_cooldown);
         w.u64(self.max_valid_seconds);
+        w.u64(self.record_retention);
         w.u16(self.deposit_fee_bps);
         w.u16(self.release_fee_bps);
         w.u8(self.threshold);
@@ -233,9 +239,12 @@ impl Config {
             || (self.release_delay == 0 && self.large_release_threshold != 0)
             || self.max_valid_seconds < MIN_VALID_SECONDS
             || self.max_valid_seconds > MAX_VALID_SECONDS
+            || self.record_retention > MAX_RECORD_RETENTION
             || (g == 0 && (self.pause_duration != 0 || self.pause_cooldown != 0))
             || (g != 0
                 && (self.pause_duration == 0
+                    // A pause outlasts every certificate that existed when it began: none is alive when it ends.
+                    || self.pause_duration <= self.max_valid_seconds
                     || self.pause_duration > MAX_PAUSE_DURATION
                     || self.pause_cooldown < self.pause_duration
                     || self.pause_cooldown > MAX_PAUSE_DURATION));
@@ -263,7 +272,7 @@ impl Config {
 
 pub const VAULT_LEN: usize = 4 + 32 + CONFIG_FIXED_LEN + 20 * MAX_SIGNERS + 20 * MAX_GUARDIANS // header, config
     + 20 + 20 + 32 + 32 + 32 + 32 // vault20, mint20, route, genesis, token account, fee token account
-    + 32 + 8 * 4 + 2 + 8 * 6 + 8 * MAX_GUARDIANS + 8 * 2; // head and counters
+    + 32 + 8 * 4 + 2 + 8 * 6 + 8 * MAX_GUARDIANS + 8 * 3; // head and counters
 
 pub struct Vault {
     pub bump: u8,
@@ -295,6 +304,9 @@ pub struct Vault {
     pub approval_seq: u64,
     /// Approvals numbered at or below this were voided by a guardian pause and must be approved again.
     pub void_through_seq: u64,
+    /// When the last guardian pause began (0: never). A release certificate that could have been signed before
+    /// it (`valid_until <= last_pause_at + max_valid_seconds`) is refused for good, whoever ends the pause.
+    pub last_pause_at: u64,
 }
 
 impl Vault {
@@ -341,12 +353,14 @@ impl Vault {
             guardian_last_chain: [0u64; MAX_GUARDIANS],
             approval_seq: 0,
             void_through_seq: 0,
+            last_pause_at: 0,
         };
         for i in 0..MAX_GUARDIANS {
             v.guardian_last_chain[i] = r.u64()?;
         }
         v.approval_seq = r.u64()?;
         v.void_through_seq = r.u64()?;
+        v.last_pause_at = r.u64()?;
         r.done().map_err(|_| VaultError::InvalidAccount)?;
         Ok(v)
     }
@@ -392,6 +406,7 @@ impl Vault {
         }
         w.u64(self.approval_seq);
         w.u64(self.void_through_seq);
+        w.u64(self.last_pause_at);
         debug_assert_eq!(w.at(), VAULT_LEN);
         Ok(())
     }
@@ -478,8 +493,9 @@ impl DepositRecord {
 pub const RELEASE_APPROVED: u8 = 1;
 pub const RELEASE_PAID: u8 = 2;
 
-/// One release per burn nonce: approved by a certificate, then paid once. Never closed (replay protection).
-pub const RELEASE_LEN: usize = 2 + 1 + 1 + 32 + 8 + 32 + 20 + 8 + 32 + 8 + 8 + 8 + 8 + 8;
+/// One release per burn nonce: approved by a certificate, then paid once. A paid record may be closed after
+/// `record_retention`; closing sets the nonce's bit in a paid page first, so the nonce stays spent for good.
+pub const RELEASE_LEN: usize = 2 + 1 + 1 + 32 + 8 + 32 + 20 + 8 + 32 + 8 + 8 + 8 + 8 + 8 + 32;
 
 pub struct ReleaseRecord {
     pub bump: u8,
@@ -495,6 +511,8 @@ pub struct ReleaseRecord {
     pub approved_at: u64,
     pub paid_at: u64,
     pub paid_amount: u64,
+    /// Who paid the record's rent at the first approval; the rent returns there when the record is closed.
+    pub payer: Word,
 }
 
 impl ReleaseRecord {
@@ -517,6 +535,7 @@ impl ReleaseRecord {
             approved_at: r.u64()?,
             paid_at: r.u64()?,
             paid_amount: r.u64()?,
+            payer: r.word()?,
         })
     }
 
@@ -537,6 +556,49 @@ impl ReleaseRecord {
         w.u64(self.approved_at);
         w.u64(self.paid_at);
         w.u64(self.paid_amount);
+        w.put(&self.payer);
         debug_assert_eq!(w.at(), RELEASE_LEN);
     }
+}
+
+/// Paid pages: one bit per burn nonce whose release was paid and whose record was closed. Never closed and never
+/// cleared: with the release records that still exist, they are the vault's whole replay state.
+pub const PAGE_NONCES: u64 = 8192;
+pub const PAGE_HEADER: usize = 2 + 1 + 32 + 8;
+pub const PAGE_LEN: usize = PAGE_HEADER + (PAGE_NONCES as usize) / 8;
+
+pub fn page_of(nonce: u64) -> u64 {
+    nonce / PAGE_NONCES
+}
+
+/// Writes the header of a new, zeroed page.
+pub fn page_init(data: &mut [u8], bump: u8, vault: &Word, page: u64) {
+    let mut w = Writer::new(data);
+    w.u8(TAG_PAID);
+    w.u8(LAYOUT_VERSION);
+    w.u8(bump);
+    w.put(vault);
+    w.u64(page);
+}
+
+/// Checks a page's header against the vault and the nonce it must cover; returns its bump.
+pub fn page_check(data: &[u8], vault: &Word, nonce: u64) -> Result<u8, ProgramError> {
+    if data.len() != PAGE_LEN || data[0] != TAG_PAID || data[1] != LAYOUT_VERSION {
+        return Err(VaultError::InvalidAccount.into());
+    }
+    let page = u64::from_le_bytes(data[35..43].try_into().unwrap());
+    if data[3..35] != vault[..] || page != page_of(nonce) {
+        return Err(VaultError::InvalidAccount.into());
+    }
+    Ok(data[2])
+}
+
+pub fn page_bit(data: &[u8], nonce: u64) -> bool {
+    let i = (nonce % PAGE_NONCES) as usize;
+    data[PAGE_HEADER + i / 8] & (1 << (i % 8)) != 0
+}
+
+pub fn page_set(data: &mut [u8], nonce: u64) {
+    let i = (nonce % PAGE_NONCES) as usize;
+    data[PAGE_HEADER + i / 8] |= 1 << (i % 8);
 }

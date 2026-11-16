@@ -22,10 +22,10 @@ fn committee() -> &'static [EthKey] {
 fn initialize_fixes_everything_and_takes_no_authority() {
     let rig = Rig::new();
     let d = rig.vault_data();
-    assert_eq!(d[0], 1);
+    assert_eq!((d[0], d[1], d.len()), (1, 2, 1146));
     // config bytes are stored verbatim after the 36-byte header
-    assert_eq!(&d[36..36 + 280], &rig.config.encode()[..280]);
-    let derived = 4 + 32 + 280 + 320 + 140;
+    assert_eq!(&d[36..36 + 288], &rig.config.encode()[..288]);
+    let derived = 4 + 32 + 288 + 320 + 140;
     assert_eq!(&d[derived..derived + 20], &rig.vault20);
     assert_eq!(&d[derived + 20..derived + 40], &rig.mint20);
     assert_eq!(&d[derived + 40..derived + 72], &rig.route);
@@ -102,6 +102,8 @@ fn initialize_refuses_bad_configurations() {
         ("release delay above 14 days", Box::new(|c| c.release_delay = 14 * 86_400 + 1)),
         ("large threshold without a delay", Box::new(|c| c.release_delay = 0)),
         ("validity window too long", Box::new(|c| c.max_valid_seconds = 86_401)),
+        ("a pause that does not outlast a certificate", Box::new(|c| c.max_valid_seconds = c.pause_duration)),
+        ("record retention above 30 days", Box::new(|c| c.record_retention = 30 * 86_400 + 1)),
         ("zero chain id", Box::new(|c| c.source_chain_id = [0; 32])),
         ("same domains", Box::new(|c| c.native_domain = c.source_domain)),
         ("zero fee owner", Box::new(|c| c.fee_owner = Address::new_from_array([0; 32]))),
@@ -521,7 +523,7 @@ fn secp_verification_missing_misplaced_or_by_another_program() {
     let real = rig.svm.get_account(&instructions_sysvar()).map(|a| a.data).unwrap_or_else(|| vec![0u8; 64]);
     rig.set_raw_account(fake_sysvar, rig.helper, real);
     let mut bad = approve.clone();
-    bad.accounts[4] = AccountMeta::new_readonly(fake_sysvar, false);
+    bad.accounts[5] = AccountMeta::new_readonly(fake_sysvar, false);
     let text = failed(rig.send(&[secp_ix(secp_data(&refs, &auth, 0)), bad]));
     assert!(text.contains("UnsupportedSysvar"), "{text}");
     // Through a CPI from another program, with a real certificate just before the outer instruction.
@@ -999,4 +1001,179 @@ fn transaction_sizes_and_compute_units() {
     println!("| set_controls | 5 | {size} | {} |", ok(rig.send(&ixs)));
     let init = initialize_ix(&rig.program, &payer.pubkey(), &rig.config);
     println!("| initialize (7 signers, 3 guardians) | 0 | {} | - |", tx_size(&payer, &[init]));
+}
+
+// ── review 325: SOL-2 (stale certificates), SOL-4 (rent and deposit contention) ──
+
+#[test]
+fn certificate_from_before_a_pause_is_dead_however_the_pause_ends() {
+    let mut rig = Rig::new();
+    rig.deposit(5_000 * USDC, L2);
+    let owner = rig.new_recipient();
+    let waiting = rig.release_for(1, &owner, 2_000 * USDC); // large: waits; valid for 1,800 s
+    ok(rig.approve(&waiting));
+    rig.advance(60);
+    ok(rig.guardian_pause(0, 1));
+    let paused_at = rig.now();
+    // Six of seven end the pause at once: the voided certificate is still inside its own validity.
+    rig.advance(30);
+    ok(rig.unpause(1, 6));
+    refused(rig.execute(1, &owner), E_VOIDED);
+    assert!(rig.now() < waiting.valid_until);
+    refused(rig.approve(&waiting), E_STALE);
+    // Any other certificate that could have been signed before the pause is refused too, at the boundary.
+    let mut old = rig.release_for(1, &owner, 2_000 * USDC);
+    old.valid_until = paused_at + rig.config.max_valid_seconds;
+    refused(rig.approve(&old), E_STALE);
+    // One second past the boundary is a certificate that cannot have existed when the guardian paused.
+    let mut fresh = rig.release_for(1, &owner, 2_000 * USDC);
+    fresh.valid_until = paused_at + rig.config.max_valid_seconds + 1;
+    ok(rig.approve(&fresh));
+    rig.advance(3_600);
+    ok(rig.execute(1, &owner));
+    refused(rig.execute(1, &owner), E_ALREADY);
+    rig.check_backing();
+}
+
+#[test]
+fn stale_rule_holds_after_a_pause_that_ran_out() {
+    // max_valid_seconds one day, pause one day and a second: the configuration closest to the limit.
+    let mut rig = Rig::with(|c| {
+        c.max_valid_seconds = 86_400;
+        c.pause_duration = 86_401;
+        c.pause_cooldown = 86_401;
+    });
+    rig.deposit(5_000 * USDC, L2);
+    let owner = rig.new_recipient();
+    let mut waiting = rig.release_for(1, &owner, 2_000 * USDC);
+    waiting.valid_until = rig.now() + 86_400;
+    ok(rig.approve(&waiting));
+    ok(rig.guardian_pause(0, 1));
+    rig.advance(86_401);
+    refused(rig.execute(1, &owner), E_VOIDED);
+    // The pause outlasted the certificate (the configuration rule), and the stale rule would refuse it anyway.
+    refused(rig.approve(&waiting), E_EXPIRED);
+    let again = rig.release_for(1, &owner, 2_000 * USDC);
+    ok(rig.approve(&again));
+}
+
+#[test]
+fn paid_record_closes_after_retention_and_the_nonce_stays_spent() {
+    let mut rig = Rig::new();
+    rig.deposit(5_000 * USDC, L2);
+    let owner = rig.new_recipient();
+    let payer = rig.payer.pubkey();
+    let stranger = rig.new_recipient();
+    let r = rig.release_for(7, &owner, 100 * USDC);
+    let before_approve = rig.svm.get_balance(&payer).unwrap();
+    ok(rig.approve(&r));
+    let record = rig.release_record(7);
+    let rent = rig.svm.get_account(&record).unwrap().lamports;
+    let data = rig.svm.get_account(&record).unwrap().data;
+    assert_eq!(data.len(), 208);
+    assert_eq!(&data[176..208], payer.as_ref(), "the record names who paid its rent");
+    assert!(before_approve - rig.svm.get_balance(&payer).unwrap() >= rent);
+
+    // Not paid yet: not closable.
+    refused(rig.send(&[rig.close_ix(7, &payer)]), E_NOT_APPROVED);
+    ok(rig.execute(7, &owner));
+    // Paid, inside the retention: not closable.
+    rig.advance(604_799);
+    refused(rig.send(&[rig.close_ix(7, &payer)]), E_NOT_READY);
+    rig.advance(1);
+    // The rent goes only to who paid it.
+    refused(rig.send(&[rig.close_ix(7, &stranger)]), E_ACCOUNT);
+    // The page of another nonce range, and the record of another nonce.
+    let mut wrong = rig.close_ix(7, &payer);
+    wrong.accounts[2] = AccountMeta::new(rig.paid_page(8192), false);
+    refused(rig.send(&[wrong]), E_ACCOUNT);
+    assert!(!rig.paid_bit(7));
+
+    let before = rig.svm.get_balance(&payer).unwrap();
+    ok(rig.send(&[rig.close_ix(7, &payer)]));
+    assert!(rig.paid_bit(7) && !rig.paid_bit(6) && !rig.paid_bit(8));
+    assert!(rig.svm.get_account(&record).map(|a| a.lamports == 0).unwrap_or(true), "the record is gone");
+    // The payer paid one transaction fee and received the whole rent.
+    assert!(rig.svm.get_balance(&payer).unwrap() + 10_000 >= before + rent);
+
+    // The nonce stays spent: a new threshold certificate, the payment, a second close.
+    let again = rig.release_for(7, &owner, 100 * USDC);
+    refused(rig.approve(&again), E_ALREADY);
+    refused(rig.execute(7, &owner), E_NOT_APPROVED);
+    refused(rig.send(&[rig.close_ix(7, &payer)]), E_NOT_APPROVED);
+    // Lamports sent to the closed record's address do not bring the nonce back.
+    let transfer = system_transfer(&payer, &record, 5_000_000);
+    ok(rig.send(&[transfer]));
+    refused(rig.approve(&again), E_ALREADY);
+    // Its neighbours are untouched.
+    let next = rig.release_for(8, &owner, 100 * USDC);
+    ok(rig.approve(&next));
+    ok(rig.execute(8, &owner));
+    rig.check_backing();
+}
+
+#[test]
+fn voided_or_waiting_approval_cannot_be_closed() {
+    let mut rig = Rig::new();
+    rig.deposit(5_000 * USDC, L2);
+    let owner = rig.new_recipient();
+    let payer = rig.payer.pubkey();
+    let r = rig.release_for(3, &owner, 2_000 * USDC);
+    ok(rig.approve(&r));
+    rig.advance(700_000);
+    refused(rig.send(&[rig.close_ix(3, &payer)]), E_NOT_APPROVED);
+    ok(rig.guardian_pause(0, 1));
+    rig.advance(700_000);
+    refused(rig.send(&[rig.close_ix(3, &payer)]), E_NOT_APPROVED);
+    assert!(!rig.paid_bit(3));
+}
+
+#[test]
+fn paid_page_must_be_the_vaults_own() {
+    let mut rig = Rig::new();
+    rig.deposit(5_000 * USDC, L2);
+    let owner = rig.new_recipient();
+    let r = rig.release_for(1, &owner, 100 * USDC);
+    // Another account in the page's place.
+    let mut ixs = rig.approve_ixs(&r, 5);
+    ixs[1].accounts[4] = AccountMeta::new(rig.paid_page(8192), false);
+    refused(rig.send(&ixs), E_ACCOUNT);
+    // A look-alike page owned by another program at the right address cannot be planted: the address is derived,
+    // and an account there that this program does not own is created by it or refused.
+    let page = rig.paid_page(1);
+    let mut fake = vec![0u8; 43 + 1024];
+    fake[0] = 4;
+    fake[1] = 2;
+    fake[43] = 0xff;
+    rig.set_raw_account(page, rig.helper, fake);
+    failed(rig.approve(&r));
+}
+
+#[test]
+fn deposits_signed_against_the_same_count_all_land() {
+    let mut rig = Rig::new();
+    let users: Vec<(Keypair, Address)> = (0..4).map(|_| rig.fund_user(100 * USDC)).collect();
+    // Four depositors read count 0 and each names the records of counts 0 to 3.
+    let ixs: Vec<Instruction> =
+        users.iter().map(|(u, source)| rig.deposit_window_ix(&u.pubkey(), source, 100 * USDC, &L2, 0, 4)).collect();
+    for ((user, _), ix) in users.iter().zip(ixs) {
+        ok(send(&mut rig.svm, user, &[], &[ix]));
+    }
+    assert_eq!(rig.state().deposit_count, 4);
+    for n in 0..4u64 {
+        let d = rig.svm.get_account(&rig.deposit_record(n)).unwrap().data;
+        assert_eq!(u64::from_le_bytes(d[35..43].try_into().unwrap()), n);
+        assert_eq!(&d[75..107], users[n as usize].0.pubkey().as_ref(), "record n belongs to the n-th deposit to land");
+    }
+    // A fifth one signed against count 0 with the same window finds no record for count 4, and moves nothing.
+    let (late, source) = rig.fund_user(100 * USDC);
+    let ix = rig.deposit_window_ix(&late.pubkey(), &source, 100 * USDC, &L2, 0, 4);
+    refused(send(&mut rig.svm, &late, &[], &[ix]), E_ACCOUNT);
+    assert_eq!(token_balance(&rig.svm, &source), 100 * USDC);
+    // More than eight candidates are refused.
+    let ix = rig.deposit_window_ix(&late.pubkey(), &source, 100 * USDC, &L2, 4, 9);
+    failed(send(&mut rig.svm, &late, &[], &[ix]));
+    let ix = rig.deposit_window_ix(&late.pubkey(), &source, 100 * USDC, &L2, 4, 8);
+    ok(send(&mut rig.svm, &late, &[], &[ix]));
+    rig.check_backing();
 }

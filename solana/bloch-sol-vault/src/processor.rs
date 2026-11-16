@@ -25,6 +25,7 @@ pub const SEED_VAULT: &[u8] = b"vault";
 pub const SEED_TOKENS: &[u8] = b"tokens";
 pub const SEED_DEPOSIT: &[u8] = b"deposit";
 pub const SEED_RELEASE: &[u8] = b"release";
+pub const SEED_PAID: &[u8] = b"paid";
 
 pub const IX_INITIALIZE: u8 = 0;
 pub const IX_DEPOSIT: u8 = 1;
@@ -34,6 +35,11 @@ pub const IX_GUARDIAN_PAUSE: u8 = 4;
 pub const IX_UNPAUSE: u8 = 5;
 pub const IX_SET_CONTROLS: u8 = 6;
 pub const IX_SWEEP_FEES: u8 = 7;
+pub const IX_CLOSE_RELEASE: u8 = 8;
+
+/// A deposit may name the record addresses of the next few nonces, so deposits signed against the same count do
+/// not fail each other: the program uses the one that belongs to the count it finds.
+pub const MAX_DEPOSIT_CANDIDATES: usize = 8;
 
 const TOKEN_ACCOUNT_LEN: usize = 165;
 const MINT_LEN: usize = 82;
@@ -49,6 +55,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         IX_UNPAUSE => unpause(program_id, accounts, rest),
         IX_SET_CONTROLS => set_controls(program_id, accounts, rest),
         IX_SWEEP_FEES => sweep_fees(program_id, accounts, rest),
+        IX_CLOSE_RELEASE => close_release(program_id, accounts, rest),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -283,6 +290,7 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pro
         guardian_last_chain: [0; MAX_GUARDIANS],
         approval_seq: 0,
         void_through_seq: 0,
+        last_pause_at: 0,
         config,
     };
     store_vault(&vault, vault_ai)?;
@@ -294,10 +302,16 @@ fn initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pro
 
 /// Accounts: depositor (signer, writable; the token authority, pays the record's rent), depositor token account
 /// (writable), vault (writable), vault token account (writable), mint, deposit record (writable), token program,
-/// system program. Data: amount u64, L2 recipient (20 bytes).
+/// system program, then up to 7 more candidate deposit records (writable). Data: amount u64, L2 recipient (20).
+///
+/// The record of deposit `n` lives at the address derived from the vault and `n`, and `n` is the vault's count
+/// when the deposit executes, not when it was signed. A depositor therefore names the record addresses of the
+/// next few counts; the one that belongs to the count found is used, and the others are not touched.
 fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    let [depositor, source_ai, vault_ai, tokens_ai, mint_ai, record_ai, token_program, system_program] =
-        accounts_exact::<8>(accounts)?;
+    require(accounts.len() >= 8 && accounts.len() < 8 + MAX_DEPOSIT_CANDIDATES, VaultError::InvalidAccount)
+        .map_err(|_| ProgramError::NotEnoughAccountKeys)?;
+    let [depositor, source_ai, vault_ai, tokens_ai, mint_ai, first_record_ai, token_program, system_program] =
+        accounts_exact::<8>(&accounts[..8])?;
     let mut r = Reader::new(data);
     let amount = r.u64()?;
     let l2_recipient = r.addr()?;
@@ -351,7 +365,10 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Progra
 
     let nonce_bytes = nonce.to_le_bytes();
     let (record_key, bump) = Pubkey::find_program_address(&[SEED_DEPOSIT, vault_ai.key.as_ref(), &nonce_bytes], program_id);
-    require_key(record_ai, &record_key)?;
+    let record_ai = core::iter::once(first_record_ai)
+        .chain(accounts[8..].iter())
+        .find(|a| *a.key == record_key)
+        .ok_or(VaultError::InvalidAccount)?;
     create_pda(
         depositor,
         record_ai,
@@ -383,13 +400,13 @@ fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Progra
 // ── releases ────────────────────────────────────────────────────────────────
 
 /// Accounts: payer (signer, writable), vault (writable), release record (writable), deposit record of nonce
-/// `mint_count - 1`, instructions sysvar, system program. The instruction before this one must be the canonical
-/// secp256k1 instruction over this release's authorization (cert.rs).
+/// `mint_count - 1`, the paid page of the nonce (writable), instructions sysvar, system program. The instruction
+/// before this one must be the canonical secp256k1 instruction over this release's authorization (cert.rs).
 /// Data: nonce u64, recipient (20), amount u64, native burn (32), mint count u64, minted total u64, mint head
 /// (32), valid until u64, source anchor slot u64, source anchor hash (32), native finalized number u64, native
 /// finalized hash (32).
 fn approve_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    let [payer, vault_ai, record_ai, deposit_ai, instructions, system_program] = accounts_exact::<6>(accounts)?;
+    let [payer, vault_ai, record_ai, deposit_ai, page_ai, instructions, system_program] = accounts_exact::<7>(accounts)?;
     let mut r = Reader::new(data);
     let nonce = r.u64()?;
     let recipient = r.addr()?;
@@ -412,6 +429,14 @@ fn approve_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     require(!vault.paused(timestamp), VaultError::Paused)?;
     require(vault.releases_enabled, VaultError::InvalidRelease)?;
     check_validity(&vault, timestamp, context.valid_until)?;
+    // No certificate that could have been signed before the last guardian pause is accepted after it: signers
+    // date `valid_until` at most `max_valid_seconds` ahead, so such a certificate ends at or before
+    // `last_pause_at + max_valid_seconds`. A pause therefore voids approvals in a way that neither the same
+    // certificate nor any other one from before the pause can undo, however the pause ends.
+    require(
+        vault.last_pause_at == 0 || context.valid_until > vault.last_pause_at.saturating_add(vault.config.max_valid_seconds),
+        VaultError::StaleCertificate,
+    )?;
     require(
         amount != 0 && recipient != [0u8; 20] && native_burn != [0u8; 32] && amount <= vault.total_locked,
         VaultError::InvalidRelease,
@@ -442,15 +467,31 @@ fn approve_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     let authorization = abi::release_authorization(&vault.config.source_chain_id, &vault.vault20, &id, &context);
     check_certificate(instructions, &authorization, vault.config.signer_set(), vault.config.threshold as usize)?;
 
+    // The paid page of this nonce: a set bit means the release was paid and its record closed. The page is
+    // created here, by the first approval of its 8,192 nonces, and is never closed.
+    let page_bytes = page_of(nonce).to_le_bytes();
+    let (page_key, page_bump) = Pubkey::find_program_address(&[SEED_PAID, vault_ai.key.as_ref(), &page_bytes], program_id);
+    require_key(page_ai, &page_key)?;
+    if page_ai.owner == program_id {
+        let page = page_ai.try_borrow_data()?;
+        page_check(&page, &vault_ai.key.to_bytes(), nonce)?;
+        require(!page_bit(&page, nonce), VaultError::AlreadyReleased)?;
+    } else {
+        create_pda(payer, page_ai, system_program, PAGE_LEN, program_id, &[SEED_PAID, vault_ai.key.as_ref(), &page_bytes, &[page_bump]])?;
+        page_init(&mut page_ai.try_borrow_mut_data()?, page_bump, &vault_ai.key.to_bytes(), page_of(nonce));
+    }
+
     // One record per burn nonce. It exists already only if an earlier approval was voided by a guardian pause;
     // a paid or still valid approval is final for this nonce.
     let nonce_bytes = nonce.to_le_bytes();
     let (record_key, bump) = Pubkey::find_program_address(&[SEED_RELEASE, vault_ai.key.as_ref(), &nonce_bytes], program_id);
     require_key(record_ai, &record_key)?;
+    let mut rent_payer = payer.key.to_bytes();
     if record_ai.owner == program_id {
         let old = ReleaseRecord::load(&record_ai.try_borrow_data()?)?;
         require(old.vault == vault_ai.key.to_bytes() && old.nonce == nonce, VaultError::InvalidAccount)?;
         require(old.state == RELEASE_APPROVED && old.seq <= vault.void_through_seq, VaultError::AlreadyReleased)?;
+        rent_payer = old.payer;
     } else {
         create_pda(
             payer,
@@ -477,6 +518,7 @@ fn approve_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
         approved_at: timestamp,
         paid_at: 0,
         paid_amount: 0,
+        payer: rent_payer,
     };
     record.store(&mut record_ai.try_borrow_mut_data()?);
     store_vault(&vault, vault_ai)?;
@@ -557,6 +599,55 @@ fn execute_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     Ok(())
 }
 
+/// Accounts: vault (writable), release record (writable), the paid page of the nonce (writable), the account that
+/// paid the record's rent (writable). Data: nonce u64.
+///
+/// Anyone may call it once the release has been paid for `record_retention`. The nonce's bit is set in the paid
+/// page, then the record's lamports go back to who paid them and the record is emptied. The bit is what keeps
+/// the nonce spent from here on: `approve_release` refuses a nonce whose bit is set.
+fn close_release(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let [vault_ai, record_ai, page_ai, refund_ai] = accounts_exact::<4>(accounts)?;
+    let mut r = Reader::new(data);
+    let nonce = r.u64()?;
+    r.done()?;
+    let vault = load_vault(program_id, vault_ai)?;
+    let (timestamp, _) = now()?;
+
+    require(record_ai.owner == program_id && record_ai.is_writable, VaultError::NotApproved)?;
+    let record = ReleaseRecord::load(&record_ai.try_borrow_data()?)?;
+    let record_key = Pubkey::create_program_address(
+        &[SEED_RELEASE, vault_ai.key.as_ref(), &nonce.to_le_bytes(), &[record.bump]],
+        program_id,
+    )
+    .map_err(|_| VaultError::InvalidAccount)?;
+    require_key(record_ai, &record_key)?;
+    require(record.vault == vault_ai.key.to_bytes() && record.nonce == nonce, VaultError::InvalidAccount)?;
+    require(record.state == RELEASE_PAID, VaultError::NotApproved)?;
+    require(timestamp >= record.paid_at.saturating_add(vault.config.record_retention), VaultError::NotReady)?;
+    require(refund_ai.key.to_bytes() == record.payer && refund_ai.is_writable, VaultError::InvalidAccount)?;
+    require(refund_ai.key != record_ai.key && refund_ai.key != page_ai.key && refund_ai.key != vault_ai.key, VaultError::InvalidAccount)?;
+
+    require(page_ai.owner == program_id && page_ai.is_writable, VaultError::InvalidAccount)?;
+    {
+        let mut page = page_ai.try_borrow_mut_data()?;
+        let bump = page_check(&page, &vault_ai.key.to_bytes(), nonce)?;
+        let page_key = Pubkey::create_program_address(
+            &[SEED_PAID, vault_ai.key.as_ref(), &page_of(nonce).to_le_bytes(), &[bump]],
+            program_id,
+        )
+        .map_err(|_| VaultError::InvalidAccount)?;
+        require_key(page_ai, &page_key)?;
+        page_set(&mut page, nonce);
+    }
+
+    sol_log_data(&[b"BLOCH-SVM-RELEASE-CLOSED-v1", &record_ai.try_borrow_data()?]);
+    let lamports = record_ai.lamports();
+    **refund_ai.try_borrow_mut_lamports()? = refund_ai.lamports().checked_add(lamports).ok_or(VaultError::InvalidTransfer)?;
+    **record_ai.try_borrow_mut_lamports()? = 0;
+    record_ai.try_borrow_mut_data()?.fill(0);
+    Ok(())
+}
+
 // ── pause, controls, fees ───────────────────────────────────────────────────
 
 /// Accounts: vault (writable), instructions sysvar. Data: valid until u64. The instruction before this one must
@@ -593,6 +684,7 @@ fn guardian_pause(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
     vault.pause_count = count;
     vault.paused_until = timestamp + vault.config.pause_duration;
     vault.void_through_seq = vault.approval_seq;
+    vault.last_pause_at = timestamp;
     store_vault(&vault, vault_ai)?;
     sol_log_data(&[
         b"BLOCH-SVM-GUARDIAN-PAUSED-v1",

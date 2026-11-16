@@ -170,6 +170,7 @@ pub struct Config {
     pub pause_duration: u64,
     pub pause_cooldown: u64,
     pub max_valid_seconds: u64,
+    pub record_retention: u64,
     pub deposit_fee_bps: u16,
     pub release_fee_bps: u16,
     pub threshold: u8,
@@ -197,6 +198,7 @@ impl Config {
             self.pause_duration,
             self.pause_cooldown,
             self.max_valid_seconds,
+            self.record_retention,
         ] {
             d.extend_from_slice(&v.to_le_bytes());
         }
@@ -335,6 +337,7 @@ pub const E_NOT_TOP: u32 = 117;
 pub const E_UPGRADEABLE: u32 = 118;
 pub const E_RECIPIENT: u32 = 119;
 pub const E_EXPIRED: u32 = 120;
+pub const E_STALE: u32 = 121;
 
 pub fn base_svm() -> (LiteSVM, Address, Address, Keypair) {
     let mut svm = LiteSVM::new();
@@ -454,6 +457,7 @@ pub fn default_config(mint: Address, fee_owner: Address, signers: &[EthKey], gua
         pause_duration: 259_200,
         pause_cooldown: 259_200,
         max_valid_seconds: 3_600,
+        record_retention: 604_800,
         deposit_fee_bps: 5,
         release_fee_bps: 5,
         threshold: 5,
@@ -574,7 +578,7 @@ impl Rig {
     /// Dynamic fields of the vault account (layout: docs/SOLANA-VAULT.md section 4).
     pub fn state(&self) -> VaultState {
         let d = self.vault_data();
-        let mut at = 4 + 32 + 280 + 320 + 140 + 20 + 20 + 32 + 32 + 32 + 32;
+        let mut at = 4 + 32 + 288 + 320 + 140 + 20 + 20 + 32 + 32 + 32 + 32;
         let head: Word = d[at..at + 32].try_into().unwrap();
         at += 32;
         let mut next = || {
@@ -615,6 +619,44 @@ impl Rig {
 
     pub fn release_record(&self, nonce: u64) -> Address {
         Address::find_program_address(&[b"release", self.vault.as_ref(), &nonce.to_le_bytes()], &self.program).0
+    }
+
+    /// The paid page that covers `nonce` (8,192 nonces per page).
+    pub fn paid_page(&self, nonce: u64) -> Address {
+        Address::find_program_address(&[b"paid", self.vault.as_ref(), &(nonce / 8192).to_le_bytes()], &self.program).0
+    }
+
+    /// Whether the paid page shows `nonce` as paid and closed (false while the page does not exist).
+    pub fn paid_bit(&self, nonce: u64) -> bool {
+        match self.svm.get_account(&self.paid_page(nonce)) {
+            Some(a) if a.data.len() == 43 + 1024 => a.data[43 + (nonce % 8192) as usize / 8] & (1 << (nonce % 8)) != 0,
+            _ => false,
+        }
+    }
+
+    pub fn close_ix(&self, nonce: u64, refund: &Address) -> Instruction {
+        let mut data = vec![8u8];
+        data.extend_from_slice(&nonce.to_le_bytes());
+        Instruction {
+            program_id: self.program,
+            accounts: vec![
+                AccountMeta::new(self.vault, false),
+                AccountMeta::new(self.release_record(nonce), false),
+                AccountMeta::new(self.paid_page(nonce), false),
+                AccountMeta::new(*refund, false),
+            ],
+            data,
+        }
+    }
+
+    /// A deposit that names the record addresses of `count` deposit numbers starting at `first`.
+    pub fn deposit_window_ix(&self, user: &Address, source: &Address, amount: u64, l2: &Addr20, first: u64, count: u64) -> Instruction {
+        let mut ix = self.deposit_ix(user, source, amount, l2);
+        ix.accounts[5] = AccountMeta::new(self.deposit_record(first), false);
+        for n in first + 1..first + count {
+            ix.accounts.push(AccountMeta::new(self.deposit_record(n), false));
+        }
+        ix
     }
 
     pub fn deposit_ix(&self, user: &Address, source: &Address, amount: u64, l2: &Addr20) -> Instruction {
@@ -714,6 +756,7 @@ impl Rig {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new(self.release_record(r.nonce), false),
                 AccountMeta::new_readonly(self.deposit_record(r.mint_count.saturating_sub(1)), false),
+                AccountMeta::new(self.paid_page(r.nonce), false),
                 AccountMeta::new_readonly(instructions_sysvar(), false),
                 AccountMeta::new_readonly(system_program(), false),
             ],

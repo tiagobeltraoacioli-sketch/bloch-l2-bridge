@@ -25,6 +25,8 @@ pub enum VaultError {
     ProgramUpgradeable = 118,
     WrongRecipient = 119,
     Expired = 120,
+    /// A release certificate that could have been signed before the last guardian pause.
+    StaleCertificate = 121,
 }
 
 impl From<VaultError> for ProgramError {
