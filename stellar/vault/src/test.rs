@@ -3426,3 +3426,32 @@ fn books_invariant_holds_under_randomized_operations() {
     assert_eq!(3 * 2_000_000 * U as i128 * 10 - held, fx.bal(&fx.vault) + out + swept as i128 * 10);
     assert!(count[0] > 40 && count[2] > 40 && count[4] > 10 && count[5] > 2 && count[6] > 0, "{:?}", count);
 }
+
+/// Reviewer 325 (round 16), R325-XLM-1. Demonstration: this test states the needed property and FAILS on 96e9ce2.
+/// With the proposed mainnet shape (every release waits in the queue), two of the three guardian keys cancel every
+/// exit as it appears. A cancel has no budget: no pause chain, no cooldown, no count per guardian or per window.
+/// Each cancelled burn then needs 6 of 7 signers and a manual step of every operator.
+#[test]
+fn r325_xlm1_a_guardian_majority_has_a_bounded_number_of_cancels() {
+    let fx = fx_with(|c, _| {
+        c.release_delay = 2 * HOUR;
+        c.large_release_threshold = 0;
+    });
+    fx.controls(true, true);
+    fx.dep(5_000 * U);
+    let mut cancelled = 0u32;
+    for nonce in 1..=30u64 {
+        let to = Address::generate(&fx.env);
+        let item = fx.item(nonce, &to, 20 * U);
+        fx.release(&item);
+        match fx.try_cancel(&fx.release_id(&item), &[0, 1]) {
+            Ok(Ok(())) => cancelled += 1,
+            _ => break,
+        }
+        // The ordinary quorum (5 of 7) can no longer pay this burn: only 6 of 7 can, once.
+        let mut again = item.clone();
+        again.generation = 1;
+        assert_eq!(err_of(fx.try_release_n(&again, &fx.ctx(), 5)), Error::InvalidCertificate);
+    }
+    assert!(cancelled < 30, "two guardians cancelled {cancelled} exits in a row with nothing to stop them");
+}
