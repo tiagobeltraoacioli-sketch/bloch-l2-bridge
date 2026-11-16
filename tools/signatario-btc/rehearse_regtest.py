@@ -613,7 +613,7 @@ def run(rig):
 
     burn1 = burn(alice_k, 250_000)   # 0.25 BTC
     burn2 = burn(bob_k, 20_000)      # 0.02 BTC
-    r = rig.vault_tx(1, burns=[burn1], tag='b-unfinal')
+    r = rig.vault_tx(1, burns=[burn2], tag='b-unfinal')   # the latest L2 block is not finalized yet
     check('B1 a burn that is not finalized on the L2 is not released', r['propose'][0] != 0 or all_refuse(r['signs'], 'not finalized'), r['propose'][1])
     rig.l2_mine(3)
     rc, unpaid = rig.tool('btc_relay.py', rig.relay_cfg, 'burns')
