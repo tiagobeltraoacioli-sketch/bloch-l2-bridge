@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Guardian tool for the Stellar vault. A guardian's key is the same secp256k1 key type as on Ethereum; it cannot sign
+a Stellar transaction, so every guardian action is a signature over a vault digest that any relayer submits.
+
+  guardiao_stellar.py --config G.json pause  --out CALL.json
+  guardiao_stellar.py --config G.json cancel --id 0xRELEASEID --out PARTIAL.json
+  guardiao_stellar.py --config G.json combine-cancel --sig A.json --sig B.json --out CALL.json
+  guardiao_stellar.py --config G.json check
+
+pause    signs `pause_digest(pause_count, valid_until)` for the vault's current pause count; valid for `valid_seconds`
+         (default 600). One guardian is enough. The vault refuses it if this guardian already paused in the current
+         chain, during a pause, or within the cooldown after a committee unpause.
+cancel   signs `cancel_digest(id, valid_until)` for a QUEUED release; a majority of the guardians (2 of 3) cancels.
+check    read-only: every release the vault paid or queued (its events in the RPC's retained window) must be a burn of
+         the L2 token: `burnIdOf(nonce)` equals the release's burn id and a `Burned` log with that id carries the same
+         amount and the commitment of the Stellar recipient, in a block at or below the L2's finalized block. Prints the
+         findings; exit 2 if any (the operator's unit then runs `pause`, and `cancel` for a queued one).
+
+Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`, `keystore`, `password_file`; for `check` also
+`l2_rpc`, `token`, optional `l2_finalized_tag` (default "finalized"), `from_ledger`; optional `cast`, `stellar_cli`.
+"""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stellar_net as sn  # noqa: E402
+
+BURNED = 'Burned(bytes32 indexed,uint64 indexed,address indexed,uint64,address,uint64,uint64,bytes32)'
+
+
+def fail(msg, **detail):
+    print(json.dumps({'ok': False, 'reason': msg, **detail}, indent=2))
+    raise SystemExit(1)
+
+
+class Guardian:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.net = sn.Net(cfg)
+        self.cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
+
+    def run(self, argv):
+        done = subprocess.run(argv, capture_output=True, text=True)
+        if done.returncode:
+            fail('command failed', argv=argv[:3], stderr=done.stderr.strip()[-500:])
+        return done.stdout.strip()
+
+    def sign(self, digest):
+        ks = ['--keystore', self.cfg['keystore'], '--password-file', self.cfg['password_file']]
+        sig = self.run([self.cast, 'wallet', 'sign', '--no-hash'] + ks + ['0x' + digest.hex()]).lower()
+        who = self.run([self.cast, 'wallet', 'address'] + ks).lower()
+        return who, sig
+
+    def context(self):
+        d = self.net.view('derived')
+        c = self.net.view('config')
+        return d, c, self.net.latest()
+
+    def pause(self, out):
+        d, c, latest = self.context()
+        st = self.net.view('state')
+        valid_until = latest['close_time'] + int(self.cfg.get('valid_seconds', 600))
+        digest = sn.pause_digest(self.net.passphrase, self.net.vault, d['route'], st['pause_count'], valid_until)
+        if self.net.view('pause_digest', pause_count=int(st['pause_count']), valid_until=valid_until) != digest.hex():
+            fail('the pause digest computed here differs from the vault\'s')
+        who, sig = self.sign(digest)
+        if who[2:] not in c['guardians']:
+            fail('this keystore is not one of the vault\'s guardians', address=who)
+        if not self.net.view('guardian_can_pause', guardian=who[2:]):
+            fail('the vault would refuse this guardian\'s pause now (paused, cooldown, or already used in this chain)')
+        call = {'kind': 'stellar-guardian-pause', 'guardian': who, 'pause_count': int(st['pause_count']),
+                'call': {'fn': 'guardian_pause', 'args': {'valid_until': valid_until, 'signature': sig[2:]}}}
+        Path(out).write_text(json.dumps(call, indent=2) + '\n')
+        print(json.dumps(call, indent=2))
+
+    def cancel(self, rid, out):
+        d, c, latest = self.context()
+        rid = sn.b32(rid)
+        if self.net.view('pending', id=rid.hex()) is None:
+            fail('no queued release has this id')
+        valid_until = latest['close_time'] + int(self.cfg.get('valid_seconds', 600))
+        digest = sn.cancel_digest(self.net.passphrase, self.net.vault, d['route'], rid, valid_until)
+        if self.net.view('cancel_digest', id=rid.hex(), valid_until=valid_until) != digest.hex():
+            fail('the cancel digest computed here differs from the vault\'s')
+        who, sig = self.sign(digest)
+        if who[2:] not in c['guardians']:
+            fail('this keystore is not one of the vault\'s guardians', address=who)
+        part = {'kind': 'stellar-release-cancel', 'guardian': who, 'id': rid.hex(), 'valid_until': valid_until,
+                'signature': sig}
+        Path(out).write_text(json.dumps(part, indent=2) + '\n')
+        print(json.dumps(part, indent=2))
+
+    def check(self):
+        tok, l2 = self.cfg['token'], self.cfg['l2_rpc']
+        fin_tag = self.cfg.get('l2_finalized_tag', 'finalized')
+        fin = int(self.run([self.cast, 'block', fin_tag, '--rpc-url', l2, '--field', 'number']))
+        health = self.net.health()
+        start = max(int(self.cfg.get('from_ledger', 0)), int(health['oldestLedger']))
+        findings, seen = [], 0
+        while True:
+            events, latest, _ = self.net.events(start)
+            for e in events:
+                if e['name'] not in ('released', 'release_queued'):
+                    continue
+                seen += 1
+                f = e['data']
+                rid, nonce, burn = e['topics'][0], int(f['nonce']), f['native_burn']
+                want = self.run([self.cast, 'call', tok, 'burnIdOf(uint64)(bytes32)', str(nonce), '--rpc-url', l2,
+                                 '--block', str(fin)])
+                logs = json.loads(self.run([self.cast, 'logs', '--rpc-url', l2, '--address', tok, '--from-block', '0',
+                                            '--to-block', str(fin), '--json', BURNED, '0x' + burn]) or '[]')
+                reason = None
+                if want.lower() != '0x' + burn:
+                    reason = 'the burn id is not the token\'s id for that nonce'
+                elif len(logs) != 1:
+                    reason = 'no final Burned log on the L2 for this burn id'
+                else:
+                    dec = self.run([self.cast, 'abi-decode', '--input', 'f(uint64,address,uint64,uint64,bytes32)',
+                                    logs[0]['data']]).splitlines()
+                    amount = int(dec[0].split()[0])
+                    if amount != int(f['amount']) or \
+                            dec[1].strip().lower() != '0x' + sn.recipient_commitment(f['recipient']).hex():
+                        reason = 'the L2 burn has another amount or recipient'
+                if reason:
+                    findings.append({'release': rid, 'event': e['name'], 'nonce': nonce, 'ledger': e['ledger'],
+                                     'reason': reason})
+            if not events or events[-1]['ledger'] >= latest:
+                break
+            start = events[-1]['ledger'] + 1
+        print(json.dumps({'ok': not findings, 'releases_checked': seen, 'l2_finalized': fin, 'findings': findings},
+                         indent=2))
+        raise SystemExit(2 if findings else 0)
+
+
+def combine_cancel(g, paths, out):
+    parts = [json.loads(Path(p).read_text()) for p in paths]
+    if not parts or any(p.get('kind') != 'stellar-release-cancel' or (p['id'], p['valid_until'])
+                        != (parts[0]['id'], parts[0]['valid_until']) for p in parts):
+        fail('the partials are not cancel signatures for one release id and validity')
+    by = {p['guardian']: p['signature'] for p in parts}
+    chosen = sorted(by, key=lambda a: int(a, 16))
+    call = {'kind': 'stellar-release-cancel-call', 'guardians': chosen,
+            'call': {'fn': 'cancel_release', 'args': {'id': parts[0]['id'], 'valid_until': parts[0]['valid_until'],
+                                                      'signatures': [by[a][2:] for a in chosen]}}}
+    Path(out).write_text(json.dumps(call, indent=2) + '\n')
+    print(json.dumps(call, indent=2))
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or '-h' in argv or '--help' in argv:
+        raise SystemExit(__doc__)
+    args = {a: argv[i + 1] for i, a in enumerate(argv[:-1]) if a.startswith('--')}
+    g = Guardian(json.loads(Path(args['--config']).read_text()))
+    try:
+        if 'combine-cancel' in argv:
+            combine_cancel(g, [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == '--sig'], args['--out'])
+        elif 'pause' in argv:
+            g.pause(args['--out'])
+        elif 'cancel' in argv:
+            g.cancel(args['--id'], args['--out'])
+        elif 'check' in argv:
+            g.check()
+        else:
+            raise SystemExit(__doc__)
+    except sn.StellarError as e:
+        fail('the Stellar node could not be read', error=str(e))
+
+
+if __name__ == '__main__':
+    main()

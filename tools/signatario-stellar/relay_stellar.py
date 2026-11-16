@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Relayer for the Stellar vault: submits calls anyone may submit (a combined release, a queued release that is due,
+the fee sweep, committee controls, a guardian's signed pause, an unpause, a guardian cancel). It holds no bridge key:
+only a Stellar account that pays the fee. The certificate inside the call is what the vault checks.
+
+  relay_stellar.py --config RELAY.json submit --call CALL.json [--key NAME]
+  relay_stellar.py --config RELAY.json status --key NAME
+
+`CALL.json` is {"call": {"fn": ..., "args": {...}}} (what signatario_stellar.py combine and guardiao_stellar.py write).
+
+Reservation before publication (the rule of tools/signatario-stable/release_submission.py, in Stellar's terms): the
+transaction is built and simulated against the relayer's own RPC, signed, and its envelope and hash are written to
+the journal BEFORE it is sent. A Stellar transaction is identified by its hash and can be applied at most once (its
+sequence number), so resending the journaled envelope is always safe, and a new one is built only when the journaled
+one is known dead: applied and failed, or its sequence number consumed by something else. For a release, a new
+transaction is never built once the vault records the burn nonce (live or archived): the release is done.
+
+Config: `stellar_rpc`, `network_passphrase`, `vault`, `relayer` (the G... address that pays), `relayer_identity`
+(the `stellar` CLI identity that signs for it), `journal` (directory); optional `stellar_cli`, `stellar_config_dir`.
+"""
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stellar_net as sn  # noqa: E402
+
+
+def out(ok, **fields):
+    print(json.dumps({'ok': ok, **fields}, indent=2))
+    raise SystemExit(0 if ok else 1)
+
+
+def write_json(path, obj):
+    tmp = path.with_suffix('.tmp')
+    with open(tmp, 'w') as f:
+        f.write(json.dumps(obj, indent=2) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def wait(net, tx_hash, seconds=60):
+    deadline = time.time() + seconds
+    while True:
+        st = net.transaction(tx_hash)
+        if st['status'] in ('SUCCESS', 'FAILED') or time.time() > deadline:
+            return st
+        time.sleep(1)
+
+
+def submit(cfg, call, key):
+    net = sn.Net({**cfg, 'view_account': cfg['relayer']})
+    journal = Path(cfg['journal'])
+    journal.mkdir(parents=True, exist_ok=True)
+    fn, args = call['fn'], call['args']
+    if key is None:
+        key = f"release-{args['item']['nonce']}" if fn == 'release' else f'{fn}-{int(time.time())}'
+    path = journal / f'{key}.json'
+    entry = json.loads(path.read_text()) if path.exists() else None
+
+    if entry is not None:
+        st = net.transaction(entry['hash'])
+        if st['status'] == 'SUCCESS':
+            out(True, key=key, hash=entry['hash'], status='SUCCESS', ledger=st['ledger'], note='already applied')
+        if st['status'] == 'NOT_FOUND':
+            # Not applied as far as this node knows: send the SAME envelope again. If its sequence number is gone the
+            # network refuses it, and only then is a new one built.
+            try:
+                net.send(entry['envelope'])
+            except sn.StellarError as e:
+                entry['resend_error'] = str(e)[-400:]
+            st = wait(net, entry['hash'])
+            if st['status'] == 'SUCCESS':
+                out(True, key=key, hash=entry['hash'], status='SUCCESS', ledger=st['ledger'], note='resent')
+            if st['status'] == 'NOT_FOUND' and 'resend_error' not in entry:
+                out(False, key=key, hash=entry['hash'], status='PENDING', note='sent again; not yet in a ledger')
+        entry['dead'] = st['status']
+        write_json(path, entry)
+
+    if fn == 'release':
+        for name, value in (('Nonce', args['item']['nonce']), ('Burn', args['item']['native_burn'])):
+            state, _, _ = net.record_state(name, value)
+            if state != 'absent':
+                out(True, key=key, status='DONE', note=f'the vault already records this burn ({name} is {state})')
+    try:
+        envelope = net.sign(net.build(cfg['relayer'], fn, **args), cfg['relayer_identity'])
+    except sn.StellarError as e:
+        out(False, key=key, status='REFUSED', error=str(e)[-1200:])
+    tx_hash = net.tx_hash(envelope)
+    write_json(path, {'key': key, 'fn': fn, 'args': args, 'hash': tx_hash, 'envelope': envelope,
+                      'reserved_at': int(time.time()), 'previous': entry})
+    try:
+        net.send(envelope)
+    except sn.StellarError as e:
+        st = wait(net, tx_hash, 10)
+        if st['status'] != 'SUCCESS':
+            out(False, key=key, hash=tx_hash, status=st['status'], error=str(e)[-1200:])
+    st = wait(net, tx_hash)
+    out(st['status'] == 'SUCCESS', key=key, hash=tx_hash, status=st['status'], ledger=st['ledger'])
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or '-h' in argv or '--help' in argv:
+        raise SystemExit(__doc__)
+    args = {a: argv[i + 1] for i, a in enumerate(argv[:-1]) if a.startswith('--')}
+    cfg = json.loads(Path(args['--config']).read_text())
+    try:
+        if 'submit' in argv:
+            call = json.loads(Path(args['--call']).read_text())
+            submit(cfg, call.get('call', call), args.get('--key'))
+        elif 'status' in argv:
+            path = Path(cfg['journal']) / f"{args['--key']}.json"
+            if not path.exists():
+                out(False, key=args['--key'], status='UNKNOWN')
+            entry = json.loads(path.read_text())
+            st = sn.Net({**cfg, 'view_account': cfg['relayer']}).transaction(entry['hash'])
+            out(st['status'] == 'SUCCESS', key=args['--key'], hash=entry['hash'], **st)
+        else:
+            raise SystemExit(__doc__)
+    except sn.StellarError as e:
+        out(False, status='ERROR', error=str(e)[-1200:])
+
+
+if __name__ == '__main__':
+    main()
