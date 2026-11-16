@@ -535,46 +535,49 @@ under final code.
 
 ## 10. Size, compute and rent
 
-Measured in the in-process SVM of the test suite (litesvm 0.18.2, Agave 4.3 runtime). The secp256k1 verification
+Measured in the in-process SVM of the test suite (litesvm 0.18.2, Agave 4.3 runtime), program image sha256
+`33f7027d1c378a1695de309a93448b2763175baf54eb3412bc9a7439401c7316` (106,984 bytes). The secp256k1 verification
 itself runs in the native program and is not counted in these compute units.
 
 | Instruction | Signatures | Transaction bytes (limit 1,232) | Compute units |
 |---|---|---|---|
-| `approve_release` | 5 | 1,118 | 15,550 |
-| `approve_release` | 6 | 1,214 | 17,171 |
-| `approve_release` | 7 | 1,310, does not fit | not sent |
-| `execute_release` | 0 | 408 | 12,456 |
-| `deposit` | 0 | 430 | 14,139 |
-| `guardian_pause` | 1 | 437 | 6,120 |
-| `unpause` | 6 | 925 | 6,473 |
-| `set_controls` | 5 | 831 | 6,448 |
-| `initialize` (7 signers, 3 guardians) | 0 | 850 | not measured |
+| `approve_release` (the first of a paid page: it creates the page) | 5 | 1,151 | 26,014 |
+| `approve_release` | 6 | 1,247, does not fit | not sent |
+| `execute_release` | 0 | 408 | 14,038 |
+| `deposit` (one record address; each further candidate adds 32 bytes) | 0 | 430 | 21,715 |
+| `guardian_pause` | 1 | 437 | 6,149 |
+| `unpause` | 6 | 925 | 6,499 |
+| `set_controls` | 5 | 831 | 6,473 |
+| `initialize` (7 signers, 3 guardians) | 0 | 858 | not measured |
 
 On a real validator (solana-test-validator of Agave v4.4.1, the local rehearsal, `computeUnitsConsumed` of the
-transaction, three runs): `approve_release` with 5 signatures 14,050 to 18,550; `execute_release` 12,492 to
-13,994; `deposit` 15,639; `set_controls` with 5 signatures 6,448; `guardian_pause` 6,120; `unpause` with 6
-signatures 6,473. `approve_release`, `execute_release` and `deposit` vary in steps of about 1,500 units: each
-searches the bump of a program-derived address (the release record of the nonce, the recipient's associated token
-address, the deposit record), and every miss costs that much. Each further miss has probability one half; a
-wallet ground to cost 40 misses would still keep `execute_release` under 80,000. The figures of each run are in
-the rehearsal's `result.json`.
+transaction): `approve_release` with 5 signatures 17,555 and 18,514 (1,151 bytes); `execute_release` 14,074 and
+14,076; `deposit` with four record addresses 16,534; `close_release` 8,773; `set_controls` with 5 signatures
+6,473; `guardian_pause` 6,149; `unpause` with 6 signatures 6,499. `approve_release`, `execute_release` and
+`deposit` vary in steps of about 1,500 units: each searches the bump of program-derived addresses (the release
+record and the paid page of the nonce, the recipient's associated token address, the deposit record), and every
+miss costs that much. Each further miss has probability one half; a wallet ground to cost 40 misses would still
+keep `execute_release` under 80,000. The figures of each run are in the rehearsal's `result.json`.
 
 All are far below the default limit of 200,000 compute units per instruction; no compute budget instruction is
 needed. The canonical certificate is `61 + 96 n` bytes for `n` signatures.
 
-Rent-exempt minimums by the standard formula, `(128 + bytes) * 3480 * 2` lamports. These are formula values, to
-be confirmed with `getMinimumBalanceForRentExemption` on the cluster:
+Rent-exempt minimums by the standard formula, `(128 + bytes) * 3480 * 2` lamports (the release record's was
+confirmed with `getMinimumBalanceForRentExemption` on the rehearsal validator: 2,338,560):
 
-| Account | Bytes | Lamports | Paid by |
-|---|---|---|---|
-| Deposit record | 211 | 2,359,440 (about 0.00236 SOL) | the depositor, per deposit |
-| Release record | 176 | 2,115,840 (about 0.00212 SOL) | the relayer, per release |
-| Vault state | 1,130 | 8,755,440 | whoever initializes, once |
-| Vault token account, or any associated token account | 165 | 2,039,280 | whoever creates it |
+| Account | Bytes | Lamports | Paid by | Returned |
+|---|---|---|---|---|
+| Deposit record | 211 | 2,359,440 (about 0.00236 SOL) | the depositor, per deposit | never: it is the canonical record of the deposit |
+| Release record | 208 | 2,338,560 (about 0.00234 SOL) | the relayer, per release | in full, to the relayer, when the record is closed after `record_retention` |
+| Paid page | 1,067 | 8,317,200 (about 0.0083 SOL) | the relayer whose approval is the first of the page's 8,192 nonces | never (about 0.000001 SOL per release) |
+| Vault state | 1,146 | 8,867,040 | whoever initializes, once | never |
+| Vault token account, or any associated token account | 165 | 2,039,280 | whoever creates it | not by this program |
 
-None of these accounts is ever closed, so the rent is a cost, not a deposit that returns. The release record is an
-operating cost of the relayer for every release, larger than the 5 bps fee of a small release, which goes to the
-fee owner and not to the relayer.
+**What a release costs its relayer** (review 325, R325-SOL-4): two transaction fees (the approval carries five
+secp256k1 signatures besides the fee payer's; about 0.00004 SOL in all at the base fee), one more for the close,
+and the share of a paid page. The record's rent is a float that returns after the retention, not a cost. Before
+the change it was a cost of 0.0021 SOL per release against 0.005 USDC of bridge income on a minimum burn. The
+5 bps release fee is unchanged and goes to the fee owner; no minimum fee was added.
 
 ## 11. The L2 side
 

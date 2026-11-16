@@ -1076,6 +1076,9 @@ class Rehearsal:
             doc.update(shared_dir=str(WORK / 'shared'), sol_half_config=str(half_cfg), signer_name=f's{i}', token_from_block=0,
                        l2_relayer_key=str(WORK / 'relayer.key'), sol_fee_payer=str(self.payer_path), relay_role='primary',
                        recipient_registry=self.registry, burn_router=self.router, round_margin=20,
+                       # one local directory stands in for five signers' private ones here, so the parent's budget of
+                       # certificates per burn and hour (6, counted per directory) is shared by all five
+                       max_release_signs_per_hour=30,
                        max_valid_seconds=VALID + 10, relayer_state=str(WORK / 'relayer-nonces.json'))
             path = WORK / f'vigia{i}.json'
             path.write_text(json.dumps(doc))

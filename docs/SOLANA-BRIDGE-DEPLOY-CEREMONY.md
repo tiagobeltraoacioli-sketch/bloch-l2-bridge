@@ -107,9 +107,12 @@ sha256sum target/deploy/bloch_sol_vault.so
 ```
 
 The first command must print nothing. A second person builds on a second machine and both compare the hash; it
-goes into `program.elfSha256` of the vault config. Whether the build is byte-reproducible across machines and
-directories has not been established in this document; if two builds differ, stop and find out why before
-deploying. The whole test suite is `solana/run-tests.sh`.
+goes into `program.elfSha256` of the vault config. What is established: on one machine (x86-64 Linux, Agave
+v4.4.1, platform-tools v1.57), builds from two different source directories into two different target
+directories give the same file, 106,984 bytes, sha256
+`33f7027d1c378a1695de309a93448b2763175baf54eb3412bc9a7439401c7316` (2026-11-17; the reviewer reproduced the
+previous image the same way). Whether two MACHINES give the same file is not established; if two builds differ,
+stop and find out why before deploying. The whole test suite is `solana/run-tests.sh`.
 
 `cargo build-sbf` also writes `target/deploy/bloch_sol_vault-keypair.json`. Do not use it; generate the program
 keypair yourself (section 5).
@@ -376,10 +379,13 @@ python3 tools/signatario-solana/sol_vault.py show --config deployments/solana/bu
 | 3 | Confirm that the seven release keys and three vault guardian keys of the Ethereum bridge are reused here (coordinator decision), and that one exposed key then migrates both bridges | TBD-owner |
 | 4 | `largeReleaseThreshold` 1,000 USDC and `releaseDelay` 1,800 s (the Ethereum vault has no delay), or 0 and 0 | TBD-owner |
 | 5 | Cap 100,000 USDC and window 10,000 USDC per day for this bridge | TBD-owner |
-| 6 | Each signer and guardian operator's own Solana RPC node (an Agave validator in RPC mode, or a provider contract per operator that no two operators share) | TBD-owner |
+| 6 | Each signer and guardian operator's own Solana RPC node (an Agave validator in RPC mode, or a provider contract per operator that no two operators share); the guardian's must serve `getProgramAccounts` for the program | TBD-owner |
 | 7 | Relayer operators, their fee-payer addresses, SOL top-up amount and alert level | TBD-owner |
 | 8 | Deployer fee payer funded; program keypair deleted after verification; `solana program show` output with no authority, kept | TBD-owner |
 | 9 | Build hash from two machines, equal | TBD-owner |
 | 10 | The Solana deployment path of the token (section 7: `sol_deploy_token.py` over the unchanged `deploy_pontes.py`) reviewed before the token is deployed; it is built and rehearsed locally | TBD-owner |
-| 11 | Registry address on the L2 | TBD-deploy |
+| 11 | Burn router and registry addresses on the L2 (section 8); every signer's Solana half carries `burn_router` | TBD-deploy |
 | 12 | Who creates a recipient's missing token account: the user (default), or the relayer under a stated limit | TBD-owner |
+| 13 | Each signer's TWO Solana endpoints for mint signing (operator, provider), recorded in the key inventory; no provider shared by two signers | TBD-owner |
+| 14 | `recordRetention` 604,800 s (7 days): how long a paid release record stays readable before its rent may be reclaimed | TBD-owner |
+| 15 | A refund rule for a burn made directly on the token to 20 bytes that are not a wallet commitment: none exists (`docs/SOLANA-VAULT.md` 11.1); accept that such a burn is held for good, or commission the signer change | TBD-owner |

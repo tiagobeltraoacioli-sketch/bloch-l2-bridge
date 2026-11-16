@@ -9,29 +9,33 @@ Branch `codex/bridge-solana-r16-20261116` (from the Ethereum bridge freeze `cc25
 
 ## 1. New code
 
-Line counts by `wc -l` on 2026-11-16, refreshed when the Python tools were finished.
+Line counts by `wc -l` on 2026-11-17, after the changes for review 325 (`agents/325-bridges-review-r16.md`,
+section 3).
 
 | Path | Lines | What | In scope |
 |---|---|---|---|
-| `solana/bloch-sol-vault/src/processor.rs` | 690 | The eight instructions, account validation, CPI to the token and system programs | Yes, first |
-| `solana/bloch-sol-vault/src/cert.rs` | 203 | The certificate check: secp256k1 instruction introspection | Yes, first |
-| `solana/bloch-sol-vault/src/state.rs` | 542 | Configuration parsing and validation, the three account layouts, the bucket | Yes |
-| `solana/bloch-sol-vault/src/abi.rs` | 219 | Identities and digests in the EVM byte layouts | Yes |
-| `solana/bloch-sol-vault/src/error.rs`, `lib.rs` | 61 | Error codes, entrypoint | Yes |
-| `contracts/solana/SolanaRecipientRegistry.sol` | 39 | The L2 notice board for burn recipients | Yes (small) |
-| `tools/signatario-solana/sol_half.py` | 318 | The source half: what a signer reads on its Solana node before the unchanged `signatario.py` signs a mint or a release | Yes, first among the tools |
-| `tools/signatario-solana/solana_lib.py` | 780 | Encodings, addresses, digests, account layouts, legacy transactions, RPC; a second implementation of the program's formulas (the rehearsal runs one against the other) | Yes |
-| `tools/signatario-solana/sol_vault.py` | 484 | Owner and operator CLI: validate, init, verify, deposit, approve, execute, pause, controls, unpause, sweep, reserves | Yes |
-| `tools/signatario-solana/sol_vigia.py` | 367 | Sign and relay daemon: a subclass of `tools/signatario-stable/vigia.py` (unchanged) with the Solana source side | Yes: the overridden methods |
-| `tools/signatario-solana/sol_guardiao.py` | 310 | Guardian watch: a subclass of `tools/guardiao/guardiao.py` (unchanged) with the Solana source side and the vault pause | Yes: the overridden methods |
+| `solana/bloch-sol-vault/src/processor.rs` | 782 | The nine instructions, account validation, CPI to the token and system programs, the paid pages and record closing | Yes, first |
+| `solana/bloch-sol-vault/src/cert.rs` | 203 | The certificate check: secp256k1 instruction introspection (unchanged since the review) | Yes, first |
+| `solana/bloch-sol-vault/src/state.rs` | 604 | Configuration parsing and validation, the four account layouts, the bucket, paid-page bits | Yes |
+| `solana/bloch-sol-vault/src/abi.rs` | 219 | Identities and digests in the EVM byte layouts (unchanged) | Yes |
+| `solana/bloch-sol-vault/src/error.rs`, `lib.rs` | 63 | Error codes, entrypoint | Yes |
+| `contracts/solana/SolanaBurnRouter.sol` | 123 | The L2 burn router: base58 decoding, the Ed25519 curve test, the commitment, `burnTo` | Yes |
+| `contracts/solana/SolanaRecipientRegistry.sol` | 39 | The L2 notice board: how a direct burn's wallet is published | Yes (small) |
+| `tools/signatario-solana/sol_half.py` | 395 | The source half: what a signer reads before the unchanged `signatario.py` signs a mint (every endpoint, agreeing) or a release (a wallet known, not stale) | Yes, first among the tools |
+| `tools/signatario-solana/sol_recipient.py` | 123 | The recipient rule: which wallet stands behind a burn's 20 bytes | Yes |
+| `tools/signatario-solana/solana_lib.py` | 825 | Encodings, addresses, digests, account layouts, legacy transactions, RPC; a second implementation of the program's formulas (the rehearsal runs one against the other) | Yes |
+| `tools/signatario-solana/sol_vault.py` | 518 | Owner and operator CLI: validate, init, verify, deposit, approve, execute, close, pause, controls, unpause, sweep, reserves | Yes |
+| `tools/signatario-solana/sol_vigia.py` | 402 | Sign and relay daemon: a subclass of `tools/signatario-stable/vigia.py` (unchanged) with the Solana source side | Yes: the overridden methods |
+| `tools/signatario-solana/sol_guardiao.py` | 333 | Guardian watch: a subclass of `tools/guardiao/guardiao.py` (unchanged) with the Solana source side and the vault pause | Yes: the overridden methods |
 | `tools/signatario-solana/sol_deploy_token.py` | 251 | The L2 token's deployment path: `tools/deploy-pontes/deploy_pontes.py` (unchanged) with its source reader answered from the Solana vault | Yes |
-| `tools/signatario-solana/rehearse_local.py` | 1,067 | The end-to-end rehearsal on a private solana-test-validator and an anvil | Supporting |
-| `solana/vault-tests/tests/vault.rs`, `tests/common/mod.rs` | 1,002 and 883 | The SVM test suite and its rig, with encoders written independently of the program | Supporting |
+| `tools/signatario-solana/test_solana_tools.py` | 497 | 25 unit tests of the tools against fake RPC servers | Supporting |
+| `tools/signatario-solana/rehearse_local.py` | 1,399 | The end-to-end rehearsal on a private solana-test-validator and an anvil | Supporting |
+| `solana/vault-tests/tests/vault.rs`, `tests/common/mod.rs` | 1,179 and 926 | The SVM test suite (38 tests) and its rig, with encoders written independently of the program | Supporting |
 | `solana/test-helper-program/src/lib.rs` | 27 | Test only: a program that accepts anything, and a CPI relay | No (never deployed) |
-| `solidity-tests/SolanaRecipientRegistry.t.sol` | 109 | Registry tests | Supporting |
+| `solidity-tests/SolanaBurnRouter.t.sol`, `SolanaRecipientRegistry.t.sol` | 152 and 109 | Router tests (5) and registry tests (6) | Supporting |
 
-On-chain program total: 1,715 lines of Rust in five files, three direct dependencies (`solana-program` 5.2.0,
-`solana-keccak-hasher` 3.1.0, `solana-sha256-hasher` 3.1.0), pinned by `Cargo.lock`.
+On-chain program total: 1,871 lines of Rust in six files, three direct dependencies (`solana-program` 5.2.0,
+`solana-keccak-hasher` 3.1.0, `solana-sha256-hasher` 3.1.0), pinned by `Cargo.lock` (unchanged).
 
 ## 2. Reused byte-identical
 
@@ -84,6 +88,19 @@ check against section 3, item 5.
    data account; the mint checks.
 8. **The source half (`sol_half.py`)**: what a signer reads before it signs a mint or a release, at which
    commitment, and what it does when the node lags or disagrees.
+10. **What review 325 changed** (each with its tests in `vault.rs`, at the end of the file, and in the
+   rehearsal). (a) `approve_release` refuses a certificate with `valid_until <= last_pause_at +
+   max_valid_seconds`: is there any way to approve, after a guardian pause, with a certificate that existed before
+   it; does the rule rest on anything but the vault's own state and the signers' bound on `valid_until`. (b) Paid
+   pages and `close_release`: the replay state of a nonce is now "a record exists" OR "its bit is set"; can a nonce
+   be in neither state after it was paid (the close sets the bit before it empties the record, in one
+   instruction); can a record be closed that is not paid, or before the retention, or its rent sent elsewhere; can
+   a page be substituted, or a closed record's address be reused. (c) `deposit` with candidate records: can a
+   depositor make the program write a record at an address other than the one of the count it found, or touch a
+   candidate it did not use. (d) `SolanaBurnRouter`: the base58 decoder (canonical form, overflow), the curve
+   test (it must agree with the runtime's own decision for every 32 bytes: the tests compare it with
+   `solana_lib.on_curve`, which the rehearsal runs against the validator in every address derivation), and
+   whether any input lets `burnTo` burn towards 20 bytes that are not the commitment of the decoded wallet.
 9. **The two subclasses and the deployment wrapper.** `sol_vigia.py` and `sol_guardiao.py` inherit from modules
    written for an Ethereum source and replace the methods that read it; `sol_deploy_token.py` replaces
    `deploy_pontes.py`'s source reader and one policy constant inside its own process. Question: is there a parent
@@ -106,20 +123,29 @@ check against section 3, item 5.
 - The issuer's freeze authority can stop the vault's token account.
 - A credited mint with no deposit holds every later exit, and the Ethereum bridge's held-state settlement is not
   ported.
-- A threshold above 6 does not fit a transaction without an address lookup table.
-- Rent is never returned: deposit and release records are permanent.
+- A threshold above 5 does not fit a transaction without an address lookup table (1,151 bytes at 5 with the paid
+  page account).
+- A deposit record's rent is never returned (it is the canonical record of the deposit and is never closed). A
+  release record's rent returns when the record is closed after `record_retention`; from then on only the nonce's
+  paid bit remains, so its amount and recipient can no longer be read from state.
 - The test suite runs in litesvm on the Agave 4.3 runtime, which does not enforce the 1,232-byte packet limit;
   sizes are computed by the tests, not enforced by them.
 
 - Signers read at `finalized`, which is some seconds behind an approval or a payment. Inside that interval a
   signer can certify a burn whose release is already approved; the vault refuses the duplicate
   (`AlreadyReleased`), and the certificate is for the same release, so nothing can come of it.
-- A voided approval can be approved again with the same certificate while it is valid; the mainnet values make the
-  pause outlast every certificate, and only the tool (`sol_vault.py validate`) enforces that relation
-  (`docs/SOLANA-VAULT.md` section 3.4.1).
+- A burn made directly on the L2 token whose 20 bytes are not the commitment of a wallet (an Ethereum address, a
+  token account's commitment) is held for good: the signers do not certify it and nothing is paid. There is no
+  refund path: it needs a release whose recipient differs from the burn's, which the unchanged L2 half of the
+  signer refuses to sign (`docs/SOLANA-VAULT.md` 11.1).
+- The router's curve test refuses program-derived wallets (multisig vaults) and cannot tell whether anyone holds
+  the key of an on-curve address.
+- After a guardian pause ended early by 6 of 7, release signing waits until a certificate dated now can no longer
+  predate the pause (`max_valid_seconds` less the certificate life after the pause began).
+- Mint signing requires at least two Solana endpoints that agree; nothing in the tool can check that two endpoints
+  are independent.
 
 ## 5. Not in this note
 
 Results of the end-to-end rehearsal on `solana-test-validator` and the reproducibility of the program binary are
-reported by agent 322 in `agents/322-bridge-solana-r16.md`, not here. The Python tools have no unit test suite
-of their own: they are exercised by the rehearsal only.
+reported by agent 322 in `agents/322-bridge-solana-r16.md`, not here.

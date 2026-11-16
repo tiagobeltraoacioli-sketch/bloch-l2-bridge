@@ -31,10 +31,17 @@ release  route, chain and vault of the intent are this vault's; releases enabled
          (now, now + max_valid_seconds], with the cluster clock within `max_clock_skew` of this host's. A local
          database refuses to sign two different releases for one nonce or one burn.
 
-Config (one JSON per signer): `sol_rpc`, `vault_config` (the deployments/solana/*.config.json file, with
-`program.id` and `program.elfSha256` filled), `keystore`, `password_file` (the secp256k1 release key, the same
-keystore format as the Ethereum half), `db`; optional `cast`, `finality_margin_slots` (150), `valid_seconds`
-(1800), `max_valid_seconds` (3600), `anchor_max_age_slots` (9000), `max_clock_skew` (120).
+Review 325: `deposit` is answered only when EVERY configured endpoint shows the same record (R325-SOL-3);
+`release` only when a wallet is known for the burn's 20-byte recipient (R325-SOL-1, sol_recipient.py), no paid
+page marks the nonce as paid, and the certificate could not predate the vault's last guardian pause (R325-SOL-2).
+
+Config (one JSON per signer): `sol_rpc` (one URL, or a list of URLs of different operators; a deposit needs
+`sol_rpc_min` of them, default 2 on a public cluster and 1 in a rehearsal, and all listed must agree),
+`vault_config` (the deployments/solana/*.config.json file, with `program.id` and `program.elfSha256` filled),
+`keystore`, `password_file` (the secp256k1 release key, the same keystore format as the Ethereum half), `db`;
+for releases `l2_rpc` and `burn_router` (required on a public cluster), `recipient_registry`,
+`router_from_block`, `registry_from_block`, `recipient_hints`; optional `cast`, `finality_margin_slots` (150),
+`valid_seconds` (1800), `max_valid_seconds` (3600), `anchor_max_age_slots` (9000), `max_clock_skew` (120).
 """
 import fcntl
 import json
