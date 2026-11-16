@@ -3,7 +3,7 @@
 a Stellar transaction, so every guardian action is a signature over a vault digest that any relayer submits.
 
   guardiao_stellar.py --config G.json pause  --out CALL.json
-  guardiao_stellar.py --config G.json cancel --id 0xRELEASEID --out PARTIAL.json
+  guardiao_stellar.py --config G.json cancel --id 0xRELEASEID [--valid-until T] --out PARTIAL.json
   guardiao_stellar.py --config G.json combine-cancel --sig A.json --sig B.json --out CALL.json
   guardiao_stellar.py --config G.json check
 
@@ -11,6 +11,9 @@ pause    signs `pause_digest(pause_count, valid_until)` for the vault's current 
          (default 600). One guardian is enough. The vault refuses it if this guardian already paused in the current
          chain, during a pause, or within the cooldown after a committee unpause.
 cancel   signs `cancel_digest(id, valid_until)` for a QUEUED release; a majority of the guardians (2 of 3) cancels.
+         The guardians must sign the same `valid_until`: the first one's is printed, the others pass it with
+         `--valid-until` (accepted only inside (ledger time, ledger time + one day]). It works only while the vault
+         was deployed with a release delay; with delay 0 nothing is ever queued and a guardian can only pause.
 check    read-only: every release the vault paid or queued (its events in the RPC's retained window) must be a burn of
          the L2 token: `burnIdOf(nonce)` equals the release's burn id and a `Burned` log with that id carries the same
          amount and the commitment of the Stellar recipient, in a block at or below the L2's finalized block. Prints the
@@ -75,12 +78,16 @@ class Guardian:
         Path(out).write_text(json.dumps(call, indent=2) + '\n')
         print(json.dumps(call, indent=2))
 
-    def cancel(self, rid, out):
+    def cancel(self, rid, out, proposed=None):
         d, c, latest = self.context()
         rid = sn.b32(rid)
         if self.net.view('pending', id=rid.hex()) is None:
             fail('no queued release has this id')
         valid_until = latest['close_time'] + int(self.cfg.get('valid_seconds', 600))
+        if proposed is not None:
+            valid_until = int(proposed)
+            if not latest['close_time'] < valid_until <= latest['close_time'] + sn.MAX_VALIDITY:
+                fail('the proposed valid_until is outside (ledger time, ledger time + one day]', valid_until=valid_until)
         digest = sn.cancel_digest(self.net.passphrase, self.net.vault, d['route'], rid, valid_until)
         if self.net.view('cancel_digest', id=rid.hex(), valid_until=valid_until) != digest.hex():
             fail('the cancel digest computed here differs from the vault\'s')
@@ -165,7 +172,7 @@ def main():
         elif 'pause' in argv:
             g.pause(args['--out'])
         elif 'cancel' in argv:
-            g.cancel(args['--id'], args['--out'])
+            g.cancel(args['--id'], args['--out'], args.get('--valid-until'))
         elif 'check' in argv:
             g.check()
         else:

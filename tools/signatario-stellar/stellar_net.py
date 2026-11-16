@@ -316,6 +316,26 @@ class Net:
         exe = e['dataJson']['contract_data']['val']['contract_instance']['executable']
         return (exe.get('wasm') if isinstance(exe, dict) else exe), e.get('liveUntilLedgerSeq'), latest
 
+    def instance_storage(self, contract=None):
+        """The vault's instance storage read straight from the ledger entry (no account, no simulation):
+        ({'Config': {...}, 'Derived': {...}, 'State': {...}}, wasm hash, live_until, latest ledger)."""
+        latest, (e,) = self.entries([self.instance_key(contract)])
+        if e is None:
+            raise StellarError('the contract instance is not in the live ledger state')
+        inst = e['dataJson']['contract_data']['val']['contract_instance']
+        exe = inst['executable']
+        out = {}
+        for item in inst.get('storage') or []:
+            key = scval(item['key'])
+            if isinstance(key, list) and len(key) == 1 and isinstance(key[0], str):
+                out[key[0]] = scval(item['val'])
+        return out, (exe.get('wasm') if isinstance(exe, dict) else exe), e.get('liveUntilLedgerSeq'), latest
+
+    def record_value(self, name, value):
+        """(state, decoded value or None) of a persistent record of the vault."""
+        state, entry, _ = self.record_state(name, value)
+        return state, (scval(entry['dataJson']['contract_data']['val']) if entry is not None else None)
+
     def events(self, start_ledger, limit=200):
         """The vault's contract events from `start_ledger`, decoded: [{name, ledger, tx, topics, data}]."""
         r = self.rpc('getEvents', {'startLedger': int(start_ledger), 'xdrFormat': 'json', 'pagination': {'limit': limit},

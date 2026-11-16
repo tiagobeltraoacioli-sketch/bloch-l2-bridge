@@ -24,8 +24,11 @@
 //! - Stellar assets have 7 decimals: amounts cross the token interface in stroops and must be multiples of
 //!   `STROOPS_PER_UNIT`; nothing is rounded;
 //! - a guardian pauses with a signature (its secp256k1 key cannot sign a Stellar transaction);
-//! - releases above `large_release_threshold` wait `release_delay` in a queue; a majority of the guardians may
-//!   cancel a queued release once, and `switch_threshold` signers may then certify it again, locked;
+//! - releases above `large_release_threshold` wait `release_delay` in a queue (both fixed at deployment; delay 0
+//!   means no queue, and the guardians are then pause-only exactly as on Ethereum); a majority of the guardians may
+//!   cancel a queued release once. A cancel pays no one and loses no burn: the burn id is free again, and
+//!   `switch_threshold` signers (the unpause quorum) certify the cancelled nonce again, once, and that release
+//!   cannot be cancelled;
 //! - there is no block-hash anchor (Soroban exposes none and Stellar has no forks); a certificate binds the network
 //!   id and this contract, and expires at `valid_until`, at most `MAX_VALIDITY` ahead;
 //! - the recipient of a release is a Stellar address, which the 20-byte recipient of the L2 burn commits to.
@@ -236,7 +239,8 @@ enum Key {
     Head(u64),
     /// Replay record by burn nonce. Persistent.
     Nonce(u64),
-    /// Replay record by burn id: the nonce it was released under. Persistent.
+    /// Replay record by burn id: the nonce it was released under. Persistent. Removed only by a guardian cancel
+    /// (the release was never paid).
     Burn(BytesN<32>),
     /// A queued release, by release id. Persistent.
     Pending(BytesN<32>),
@@ -902,12 +906,11 @@ impl Vault {
         let by_burn: Option<u64> = env.storage().persistent().get(&burn_key);
         let required = match (record, by_burn, item.generation) {
             (None, None, 0) => cfg.threshold,
-            // After a cancel the nonce is free for ONE locked certificate. It may name another burn id than the
-            // cancelled one (a forged release that took a real burn's nonce is how a cancel comes about), as long as
-            // that id was never released under another nonce.
-            (Some(r), b, 1) if r.cancelled && r.generation == 0 && (b.is_none() || b == Some(item.nonce)) => {
-                cfg.switch_threshold
-            }
+            // After a cancel the nonce is open for ONE locked certificate of `switch_threshold` signers. It names the
+            // real burn of that nonce: the cancelled id again (a false alarm, or a forgery of the amount or the
+            // recipient) or another id (a forgery that took the nonce), as long as that id is not recorded under any
+            // nonce. The cancel freed the cancelled id.
+            (Some(r), None, 1) if r.cancelled && r.generation == 0 => cfg.switch_threshold,
             _ => fail(&env, Error::InvalidRelease),
         };
         let id = Self::release_id(env.clone(), item.clone());
@@ -951,7 +954,8 @@ impl Vault {
         .publish(&env);
     }
 
-    /// Anyone pays a queued release once its delay has passed, unless the vault is paused.
+    /// Anyone pays a queued release once its delay has passed, unless the vault is paused or the committee closed
+    /// releases (it then stays queued and is paid once they are open again).
     pub fn execute_release(env: Env, id: BytesN<32>) {
         let cfg = load_config(&env);
         let mut st = load_state(&env);
@@ -963,6 +967,9 @@ impl Vault {
         let now = env.ledger().timestamp();
         if now < st.paused_until {
             fail(&env, Error::Paused);
+        }
+        if !st.releases_enabled {
+            fail(&env, Error::InvalidRelease);
         }
         if now < pending.ready_at {
             fail(&env, Error::NotReady);
@@ -982,10 +989,13 @@ impl Vault {
         .publish(&env);
     }
 
-    /// A majority of the guardians cancels a queued release. The nonce stays recorded, so the certificate is dead;
-    /// only `switch_threshold` signers can certify that nonce again (`generation` 1, for the same or another burn
-    /// id), and that one cannot be cancelled.
-    /// Guardians move nothing and pay no one.
+    /// A majority of the guardians cancels a queued release. The nonce stays recorded as cancelled, so the cancelled
+    /// certificate and every other `generation` 0 certificate of that nonce are dead; the burn id is forgotten, so
+    /// the burn it names is not lost. Only `switch_threshold` signers (the quorum that ends a pause) can certify
+    /// that nonce again (`generation` 1, for the same or another burn id), once, and that release cannot be
+    /// cancelled: guardians delay a burn by one cancel, never for good.
+    /// Guardians move nothing, pay no one and change no limit. With `release_delay` 0 nothing is ever queued and
+    /// this function can never succeed.
     pub fn cancel_release(env: Env, id: BytesN<32>, valid_until: u64, signatures: Vec<BytesN<65>>) {
         let cfg = load_config(&env);
         let key = Key::Pending(id.clone());
@@ -1007,6 +1017,7 @@ impl Vault {
             cfg.guardians.len() / 2 + 1,
         );
         env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&Key::Burn(record.burn.clone()));
         record.cancelled = true;
         put(&env, &nonce_key, &record);
         save_state(&env, &load_state(&env));

@@ -51,6 +51,7 @@ class StellarCtx(S.Ctx):
         except sn.StellarError as e:
             S.refuse(str(e))
         self.stellar_recipient = None
+        self.generation = 0   # 1 only when the half certifies a nonce again after a guardian cancel
 
     def deposit_id(self, route, nonce, sender, amount, pq):
         return '0x' + sn.deposit_id(route, nonce, sender, amount, pq[26:]).hex()
@@ -66,9 +67,10 @@ class StellarCtx(S.Ctx):
                              stellar_recipient=recipient, commitment=commitment)
             except sn.StellarError as e:
                 S.refuse(f'the Stellar half named an invalid recipient: {e}')
-            if out.get('vault_contract') != self.vault_contract or int(out.get('generation', -1)) != 0:
+            if out.get('vault_contract') != self.vault_contract or int(out.get('generation', -1)) not in (0, 1):
                 S.refuse('the Stellar half answered for another vault or generation', half=out)
             self.stellar_recipient = recipient
+            self.generation = int(out['generation'])
         return out
 
     def release_digest(self, rel, context):
@@ -76,7 +78,7 @@ class StellarCtx(S.Ctx):
             S.refuse('no Stellar recipient was verified for this release')
         item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': self.stellar_recipient,
                 'amount': rel['amount'], 'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],
-                'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead'], 'generation': 0}
+                'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead'], 'generation': self.generation}
         ctx = {'valid_until': context['validUntil'], 'native_finalized_number': context['nativeFinalizedNumber'],
                'native_finalized_hash': context['nativeFinalizedHash']}
         return '0x' + sn.release_digest(self.passphrase, self.vault_contract, item, ctx).hex()
@@ -129,13 +131,18 @@ def cmd_combine(ctx, args):
     fields = ('source_chain_id', 'source_vault', 'release', 'context', 'digest')
     first = {f: sigs[0][f] for f in fields}
     recipient = (sigs[0].get('eth') or {}).get('stellar_recipient')
+    generation = int((sigs[0].get('eth') or {}).get('generation', 0))
+    if generation not in (0, 1):
+        S.refuse('unknown generation in the partial signatures')
     for s in sigs[1:]:
         if s.get('kind') != 'stable-release' or {f: s.get(f) for f in fields} != first \
-                or (s.get('eth') or {}).get('stellar_recipient') != recipient:
+                or (s.get('eth') or {}).get('stellar_recipient') != recipient \
+                or int((s.get('eth') or {}).get('generation', 0)) != generation:
             S.refuse('the partial signatures are for different messages',
                      differ=[f for f in fields if s.get(f) != first[f]])
     rel, c = first['release'], first['context']
     ctx.stellar_recipient = recipient
+    ctx.generation = generation
     try:
         if '0x' + sn.recipient_commitment(recipient).hex() != rel['recipient']:
             S.refuse('the Stellar recipient does not hash to the release\'s recipient commitment')
@@ -144,6 +151,11 @@ def cmd_combine(ctx, args):
     if ctx.release_digest(rel, c) != first['digest']:
         S.refuse('the partials\' digest is not the vault digest of their release')
     k = int(ctx.cfg.get('vault_threshold', ctx.cfg['threshold']))
+    if generation == 1:
+        # The locked certificate after a guardian cancel needs the vault's switch quorum (6 of 7 at launch).
+        if 'vault_switch_threshold' not in ctx.cfg:
+            S.refuse('a generation-1 release needs "vault_switch_threshold" in the config')
+        k = int(ctx.cfg['vault_switch_threshold'])
     by_signer = {s['signer']: s['signature'] for s in sigs}
     if len(by_signer) < k:
         S.refuse(f'need {k} distinct signers, have {len(by_signer)}')
@@ -153,11 +165,12 @@ def cmd_combine(ctx, args):
             'args': {'item': {'route': unhex(rel['route']), 'nonce': rel['nonce'], 'recipient': recipient,
                               'amount': rel['amount'], 'native_burn': unhex(rel['nativeBurn']),
                               'mint_count': rel['mintCount'], 'minted_total': rel['mintedTotal'],
-                              'mint_head': unhex(rel['mintHead']), 'generation': 0},
+                              'mint_head': unhex(rel['mintHead']), 'generation': generation},
                      'context': {'valid_until': c['validUntil'], 'native_finalized_number': c['nativeFinalizedNumber'],
                                  'native_finalized_hash': unhex(c['nativeFinalizedHash'])},
                      'signatures': [unhex(by_signer[a]) for a in chosen]}}
-    result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'signers': chosen,
+    result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'generation': generation,
+              'signers': chosen,
               'signatures': [by_signer[a] for a in chosen], 'to': ctx.vault_contract, 'call': call}
     out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

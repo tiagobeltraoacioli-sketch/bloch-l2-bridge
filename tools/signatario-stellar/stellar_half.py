@@ -28,11 +28,17 @@ release  the pinned Wasm; the route; releases enabled; no pause; the burn nonce 
          of the signed digest (the vault cannot check a ledger hash); it travels with the certificate so the k
          partials agree. The digest is computed here and must equal the vault's `release_digest`. A local database
          refuses two different releases for one nonce or one burn.
+         After a guardian cancel (the vault's record of the nonce says `cancelled`, generation 0) the nonce is
+         certified again only as a deliberate act of this operator: the nonce is listed in `recertify_nonces`. The
+         half then signs `generation` 1 (the vault asks `switch_threshold` signatures for it and it cannot be
+         cancelled), with every other check unchanged: the burn is still read from the L2 by signatario.py. A nonce
+         that is listed but not cancelled on the vault is refused.
 
 Config (one JSON per signer): `stellar_rpc`, `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account`,
 `keystore`, `password_file`, `db`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
 `vault_from_ledger`, `finality_ledgers` (12), `max_ledger_age` (60), `valid_seconds` (1800), `max_valid_seconds`
-(3600), `recipient_hints` (directory of files named by the commitment hex), `l2_rpc` + `router` (StellarBurnRouter).
+(3600), `recipient_hints` (directory of files named by the commitment hex), `l2_rpc` + `router` (StellarBurnRouter),
+`recertify_nonces` (list of burn nonces whose cancelled release this operator agreed to certify again).
 """
 import fcntl
 import json
@@ -242,10 +248,24 @@ class Half:
             refuse('the vault is paused by a guardian', paused_until=state['paused_until'])
         nonce, amount = int(rel['nonce']), int(rel['amount'])
         burn = sn.b32(rel['nativeBurn'])
-        for name, value in (('Nonce', nonce), ('Burn', burn)):
-            record, _, _ = self.net.record_state(name, value)
+        generation = 0
+        if nonce in [int(n) for n in self.cfg.get('recertify_nonces', [])]:
+            # The one certificate allowed after a guardian cancel. The vault's record must say so, live.
+            record, entry, _ = self.net.record_state('Nonce', nonce)
+            if record != 'live':
+                refuse(f'recertify_nonces lists nonce {nonce}, but its record on the vault is {record}', nonce=nonce)
+            rec = sn.scval(entry['dataJson']['contract_data']['val'])
+            if rec.get('cancelled') is not True or int(rec.get('generation', -1)) != 0:
+                refuse('recertify_nonces lists a nonce the vault does not record as cancelled', nonce=nonce, record=rec)
+            record, _, _ = self.net.record_state('Burn', burn)
             if record != 'absent':
-                refuse(f'this burn is already recorded by the vault ({name} record is {record})', nonce=nonce)
+                refuse(f'this burn id is already recorded by the vault (Burn record is {record})', nonce=nonce)
+            generation = 1
+        else:
+            for name, value in (('Nonce', nonce), ('Burn', burn)):
+                record, _, _ = self.net.record_state(name, value)
+                if record != 'absent':
+                    refuse(f'this burn is already recorded by the vault ({name} record is {record})', nonce=nonce)
         if amount <= 0 or amount > int(state['total_locked']):
             refuse('the amount is zero or above the vault\'s locked total', amount=amount, locked=state['total_locked'])
         if amount > int(self.net.view('available_to_release')):
@@ -293,7 +313,7 @@ class Half:
 
         item = {'route': derived['route'], 'nonce': nonce, 'recipient': recipient, 'amount': amount,
                 'native_burn': burn.hex(), 'mint_count': mint_count, 'minted_total': int(rel['mintedTotal']),
-                'mint_head': unhex(rel['mintHead']).lower(), 'generation': 0}
+                'mint_head': unhex(rel['mintHead']).lower(), 'generation': generation}
         ctx = {'valid_until': valid_until, 'native_finalized_number': int(native['nativeFinalizedNumber']),
                'native_finalized_hash': unhex(native['nativeFinalizedHash']).lower()}
         digest = sn.release_digest(self.net.passphrase, self.net.vault, item, ctx)
@@ -311,6 +331,10 @@ class Half:
             for table, key in (('nonces', str(nonce)), ('burns', burn.hex())):
                 prior = db[table].get(key)
                 if prior is not None and prior != core:
+                    if generation == 1 and table == 'nonces':
+                        # The vault records the earlier release of this nonce as cancelled: it can never be paid.
+                        db.setdefault('cancelled', []).append(prior)
+                        continue
                     refuse('this signer already signed another release for this nonce or burn', prior=prior, now=core)
             db['nonces'][str(nonce)] = core
             db['burns'][burn.hex()] = core
@@ -328,7 +352,7 @@ class Half:
         if unhex(signer) not in config['signers']:
             refuse('this keystore is not one of the vault\'s signers', signer=signer)
         answer(True, signer=signer, release=rel, stellar_recipient=recipient, vault_contract=self.net.vault,
-               generation=0,
+               generation=generation,
                context={'validUntil': valid_until, 'sourceAnchorNumber': anchor, 'sourceAnchorHash': '0x' + own['hash'],
                         'nativeFinalizedNumber': ctx['native_finalized_number'],
                         'nativeFinalizedHash': native['nativeFinalizedHash']},
