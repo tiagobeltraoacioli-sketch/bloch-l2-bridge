@@ -1,14 +1,14 @@
 {
-  "_about": "One per signer operator. btc_signer.py: signs vault transactions with the operator's release key (the keystore the Ethereum half uses).",
+  "_about": "One per signer operator. btc_signer.py: signs vault transactions with the operator's Bitcoin vault key, a key of its own (role btc-vault-signer), never the Ethereum release key.",
   "vault": "/etc/bloch-bbtc-signer/bbtc-vault-mainnet.config.json",
   "btc_rpc": "http://127.0.0.1:8332",
   "btc_cookie": "/var/lib/bitcoind/.cookie",
   "signatario_config": "/etc/bloch-bbtc-signer/mint-signer.json",
-  "keystore": "/etc/bloch-busdc-signer/eth-release.keystore",
-  "password_file": "/etc/bloch-busdc-signer/eth-release.password",
-  "pubkey": "TBD-owner (this operator's compressed key, from btc_deploy.py keys)",
+  "keystore": "/etc/bloch-bbtc-signer/btc-vault.keystore",
+  "password_file": "/etc/bloch-bbtc-signer/btc-vault.password",
+  "pubkey": "TBD-owner (this operator's compressed Bitcoin vault key, from btc_deploy.py keys --role btc-vault-signer)",
+  "burn_router": "TBD-deploy (BitcoinBurnRouter address on the L2)",
+  "burn_router_code_keccak": "TBD-deploy",
   "journal": "/var/lib/bloch-bbtc-signer/vault-signer.journal.json",
-  "cast": "/opt/foundry/bin/cast",
-  "feerate_ceiling": 30,
-  "fee_estimate_factor": 3
+  "cast": "/opt/foundry/bin/cast"
 }

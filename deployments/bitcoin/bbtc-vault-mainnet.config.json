@@ -2,10 +2,10 @@
   "domain": "bloch.bridge.btc-vault.v1",
   "notes": {
     "status": "UNAUDITED. Nothing is deployed. Proposed values; the owner confirms every one before the anchor is funded, because the policy hash, the keys, the anchor and the fee address are all inside the L2 token's sourceRoute and can never change.",
-    "keys": "TBD-owner: the 7 compressed public keys of the committee's Ethereum release signer keys, printed by `btc_deploy.py keys --inventory deployments/mainnet/busdc-keys.inventory.json`. The same keystores sign Bitcoin inputs with `cast wallet sign --no-hash`.",
+    "keys": "TBD-owner: the 7 compressed public keys of the operators' SEPARATE Bitcoin vault keys (role btc-vault-signer), printed by `btc_deploy.py keys --inventory deployments/bitcoin/bbtc-keys.inventory.json --role btc-vault-signer`. Not the Ethereum release keys: a compromise of one bridge's hot keys must not open the other.",
     "anchor": "TBD-deploy: the single output that funds the thread address (docs/BTC-BRIDGE-DEPLOYMENT.md step 3).",
     "owner_address": "Owner input 2026-11-16 (BRIEF-ROUND16.md): the Bitcoin fee address. P2WPKH. It is committed by the route; confirm it on a second channel before funding the anchor.",
-    "policy": "Limits in sats. capSats and maxDepositSats must equal the token's supplyCap and bucketCapacity times 100 (btc_deploy.py token checks it). Proposed as the Ethereum bridge's launch values at roughly 100,000 USD per BTC: cap 1 BTC, window 0.1 BTC a day; the owner sets the reference price and confirms."
+    "policy": "Limits in sats. capSats and maxDepositSats must equal the token's supplyCap and bucketCapacity times 100; the token's minBurn must be payable at maxFeerate (btc_deploy.py token checks all three). Proposed as the Ethereum bridge's launch values at roughly 100,000 USD per BTC: cap 1 BTC, window 0.1 BTC a day; the owner sets the reference price and confirms."
   },
   "network": "bitcoin-mainnet",
   "threshold": 5,
@@ -25,14 +25,14 @@
     "unitSats": 100,
     "depositFeeBps": 5,
     "releaseFeeBps": 5,
-    "minDepositSats": 20000,
+    "minDepositSats": 100000,
     "maxDepositSats": 10000000,
     "capSats": 100000000,
     "maxChargeBps": 1000,
     "dustSats": 546,
     "ownerPayoutMinSats": 10000,
     "poolTargetSats": 200000,
-    "maxFeerate": 500,
+    "maxFeerate": 200,
     "sweepDepth": 2,
     "minConfirmations": 6,
     "satsPerExtraConfirmation": 100000000,
@@ -41,6 +41,7 @@
     "windowLimitSats": 10000000,
     "largeReleaseSats": 5000000,
     "largeReleaseDelaySeconds": 43200,
+    "directBurnClaimSeconds": 259200,
     "maxDepositsPerTx": 20,
     "maxReleasesPerTx": 40
   }

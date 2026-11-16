@@ -67,9 +67,9 @@
     "cap": "1000000",
     "window": "100000",
     "windowSeconds": 86400,
-    "minDeposit": "200",
+    "minDeposit": "1000",
     "maxDeposit": "100000",
-    "l2MinBurn": "500",
+    "l2MinBurn": "1000",
     "l2MaxBurn": "100000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
@@ -80,7 +80,7 @@
     "recipient": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
     "paidOn": "source",
     "collection": "an output to the recipient in the vault's own transactions, whenever at least 10,000 sat is due (the amount due is carried in the vault marker until then)",
-    "networkFee": "taken from the user's amount: every swept deposit and every release pays fee rate x (its own vbytes + the fixed transaction overhead), capped at 10% of the item; above the cap the item waits for lower fees"
+    "networkFee": "taken from the user's amount at a fee rate the signers check against their own nodes (at most 1.5 times the node's estimate, never above 200 sat/vB): a swept deposit pays fee rate x 574 vbytes (not swept while that exceeds 10% of it; refundable meanwhile), a release fee rate x 402 vbytes, a refund fee rate x 605 vbytes. The smallest burn (0.001 BTC) still pays out at 200 sat/vB."
   },
   "finality": {
     "rule": "A deposit is credited after the vault has swept it (2 confirmations) and the sweep has 6 confirmations, plus one more confirmation for every BTC swept since, up to 144.",
@@ -95,24 +95,26 @@
     "steps": [
       "compute your deposit address from your L2 address (the bridge page does it; check it with btc_relay.py address)",
       "send BTC to it from any wallet: an ordinary payment, no OP_RETURN, any change goes back to your own wallet",
-      "after the confirmations and the 12 hour mint delay the L2 token credits the amount less 0.05% and the miner charge, in units of 0.000001 BTC"
+      "after the confirmations and the 12 hour mint delay the L2 token credits the amount less 0.05% and the miner charge, in units of 0.000001 BTC; before it is swept, the deposit can be refunded at the L2 recipient's signed request"
     ],
     "refusals": [
-      "below 0.0002 BTC or above 0.1 BTC in one output: never credited and NOT refunded automatically",
+      "below 0.001 BTC or above 0.1 BTC in one output, or while the supply cap is reached: not credited; the L2 address the deposit names can have it sent back (less 0.05% and the miner charge) by signing a refund request naming a bc1q address. An L2 address that is a contract and cannot sign cannot ask for a refund",
       "sent to the bare vault (thread) address: names no recipient, joins the fee pool",
-      "sent to an address computed for another L2 address: credited to that address",
+      "sent to an address computed for another L2 address: credited (or refundable) to that address",
       "an address computed for another vault, network or key set is not this bridge"
     ]
   },
   "release": {
-    "l2Function": "burn(uint64 amount, address sourceRecipient)",
-    "recipientEncoding": "the 20-byte witness program of a P2WPKH address (bc1q..., 42 characters); no other address type can be named",
+    "l2Function": "BitcoinBurnRouter.burnTo(uint64 amount, string bitcoinAddress), after approve(router, amount) on the token",
+    "recipientEncoding": "a lowercase P2WPKH address string (bc1q..., 42 characters); the router checks prefix, checksum and witness version before it burns",
     "typicalSeconds": 3600,
     "paysAsset": "BTC to that P2WPKH address: the burned amount less 0.05% and the miner charge",
     "notes": [
+      "burn through the router. A burn made directly on the token (burn(uint64,address)) is not paid blind: its burner signs a claim naming a bc1q address, or it waits 3 days and the 20 bytes it names are paid",
       "a burn above 0.05 BTC waits 12 hours",
       "at most 0.1 BTC leaves the vault in any 24 hours",
-      "a release stuck at a low fee rate is replaced by one with a higher fee rate; the higher miner charge comes out of the payout, never above 10% of it"
+      "a release stuck at a low fee rate is replaced by one with a higher fee rate; the higher miner charge comes out of the payout",
+      "the smallest burn is 0.001 BTC"
     ]
   },
   "explorers": {
@@ -128,7 +130,7 @@
   },
   "notes": [
     "UNAUDITED. Nothing is deployed.",
-    "There is no contract on Bitcoin: 5 of the 7 committee keys can spend the whole vault. Every limit on the Bitcoin side is a rule each signer applies before signing; the L2 token's supply cap is the hard bound on what the vault can hold.",
+    "There is no contract on Bitcoin: 5 of the 7 committee keys can spend the whole vault AND every deposit not yet swept. Every limit on the Bitcoin side is a rule each signer applies before signing. The worst loss on a five-key compromise is the vault (at most the supply cap plus fees) plus whatever sits unswept at deposit addresses at that moment.",
     "Limits are proposals in units of 0.000001 BTC; the owner confirms them."
   ]
 }

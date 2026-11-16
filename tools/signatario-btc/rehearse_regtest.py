@@ -155,20 +155,25 @@ class Rig:
         assert len(vout) == 1
         return txid, vout[0], tx.outputs[vout[0]][0]
 
-    def pay_from(self, kind, address, sats, extra=None):
-        """A payment whose only input is of the given type ('legacy' P2PKH, 'p2sh-segwit', 'bech32' P2WPKH, 'bech32m'
-        taproot): `address` is output 0. Returns (txid, 0, sats)."""
+    def fund(self, kind, sats):
+        """A confirmed wallet coin of the given address type ('legacy' P2PKH, 'p2sh-segwit', 'bech32', 'bech32m' taproot)."""
         src = self.b('getnewaddress', '', kind)
         spk = self.b('getaddressinfo', src)['scriptPubKey']
         funding = self.b('sendtoaddress', src, '%.8f' % ((sats + 50_000) / 1e8))
         self.mine(1)
         tx, *_ = c.parse_tx(bytes.fromhex(self.b('getrawtransaction', funding)))
-        vout = [i for i, (_, k) in enumerate(tx.outputs) if k.hex() == spk][0]
+        return funding, [i for i, (_, k) in enumerate(tx.outputs) if k.hex() == spk][0]
+
+    def pay_funded(self, coin, address, sats, extra=None):
+        """Spend exactly that coin: `address` is output 0 (unconfirmed on return). Returns (txid, 0, sats)."""
         outs = [{address: '%.8f' % (sats / 1e8)}] + ([extra] if extra else []) + [{self.b('getnewaddress', '', 'bech32'): '0.00045000'}]
-        raw = self.b('createrawtransaction', json.dumps([{'txid': funding, 'vout': vout}]), json.dumps(outs))
+        raw = self.b('createrawtransaction', json.dumps([{'txid': coin[0], 'vout': coin[1]}]), json.dumps(outs))
         signed = self.b('signrawtransactionwithwallet', raw)
         assert signed['complete'], signed
         return self.b('sendrawtransaction', signed['hex']), 0, sats
+
+    def pay_from(self, kind, address, sats, extra=None):
+        return self.pay_funded(self.fund(kind, sats), address, sats, extra)
 
     def double_spend(self, txid):
         """A conflicting transaction of the same wallet: same inputs, everything back to itself, higher fee."""
@@ -490,12 +495,16 @@ def run(rig):
     rc, res2 = rig.reserves()
     check('S4 two strays swept at 1 sat/vB pay the whole transaction themselves: the pool does not fall. The thread now has '
           'a nested-segwit-funded parent, and the tools keep running',
-          r['combine'] and r['combine'][0] == 0 and rc == 0 and res2['fee_pool_sats'] + res2['fees_due_sats'] >= res['fee_pool_sats']
-          and rig.status()['tip'] == r['propose'][1]['txid'], (r, res2))
+          r['combine'] and r['combine'][0] == 0 and rc == 0
+          and res2['fee_pool_sats'] + res2['fees_due_sats'] + r['propose'][1]['owner_paid'] >= res['fee_pool_sats'] + 2 * 546 - 757
+          and r['propose'][1]['fee'] <= 2 * 546 and rig.status()['tip'] == r['propose'][1]['txid'], (r['combine'], res2))
+
+    owner_before = r['propose'][1]['owner_paid']
 
     # ── A. deposit -> sweep -> attested mint -> credit ───────────────────────
-    d_alice = rig.pay_from('legacy', dep_addr(alice), 90_000_000)        # paid from a P2PKH input
-    d_bob = rig.pay_from('p2sh-segwit', dep_addr(bob), 90_000_000)     # paid from a nested-segwit input
+    coin_a, coin_b = rig.fund('legacy', 90_000_000), rig.fund('p2sh-segwit', 90_000_000)
+    d_alice = rig.pay_funded(coin_a, dep_addr(alice), 90_000_000)    # paid from a P2PKH input
+    d_bob = rig.pay_funded(coin_b, dep_addr(bob), 90_000_000)        # paid from a nested-segwit input
     d_small = rig.pay(dep_addr(bob), '0.00010000')          # below the minimum
     d_huge = rig.pay(dep_addr(bob), '1.50000000')           # above the maximum (it could never fit the mint bucket)
     d_stray = rig.pay(vault.thread_address(), '0.00030000')  # sent to the bare vault address: names nobody
@@ -532,7 +541,7 @@ def run(rig):
     check('A8 no signer attests before the confirmation depth', call is None and all('not deep enough' in str(a) for _, a in answers), answers[:1])
     rig.mine(2)
     owner_got = paid_to(owner)
-    check('A9 the owner address received the fee output on Bitcoin', owner_got == sweep['owner_paid'], (owner_got, sweep['owner_paid']))
+    check('A9 the owner address received the fee output on Bitcoin', owner_got == sweep['owner_paid'] + owner_before, (owner_got, sweep['owner_paid'], owner_before))
     answers, call_a = rig.attest(id_a, signers=range(7), tag='a-alice')
     check('A10 at depth, 7 of 7 signers attest through the unchanged signatario.py; 5 are combined', call_a is not None, answers[:1])
     forged = '0x' + id_a[2:-2] + ('00' if id_a[-2:] != '00' else '01')

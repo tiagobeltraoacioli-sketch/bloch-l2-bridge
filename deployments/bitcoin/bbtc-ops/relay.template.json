@@ -8,5 +8,6 @@
   "token_from_block": "TBD-deploy",
   "l2_chain_id": 700770,
   "token_code_keccak": "TBD-deploy",
-  "tolerance_units": 0
+  "tolerance_units": 0,
+  "burn_router": "TBD-deploy"
 }

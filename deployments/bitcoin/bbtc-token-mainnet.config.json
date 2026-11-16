@@ -3,7 +3,7 @@
   "notes": {
     "status": "UNAUDITED. Input of `btc_deploy.py token`. The contract is BridgedStablecoinV3, byte-identical (creation keccak 0xe560441f...1de7); only constructor arguments differ from bUSDC. It has 6 decimals: one unit is 100 sat.",
     "signers": "TBD-owner: the 7 L2 mint signer addresses of the committee (the bUSDC inventory's l2-mint-signer keys), and the 3 L2 token guardian addresses.",
-    "limits": "Token units (1 BTC = 1,000,000 units). refillPerSecond is an integer: 1 unit a second is 0.0864 BTC a day, the lowest rate the contract can express."
+    "limits": "Token units (1 BTC = 1,000,000 units). minBurn 1,000 units (0.001 BTC) is the smallest burn that still clears dust at the vault's fee ceiling of 200 sat/vB. refillPerSecond is an integer: 1 unit a second is 0.0864 BTC a day, the lowest rate the contract can express."
   },
   "token": {
     "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
@@ -41,6 +41,6 @@
     "refillPerSecond": 1,
     "largeMintThreshold": 0,
     "largeMintDelay": 43200,
-    "minBurn": 500
+    "minBurn": 1000
   }
 }
