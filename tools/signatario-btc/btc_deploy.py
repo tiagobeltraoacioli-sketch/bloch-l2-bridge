@@ -3,9 +3,13 @@
 
 Offline unless a node is named. It never reads a key, a keystore or a password, and sends nothing.
 
-  keys     --inventory INVENTORY.json [--role eth-release-signer]
-           The 7 compressed public keys of the committee, recovered from the proof-of-possession signatures the
-           operators already made in the bUSDC ceremony (docs/BRIDGE-V3-KEY-CEREMONY.md 4.1). No new step for operators.
+  keys     --inventory INVENTORY.json [--role eth-release-signer | btc-vault-signer]
+           The 7 compressed public keys of the committee, recovered from proof-of-possession signatures.
+           eth-release-signer: the keys of the bUSDC ceremony (docs/BRIDGE-V3-KEY-CEREMONY.md 4.1), no new step.
+           btc-vault-signer: a separate Bitcoin key per operator, attested with the same text and tool, listed in an
+           inventory file of its own (deployments/bitcoin/bbtc-keys.inventory.json).
+  message  --index N --operator NAME --address 0x.. --date YYYY-MM-DD
+           The text an operator signs (`cast wallet sign`) for a separate btc-vault-signer key.
   thread   --config VAULT.json
            The thread (bare 5-of-7) address to fund once: that payment is the vault's anchor. Works before the anchor is set.
   vault    --config VAULT.json [--btc-rpc URL --btc-cookie PATH]
@@ -62,6 +66,19 @@ def recover_key(text, signature, address):
     return key
 
 
+BTC_ROLE = 'btc-vault-signer'
+
+
+def attestation_text(key_inventory, role, index, operator, address, date):
+    """The ceremony's attestation text. `btc-vault-signer` is a role of this bridge only: a separate Bitcoin key per
+    operator (same tool, same text format), kept in its own inventory file so the frozen bUSDC inventory tool and its
+    role list do not change."""
+    if role != BTC_ROLE:
+        return key_inventory.message(role, index, operator, address, date)
+    template = key_inventory.message('eth-release-signer', index, operator, address, date)
+    return template.replace('role=eth-release-signer ', f'role={BTC_ROLE} ')
+
+
 def cmd_keys(args):
     import key_inventory  # the ceremony's own message format (tools/deploy-pontes)
     role = option(args, '--role', 'eth-release-signer')
@@ -72,7 +89,7 @@ def cmd_keys(args):
             continue
         if not k.get('address') or not k.get('attestation') or not k.get('date'):
             refuse('the inventory has an unfilled key of this role', index=k.get('index'))
-        text = key_inventory.message(role, k['index'], k['operator'], k['address'], k['date'])
+        text = attestation_text(key_inventory, role, k['index'], k['operator'], k['address'], k['date'])
         out.append({'index': k['index'], 'operator': k['operator'], 'address': k['address'].lower(),
                     'pubkey': recover_key(text, k['attestation'], k['address']).hex()})
     if len(out) != MAINNET_POLICY['signers']:
@@ -216,9 +233,14 @@ def main():
     args = sys.argv[1:]
     if not args or args[0] in ('-h', '--help'):
         raise SystemExit(__doc__)
-    cmd = next((a for a in args if a in ('keys', 'thread', 'vault', 'address', 'token', 'verify')), None)
+    cmd = next((a for a in args if a in ('keys', 'message', 'thread', 'vault', 'address', 'token', 'verify')), None)
     if cmd == 'keys':
         return cmd_keys(args)
+    if cmd == 'message':
+        import key_inventory
+        print(attestation_text(key_inventory, BTC_ROLE, int(option(args, '--index')), option(args, '--operator'),
+                               option(args, '--address'), option(args, '--date')))
+        return
     if cmd == 'token':
         return cmd_token(args)
     if cmd == 'verify':

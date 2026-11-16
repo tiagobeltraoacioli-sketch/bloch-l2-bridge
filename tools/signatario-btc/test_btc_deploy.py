@@ -29,15 +29,15 @@ class Deploy(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix='btc-deploy-test-'))
 
-    def inventory(self, tamper=None):
+    def inventory(self, tamper=None, role='eth-release-signer'):
         keys = []
         for i, priv in enumerate(PRIVS):
             pub = c.pubkey(priv)
             address = c.eth_address(pub)
-            text = key_inventory.message('eth-release-signer', i + 1, f'signer-op{i + 1}', address, '2026-11-16')
+            text = btc_deploy.attestation_text(key_inventory, role, i + 1, f'signer-op{i + 1}', address, '2026-11-16')
             r, s, v = c.sign(btc_deploy.personal_digest(text), priv)
             sig = '0x' + (r.to_bytes(32, 'big') + s.to_bytes(32, 'big') + bytes([27 + v])).hex()
-            keys.append({'role': 'eth-release-signer', 'index': i + 1, 'operator': f'signer-op{i + 1}', 'address': address,
+            keys.append({'role': role, 'index': i + 1, 'operator': f'signer-op{i + 1}', 'address': address,
                          'custody': 'hot-keystore', 'date': '2026-11-16', 'attestation': sig})
         if tamper:
             tamper(keys)
@@ -49,6 +49,19 @@ class Deploy(unittest.TestCase):
         rc, out = run('keys', '--inventory', self.inventory())
         self.assertEqual(rc, 0, out)
         self.assertEqual([k['pubkey'] for k in out['keys']], [c.pubkey(p).hex() for p in PRIVS])
+
+    def test_separate_bitcoin_keys_have_their_own_role_and_text(self):
+        path = self.inventory(role='btc-vault-signer')
+        rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([k['pubkey'] for k in out['keys']], [c.pubkey(p).hex() for p in PRIVS])
+        # an attestation made for the Ethereum release role is not accepted as a Bitcoin vault key, nor the reverse
+        inv = json.loads(self.inventory().read_text())
+        for k in inv['keys']:
+            k['role'] = 'btc-vault-signer'
+        path.write_text(json.dumps(inv))
+        rc, out = run('keys', '--inventory', path, '--role', 'btc-vault-signer')
+        self.assertEqual((rc, out['decision']), (1, 'refused'))
 
     def test_an_attestation_for_another_address_or_slot_is_refused(self):
         def swap(keys):

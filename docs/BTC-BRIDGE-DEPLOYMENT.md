@@ -22,6 +22,27 @@ The Bitcoin script needs public keys, not addresses. They are recovered from the
 operators already gave (ceremony 4.1), so the owner derives them alone and each operator confirms its own key on the
 second channel (first 6 and last 6 hex characters).
 
+### 1a. Separate Bitcoin keys (recommended; the tools support it)
+
+Each signer operator generates one more key on the signer host, exactly as in ceremony 3.1 (`cast wallet new`, its own
+password file, for example `/etc/bloch-bbtc-signer/btc-vault.keystore`), and attests it under the role
+`btc-vault-signer`. A compromise of the Ethereum release keys then does not open the Bitcoin vault, and the reverse.
+Cost: 7 more keystores, passwords and backups, 7 more attestations and second-channel confirmations; no new tool, host
+or key type. The operator prints the text and signs it:
+
+```
+python3 tools/signatario-btc/btc_deploy.py message --index 3 --operator signer-op3 --address 0xBTC_VAULT_KEY_ADDRESS --date 2026-11-20
+```
+```
+sudo -u bloch-busdc /opt/foundry/bin/cast wallet sign --keystore /etc/bloch-bbtc-signer/btc-vault.keystore --password-file /etc/bloch-bbtc-signer/btc-vault.password "$MSG"
+```
+
+The owner collects the 7 records (role, index, operator, address, date, attestation) into
+`deployments/bitcoin/bbtc-keys.inventory.json` (same record shape as the bUSDC inventory) and derives the keys with
+`--role btc-vault-signer` in step 3. In `vault-signer.json` the `keystore`, `password_file` and `pubkey` name the new
+key. Not checked by any tool yet: that a `btc-vault-signer` address appears in no other role (compare by hand against
+the bUSDC inventory).
+
 There is no Bitcoin guardian key: a guardian pauses bBTC with its L2 key, and the signers stop signing vault
 transactions while the token is paused.
 
