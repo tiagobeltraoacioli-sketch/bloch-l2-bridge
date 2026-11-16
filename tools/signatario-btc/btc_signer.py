@@ -21,7 +21,8 @@ Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 
      with the Bitcoin tip's median time past.
   5. Fee rate within the policy ceiling and this signer's own ceiling (a multiple of its node's estimate); a
      replacement of a pending vault transaction must pay a higher fee rate than the one it replaces.
-  6. The rebuilt transaction equals the proposal byte for byte. The decision is journaled before the key is used.
+  6. The rebuilt transaction equals the proposal byte for byte. The decision is journaled before the key is used
+     (a record for the operator; replay protection is the on-chain conflict, not this file).
 Then each input's BIP143 digest is signed with `cast wallet sign --no-hash` from the keystore (never a raw key), and
 every signature is verified against this operator's public key in the vault script before it is written. UNAUDITED.
 
@@ -231,9 +232,8 @@ def cmd_sign(cfg, args):
     tx = built['tx']
     if tx.stripped().hex() != str(proposal.get('tx', '')).lower():
         refuse('the proposed transaction is not the one the rules build from these items', ours=tx.txid())
-    prior = [s for s in signed if s['txid'] != tx.txid() and s['feerate'] >= feerate]
-    if prior:
-        refuse('this operator already signed another transaction on this tip at this fee rate or higher', prior=prior)
+    # The journal is a record, not a safety rule: any two transactions on one tip conflict on Bitcoin, and a signed
+    # transaction can become invalid (a reorganisation removed a deposit it swept), after which the tip must be reusable.
     if not any(s['txid'] == tx.txid() for s in signed):
         signed.append({'txid': tx.txid(), 'feerate': feerate, 'burns': [b['nonce'] for b in burns],
                        'deposits': [f"{d['txid']}:{d['vout']}" for d in deposits]})

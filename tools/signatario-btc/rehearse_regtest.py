@@ -665,8 +665,9 @@ def run(rig):
     id_e = r['propose'][1]['credits'][0]['deposit_id']
     rig.mine(3)
     answers, none = rig.attest(id_e, tag='e-erin-held')
-    check('E5 the next deposit takes the same nonce; every signer HOLDS its attestation while the stray mint holds the slot',
-          r['propose'][1]['credits'][0]['nonce'] == nonce_d and none is None and all('hold' in str(a.get('reason')) or 'hold' in str(a) for _, a in answers), answers[:1])
+    check('E5 the next deposit is swept on the same tip (the dead sweep no longer exists) and takes the same nonce; '
+          'every signer HOLDS its attestation while the stray mint holds the slot',
+          r['combine'] and r['combine'][0] == 0 and r['propose'][1]['credits'][0]['nonce'] == nonce_d and none is None and all('hold' in str(a.get('reason')) or 'hold' in str(a) for _, a in answers), answers[:1])
     burn_h = burn(alice_k, 10_000)
     rig.l2_mine(3)
     r = rig.vault_tx(1, burns=[burn_h], tag='e-release-held')
