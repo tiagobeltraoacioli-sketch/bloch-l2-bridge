@@ -326,8 +326,8 @@ def run(rig):
         sh(rig.cast, 'wallet', 'import', f'signer{i}', '--private-key', '0x' + k.hex(), '--keystore-dir', keys_dir,
            '--unsafe-password', f'throwaway-{i}')
     owner = c.address_from_spk('bitcoin-regtest', c.spk_from_address('bitcoin-mainnet', OWNER_MAINNET))
-    policy = {**pol.DEFAULT_POLICY, 'sweepDepth': 1, 'minConfirmations': 3, 'windowLimitSats': 150_000_000,
-              'largeReleaseSats': 50_000_000}
+    policy = {**pol.DEFAULT_POLICY, 'sweepDepth': 1, 'minConfirmations': 3, 'windowLimitSats': 100_000_000,
+              'largeReleaseSats': 30_000_000}
 
     # the anchor: the first thread output, paid to the bare 5-of-7 script; it seeds the fee pool
     thread_address = c.address_from_spk('bitcoin-regtest', c.p2wsh(c.multisig_script(5, pubs)))
@@ -342,18 +342,34 @@ def run(rig):
 
     # the L2 token: frozen bytecode, constructor arguments only
     UNIT = 1_000_000  # token units per BTC (6 decimals)
+    token_cfg = {'token': {'name': 'Bloch Bridged Bitcoin', 'symbol': 'bBTC'},
+                 'signers': {'threshold': 5, 'set': addrs},
+                 'guardians': {'set': guardians, 'pauseDuration': 259200, 'pauseCooldown': 259200},
+                 'mintSwitch': {'threshold': 6, 'delay': 1209600},
+                 'limits': {'supplyCap': 100 * UNIT, 'bucketCapacity': 1 * UNIT, 'refillPerSecond': 231,
+                            'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 500}}
+    token_path = rig.work / 'token.json'
+    token_path.write_text(json.dumps(token_cfg, indent=1))
+    rc, planned = rig.tool('btc_deploy.py', str(vault_path), 'token', '--token-config', str(token_path), '--artifact',
+                           opt('--artifact'), '--out', str(rig.work / 'token.initcode'))
     ctor = sh(rig.cast, 'abi-encode',
               'f(string,string,uint256,address,bytes32,address[],uint256,(uint256,uint256,uint256,uint256,uint256,uint256),'
               '(address[],uint256,uint256),(uint256,uint64))',
               'Bloch Bridged Bitcoin', 'bBTC', str(vault.chain_id), '0x' + vault.source_vault.hex(), '0x' + vault.route.hex(),
               '[' + ','.join(addrs) + ']', '5',
-              f'({100 * UNIT},{10 * UNIT},231,0,43200,500)', '([' + ','.join(guardians) + '],259200,259200)',
+              f'({100 * UNIT},{1 * UNIT},231,0,43200,500)', '([' + ','.join(guardians) + '],259200,259200)',
               '(6,1209600)').stdout.strip()
-    dep = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', deployer, '--json', '--create',
-                        '0x' + creation.hex() + ctor[2:]).stdout)
+    check('0 btc_deploy.py token: its constructor encoding equals cast abi-encode, byte for byte',
+          rc == 0 and planned.get('constructorArgs') == ctor, planned)
+    init_code = (rig.work / 'token.initcode').read_text().strip()
+    dep = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', deployer, '--json', '--create', init_code).stdout)
     rig.token = dep['contractAddress'].lower()
     runtime = sh(rig.cast, 'code', rig.token, '--rpc-url', rig.l2).stdout.strip()
     code_keccak = '0x' + c.keccak256(bytes.fromhex(runtime[2:])).hex()
+    rc, verified = rig.tool('btc_deploy.py', str(vault_path), 'verify', '--token-config', str(token_path), '--l2-rpc', rig.l2,
+                            '--token', rig.token)
+    check('0 btc_deploy.py verify: every immutable of the deployed token equals the plan; mint chain genesis is this vault',
+          rc == 0 and verified.get('decision') == 'ok' and verified.get('runtimeCodeKeccak') == code_keccak, verified)
     check('0 token deployed from the frozen bytecode with constructor arguments only (6 decimals, T = 0, 5 of 7, 3 guardians)',
           rig.call('decimals()(uint8)') == '6' and rig.call('symbol()(string)').strip('"') == 'bBTC'
           and int(rig.call('sourceChainId()(uint256)').split()[0]) == vault.chain_id
@@ -407,8 +423,8 @@ def run(rig):
         return round(float(rig.b('scantxoutset', 'start', json.dumps([f'addr({address})']))['total_amount']) * 1e8)
 
     # ── A. deposit -> sweep -> attested mint -> credit ───────────────────────
-    d_alice = rig.pay(dep_addr(alice), '2.00000000')
-    d_bob = rig.pay(dep_addr(bob), '0.05000000')
+    d_alice = rig.pay(dep_addr(alice), '0.90000000')
+    d_bob = rig.pay(dep_addr(bob), '0.90000000')
     d_small = rig.pay(dep_addr(bob), '0.00010000')          # below the minimum
     d_stray = rig.pay(vault.thread_address(), '0.00030000')  # sent to the bare vault address: names nobody
     check('A1 two recipients get two different deposit addresses, both plain P2WSH any wallet can pay',
@@ -428,16 +444,15 @@ def run(rig):
           r['combine'] and r['combine'][0] == 0 and sum(1 for rc, _ in r['signs'] if rc == 0) == 7, r)
     sweep = r['propose'][1]
     credits = {x['nonce']: x for x in sweep['credits']}
-    id_a = next(x['deposit_id'] for x in sweep['credits'] if x['units'] > 1_000_000)
-    id_b = next(x['deposit_id'] for x in sweep['credits'] if x['units'] < 1_000_000)
-    units_a = next(x['units'] for x in sweep['credits'] if x['deposit_id'] == id_a)
-    units_b = next(x['units'] for x in sweep['credits'] if x['deposit_id'] == id_b)
+    rig.mine(1)
+    by_recipient = {d['recipient']: d for d in rig.status()['deposits']}
+    id_a, units_a = by_recipient[alice]['deposit_id'], by_recipient[alice]['units']
+    id_b, units_b = by_recipient[bob]['deposit_id'], by_recipient[bob]['units']
     charge = 2 * (vault.deposit_vb + vault.overhead_vb)
     check('A6 credit = (deposit - 5 bps - miner charge) in 100-sat units',
-          units_a == (200_000_000 - 100_000 - charge) // 100 and units_b == (5_000_000 - 2_500 - charge) // 100, sweep)
+          units_a == units_b == (90_000_000 - 45_000 - charge) // 100 and id_a != id_b, sweep)
     check('A7 the sweep pays the 5 bps deposit fees to the owner address as an output above dust',
-          sweep['owner_paid'] >= 102_500 and len(credits) == 2, sweep)
-    rig.mine(1)
+          sweep['owner_paid'] >= 90_000 and len(credits) == 2, sweep)
     answers, call = rig.attest(id_a, tag='a-early')
     check('A8 no signer attests before the confirmation depth', call is None and all('not deep enough' in str(a) for _, a in answers), answers[:1])
     rig.mine(2)
@@ -457,10 +472,19 @@ def run(rig):
                      str(call_a['amount']), mallory, sigs, ok=False)
     check('A12 forged mints revert on the token: 4 signatures, a changed amount, a changed recipient',
           short is None and other is None and thief is None)
-    answers, call_b = rig.attest(id_b, tag='a-bob')
-    for call in sorted([call_a, call_b], key=lambda x: x['deposit_nonce']):
-        got = rig.send(deployer, call['call'][0], *call['call'][1:])
-        assert got and int(got['status'], 16) == 1
+    first_id = id_a if call_a['deposit_nonce'] == 0 else id_b
+    answers, call_first = (answers, call_a) if first_id == id_a else rig.attest(id_b, tag='a-first')
+    got = rig.send(deployer, call_first['call'][0], *call_first['call'][1:])
+    assert got and int(got['status'], 16) == 1
+    second_id = id_b if first_id == id_a else id_a
+    answers, none = rig.attest(second_id, signers=range(2), tag='a-bucket')
+    check('A12b the second 0.9 BTC mint does not fit the 1 BTC mint bucket yet: signers wait',
+          none is None and all('token bucket' in str(a) for _, a in answers), answers[:1])
+    rig.advance(4_000)
+    answers, call_second = rig.attest(second_id, tag='a-second')
+    got = rig.send(deployer, call_second['call'][0], *call_second['call'][1:])
+    assert got and int(got['status'], 16) == 1
+    call_b = call_second if second_id == id_b else call_first
     check('A13 both mints are queued (T = 0: every mint waits the 12 h delay, cancellable); nothing credited yet',
           rig.balance(alice) == 0 and int(rig.call('pendingSupply()(uint256)').split()[0]) == units_a + units_b)
     replay = rig.send(deployer, call_a['call'][0], *call_a['call'][1:], ok=False)
@@ -489,7 +513,7 @@ def run(rig):
         return {'tx': got['transactionHash'].lower(), 'id': log['topics'][1].lower(), 'nonce': int(log['topics'][2], 16),
                 'units': units, 'address': address}
 
-    burn1 = burn(alice_k, 300_000)   # 0.3 BTC
+    burn1 = burn(alice_k, 250_000)   # 0.25 BTC
     burn2 = burn(bob_k, 20_000)      # 0.02 BTC
     r = rig.vault_tx(1, burns=[burn1], tag='b-unfinal')
     check('B1 a burn that is not finalized on the L2 is not released', r['propose'][0] != 0 or all_refuse(r['signs'], 'not finalized'), r['propose'][1])
@@ -515,7 +539,7 @@ def run(rig):
     check('B6 the bump lowers each payout by exactly the rule: 5 sat/vB x (payout + overhead vbytes)',
           all(pay_low[n] - pay_high[n] == step for n in pay_low), (pay_low, pay_high, step))
     rig.mine(1)
-    exp1 = 30_000_000 - 15_000 - 6 * (vault.payout_vb + vault.overhead_vb)
+    exp1 = 25_000_000 - 12_500 - 6 * (vault.payout_vb + vault.overhead_vb)
     check('B7 the user is paid on Bitcoin: amount - 5 bps - miner charge, once', received(burn1['address']) == exp1 == pay_high[1]
           and received(burn2['address']) == pay_high[2], (received(burn1['address']), exp1))
     lowraw = json.loads((rig.work / 'b-release-low.final.json').read_text())['raw']
@@ -543,7 +567,7 @@ def run(rig):
     r = rig.sign_and_combine(p, range(5), 'b-forged-replay')
     check('B10 forged replay: a hand-made transaction paying a paid burn again is refused by every signer',
           all_refuse(r['signs'], 'already paid'), reasons(r['signs']))
-    burn3 = burn(alice_k, 100_000)
+    burn3 = burn(alice_k, 50_000)
     rig.l2_mine(3)
     good = rig.vault_tx(1, burns=[burn3], tag='b-burn3', signers=[], broadcast=False)
     prop = json.loads(Path(good['proposal']).read_text())
@@ -577,10 +601,11 @@ def run(rig):
     r = rig.sign_and_combine(good['proposal'], range(2, 7), 'b-burn3-go')
     rig.mine(1)
     check('B14 the honest release of the third burn (signers 3..7 this time) confirms', r['combine'] and r['combine'][0] == 0
-          and received(burn3['address']) == 10_000_000 - 5_000 - (vault.payout_vb + vault.overhead_vb), r)
+          and received(burn3['address']) == 5_000_000 - 2_500 - (vault.payout_vb + vault.overhead_vb), r)
 
     # ── C. pause, large-release delay, window ────────────────────────────────
-    big = burn(alice_k, 600_000)     # 0.6 BTC > largeReleaseSats (0.5 BTC)
+    big = burn(alice_k, 310_000)     # 0.31 BTC > largeReleaseSats (0.3 BTC)
+    over = burn(bob_k, 400_000)      # another large one, burned at the same time
     burn4 = burn(alice_k, 50_000)    # a later, small burn
     rig.l2_mine(3)
     assert rig.send(g1, 'pause()')
@@ -608,15 +633,13 @@ def run(rig):
     r = rig.vault_tx(1, burns=[big], tag='c-large')
     rig.mine(1)
     check('C5 after the delay the large release is signed and paid', r['combine'] and r['combine'][0] == 0
-          and received(big['address']) == 60_000_000 - 30_000 - (vault.payout_vb + vault.overhead_vb), r)
-    over = burn(alice_k, 450_000)    # with the last day's releases this passes the 1.5 BTC window
-    rig.l2_mine(3)
+          and received(big['address']) == 31_000_000 - 15_500 - (vault.payout_vb + vault.overhead_vb), r)
     r = rig.vault_tx(1, burns=[over], tag='c-window')
-    check('C6 the rolling release window (1.5 BTC here) holds the next burn', all_refuse(r['signs'], 'window is full'), reasons(r['signs']) or r['propose'])
+    check('C6 the rolling release window (1 BTC here) holds the next large burn although its delay has passed', all_refuse(r['signs'], 'window is full'), reasons(r['signs']) or r['propose'])
     rig.advance(86_400 + 60)
     r = rig.vault_tx(1, burns=[over], tag='c-window-later')
     rig.mine(1)
-    check('C7 when the window has moved on, the same burn is paid', r['combine'] and r['combine'][0] == 0 and received(over['address']) > 44_000_000, r)
+    check('C7 when the window has moved on, the same burn is paid', r['combine'] and r['combine'][0] == 0 and received(over['address']) > 39_000_000, r)
 
     # ── D. double-spend of a deposit before confirmation ─────────────────────
     d_carol = rig.pay(dep_addr(erin), '0.30000000')
