@@ -96,6 +96,8 @@ class Node:
         if len(self.elf_pin) != 64:
             raise S.Refused('the program ELF pin is undecided (program.elfSha256)')
         _, owner, data = self.account(self.a.program_id)
+        if data is None:
+            raise S.Refused('the program account does not exist at this commitment', commitment=self.commitment)
         if owner != S.UPGRADEABLE_LOADER or data is None or data[:4] != b'\x02\0\0\0' or data[4:36] != self.a.program_data:
             raise S.Refused('the program account is not an upgradeable-loader program at the expected address')
         _, owner, pd = self.account(self.a.program_data)

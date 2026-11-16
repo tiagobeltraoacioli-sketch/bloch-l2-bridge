@@ -296,6 +296,9 @@ class Config:
                 (g == 3, 'mainnet policy: exactly 3 guardians'),
                 (self.deposit_fee_bps == 5 and self.release_fee_bps == 5, 'mainnet policy: 5 + 5 bps'),
                 (on_curve(self.fee_owner), 'the fee owner is not a wallet address (off curve)'),
+                (g == 0 or self.pause_duration > self.max_valid_seconds,
+                 'mainnet policy: a guardian pause must outlast every certificate (pauseDuration > maxValidSeconds), '
+                 'so an approval it voided cannot be approved again with the same certificate'),
             ]
         return [text for ok, text in checks if not ok]
 

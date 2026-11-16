@@ -48,7 +48,7 @@ BASE = int(arg('--port-base', '42200'))
 CAST, FORGE, ANVIL = str(FOUNDRY / 'cast'), str(FOUNDRY / 'forge'), str(FOUNDRY / 'anvil')
 L2_URL = f'http://127.0.0.1:{BASE + 1}'
 SOL_URL = f'http://127.0.0.1:{BASE + 10}'
-L2_CHAIN = 700770
+L2_CHAIN = 700771  # not 700770: the signer refuses `l2_source: rpc` (tests only) on the real L2 chain id
 RESULTS = []
 PROCS = {}
 
@@ -153,7 +153,10 @@ class Sol:
 
     def tx(self, payer, ixs, extra=()):
         """Sends raw instructions; returns (custom error code or None, result)."""
-        res = S.send_and_confirm(self.rpc, payer, ixs, extra_signers=extra)
+        try:
+            res = S.send_and_confirm(self.rpc, payer, ixs, extra_signers=extra)
+        except S.Refused as e:  # for example a transaction that does not fit one packet: never sent
+            return f'not sent: {e.reason} {e.detail}', {'err': e.reason}
         if res['err'] is None:
             return None, res
         code = S.custom_error(res['err'])
@@ -279,10 +282,10 @@ class Rehearsal:
                 'sourceDomainLabel': 'solana-localnet', 'nativeDomainLabel': 'bloch-l2-700770', 'assetLabel': 'USDC',
                 'cap': 5_000 * U,
                 'signers': {'threshold': 5, 'set': [{'operator': f'op{i}', 'address': a} for i, (a, _) in enumerate(self.release_keys, 1)]},
-                'policy': {'windowLimit': 1_000 * U, 'windowSeconds': 600, 'unpauseThreshold': 6, 'minDeposit': 11 * U,
+                'policy': {'windowLimit': 1_000 * U, 'windowSeconds': 6000, 'unpauseThreshold': 6, 'minDeposit': 11 * U,
                            'l2MinBurn': 10 * U, 'largeReleaseThreshold': 300 * U, 'releaseDelay': 20, 'maxValidSeconds': 3600},
                 'guard': {'guardians': [{'operator': f'g{i}', 'address': a} for i, (a, _) in enumerate(self.guardian_keys, 1)],
-                          'pauseDuration': 25, 'pauseCooldown': 25},
+                          'pauseDuration': 45, 'pauseCooldown': 45},
                 'fees': {'owner': S.b58encode(self.fee_owner.public), 'depositBps': 5, 'releaseBps': 5}}}
         self.config_path.write_text(json.dumps(doc, indent=2) + '\n')
         self.common = ['--config', str(self.config_path), '--rpc', SOL_URL]
@@ -303,6 +306,7 @@ class Rehearsal:
         check('the program has no upgrade authority after --final', 'Authority: none' in shown, shown=shown)
         r = self.vault('init', *self.pay)
         check('init creates the vault at the address the configuration derives', r['ok'] and r.get('created') and r['vault'] == S.b58encode(self.a.vault), answer=r)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         r = self.vault('verify')
         check('verify: program final and pinned, vault equals the file', r['ok'], answer=r)
 
@@ -414,6 +418,8 @@ class Rehearsal:
             partials += ['--sig', str(f)]
         combined = WORK / f'mint-{label}.json'
         r = self.signatario(0, 'combine', *partials, '--out', str(combined))
+        if not combined.exists():
+            return {'refused': r}
         call = json.loads(combined.read_text())['call']
         receipt = l2_send(self.relayer_l2, self.token, *call, ok=False)
         return {'receipt': receipt, 'call': call}
@@ -481,6 +487,7 @@ class Rehearsal:
         blob = '0x' + ''.join(sign_raw(k, S.unhex(digest, 32)).hex() for _, k in self.stranger_keys)
         forged = l2_send(self.relayer_l2, self.token, 'mint(bytes32,uint64,uint64,address,bytes)', '0x' + '00' * 7 + '01' + '11' * 24, '1', str(50 * U), self.user_l2_addr, blob, ok=False)
         check('a mint attested by keys outside the committee is refused by the token', forged['status'] != '0x1')
+        assert 'call' in m, 'the honest deposit was not attested: nothing after this point can run'
         again = l2_send(self.relayer_l2, self.token, *m['call'], ok=False)
         check('the same mint certificate replayed is refused by the token', again['status'] != '0x1')
         r = self.credit(dep1)
@@ -497,11 +504,12 @@ class Rehearsal:
         c = self.certify_release(burn1, 'b1')
         check('5 signers certify the finalized burn', 'cert' in c, answer=c if 'cert' not in c else None)
         self.cert1 = c
+        self.n1 = int(c['doc']['release']['nonce'])
         r = self.vault('approve', '--cert', str(c['cert']), *self.pay)
         check('the relayer approves the release with the certificate', r['ok'], answer=r)
         self.evidence = {'approve': {'units': r.get('units'), 'signature': r.get('signature')}}
         before = self.sol.balance(S.associated_token_address(wallet, self.mint))
-        r = self.vault('execute', '--nonce', '0', '--owner', S.b58encode(wallet), *self.pay)
+        r = self.vault('execute', '--nonce', str(self.n1), '--owner', S.b58encode(wallet), *self.pay)
         paid = self.sol.balance(S.associated_token_address(wallet, self.mint)) - before
         check('the committed wallet is paid the burned amount less 5 bps', r['ok'] and paid == 50 * U - 25_000, paid=paid, answer=r)
         self.evidence['execute'] = {'units': r.get('units'), 'signature': r.get('signature')}
@@ -514,6 +522,7 @@ class Rehearsal:
               r['ok'] and r['feeAccountBalance'] == fees and self.sol.balance(self.a.fee_account) == fees, answer=r)
         s = self.state()
         check('backing: token balance equals locked plus fees not yet swept', s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # the monitor reads at `finalized`
         r = self.vault('reserves', '--l2-rpc', L2_URL, '--token', self.token, '--cast', CAST, '--l2-block', 'latest')
         check('reserves monitor: the L2 supply is covered by the locked backing', r['ok'] and r['lockedMinusSupply'] == 0, answer=r)
 
@@ -523,8 +532,9 @@ class Rehearsal:
         rel, ctx = self.raw_release(c['doc'])
         code, _ = self.forged_approve(rel, ctx, self.release_keys[:5])
         check('the same certificate sent again is refused on chain (AlreadyReleased)', code == 115, code=code)
-        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(0, wallet)])
+        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(self.n1, wallet)])
         check('the payment sent again is refused on chain (AlreadyReleased)', code == 115, code=code)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # signers read at `finalized`
         r = self.half(0, 'release', '--intent', str(self.write_intent(rel, ctx)))
         check('a signer refuses to certify a burn nonce that already has a release', not r['ok'], answer=r)
 
@@ -542,7 +552,7 @@ class Rehearsal:
         section('Forged releases and secp256k1 verifications that are not the vault\'s own')
         rel, ctx = self.raw_release(self.cert1['doc'])
         thief = self.thief.public
-        forged = dict(rel, nonce=1, recipient=S.account_id(thief), amount=400 * U, nativeBurn=S.sha256(b'no such burn'))
+        forged = dict(rel, nonce=77, recipient=S.account_id(thief), amount=400 * U, nativeBurn=S.sha256(b'no such burn'))
         ctx = dict(ctx, validUntil=int(time.time()) + 1200)
         auth = S.release_authorization(self.config.source_chain_id, self.a.vault20, forged, ctx)
         digest = S.eip191(auth)
@@ -572,17 +582,24 @@ class Rehearsal:
         code, _ = self.sol.tx(self.payer, [approve, S.secp_instruction(auth, junk, 1)], )
         check('the secp256k1 instruction placed after the approval (transaction fails)', code is not None, code=code)
 
-        # WRONG INSTRUCTION: the native program verifies the attacker's own signature that lives in instruction 0;
-        # the secp256k1 instruction shows the committee's addresses and the right message in the canonical places.
+        # WRONG INSTRUCTION: instruction 0 is a valid secp256k1 verification of the ATTACKER's signature over the
+        # right message; instruction 1 shows the committee's addresses and the message in the canonical places, but
+        # its five offset structures point at the attacker's signature and address in instruction 0. The native
+        # program accepts both; only the instruction-index bytes differ from an honest certificate.
         attacker_addr, attacker_key = self.stranger_keys[0]
-        other = b'\x33' * 60
-        sig = sign_raw(attacker_key, S.keccak256(other))
-        carrier = b'\x00' + sig[:64] + bytes([sig[64] - 27]) + S.unhex(attacker_addr, 20) + other
+        sig = sign_raw(attacker_key, digest)
+        message = 1 + 96 * 5
+        carrier = (b'\x01' + (12).to_bytes(2, 'little') + b'\x00' + (77).to_bytes(2, 'little') + b'\x00'
+                   + message.to_bytes(2, 'little') + (60).to_bytes(2, 'little') + b'\x01'
+                   + sig[:64] + bytes([sig[64] - 27]) + S.unhex(attacker_addr, 20))
         data = bytearray(S.secp_instruction(auth, junk, 1).data)
         for i in range(5):
             o = 1 + 11 * i
-            data[o:o + 11] = (1).to_bytes(2, 'little') + b'\x00' + (66).to_bytes(2, 'little') + b'\x00' + (86).to_bytes(2, 'little') + (60).to_bytes(2, 'little') + b'\x00'
-        code, res = self.sol.tx(self.payer, [helper(carrier), S.Instruction(S.SECP256K1_PROGRAM, [], data), approve])
+            data[o:o + 11] = ((12).to_bytes(2, 'little') + b'\x00' + (77).to_bytes(2, 'little') + b'\x00'
+                              + message.to_bytes(2, 'little') + (60).to_bytes(2, 'little') + b'\x01')
+        code, res = self.sol.tx(self.payer, [S.Instruction(S.SECP256K1_PROGRAM, [], carrier), S.Instruction(S.SECP256K1_PROGRAM, [], data)])
+        check('WRONG INSTRUCTION, control: the native program alone accepts those two secp256k1 instructions', code is None, code=code)
+        code, res = self.sol.tx(self.payer, [S.Instruction(S.SECP256K1_PROGRAM, [], carrier), S.Instruction(S.SECP256K1_PROGRAM, [], data), approve])
         check('WRONG INSTRUCTION: offsets pointing into another instruction pass the native program and are refused by the vault (InvalidCertificate)',
               code == 104, code=code)
         # one compromised committee key: five offset structures all pointing at its one real signature
@@ -605,7 +622,7 @@ class Rehearsal:
         fake = S.Instruction(approve.program_id, [m if m.key != S.INSTRUCTIONS_SYSVAR else S.Meta(self.user.public) for m in approve.metas], approve.data)
         code, _ = self.sol.tx(self.payer, [signed, fake])
         check('another account in the instructions sysvar\'s place is refused', code is not None and code != 104 and 'UnsupportedSysvar' in str(code), code=code)
-        _, owner, data_, _ = self.sol.rpc.account(self.a.release_record(1), 'confirmed')
+        _, owner, data_, _ = self.sol.rpc.account(self.a.release_record(77), 'confirmed')
         check('no forged attempt created a release record', data_ is None)
 
         section('Wrong mint, wrong token accounts, wrong recipient')
@@ -633,40 +650,56 @@ class Rehearsal:
         check('a deposit above the window limit is refused (InvalidTransfer)', r.get('error_name') == 'InvalidTransfer', answer=r)
         r = self.deposit(11 * U - 1, expect_ok=False)
         check('a deposit below the minimum is refused (InvalidTransfer)', r.get('error_name') == 'InvalidTransfer', answer=r)
+        dep3 = self.deposit(700 * U)
+        m = self.attest_and_mint(dep3, 'd3')
+        r = self.credit(dep3)
+        check('a third deposit funds the later exits', r['status'] == '0x1', mint=m)
+        self.deps.append(dep3)
         wallet, thief = self.walletB.public, self.thief.public
         ata = S.associated_token_address(wallet, self.mint)
-        # burn nonce 1: 280 (small: no delay); nonce 2: 320 (large: waits 20 s)
+        # 280 (small: no delay) and 320 (large: waits 20 s)
         small = self.certify_release(self.burn(280 * U, wallet), 'b2')
         large = self.certify_release(self.burn(320 * U, wallet), 'b3')
         assert 'cert' in small and 'cert' in large, (small, large)
+        n_small, n_large = (str(x['doc']['release']['nonce']) for x in (small, large))
         r1 = self.vault('approve', '--cert', str(small['cert']), *self.pay)
         r2 = self.vault('approve', '--cert', str(large['cert']), *self.pay)
         t_large = time.time()
         check('both releases approved', r1['ok'] and r2['ok'], small=r1, large=r2)
-        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(1, thief)])
+        code, _ = self.sol.tx(self.payer, [self.ix.execute_release(int(n_small), thief)])
         check('payment to a wallet the burn did not commit to is refused (WrongRecipient)', code == 119, code=code)
-        ix = self.ix.execute_release(1, wallet)
+        ix = self.ix.execute_release(int(n_small), wallet)
         metas = list(ix.metas)
         metas[4] = S.Meta(S.associated_token_address(thief, self.mint), False, True)
         code, _ = self.sol.tx(self.payer, [S.Instruction(ix.program_id, metas, ix.data)])
         check('the right wallet named but another token account given is refused (InvalidAccount)', code == 101, code=code)
         before = self.sol.balance(ata)
-        r = self.vault('execute', '--nonce', '1', '--owner', S.b58encode(wallet), *self.pay)
+        r = self.vault('execute', '--nonce', n_small, '--owner', S.b58encode(wallet), *self.pay)
         check('a release at or below the large threshold is paid at once', r['ok'] and self.sol.balance(ata) - before == 280 * U - 140_000, answer=r)
-        r = self.vault('execute', '--nonce', '2', '--owner', S.b58encode(wallet), *self.pay)
+        r = self.vault('execute', '--nonce', n_large, '--owner', S.b58encode(wallet), *self.pay)
         check('a release above the large threshold waits (NotReady)', not r['ok'] and r.get('error_name') == 'NotReady', answer=r)
         time.sleep(max(0, 23 - (time.time() - t_large)))
         before = self.sol.balance(ata)
-        r = self.vault('execute', '--nonce', '2', '--owner', S.b58encode(wallet), *self.pay)
+        r = self.vault('execute', '--nonce', n_large, '--owner', S.b58encode(wallet), *self.pay)
         check('and is paid after the delay', r['ok'] and self.sol.balance(ata) - before == 320 * U - 160_000, answer=r)
-        # the release bucket: 1,000 per 600 s; 50 + 280 + 320 are out, a further 380 does not fit yet
-        s = self.state()
-        self.big = self.certify_release(self.burn(380 * U, wallet), 'b4')
+        # 310 more (large): approved in the pause section, voided by the pause, certified and approved again
+        self.big_tx = self.burn(310 * U, wallet)
+        self.big = self.certify_release(self.big_tx, 'b4')
         assert 'cert' in self.big, self.big
-        # signers pre-check the bucket: they certify only what the bucket allows now, so 380 may be refused first
-        check('the L2 burn above what the release bucket allows now is not certified until it refills',
-              True, note='covered by the on-chain check below when the certificate exists')
-        self.t_big = time.time()
+        self.n_big = str(self.big['doc']['release']['nonce'])
+
+    def available_now(self):
+        s = self.state()
+        now = self.sol.rpc.block_time(s['contextSlot'])
+        refilled = s['releaseBucket'] + max(0, now - s['bucketUpdatedAt']) * self.config.window_limit // self.config.window_seconds
+        return min(refilled, self.config.window_limit)
+
+    def wait_bucket(self, amount):
+        for _ in range(200):
+            if self.available_now() >= amount:
+                return
+            time.sleep(3)
+        raise RuntimeError('the release bucket did not refill')
 
     def run_pause(self):
         section('Guardian pause')
@@ -694,34 +727,58 @@ class Rehearsal:
         check('the same pause authorization replayed is refused', not r['ok'], answer=r)
         r = self.deposit(20 * U, expect_ok=False)
         check('deposit refused while paused (Paused)', r.get('error_name') == 'Paused', answer=r)
-        r = self.vault('execute', '--nonce', '3', '--owner', S.b58encode(wallet), *self.pay)
+        r = self.vault('execute', '--nonce', self.n_big, '--owner', S.b58encode(wallet), *self.pay)
         check('payment refused while paused (Paused)', r.get('error_name') == 'Paused', answer=r)
         rel, ctx = self.raw_release(self.big['doc'])
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         r = self.half(0, 'release', '--intent', str(self.write_intent(dict(rel, nonce=9, nativeBurn=S.sha256(b'x')), ctx)))
         check('signers do not certify while the vault is paused', not r['ok'] and 'paused' in r.get('reason', ''), answer=r)
         f2 = WORK / 'pause2-early.json'
         r = self.vault('pause-sign', *self.wallet('guard', 2), '--out', str(f2))
         r = self.vault('pause-submit', '--cert', str(f2), *self.pay)
         check('a second guardian cannot stack a pause on a running one (InvalidPause)', r.get('error_name') == 'InvalidPause', answer=r)
-        time.sleep(max(0, 27 - (time.time() - t_pause)))
-        r = self.vault('execute', '--nonce', '3', '--owner', S.b58encode(wallet), *self.pay)
+        time.sleep(max(0, 47 - (time.time() - t_pause)))
+        r = self.vault('execute', '--nonce', self.n_big, '--owner', S.b58encode(wallet), *self.pay)
         check('after the pause the approval that was waiting is void (Voided)', r.get('error_name') == 'Voided', answer=r)
-        again = self.certify_release(self.big['doc']['l2']['burn_tx'] if 'l2' in self.big['doc'] else self.big_tx, 'b4-again')
-        check('the signers certify the same burn again after the pause voided its approval', 'cert' in again, answer=again if 'cert' not in again else None)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        again = self.certify_release(self.big_tx, 'b4-again')
+        check('the signers certify the same burn again after the pause voided its approval (the burn is not lost)',
+              'cert' in again, answer=again if 'cert' not in again else None)
+        assert 'cert' in again
+        check('the second certificate is for the same release (same id), under a new context',
+              again['doc']['release'] == self.big['doc']['release'] and again['doc']['digest'] != self.big['doc']['digest'])
+        # This rehearsal's pause (45 s) is shorter than a certificate's life (30 min), so the voided certificate is
+        # still valid here; with the mainnet values (72 h pause, 1 h at most) it is dead when the pause ends.
+        rel, ctx = self.raw_release(self.big['doc'])
+        code, _ = self.forged_approve(dict(rel, amount=rel['amount'] + 1), ctx, self.release_keys[:5][:4])
+        check('a voided release cannot be approved again without a threshold certificate (InvalidCertificate)', code == 104, code=code)
         r = self.vault('approve', '--cert', str(again['cert']), *self.pay)
         t = time.time()
-        check('the new certificate approves the voided release again', r['ok'], answer=r)
+        check('the voided release is approved again', r['ok'], answer=r)
+        # The release bucket: a small exit that fits now, but not once the large one before it is paid.
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        last = self.available_now() - 310 * U + 15 * U
+        assert 10 * U <= last <= 300 * U, last
+        c = self.certify_release(self.burn(last, wallet), 'b5')
+        assert 'cert' in c, c
+        n_last = str(c['doc']['release']['nonce'])
+        r = self.vault('approve', '--cert', str(c['cert']), *self.pay)
+        check('a further small release is certified (it fits the bucket now) and approved', r['ok'], amount=last, answer=r)
         time.sleep(max(0, 23 - (time.time() - t)))
         ata = S.associated_token_address(wallet, self.mint)
-        for _ in range(40):
+        before = self.sol.balance(ata)
+        r = self.vault('execute', '--nonce', self.n_big, '--owner', S.b58encode(wallet), *self.pay)
+        check('the approved-again release is paid once, after its delay', r['ok'] and self.sol.balance(ata) - before == 310 * U - 155_000, answer=r)
+        limited = 0
+        for _ in range(60):
             before = self.sol.balance(ata)
-            r = self.vault('execute', '--nonce', '3', '--owner', S.b58encode(wallet), *self.pay)
+            r = self.vault('execute', '--nonce', n_last, '--owner', S.b58encode(wallet), *self.pay)
             if r.get('error_name') != 'RateLimited':
                 break
-            self.saw_rate_limit = True
+            limited += 1
             time.sleep(5)
-        check('the release bucket refused the payment until it refilled (RateLimited), then it was paid',
-              getattr(self, 'saw_rate_limit', False) and r['ok'] and self.sol.balance(ata) - before == 380 * U - 190_000, answer=r)
+        check('the release bucket refused the next payment until it refilled (RateLimited), then it was paid',
+              limited > 0 and r['ok'] and self.sol.balance(ata) - before == last - last * 5 // 10_000, refusals=limited, answer=r)
 
         # second pause in the same chain by another guardian, ended early by 6 of 7
         f = WORK / 'pause2.json'
@@ -749,11 +806,85 @@ class Rehearsal:
         r = self.vault('pause-submit', '--cert', str(f), *self.pay)
         check('guardians wait the cooldown after a committee unpause (InvalidPause)', r.get('error_name') == 'InvalidPause', answer=r)
 
+    def daemon(self, script, cfg, *argv):
+        done = run(sys.executable, HERE / script, '--config', cfg, *argv, ok=False)
+        lines = []
+        for line in done.stdout.splitlines():
+            try:
+                lines.append(json.loads(line))
+            except ValueError:
+                pass
+        with open(WORK / 'daemons.log', 'a') as f:
+            f.write(f'## {script} {cfg.name} {" ".join(argv)} exit {done.returncode}\n{done.stdout}{done.stderr[-2000:]}\n')
+        return done.returncode, lines
+
+    def run_daemons(self):
+        section('Daemons: sol_vigia.py (sign, relay) and sol_guardiao.py (watch) with nobody in the loop')
+        (WORK / 'relayer.key').write_text(self.relayer_l2 + '\n')
+        (WORK / 'relayer.key').chmod(0o600)
+        self.vigia_cfgs = []
+        for i, (cfg, half_cfg) in enumerate(self.signer_cfgs[:5], 1):
+            doc = json.loads(cfg.read_text())
+            doc.update(shared_dir=str(WORK / 'shared'), sol_half_config=str(half_cfg), signer_name=f's{i}', token_from_block=0,
+                       l2_relayer_key=str(WORK / 'relayer.key'), sol_fee_payer=str(self.payer_path),
+                       recipient_registry=self.registry, relayer_state=str(WORK / 'relayer-nonces.json'))
+            path = WORK / f'vigia{i}.json'
+            path.write_text(json.dumps(doc))
+            self.vigia_cfgs.append(path)
+        run(CAST, 'wallet', 'import', 'l2guard1', '--private-key', self.l2_guardians[0][1], '--keystore-dir', WORK / 'keys',
+            '--unsafe-password', 'rehearsal-password')
+        self.guardian_cfg = WORK / 'guardian.json'
+        self.guardian_cfg.write_text(json.dumps({
+            'kind': 'stable', 'provenance': True, 'name': 'busdc-sol', 'l2_rpc': L2_URL, 'l2_chain_id': L2_CHAIN,
+            'token': self.token, 'vault': self.a.summary()['sourceVault'], 'keystore': str(WORK / 'keys' / 'l2guard1'),
+            'password_file': str(WORK / 'pw'), 'cast': CAST, 'state': str(WORK / 'guardian-state.json'), 'sol_rpc': SOL_URL,
+            'vault_config': str(self.config_path), 'vault_pause': True, 'sol_keystore': str(WORK / 'keys' / 'guard3'),
+            'sol_password_file': str(WORK / 'pw'), 'sol_fee_payer': str(self.payer_path), 'reserves_grace_s': 0,
+            'provenance_grace_s': 0}))
+        wallet = self.walletB.public
+        ata = S.associated_token_address(wallet, self.mint)
+        before_l2 = self.l2_balance()
+        dep = self.deposit(50 * U)
+        self.deps.append(dep)
+        self.sol.wait_finalized(dep['slot'], 8 + 2)
+        for cfg in self.vigia_cfgs:
+            self.daemon('sol_vigia.py', cfg, 'sign', '--once')
+        partials = list((WORK / 'shared' / 'mint' / dep['depositId'][2:]).glob('s*.json'))
+        check('sign daemons: 5 signers found the finalized deposit on their own and left a mint partial each', len(partials) == 5, found=len(partials))
+        earlier = [d for d in self.deps[:-1] if (WORK / 'shared' / 'mint' / d['depositId'][2:]).exists()]
+        check('sign daemons: deposits already minted were not signed again', not earlier, signed_again=len(earlier))
+        _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        l2_warp(43200 + 5)
+        _, lines2 = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        check('relay daemon: the mint is queued, then executed after the L2 delay; the deposit is credited 1:1 (net)',
+              self.l2_balance() - before_l2 == dep['net'], credited=self.l2_balance() - before_l2, log=(lines + lines2)[-6:])
+        self.wait_bucket(10 * U)
+        burn = self.burn(10 * U, wallet)
+        before = self.sol.balance(ata)
+        for cfg in self.vigia_cfgs:
+            self.daemon('sol_vigia.py', cfg, 'sign', '--once')
+        rounds = list((WORK / 'shared' / 'release').glob('*/r-*'))
+        certs = [len(list(r.glob('s*.json'))) for r in rounds]
+        check('sign daemons: one round for the new burn, opened by the first signer and joined by the other four',
+              certs == [5], rounds=[r.name for r in rounds], certs=certs)
+        _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        approve = next((x for x in lines if x.get('kind') == 'relay-approve'), {})
+        execute = next((x for x in lines if x.get('kind') == 'relay-execute' and x.get('ok')), {})
+        check('relay daemon: approve, then execute in the same pass (wallet read from the L2 registry); paid less 5 bps',
+              approve.get('ok') and execute.get('ok') and self.sol.balance(ata) - before == 10 * U - 5_000, log=lines[-6:])
+        self.evidence['daemon'] = {'approve_units': approve.get('units'), 'execute_units': execute.get('units')}
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        check('relay daemon: a further pass sends nothing (the paid record at `finalized` decides)',
+              not any(x.get('kind') in ('relay-approve', 'relay-execute', 'relay-mint') for x in lines), log=lines[-6:])
+        code, lines = self.daemon('sol_guardiao.py', self.guardian_cfg, 'check')
+        check('guardian watch: no finding on the honest history (exit 0)', code == 0, exit=code, log=lines[-6:])
+
     def run_reorg(self):
         section('Rollback after attestation (cluster restart to an earlier state)')
         s0 = self.state()
         stop('validator')
-        shutil.copytree(WORK / 'ledger', WORK / 'ledger.snapshot')
+        shutil.copytree(WORK / 'ledger', WORK / 'ledger.snapshot', ignore=shutil.ignore_patterns('admin.rpc'))  # not the admin socket
         self.sol.rpc = start_validator(reset=False)
         time.sleep(2)
         dep = self.deposit(60 * U)
@@ -775,7 +906,8 @@ class Rehearsal:
         r = self.vault('reserves', '--l2-rpc', L2_URL, '--token', self.token, '--cast', CAST, '--l2-block', 'latest')
         check('reserves monitor raises: the L2 supply exceeds the locked backing', not r['ok'] and r.get('lockedMinusSupply', 0) < 0, answer=r)
         wallet = self.walletB.public
-        burn = self.burn(30 * U, wallet)
+        self.wait_bucket(10 * U)
+        burn = self.burn(10 * U, wallet)
         c = self.certify_release(burn, 'b-held')
         check('signers hold a burn made under a mint chain the deposits do not back',
               'refused' in c and 'provenance' in json.dumps(c['refused']), answer=c)
@@ -790,6 +922,20 @@ class Rehearsal:
               dep_new['nonce'] == dep['nonce'] and m.get('receipt', {}).get('status') != '0x1', answer=m)
         s = self.state()
         check('backing on Solana intact after the rollback', s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
+        if hasattr(self, 'guardian_cfg'):
+            self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+            _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'sign', '--once')
+            held = [x for x in lines if x.get('id') == 'release-held-provenance']
+            check('sign daemon: the held burn is parked and alerted (release-held-provenance), nothing is signed for it',
+                  len(held) == 1 and not list((WORK / 'shared' / 'release' / held[0]['burn'][2:]).glob('r-*')), log=lines[-6:])
+            pauses = self.state()['pauseCount']
+            code, lines = self.daemon('sol_guardiao.py', self.guardian_cfg, 'check')
+            ids = sorted({str(x.get('id')).split(':')[0] for x in lines if x.get('kind') == 'alert'})
+            s = self.state()
+            now = self.sol.rpc.block_time(s['contextSlot'])
+            check('guardian watch: the unbacked mint is found (reserves, mint-chain) and this guardian pauses the vault by itself',
+                  code in (2, 4) and 'reserves' in ids and 'mint-chain' in ids and s['pauseCount'] == pauses + 1 and s['pausedUntil'] > now,
+                  exit=code, ids=ids, state=s, log=[x for x in lines if x.get('kind', '').startswith('vault-pause')])
 
     def l2_burn_release(self, burn_tx):
         """The release a compromised committee would sign for this burn, read from the L2 Burned log."""
@@ -823,6 +969,8 @@ def main():
         r.run_forgeries()
         r.run_limits_and_delay()
         r.run_pause()
+        if '--skip-daemons' not in sys.argv:
+            r.run_daemons()
         if '--skip-reorg' not in sys.argv:
             r.run_reorg()
         evidence = r.evidence

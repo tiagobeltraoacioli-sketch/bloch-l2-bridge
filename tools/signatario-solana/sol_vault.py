@@ -44,7 +44,9 @@ def opt(args, name, default=None, many=False):
     return found[-1] if found else default
 
 
-def out(ok, **fields):
+def out(ok, /, **fields):
+    fields.pop('ok', None)  # a transaction result carries its own 'ok'; the verdict is the first argument
+
     def clean(v):
         if isinstance(v, (bytes, bytearray)):
             return S.hx(v)
@@ -53,7 +55,7 @@ def out(ok, **fields):
         if isinstance(v, (list, tuple)):
             return [clean(x) for x in v]
         return v
-    print(json.dumps({'ok': ok, **clean(fields)}, indent=2))
+    print(json.dumps({'ok': bool(ok), **clean(fields)}, indent=2))
     raise SystemExit(0 if ok else 1)
 
 
@@ -272,7 +274,7 @@ def cmd_init(args):
         if res['err'] is not None:
             out(False, step='initialize', **res, error_name=S.VAULT_ERRORS.get(S.custom_error(res['err'])))
     node = Node(cfg, commitment='confirmed')
-    out(True, created=data is None, **a.summary(), **state_of(node))
+    out(True, created=data is None, **{**a.summary(), **state_of(node)})
 
 
 def cmd_create_fee_account(args):
