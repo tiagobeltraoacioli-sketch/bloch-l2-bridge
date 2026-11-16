@@ -98,10 +98,12 @@ class Guardian:
         fin = int(self.run([self.cast, 'block', fin_tag, '--rpc-url', l2, '--field', 'number']))
         health = self.net.health()
         start = max(int(self.cfg.get('from_ledger', 0)), int(health['oldestLedger']))
-        findings, seen = [], 0
+        findings, seen, cancelled = [], 0, set()
         while True:
             events, latest, _ = self.net.events(start)
             for e in events:
+                if e['name'] == 'release_cancelled':
+                    cancelled.add(e['topics'][0])
                 if e['name'] not in ('released', 'release_queued'):
                     continue
                 seen += 1
@@ -129,8 +131,11 @@ class Guardian:
             if not events or events[-1]['ledger'] >= latest:
                 break
             start = events[-1]['ledger'] + 1
-        print(json.dumps({'ok': not findings, 'releases_checked': seen, 'l2_finalized': fin, 'findings': findings},
-                         indent=2))
+        # A queued release the guardians already cancelled pays no one: reported, but no longer a finding.
+        done = [f for f in findings if f['release'] in cancelled and f['event'] == 'release_queued']
+        findings = [f for f in findings if f not in done]
+        print(json.dumps({'ok': not findings, 'releases_checked': seen, 'l2_finalized': fin, 'findings': findings,
+                          'cancelled': done}, indent=2))
         raise SystemExit(2 if findings else 0)
 
 

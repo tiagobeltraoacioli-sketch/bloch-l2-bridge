@@ -182,7 +182,7 @@ pub struct Release {
     pub mint_count: u64,
     pub minted_total: u64,
     pub mint_head: BytesN<32>,
-    /// 0 for the first certificate of a burn; n after n guardian cancels (at most 1).
+    /// 0 for the first certificate of a burn nonce; 1 for the one certificate allowed after a guardian cancel.
     pub generation: u32,
 }
 
@@ -888,7 +888,10 @@ impl Vault {
         let by_burn: Option<u64> = env.storage().persistent().get(&burn_key);
         let required = match (record, by_burn, item.generation) {
             (None, None, 0) => cfg.threshold,
-            (Some(r), Some(n), 1) if r.cancelled && r.generation == 0 && r.burn == item.native_burn && n == item.nonce => {
+            // After a cancel the nonce is free for ONE locked certificate. It may name another burn id than the
+            // cancelled one (a forged release that took a real burn's nonce is how a cancel comes about), as long as
+            // that id was never released under another nonce.
+            (Some(r), b, 1) if r.cancelled && r.generation == 0 && (b.is_none() || b == Some(item.nonce)) => {
                 cfg.switch_threshold
             }
             _ => fail(&env, Error::InvalidRelease),
@@ -965,8 +968,9 @@ impl Vault {
         .publish(&env);
     }
 
-    /// A majority of the guardians cancels a queued release. The burn stays recorded, so its certificate is dead;
-    /// only `switch_threshold` signers can certify it again (`generation` 1), and that one cannot be cancelled.
+    /// A majority of the guardians cancels a queued release. The nonce stays recorded, so the certificate is dead;
+    /// only `switch_threshold` signers can certify that nonce again (`generation` 1, for the same or another burn
+    /// id), and that one cannot be cancelled.
     /// Guardians move nothing and pay no one.
     pub fn cancel_release(env: Env, id: BytesN<32>, valid_until: u64, signatures: Vec<BytesN<65>>) {
         let cfg = load_config(&env);
