@@ -2,6 +2,7 @@
 """End-to-end rehearsal of the bBTC bridge: Bitcoin Core regtest <-> anvil standing in for the L2, real token bytecode.
 
   python3 rehearse_regtest.py --bitcoin-bin DIR --artifact out/BridgedStablecoinV3.sol/BridgedStablecoinV3.json
+                              --router-artifact out/BitcoinBurnRouter.sol/BitcoinBurnRouter.json
                               --work DIR [--btc-port 42110] [--l2-port 42120]
 
 Private, loopback only, throwaway keys generated here. The L2 token is `BridgedStablecoinV3` deployed from the given
@@ -14,6 +15,10 @@ Prints PASS/FAIL per check, a count at the end, exit 0 only if every check passe
   C pause, large-release delay, window              D deposit double-spend before confirmation
   E reorganisation after attestation                F forged mint by a rogue quorum, strays, proof of reserves
   G the limit an auditor must accept: a rogue quorum moves the vault (detected, not prevented)
+  S strangers' coins at the thread address from every input type, pool drain    I fees at the ceiling
+  J refunds of unswept deposits    K router burns, direct burns, claims
+The node runs with -acceptnonstdtxn=0: every vault transaction passes mainnet relay policy. Each signer has two keys in
+separate keystores: an L2 mint key and a Bitcoin vault key.
 """
 import hashlib
 import json
@@ -100,7 +105,7 @@ class Rig:
             str(self.bin / 'bitcoind'), '-regtest', f'-datadir={self.data}', f'-rpcport={self.btc_port}', '-server=1',
             '-listen=0', '-connect=0', '-dnsseed=0', '-fixedseeds=0', '-discover=0', '-listenonion=0',
             '-rpcbind=127.0.0.1', '-rpcallowip=127.0.0.1', '-txindex=1', '-fallbackfee=0.0002', '-dbcache=64',
-            '-printtoconsole=0'], stdout=log, stderr=log))
+            '-printtoconsole=0', '-acceptnonstdtxn=0'], stdout=log, stderr=log))
         for _ in range(150):
             if self.cookie.exists() and self.bcli('getblockchaininfo', ok=False).returncode == 0:
                 break
@@ -149,6 +154,21 @@ class Rig:
         vout = [i for i, (_, k) in enumerate(tx.outputs) if k == spk]
         assert len(vout) == 1
         return txid, vout[0], tx.outputs[vout[0]][0]
+
+    def pay_from(self, kind, address, sats, extra=None):
+        """A payment whose only input is of the given type ('legacy' P2PKH, 'p2sh-segwit', 'bech32' P2WPKH, 'bech32m'
+        taproot): `address` is output 0. Returns (txid, 0, sats)."""
+        src = self.b('getnewaddress', '', kind)
+        spk = self.b('getaddressinfo', src)['scriptPubKey']
+        funding = self.b('sendtoaddress', src, '%.8f' % ((sats + 50_000) / 1e8))
+        self.mine(1)
+        tx, *_ = c.parse_tx(bytes.fromhex(self.b('getrawtransaction', funding)))
+        vout = [i for i, (_, k) in enumerate(tx.outputs) if k.hex() == spk][0]
+        outs = [{address: '%.8f' % (sats / 1e8)}] + ([extra] if extra else []) + [{self.b('getnewaddress', '', 'bech32'): '0.00045000'}]
+        raw = self.b('createrawtransaction', json.dumps([{'txid': funding, 'vout': vout}]), json.dumps(outs))
+        signed = self.b('signrawtransactionwithwallet', raw)
+        assert signed['complete'], signed
+        return self.b('sendrawtransaction', signed['hex']), 0, sats
 
     def double_spend(self, txid):
         """A conflicting transaction of the same wallet: same inputs, everything back to itself, higher fee."""
@@ -205,7 +225,8 @@ class Rig:
         done = sh(sys.executable, HERE / script, '--config', cfg, *args, ok=False)
         return done.returncode, js(done)
 
-    def vault_tx(self, feerate, deposits=(), burns=(), donations=(), signers=range(5), tag='tx', broadcast=True):
+    def vault_tx(self, feerate, deposits=(), burns=(), donations=(), signers=range(5), tag='tx', broadcast=True,
+                 refunds=(), claims=()):
         """propose -> sign by each signer -> combine. Returns {'propose', 'signs': [(rc, answer)], 'combine'}."""
         self.sync_index()
         p = self.work / f'{tag}.proposal.json'
@@ -216,6 +237,10 @@ class Rig:
             argv += ['--donation', f'{d[0]}:{d[1]}']
         for burn in burns:
             argv += ['--burn', f"{burn['tx']}:{burn['id']}"]
+        for r in refunds:
+            argv += ['--refund', ':'.join(str(x) for x in r)]
+        for cl in claims:
+            argv += ['--claim', ':'.join(str(x) for x in cl)]
         rc, proposed = self.tool('btc_relay.py', self.relay_cfg, *argv)
         out = {'propose': (rc, proposed), 'signs': [], 'combine': None, 'proposal': p}
         if rc:
@@ -312,22 +337,28 @@ def run(rig):
     alice, bob, erin, mallory = (rig.addr(k) for k in (alice_k, bob_k, erin_k, mallory_k))
     guardians = [rig.addr(k) for k in (g1, g2, g3)]
 
-    # committee: 7 throwaway keys, each in its own cast keystore; the SAME key signs L2 mints and Bitcoin inputs
+    # committee: 7 operators, each with TWO throwaway keys in separate cast keystores: an L2 mint key (`signer{i}`) and
+    # a Bitcoin vault key of its own (`vault{i}`). The Bitcoin script is built from the vault keys only.
     keys_dir = rig.work / 'keys'
     keys_dir.mkdir(mode=0o700, exist_ok=True)
     privs, pubs, addrs = [], [], []
     for i in range(7):
-        k = secrets.token_bytes(32)
-        privs.append(int.from_bytes(k, 'big'))
-        pubs.append(c.pubkey(privs[-1]))
-        addrs.append(c.eth_address(pubs[-1]))
-        (keys_dir / f'pw{i}').write_text(f'throwaway-{i}')
-        os.chmod(keys_dir / f'pw{i}', 0o600)
-        sh(rig.cast, 'wallet', 'import', f'signer{i}', '--private-key', '0x' + k.hex(), '--keystore-dir', keys_dir,
-           '--unsafe-password', f'throwaway-{i}')
+        for name, vault_key in ((f'signer{i}', False), (f'vault{i}', True)):
+            k = secrets.token_bytes(32)
+            if vault_key:
+                privs.append(int.from_bytes(k, 'big'))
+                pubs.append(c.pubkey(privs[-1]))
+            else:
+                addrs.append(c.eth_address(c.pubkey(int.from_bytes(k, 'big'))))
+            (keys_dir / f'{name}.pw').write_text(f'throwaway-{name}')
+            os.chmod(keys_dir / f'{name}.pw', 0o600)
+            sh(rig.cast, 'wallet', 'import', name, '--private-key', '0x' + k.hex(), '--keystore-dir', keys_dir,
+               '--unsafe-password', f'throwaway-{name}')
+    check('0 separate keys: no Bitcoin vault key is an L2 mint key', not {c.eth_address(p) for p in pubs} & set(addrs))
     owner = c.address_from_spk('bitcoin-regtest', c.spk_from_address('bitcoin-mainnet', OWNER_MAINNET))
     policy = {**pol.DEFAULT_POLICY, 'sweepDepth': 1, 'minConfirmations': 3, 'windowLimitSats': 100_000_000,
               'largeReleaseSats': 30_000_000, 'maxDepositSats': 100_000_000, 'capSats': 10_000_000_000}
+    assert policy['maxFeerate'] == 200 and policy['minDepositSats'] == 100_000
 
     # the anchor: the first thread output, paid to the bare 5-of-7 script; it seeds the fee pool
     thread_address = c.address_from_spk('bitcoin-regtest', c.p2wsh(c.multisig_script(5, pubs)))
@@ -347,7 +378,7 @@ def run(rig):
                  'guardians': {'set': guardians, 'pauseDuration': 259200, 'pauseCooldown': 259200},
                  'mintSwitch': {'threshold': 6, 'delay': 1209600},
                  'limits': {'supplyCap': 100 * UNIT, 'bucketCapacity': 1 * UNIT, 'refillPerSecond': 231,
-                            'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 500}}
+                            'largeMintThreshold': 0, 'largeMintDelay': 43200, 'minBurn': 1000}}
     token_path = rig.work / 'token.json'
     token_path.write_text(json.dumps(token_cfg, indent=1))
     rc, planned = rig.tool('btc_deploy.py', str(vault_path), 'token', '--token-config', str(token_path), '--artifact',
@@ -357,7 +388,7 @@ def run(rig):
               '(address[],uint256,uint256),(uint256,uint64))',
               'Bloch Bridged Bitcoin', 'bBTC', str(vault.chain_id), '0x' + vault.source_vault.hex(), '0x' + vault.route.hex(),
               '[' + ','.join(addrs) + ']', '5',
-              f'({100 * UNIT},{1 * UNIT},231,0,43200,500)', '([' + ','.join(guardians) + '],259200,259200)',
+              f'({100 * UNIT},{1 * UNIT},231,0,43200,1000)', '([' + ','.join(guardians) + '],259200,259200)',
               '(6,1209600)').stdout.strip()
     check('0 btc_deploy.py token: its constructor encoding equals cast abi-encode, byte for byte',
           rc == 0 and planned.get('constructorArgs') == ctor, planned)
@@ -376,6 +407,13 @@ def run(rig):
           and rig.call('sourceRoute()(bytes32)') == '0x' + vault.route.hex())
     note(f"token {rig.token}, creation gas {int(dep['gasUsed'], 16)}")
 
+    # the exit door: BitcoinBurnRouter over the token, for this network's address prefix
+    rart = json.loads(Path(opt('--router-artifact')).read_text())
+    rctor = sh(rig.cast, 'abi-encode', 'f(address,string)', rig.token, 'bcrt').stdout.strip()
+    rdep = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', deployer, '--json', '--create',
+                         rart['bytecode']['object'] + rctor[2:]).stdout)
+    rig.router = rdep['contractAddress'].lower()
+    router_keccak = '0x' + c.keccak256(bytes.fromhex(sh(rig.cast, 'code', rig.router, '--rpc-url', rig.l2).stdout.strip()[2:])).hex()
     rig.mint_cfg, rig.half_cfg, rig.signer_cfg = [], [], []
     for i in range(7):
         half = rig.work / f'half{i}.json'
@@ -388,21 +426,23 @@ def run(rig):
             'source_chain_id': vault.chain_id, 'source_vault': '0x' + vault.source_vault.hex(),
             'source_route': '0x' + vault.route.hex(), 'threshold': 5, 'provenance': True, 'l2_source': 'rpc',
             'db': str(rig.work / f'mint{i}.db.json'), 'keystore': str(keys_dir / f'signer{i}'),
-            'password_file': str(keys_dir / f'pw{i}'), 'cast': rig.cast,
+            'password_file': str(keys_dir / f'signer{i}.pw'), 'cast': rig.cast,
             'eth_half_deposit': [sys.executable, str(HERE / 'btc_half.py'), '--config', str(half), 'deposit',
                                  '--deposit-id', '{deposit_id}']}))
         signer = rig.work / f'signer{i}.json'
         signer.write_text(json.dumps({'vault': str(vault_path), 'btc_rpc': rig.btc_url, 'btc_cookie': str(rig.cookie),
-                                      'signatario_config': str(mint), 'keystore': str(keys_dir / f'signer{i}'),
-                                      'password_file': str(keys_dir / f'pw{i}'), 'pubkey': pubs[i].hex(),
+                                      'signatario_config': str(mint), 'keystore': str(keys_dir / f'vault{i}'),
+                                      'password_file': str(keys_dir / f'vault{i}.pw'), 'pubkey': pubs[i].hex(),
                                       'journal': str(rig.work / f'signer{i}.journal.json'), 'cast': rig.cast,
-                                      'feerate_ceiling': 30}))
+                                      'burn_router': rig.router, 'burn_router_code_keccak': router_keccak,
+                                      'feerate_without_estimate': 200}))
         rig.mint_cfg.append(str(mint))
         rig.half_cfg.append(str(half))
         rig.signer_cfg.append(str(signer))
     rig.relay_cfg = str(rig.work / 'relay.json')
     Path(rig.relay_cfg).write_text(json.dumps({'vault': str(vault_path), 'btc_rpc': rig.btc_url, 'btc_cookie': str(rig.cookie),
-                                               'l2_rpc': rig.l2, 'token': rig.token, 'token_from_block': 0}))
+                                               'l2_rpc': rig.l2, 'token': rig.token, 'token_from_block': 0,
+                                               'l2_chain_id': L2_CHAIN, 'burn_router': rig.router}))
     rig.advance(60)  # one clock from here on
 
     def dep_addr(who):
@@ -422,9 +462,40 @@ def run(rig):
         rig.sync_index()
         return round(float(rig.b('scantxoutset', 'start', json.dumps([f'addr({address})']))['total_amount']) * 1e8)
 
+    # ── S. strangers' coins at the public thread address (review R325-BTC-1) ─
+    # Sent BEFORE anything else and never removed: every later step runs with them in the UTXO set.
+    hostile = []
+    for kind in ('legacy', 'p2sh-segwit', 'bech32', 'bech32m'):
+        hostile.append(rig.pay_from(kind, vault.thread_address(), 546))
+    fake = c.Marker(7, 3, 123_456, 0, 1, {5}).encode()
+    hostile.append(rig.pay_from('legacy', vault.thread_address(), 600, extra={'data': fake[2:].hex()}))  # output 1 looks like a marker
+    rig.b('generatetoaddress', 1, vault.thread_address())                                             # a coinbase paying the thread address
+    rig.mine(2)
+    st = rig.status()
+    rc, res = rig.reserves()
+    check('S1 546-sat strays at the thread address from legacy, nested-segwit, segwit and taproot inputs, a fake marker and '
+          'a coinbase: every tool still runs (status, reserves), none is taken for the thread',
+          st.get('ok') is True and st['tip'] == a_txid and rc == 0 and res['status'] == 'ok', (st, res))
+    r = rig.vault_tx(200, donations=[(hostile[0][0], 0)], tag='s-drain')
+    check('S2 pool drain (review R325-BTC-3): a 546-sat stray cannot be swept at a fee the pool would pay',
+          r['propose'][0] != 0 and 'does not pay for its own input' in r['propose'][1].get('reason', ''), r['propose'][1])
+    p = rig.work / 's-drain-forced.proposal.json'
+    p.write_text(json.dumps({'kind': 'btc-vault-proposal', 'version': 1, 'tip': a_txid, 'feerate': 200, 'deposits': [],
+                             'donations': [{'txid': hostile[0][0], 'vout': 0}], 'burns': [], 'tx': '00', 'txid': '00'}))
+    r = rig.sign_and_combine(p, range(5), 's-drain-forced')
+    check('S3 the same proposal made by hand is refused by every signer', all_refuse(r['signs'], 'does not pay for its own input'),
+          reasons(r['signs']))
+    r = rig.vault_tx(1, donations=[(hostile[1][0], 0), (hostile[2][0], 0)], tag='s-strays-pay')
+    rig.mine(1)
+    rc, res2 = rig.reserves()
+    check('S4 two strays swept at 1 sat/vB pay the whole transaction themselves: the pool does not fall. The thread now has '
+          'a nested-segwit-funded parent, and the tools keep running',
+          r['combine'] and r['combine'][0] == 0 and rc == 0 and res2['fee_pool_sats'] + res2['fees_due_sats'] >= res['fee_pool_sats']
+          and rig.status()['tip'] == r['propose'][1]['txid'], (r, res2))
+
     # ── A. deposit -> sweep -> attested mint -> credit ───────────────────────
-    d_alice = rig.pay(dep_addr(alice), '0.90000000')
-    d_bob = rig.pay(dep_addr(bob), '0.90000000')
+    d_alice = rig.pay_from('legacy', dep_addr(alice), 90_000_000)        # paid from a P2PKH input
+    d_bob = rig.pay_from('p2sh-segwit', dep_addr(bob), 90_000_000)     # paid from a nested-segwit input
     d_small = rig.pay(dep_addr(bob), '0.00010000')          # below the minimum
     d_huge = rig.pay(dep_addr(bob), '1.50000000')           # above the maximum (it could never fit the mint bucket)
     d_stray = rig.pay(vault.thread_address(), '0.00030000')  # sent to the bare vault address: names nobody
@@ -510,12 +581,26 @@ def run(rig):
     note(f"reserves: vault {res['vault_sats']} sat = supply {res['l2_supply_units']} units x 100 + fees due {res['fees_due_sats']} + pool {res['fee_pool_sats']}")
 
     # ── B. burn -> release; stuck release; replay; forgeries ─────────────────
-    def burn(key, units):
-        address, h160 = user_hash()
-        got = rig.send(key, 'burn(uint64,address)', str(units), h160)
+    def burn_log(got, units, address):
         log = next(l for l in got['logs'] if l['address'].lower() == rig.token and len(l['topics']) == 4)
         return {'tx': got['transactionHash'].lower(), 'id': log['topics'][1].lower(), 'nonce': int(log['topics'][2], 16),
                 'units': units, 'address': address}
+
+    def burn(key, units):
+        """An exit as the bridge page does it: approve the router, then burnTo(amount, bitcoin address)."""
+        address, h160 = user_hash()
+        assert rig.send(key, 'approve(address,uint256)', rig.router, str(units))
+        got = json.loads(sh(rig.cast, 'send', rig.router, 'burnTo(uint64,string)', str(units), address, '--rpc-url', rig.l2,
+                            '--private-key', key, '--json').stdout)
+        return burn_log(got, units, address)
+
+    def burn_direct(key, units, recipient20):
+        """A burn made straight on the token, as a script written for bUSDC would: 20 unchecked bytes."""
+        got = rig.send(key, 'burn(uint64,address)', str(units), recipient20)
+        return burn_log(got, units, None)
+
+    def personal_sign(key, text):
+        return sh(rig.cast, 'wallet', 'sign', '--private-key', key, text).stdout.strip()
 
     burn1 = burn(alice_k, 250_000)   # 0.25 BTC
     burn2 = burn(bob_k, 20_000)      # 0.02 BTC
@@ -621,7 +706,7 @@ def run(rig):
 
     def committee_sigs(digest, members):
         return '0x' + ''.join(sh(rig.cast, 'wallet', 'sign', '--no-hash', '--keystore', keys_dir / f'signer{i}',
-                                 '--password-file', keys_dir / f'pw{i}', digest).stdout.strip()[2:] for i in members)
+                                 '--password-file', keys_dir / f'signer{i}.pw', digest).stdout.strip()[2:] for i in members)
 
     five = rig.send(deployer, 'unpause(bytes)', committee_sigs(digest, by_addr[:5]), ok=False)
     six = rig.send(deployer, 'unpause(bytes)', committee_sigs(digest, by_addr[:6]), ok=False)
@@ -686,7 +771,7 @@ def run(rig):
     check('E3 signers no longer attest it', none is None and all(rc for rc, _ in answers), answers[:1])
     rc, res = rig.reserves()
     check('E4 the reserves monitor reports the bridge HELD (a queued mint without a ledger deposit)', rc == 2 and res['status'] == 'held', res)
-    d_erin = rig.pay(dep_addr(erin), '0.20000000')
+    d_erin = rig.pay_from('bech32m', dep_addr(erin), 20_000_000)        # paid from a taproot input
     rig.mine(1)
     r = rig.vault_tx(1, deposits=[(d_erin[0], d_erin[1], erin)], tag='e-erin-sweep')
     id_e = r['propose'][1]['credits'][0]['deposit_id']
@@ -753,6 +838,89 @@ def run(rig):
     note('final reserves line: ' + json.dumps(res))
     note(f'owner address holds {paid_to(owner)} sat of fees after the run')
     (rig.work / 'reserves-final.json').write_text(json.dumps(res, indent=1))
+
+    # ── I. fees (review R325-BTC-2, -3) ──────────────────────────────────────
+    pool0 = res['fee_pool_sats']
+    small = burn(bob_k, 1_000)       # the smallest burn the token accepts: 0.001 BTC
+    rig.l2_mine(3)
+    r = rig.vault_tx(201, burns=[small], tag='i-over')
+    check('I1 no vault transaction above the policy fee ceiling (200 sat/vB)', r['propose'][0] != 0 and 'fee rate' in r['propose'][1].get('reason', ''))
+    r = rig.vault_tx(200, burns=[small], tag='i-ceiling')
+    rig.mine(1)
+    rc, res = rig.reserves()
+    check('I2 the smallest burn lands at the fee ceiling: 100,000 - 50 - 200 x 402 = 19,550 sat paid; the pool did not fall',
+          r['combine'] and r['combine'][0] == 0 and received(small['address']) == 19_550 == 100_000 - 50 - 200 * (vault.payout_vb + vault.overhead_vb)
+          and rc == 0 and res['fee_pool_sats'] >= pool0, (r, res))
+
+    # ── J. refunds (review R325-BTC-4) ───────────────────────────────────────
+    def refund_request(dep, recipient, key):
+        address, _ = user_hash()
+        text = sh(sys.executable, HERE / 'btc_relay.py', '--config', rig.relay_cfg, 'refund-text', '--outpoint', f'{dep[0]}:{dep[1]}',
+                  '--to', address).stdout.strip()
+        return (dep[0], dep[1], recipient, address, personal_sign(key, text)), address
+
+    forged_request, _ = refund_request(d_huge, bob, mallory_k)
+    r = rig.vault_tx(1, refunds=[forged_request], tag='j-forged')
+    check('J1 a refund not signed by the L2 address the deposit names is refused by every signer',
+          all_refuse(r['signs'], 'not signed by the L2 address'), reasons(r['signs']) or r['propose'])
+    req_small, to_small = refund_request(d_small, bob, bob_k)
+    req_huge, to_huge = refund_request(d_huge, bob, bob_k)
+    before = rig.status()
+    r = rig.vault_tx(1, refunds=[req_small, req_huge], tag='j-refund')
+    rig.mine(1)
+    after = rig.status()
+    cost = vault.deposit_vb + vault.payout_vb + vault.overhead_vb
+    check('J2 the deposits below the minimum and above the maximum go back to the address their L2 recipient signed for, '
+          'less 5 bps and the miner charge; nobody is credited',
+          r['combine'] and r['combine'][0] == 0 and received(to_small) == 10_000 - 5 - cost
+          and received(to_huge) == 150_000_000 - 75_000 - cost and len(after['deposits']) == len(before['deposits'])
+          and after['marker']['liabilities'] == before['marker']['liabilities'], r)
+    r = rig.vault_tx(1, refunds=[req_huge], tag='j-again')
+    rc, res = rig.reserves()
+    check('J3 a refunded deposit cannot be refunded or swept again; reserves stay exact and count 2 refunds',
+          r['propose'][0] != 0 and rc == 0 and res['refunded_deposits'] == 2 and res['identity_vault'] and res['identity_books'], (r['propose'][1], res))
+
+    # ── K. where a burn is paid (review R325-BTC-5) ──────────────────────────
+    bad = sh(rig.cast, 'send', rig.router, 'burnTo(uint64,string)', '5000', alice, '--rpc-url', rig.l2, '--private-key', alice_k,
+             '--json', ok=False)
+    check('K1 the router refuses an Ethereum address as the Bitcoin destination: nothing is burned', bad.returncode != 0)
+    wrong = burn_direct(alice_k, 5_000, alice)   # straight on the token, naming her own ETHEREUM address
+    rig.l2_mine(3)
+    r = rig.vault_tx(1, burns=[wrong], tag='k-blind')
+    check('K2 a burn made directly on the token is not paid blind to the 20 bytes it names',
+          all_refuse(r['signs'], 'signs for'), reasons(r['signs']) or r['propose'])
+
+    def claim(b, key):
+        address, _ = user_hash()
+        text = sh(sys.executable, HERE / 'btc_relay.py', '--config', rig.relay_cfg, 'claim-text', '--nonce', b['nonce'], '--to',
+                  address).stdout.strip()
+        return (b['id'], address, personal_sign(key, text)), address
+
+    stolen_claim, _ = claim(wrong, mallory_k)
+    r = rig.vault_tx(1, burns=[wrong], claims=[stolen_claim], tag='k-stolen')
+    check('K3 a claim signed by anyone but the burner is refused', all_refuse(r['signs'], 'not signed by the account that burned'),
+          reasons(r['signs']) or r['propose'])
+    good_claim, to_claim = claim(wrong, alice_k)
+    r = rig.vault_tx(1, burns=[wrong], claims=[good_claim], tag='k-claim')
+    rig.mine(1)
+    check('K4 the burner signs a claim for a real Bitcoin address and is paid there: the mistaken burn is rescued',
+          r['combine'] and r['combine'][0] == 0 and received(to_claim) == 500_000 - 250 - (vault.payout_vb + vault.overhead_vb), r)
+    named_addr, named = user_hash()
+    unclaimed = burn_direct(bob_k, 2_000, named)
+    rig.l2_mine(3)
+    r = rig.vault_tx(1, burns=[unclaimed], tag='k-unclaimed-early')
+    early = all_refuse(r['signs'], 'signs for')
+    rig.advance(policy['directBurnClaimSeconds'] + 60)
+    r = rig.vault_tx(1, burns=[unclaimed], tag='k-unclaimed')
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    check('K5 an unclaimed direct burn waits the claim window (3 days), then the 20 bytes it names are paid; the reserves '
+          'report lists the burn that was paid to a claimed address',
+          early and r['combine'] and r['combine'][0] == 0 and received(named_addr) == 200_000 - 100 - (vault.payout_vb + vault.overhead_vb)
+          and rc == 0 and res['direct_burns_paid_to_a_claimed_address'] == [wrong['nonce']], (r, res))
+    (rig.work / 'reserves-final.json').write_text(json.dumps(res, indent=1))
+    note('final reserves line: ' + json.dumps(res))
 
     # ── G. the limit an auditor must accept ──────────────────────────────────
     st = rig.status()

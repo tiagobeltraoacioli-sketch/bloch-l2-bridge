@@ -140,9 +140,9 @@ def cmd_token(args, verify=False):
         refuse('token limits out of range')
     # a burn must be payable: its 10% miner-charge cap must cover at least 1 sat/vB, and its payout must clear dust
     try:
-        pol.release_payout(vault, lim['minBurn'], 1)
+        pol.release_payout(vault, lim['minBurn'], p['maxFeerate'])  # the smallest burn lands at the fee ceiling
     except pol.PolicyError as e:
-        refuse(f'token minBurn is too small for the vault policy: {e.reason}')
+        refuse(f'token minBurn is too small: the smallest burn must be payable at the policy fee ceiling ({e.reason})')
     if p['maxDepositSats'] > lim['bucketCapacity'] * unit:
         refuse('a deposit of maxDepositSats would not fit the token mint bucket: its mint could never queue and would block every later one')
     if p['capSats'] != lim['supplyCap'] * unit:

@@ -106,4 +106,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (btc_vault.NodeError, btc_vault.Held, btc_l2.L2Error, pol.PolicyError) as e:
+        answer(False, reason=f'hold: {e}')
+    except (ValueError, KeyError, TypeError, IndexError, OSError) as e:
+        answer(False, reason=f'refused: {type(e).__name__}: {str(e)[:200]}')

@@ -25,7 +25,11 @@ amount and recipient, and its sweep must still be in this node's chain. Otherwis
 arguments of `voteCancelMint`; a guardian daemon (tools/guardiao) casts the vote. A reorganisation that removed an
 attested sweep is caught here during the token's mint delay. UNAUDITED.
 
-Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "tolerance_units": 0}
+Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "tolerance_units": 0,
+         "burn_router": address}
+
+Not on the vault's books and reported apart: coins at deposit addresses that were never swept. They are spendable by
+the same five keys; each is refundable at its L2 recipient's signed request (btc_relay.py --refund).
 """
 import json
 from pathlib import Path
@@ -73,6 +77,21 @@ def main():
     except btc_l2.L2Error as e:
         emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=str(e))
     known = {b['nonce'] for b in burns}
+    # Every payout against the L2 burn it settles (R325-BTC-6): the amount always; the key hash for a burn made through
+    # the router. A direct burn may be paid to another address, the one its burner signed a claim for: listed, since the
+    # claim is not on either chain.
+    by_nonce = {b['nonce']: b for b in burns}
+    router = str(cfg.get('burn_router', '')).lower()
+    wrong, redirected = [], []
+    for e in view.entries[1:]:
+        for x in e['build']['payouts']:
+            b = by_nonce.get(x['nonce'])
+            if b is None:
+                continue  # reported as a phantom below
+            if b['units'] != x['units'] or (b['from'] == router and b['recipient'] != x['spk'][2:]):
+                wrong.append({'nonce': x['nonce'], 'txid': e['txid']})
+            elif b['recipient'] != x['spk'][2:]:
+                redirected.append(x['nonce'])
     phantom = sorted(n for n in list(range(1, marker.burn_base + 1)) + sorted(marker.paid) if n not in known)
     unpaid = sum(b['units'] for b in burns if not marker.is_paid(b['nonce']))
     paid = sum(b['units'] for b in burns if marker.is_paid(b['nonce']))
@@ -86,7 +105,12 @@ def main():
             'deposits': len(credits), 'credited_units': credited, 'paid_burn_units': paid, 'l2_mint_count': count,
             'l2_minted_total': total, 'vault_transactions': len(view.entries) - 1,
             'identity_vault': tip['value'] == owed + marker.owner_due + pool and pool >= 0,
-            'identity_books': owed == (credited - paid) * unit and not phantom}
+            'identity_books': owed == (credited - paid) * unit and not phantom,
+            'refunded_deposits': sum(len(e['build']['refunds']) for e in view.entries[1:]),
+            'direct_burns_paid_to_a_claimed_address': redirected}
+    if wrong:
+        emit(2, **line, status='deficit', reason='a payout does not match the L2 burn it settles (amount, or the key hash of a '
+             'router burn)', payouts=wrong[:20])
     if problem or count > len(credits) or head != pol.mint_chain(vault, credits[:count])[count][2]:
         emit(2, **line, status='held', reason=problem or 'the token mint chain is not the ledger chain')
     if phantom:
@@ -128,4 +152,7 @@ def guard(cfg, token, credits):
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (btc_vault.NodeError, btc_l2.L2Error, ValueError, KeyError, TypeError, IndexError, OSError) as e:
+        emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=f'{type(e).__name__}: {str(e)[:200]}')

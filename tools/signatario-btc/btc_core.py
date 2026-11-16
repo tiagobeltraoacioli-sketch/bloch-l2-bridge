@@ -567,3 +567,37 @@ def parse_tx(raw):
     # the identity of the transaction as serialized (any version, sequence or locktime), not as the vault would write it
     tx.parsed_txid = sha256d(raw[:4] + raw[body_start:body_end] + raw[-4:])[::-1].hex()
     return tx, version, locktime, sequences
+
+
+# ── signed requests from L2 accounts (EIP-191 personal messages) ─────────────
+
+
+def personal_digest(text):
+    data = text.encode()
+    return keccak256(b'\x19Ethereum Signed Message:\n' + str(len(data)).encode() + data)
+
+
+def signer_of(text, signature_hex):
+    """The Ethereum address that signed `text` as a personal message (`cast wallet sign TEXT`, any wallet's personal_sign)."""
+    sig = bytes.fromhex(str(signature_hex).removeprefix('0x'))
+    return eth_address(recover(personal_digest(text), *parse_rsv(sig)))
+
+
+def refund_text(vault_id, txid, vout, bitcoin_address):
+    """What the L2 recipient of an unswept deposit signs to have it sent back."""
+    return (f'bloch.bbtc.refund.v1: refund the deposit {txid}:{vout} of vault {vault_id.hex()} '
+            f'to the Bitcoin address {bitcoin_address}')
+
+
+def claim_text(vault_id, l2_chain_id, token, burn_nonce, bitcoin_address):
+    """What the burner of a burn made directly on the token (not through the router) signs to be paid."""
+    return (f'bloch.bbtc.claim.v1: pay burn {burn_nonce} of token {token.lower()} on chain {l2_chain_id} '
+            f'(vault {vault_id.hex()}) to the Bitcoin address {bitcoin_address}')
+
+
+def p2wpkh_hash(network, bitcoin_address):
+    """The 20-byte key hash of a P2WPKH address of this network; anything else raises BadAddress."""
+    spk = spk_from_address(network, bitcoin_address)
+    if not is_standard_payout(spk) or not any(spk[2:]):
+        raise BadAddress('not a P2WPKH address')
+    return spk[2:]

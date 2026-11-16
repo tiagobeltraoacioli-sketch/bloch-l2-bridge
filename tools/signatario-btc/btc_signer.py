@@ -19,17 +19,22 @@ Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 
      deposits up to there are final (else HOLD: a credited mint has no deposit behind it); the token agrees with the
      ledger at the finalized block; not paid yet (the marker); large-release delay and the rolling window, measured
      with the Bitcoin tip's median time past.
-  5. Fee rate within the policy ceiling and this signer's own ceiling (a multiple of its node's estimate); a
-     replacement of a pending vault transaction must pay a higher fee rate than the one it replaces.
+  3b. Every refund: the outpoint is an unswept deposit of the recipient named, and the request (outpoint, Bitcoin
+     address) is signed by that L2 address.
+  4b. Burn destination: a burn made through the pinned BitcoinBurnRouter is paid to the key hash the router checked;
+     a burn made directly on the token is paid to the address its burner signs a claim for, or, unclaimed after
+     `directBurnClaimSeconds`, to the 20 bytes it names. The pause is read again on the verified L2.
+  5. Fee rate at most 1.5 times this signer's own node's estimate and the policy ceiling (a mainnet signer without an
+     estimate signs nothing); a replacement of a pending vault transaction must pay a higher fee rate than it.
   6. The rebuilt transaction equals the proposal byte for byte. The decision is journaled before the key is used
      (a record for the operator; replay protection is the on-chain conflict, not this file).
 Then each input's BIP143 digest is signed with `cast wallet sign --no-hash` from the keystore (never a raw key), and
 every signature is verified against this operator's public key in the vault script before it is written. UNAUDITED.
 
 Config: {"vault": path, "btc_rpc", "btc_cookie", "signatario_config": path of this operator's signatario.py config for
-the bBTC token (provenance true), "keystore", "password_file", "pubkey": this operator's compressed key (hex),
-"journal": path, "cast": path, "feerate_ceiling": sat/vB allowed when the node has no estimate (default 30),
-"fee_estimate_factor": 3}
+the bBTC token (provenance true), "keystore", "password_file" (the operator's Bitcoin vault key, a key of its own),
+"pubkey": that key, compressed (hex), "burn_router": address, "burn_router_code_keccak": hex, "journal": path,
+"cast": path, "feerate_without_estimate": sat/vB ceiling on a private test network whose node has no estimate}
 """
 import json
 import os
@@ -107,12 +112,20 @@ def journal_save(path, data):
     os.replace(tmp, path)
 
 
-def fee_ceiling(cfg, node, policy):
-    ceiling = int(cfg.get('feerate_ceiling', 30))
+def fee_ceiling(cfg, node, vault):
+    """The highest fee rate this signer signs now: 1.5 times its own node's estimate for confirmation within two
+    blocks, never above the policy ceiling. The relayer proposes a fee rate; it cannot take it above the market, so it
+    cannot make users overpay miners. Without an estimate a mainnet signer signs nothing; a private test network uses
+    the configured `feerate_without_estimate`."""
     est = node.call('estimatesmartfee', 2)
     if est and est.get('feerate') is not None:
-        ceiling = max(ceiling, int(est['feerate'] * 100_000 * int(cfg.get('fee_estimate_factor', 3))) + 1)
-    return min(ceiling, policy['maxFeerate'])
+        sat_vb = float(est['feerate']) * 100_000
+        ceiling = max(1, int(sat_vb * 3 / 2 + 0.999999))
+    elif vault.network == 'bitcoin-mainnet':
+        refuse('hold: this node has no fee estimate; no fee rate can be checked against the market')
+    else:
+        ceiling = int(cfg.get('feerate_without_estimate', 1))
+    return min(ceiling, vault.policy['maxFeerate'])
 
 
 def cmd_sign(cfg, args):
@@ -129,6 +142,10 @@ def cmd_sign(cfg, args):
     if not ctx.provenance or ctx.source_chain_id != vault.chain_id or ctx.source_route != '0x' + vault.route.hex() \
             or ctx.source_vault != '0x' + vault.source_vault.hex():
         refuse('the signatario config is not for this vault (source chain, vault, route, provenance)')
+    if vault.network == 'bitcoin-mainnet' and (ctx.pins is None or ctx.l2_chain_id != 700770
+                                               or ctx.cfg.get('l2_source', 'rebuild') != 'rebuild'):
+        refuse('a mainnet vault is signed for only with the launch pins on chain 700770 and a rebuilt L2 (l2_pins, l2_source)')
+    router = signatario.address(cfg.get('burn_router', ''), 'burn_router')
 
     # 1. the vault as this node sees it
     try:
@@ -173,6 +190,25 @@ def cmd_sign(cfg, args):
             refuse('a stray input is not a confirmed unspent output at the thread script', outpoint=f'{txid}:{vout}')
         donations.append({'txid': txid, 'vout': vout, 'value': got[0]})
 
+    # 3b. refunds: an unswept deposit goes back only at the signed request of the L2 address it names
+    refunds = []
+    for d in proposal.get('refunds', []):
+        txid, vout = hex_bytes(d.get('txid', ''), 32, 'refund txid').hex(), signatario.uint(d.get('vout'), 32, 'vout')
+        recipient = hex_bytes(d.get('recipient', ''), 20, 'recipient')
+        got = node.unspent(txid, vout)
+        if got is None or got[1] < p['sweepDepth']:
+            refuse('a refund outpoint is not a confirmed unspent output of this chain', outpoint=f'{txid}:{vout}')
+        if got[2] != c.p2wsh(vault.deposit_script(recipient)):
+            refuse('a refund outpoint is not the deposit address of the recipient named', outpoint=f'{txid}:{vout}')
+        try:
+            dest = c.p2wpkh_hash(vault.network, d.get('to', ''))
+            signer = c.signer_of(c.refund_text(vault.vault_id, txid, vout, d['to']), d.get('signature', ''))
+        except (c.BadAddress, c.BadKey, ValueError, KeyError):
+            refuse('a refund request is malformed: it needs a P2WPKH address of this network and a signature')
+        if signer != '0x' + recipient.hex():
+            refuse('a refund is not signed by the L2 address the deposit names', outpoint=f'{txid}:{vout}', signer=signer)
+        refunds.append({'txid': txid, 'vout': vout, 'value': got[0], 'recipient': recipient, 'dest': dest})
+
     # 4. burns
     burns, proc, work = [], None, None
     refs = proposal.get('burns', [])
@@ -188,6 +224,15 @@ def cmd_sign(cfg, args):
                 refuse(f'hold: {e}')
             if problem:
                 refuse('hold: ' + problem)
+            try:  # the pause and the router, read again on the L2 this signer verified itself
+                if final_token[0].uint('paused()'):
+                    refuse('hold: the token is paused by a guardian; no vault transaction is signed during a pause')
+                code = final_token[0].rpc('eth_getCode', [router, final_token[1]])
+                if code in ('0x', '') or '0x' + c.keccak256(bytes.fromhex(code[2:])).hex() != str(cfg['burn_router_code_keccak']).lower():
+                    refuse('hold: the burn router code differs from the pinned hash')
+            except btc_l2.L2Error as e:
+                refuse(f'hold: {e}')
+            claims = {str(r.get('burn_id', '')).lower(): r.get('claim') for r in refs}
             now, gross_total = view.at['mtp'], 0
             for release, l2, burn_time in verified:
                 count = release['mintCount']
@@ -201,8 +246,32 @@ def cmd_sign(cfg, args):
                 if now < ready:
                     refuse('a large release is still in its delay', nonce=release['nonce'], ready_at=ready, now=now)
                 gross_total += release['amount'] * p['unitSats']
-                burns.append({'nonce': release['nonce'], 'units': release['amount'],
-                              'recipient': bytes.fromhex(release['recipient'][2:])})
+                # Where the coins go. Through the router the destination was checked as a Bitcoin address before the
+                # burn. A burn made directly on the token names 20 unchecked bytes (possibly an Ethereum address): it
+                # is paid to the address its burner signs for, or, unclaimed after the claim window, to those bytes.
+                named = bytes.fromhex(release['recipient'][2:])
+                claim = claims.get(release['nativeBurn'])
+                if l2['from'] == router:
+                    if claim:
+                        refuse('a burn made through the router takes no claim', nonce=release['nonce'])
+                    destination = named
+                elif claim:
+                    try:
+                        destination = c.p2wpkh_hash(vault.network, claim.get('to', ''))
+                        who = c.signer_of(c.claim_text(vault.vault_id, ctx.l2_chain_id, ctx.token, release['nonce'], claim['to']),
+                                          claim.get('signature', ''))
+                    except (c.BadAddress, c.BadKey, ValueError, KeyError, AttributeError):
+                        refuse('a burn claim is malformed: it needs a P2WPKH address of this network and a signature')
+                    if who != l2['from']:
+                        refuse('a burn claim is not signed by the account that burned', nonce=release['nonce'], signer=who)
+                else:
+                    payable = pol.direct_burn_payable_at(p, burn_time)
+                    if now < payable:
+                        refuse('a burn made directly on the token (not through the router) is paid to the address its burner '
+                               'signs for, or to the 20 bytes it names once the claim window has passed',
+                               nonce=release['nonce'], payable_at=payable, now=now)
+                    destination = named
+                burns.append({'nonce': release['nonce'], 'units': release['amount'], 'recipient': destination})
             ok, used = pol.window_allows(p, view.releases(), gross_total, now)
             if not ok:
                 refuse('the release window is full; retry later', used=used, limit=p['windowLimitSats'])
@@ -214,9 +283,9 @@ def cmd_sign(cfg, args):
             shutil.rmtree(work, ignore_errors=True)
 
     # 5. fee rate
-    ceiling = fee_ceiling(cfg, node, p)
+    ceiling = fee_ceiling(cfg, node, vault)
     if not 1 <= feerate <= ceiling:
-        refuse('the fee rate is above what this signer accepts now', feerate=feerate, ceiling=ceiling)
+        refuse('the fee rate is above what this signer accepts now (1.5 times its own estimate)', feerate=feerate, ceiling=ceiling)
     journal = journal_load(cfg['journal'])
     signed = journal['tips'].setdefault(tip['txid'], [])
     if view.pending is not None and feerate <= view.pending['marker'].feerate:
@@ -226,7 +295,7 @@ def cmd_sign(cfg, args):
 
     # 6. rebuild and compare
     try:
-        built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate)
+        built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds)
     except pol.PolicyError as e:
         refuse(f'the rules refuse this transaction: {e.reason}', wait=e.wait, **e.detail)
     tx = built['tx']
@@ -257,6 +326,7 @@ def cmd_sign(cfg, args):
               'credits': [{'nonce': x['nonce'], 'deposit_id': '0x' + x['deposit_id'].hex(), 'units': x['units']}
                           for x in built['credits']],
               'payouts': [{'nonce': x['nonce'], 'sats': x['sats']} for x in built['payouts']],
+              'refunds': [{'outpoint': f"{x['txid']}:{x['vout']}", 'sats': x['sats']} for x in built['refunds']],
               'owner_paid': built['owner_paid'], 'fee': built['fee']}
     out_path.write_text(json.dumps(record, indent=2) + '\n')
     print(json.dumps(record, indent=2))
@@ -266,7 +336,13 @@ def main():
     args = sys.argv[1:]
     if not args or 'sign' not in args:
         raise SystemExit(__doc__)
-    cmd_sign(json.loads(Path(signatario.option(args, '--config')).read_text()), args)
+    try:
+        cmd_sign(json.loads(Path(signatario.option(args, '--config')).read_text()), args)
+    except (btc_vault.NodeError, btc_vault.Held, btc_l2.L2Error, pol.PolicyError) as e:
+        refuse(f'hold: {e}')
+    except (ValueError, KeyError, TypeError, IndexError, OSError) as e:
+        # nothing read from a chain, a proposal or a node may end a signer with a traceback
+        refuse(f'refused: {type(e).__name__}: {str(e)[:200]}')
 
 
 if __name__ == '__main__':

@@ -44,6 +44,8 @@ DEFAULT_POLICY = {
     'windowLimitSats': 200_000_000,
     'largeReleaseSats': 50_000_000,
     'largeReleaseDelaySeconds': 43_200,
+    'directBurnClaimSeconds': 259_200,  # a burn made directly on the token (not through the router) waits this long
+                                        # for its burner's signed claim; after it the 20 bytes it names are paid
     'maxDepositsPerTx': 20,
     'maxReleasesPerTx': 40,
 }
@@ -378,6 +380,11 @@ def release_ready_at(policy, burn_time, units):
     behind the wall clock, so a large release waits the delay plus that lag: the conservative side."""
     large = units * policy['unitSats'] > policy['largeReleaseSats']
     return burn_time + policy['largeReleaseDelaySeconds'] if large else 0
+
+
+def direct_burn_payable_at(policy, burn_time):
+    """Earliest clock time an unclaimed direct burn is paid to the 20 bytes it names."""
+    return burn_time + policy['directBurnClaimSeconds']
 
 
 def window_allows(policy, recent, candidate_sats, now):

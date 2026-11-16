@@ -3,7 +3,10 @@
 
   python3 btc_relay.py --config RELAY.json address --recipient 0xL2ADDRESS
   python3 btc_relay.py --config RELAY.json propose --feerate N [--deposit TXID:VOUT:0xRECIPIENT ...]
-                        [--donation TXID:VOUT ...] [--burn 0xBURNTX:0xBURNID ...] --out PROPOSAL.json
+                        [--donation TXID:VOUT ...] [--burn 0xBURNTX:0xBURNID ...] [--claim 0xBURNID:ADDRESS:0xSIG ...]
+                        [--refund TXID:VOUT:0xRECIPIENT:ADDRESS:0xSIG ...] --out PROPOSAL.json
+  python3 btc_relay.py --config RELAY.json refund-text --outpoint TXID:VOUT --to ADDRESS      what the L2 recipient signs
+  python3 btc_relay.py --config RELAY.json claim-text --nonce N --to ADDRESS                  what a direct burner signs
   python3 btc_relay.py --config RELAY.json burns                       unpaid finalized burns, for `propose`
   python3 btc_relay.py --config RELAY.json combine --proposal P.json --partial A.json [...] --out TX.json [--broadcast]
 
@@ -13,7 +16,8 @@ verifies every signature against the vault script before it assembles the witnes
 transaction (`testmempoolaccept`) before any broadcast. A higher `--feerate` on the same tip is a replacement (BIP125):
 it conflicts with the earlier transaction by construction. UNAUDITED.
 
-Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n}
+Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "l2_chain_id": n,
+         "burn_router": address}
 """
 import json
 from pathlib import Path
@@ -61,6 +65,15 @@ def main():
         print(json.dumps({'ok': True, 'recipient': '0x' + recipient.hex(), 'deposit_address': vault.deposit_address(recipient),
                           'witness_script': vault.deposit_script(recipient).hex(), 'min_deposit_sats': vault.policy['minDepositSats']}))
         return
+    if 'refund-text' in args:
+        txid, vout = option(args, '--outpoint').split(':')
+        c.p2wpkh_hash(vault.network, option(args, '--to'))
+        print(c.refund_text(vault.vault_id, txid, int(vout), option(args, '--to')))
+        return
+    if 'claim-text' in args:
+        c.p2wpkh_hash(vault.network, option(args, '--to'))
+        print(c.claim_text(vault.vault_id, int(cfg['l2_chain_id']), cfg['token'], int(option(args, '--nonce')), option(args, '--to')))
+        return
     node = btc_vault.Node(cfg['btc_rpc'], cfg['btc_cookie'], vault.network, broadcast='--broadcast' in args)
     try:
         view = btc_vault.VaultView(vault, node).load()
@@ -69,14 +82,28 @@ def main():
     tip = view.tip_state()
 
     if 'burns' in args:
+        router = str(cfg.get('burn_router', '')).lower()
         print(json.dumps({'ok': True, 'unpaid': [{'nonce': b['nonce'], 'units': b['units'], 'burn_tx': b['tx'],
-                                                  'burn_id': b['burn_id'], 'recipient': '0x' + b['recipient'].hex()}
+                                                  'burn_id': b['burn_id'], 'recipient': '0x' + b['recipient'].hex(),
+                                                  'through_router': b['from'] == router, 'from': b['from']}
                                                  for b in unpaid_burns(cfg, view)]}, indent=2))
         return
 
     if 'propose' in args:
         feerate = int(option(args, '--feerate'))
-        deposits, donations, burns, refs = [], [], [], []
+        deposits, donations, burns, refs, refunds, refund_refs = [], [], [], [], [], []
+        claims = {}
+        for cl in options(args, '--claim'):
+            burn_id, to, sig = cl.split(':')
+            claims[burn_id.lower()] = {'to': to, 'signature': sig}
+        for r in options(args, '--refund'):
+            txid, vout, recipient, to, sig = r.split(':')
+            got = node.unspent(txid, int(vout))
+            if got is None:
+                fail('refund outpoint not found unspent', outpoint=r)
+            refunds.append({'txid': txid, 'vout': int(vout), 'value': got[0], 'recipient': bytes.fromhex(recipient.removeprefix('0x')),
+                            'dest': c.p2wpkh_hash(vault.network, to)})
+            refund_refs.append({'txid': txid, 'vout': int(vout), 'recipient': recipient.lower(), 'to': to, 'signature': sig})
         for d in options(args, '--deposit'):
             txid, vout, recipient = d.split(':')
             got = node.unspent(txid, int(vout))
@@ -98,23 +125,28 @@ def main():
                 if (burn_tx, burn_id) not in known:
                     fail('burn not found among the unpaid finalized burns', burn=w)
                 b = known[(burn_tx, burn_id)]
-                burns.append({'nonce': b['nonce'], 'units': b['units'], 'recipient': b['recipient']})
-                refs.append({'burn_tx': burn_tx, 'burn_id': burn_id, 'nonce': b['nonce']})
+                claim = claims.get(burn_id)
+                destination = c.p2wpkh_hash(vault.network, claim['to']) if claim else b['recipient']
+                burns.append({'nonce': b['nonce'], 'units': b['units'], 'recipient': destination})
+                refs.append({'burn_tx': burn_tx, 'burn_id': burn_id, 'nonce': b['nonce'], **({'claim': claim} if claim else {})})
         try:
-            built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate)
+            built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds)
         except pol.PolicyError as e:
             fail(f'the rules refuse this transaction: {e.reason}', wait=e.wait, **e.detail)
         proposal = {'kind': 'btc-vault-proposal', 'version': 1, 'tip': tip['txid'], 'feerate': feerate,
                     'deposits': [{'txid': d['txid'], 'vout': d['vout'], 'recipient': '0x' + d['recipient'].hex()}
                                  for d in sorted(deposits, key=lambda d: (d['txid'], d['vout']))],
                     'donations': [{'txid': d['txid'], 'vout': d['vout']} for d in donations],
+                    'refunds': sorted(refund_refs, key=lambda d: (d['txid'], d['vout'])),
                     'burns': sorted(refs, key=lambda r: r['nonce']), 'tx': built['tx'].stripped().hex(),
                     'txid': built['tx'].txid(), 'fee': built['fee'], 'owner_paid': built['owner_paid'],
                     'replaces': view.pending['txid'] if view.pending else None}
         Path(option(args, '--out')).write_text(json.dumps(proposal, indent=2) + '\n')
         print(json.dumps({'ok': True, **{k: proposal[k] for k in ('txid', 'tip', 'feerate', 'fee', 'owner_paid', 'replaces')},
                           'credits': [{'nonce': x['nonce'], 'units': x['units'], 'deposit_id': '0x' + x['deposit_id'].hex()} for x in built['credits']],
-                          'payouts': [{'nonce': x['nonce'], 'sats': x['sats']} for x in built['payouts']]}, indent=2))
+                          'payouts': [{'nonce': x['nonce'], 'sats': x['sats']} for x in built['payouts']],
+                          'refunds': [{'outpoint': f"{x['txid']}:{x['vout']}", 'sats': x['sats']} for x in built['refunds']],
+                          'pool': built['pool']}, indent=2))
         return
 
     if 'combine' in args:
@@ -127,7 +159,8 @@ def main():
                 fail('an input has no parent on this node')
             prevouts.append(parent['tx'].outputs[vout])
         ordered = sorted(proposal['deposits'], key=lambda d: (d['txid'], d['vout']))  # the builder's input order
-        scripts = [vault.thread_script] + [vault.deposit_script(bytes.fromhex(d['recipient'][2:])) for d in ordered] \
+        back = sorted(proposal.get('refunds', []), key=lambda d: (d['txid'], d['vout']))
+        scripts = [vault.thread_script] + [vault.deposit_script(bytes.fromhex(d['recipient'][2:])) for d in ordered + back] \
             + [vault.thread_script] * len(proposal['donations'])
         if len(scripts) != len(tx.inputs) or any(c.p2wsh(s) != spk for s, (_, spk) in zip(scripts, prevouts)):
             fail('the proposal inputs do not match the vault scripts')
@@ -164,4 +197,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (btc_vault.NodeError, btc_vault.Held, btc_l2.L2Error, pol.PolicyError) as e:
+        fail(f'hold: {e}')
+    except (ValueError, KeyError, TypeError, IndexError, OSError, c.BadAddress, c.BadKey) as e:
+        fail(f'refused: {type(e).__name__}: {str(e)[:200]}')
