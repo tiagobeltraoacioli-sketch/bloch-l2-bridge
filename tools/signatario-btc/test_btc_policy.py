@@ -9,7 +9,7 @@ import btc_policy as pol
 
 PRIVS = [int.from_bytes(hashlib.sha256(b'throwaway-btc-signer-%d' % i).digest(), 'big') % c.N for i in range(7)]
 KEYS = [c.pubkey(k) for k in PRIVS]
-OWNER = 'bcrt1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx229k7gu9'
+OWNER = 'bcrt1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22tkfggv'
 
 
 def owner_regtest():
