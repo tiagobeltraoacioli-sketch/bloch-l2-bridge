@@ -1,0 +1,11 @@
+{
+  "_about": "One per signer operator. btc_half.py: the source half of signatario.py mint for bBTC. No key.",
+  "vault": "/etc/bloch-bbtc-signer/bbtc-vault-mainnet.config.json",
+  "btc_rpc": "http://127.0.0.1:8332",
+  "btc_cookie": "/var/lib/bitcoind/.cookie (the operator's own Bitcoin Core, txindex=1, readable by the signer user only)",
+  "l2_rpc": "TBD-owner (an L2 RPC, as in the bUSDC signer config)",
+  "token": "TBD-deploy (bBTC address)",
+  "l2_chain_id": 700770,
+  "token_code_keccak": "TBD-deploy",
+  "journal": "/var/lib/bloch-bbtc-signer/btc-half.journal.json"
+}

@@ -1,0 +1,47 @@
+{
+  "domain": "bloch.bridge.btc-vault.v1",
+  "notes": {
+    "status": "UNAUDITED. Nothing is deployed. Proposed values; the owner confirms every one before the anchor is funded, because the policy hash, the keys, the anchor and the fee address are all inside the L2 token's sourceRoute and can never change.",
+    "keys": "TBD-owner: the 7 compressed public keys of the committee's Ethereum release signer keys, printed by `btc_deploy.py keys --inventory deployments/mainnet/busdc-keys.inventory.json`. The same keystores sign Bitcoin inputs with `cast wallet sign --no-hash`.",
+    "anchor": "TBD-deploy: the single output that funds the thread address (docs/BTC-BRIDGE-DEPLOYMENT.md step 3).",
+    "owner_address": "Owner input 2026-11-16 (BRIEF-ROUND16.md): the Bitcoin fee address. P2WPKH. It is committed by the route; confirm it on a second channel before funding the anchor.",
+    "policy": "Limits in sats. capSats and maxDepositSats must equal the token's supplyCap and bucketCapacity times 100 (btc_deploy.py token checks it). Proposed as the Ethereum bridge's launch values at roughly 100,000 USD per BTC: cap 1 BTC, window 0.1 BTC a day; the owner sets the reference price and confirms."
+  },
+  "network": "bitcoin-mainnet",
+  "threshold": 5,
+  "keys": [
+    "TBD-owner",
+    "TBD-owner",
+    "TBD-owner",
+    "TBD-owner",
+    "TBD-owner",
+    "TBD-owner",
+    "TBD-owner"
+  ],
+  "anchor": null,
+  "owner_address": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
+  "policy": {
+    "version": 1,
+    "unitSats": 100,
+    "depositFeeBps": 5,
+    "releaseFeeBps": 5,
+    "minDepositSats": 20000,
+    "maxDepositSats": 10000000,
+    "capSats": 100000000,
+    "maxChargeBps": 1000,
+    "dustSats": 546,
+    "ownerPayoutMinSats": 10000,
+    "poolTargetSats": 200000,
+    "maxFeerate": 500,
+    "sweepDepth": 2,
+    "minConfirmations": 6,
+    "satsPerExtraConfirmation": 100000000,
+    "maxConfirmations": 144,
+    "windowSeconds": 86400,
+    "windowLimitSats": 10000000,
+    "largeReleaseSats": 5000000,
+    "largeReleaseDelaySeconds": 43200,
+    "maxDepositsPerTx": 20,
+    "maxReleasesPerTx": 40
+  }
+}
