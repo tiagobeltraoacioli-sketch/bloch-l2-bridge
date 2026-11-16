@@ -276,7 +276,7 @@ def address_from_spk(network, spk):
 # ── scripts ──────────────────────────────────────────────────────────────────
 OP_DROP, OP_CHECKMULTISIG, OP_RETURN = 0x75, 0xae, 0x6a
 THREAD_TAG = b'bloch.bbtc.vault.v1'
-MARKER_TAG = b'BBTC\x01'
+MARKER_TAG = b'BBTC\x02'  # version 2: the operations byte (burns set aside, late payments)
 MAX_KEYS = 15
 
 
@@ -400,49 +400,72 @@ def vsize(n_thread_like, n_deposit, out_spk_lens, threshold, thread_script_len, 
 
 
 # ── the marker: the vault's state, carried by every vault transaction ────────
-MAX_BITMAP = 41  # bytes; 80-byte OP_RETURN payload limit of the oldest relay policy still deployed
+MARKER_PAYLOAD = 80  # bytes; the OP_RETURN payload limit of the oldest relay policy still deployed
+MARKER_FIXED = 40    # tag, four 8-byte fields, the fee rate, the operations byte
+MAX_BITMAP = MARKER_PAYLOAD - MARKER_FIXED  # bytes of bitmap when the transaction sets nothing aside and pays no late burn
+MAX_LATE = 4         # late payments (burns set aside earlier) one vault transaction may carry
 
 
 class Marker:
-    """State after a vault transaction.
+    """State after a vault transaction, and what the transaction did to the burns that were set aside.
 
     next_deposit  nonce the next swept deposit takes (deposit nonces are 0, 1, 2, ...)
-    burn_base     every burn nonce <= burn_base is paid (burn nonces start at 1)
-    liabilities   sats owed to L2 holders: credited deposits minus paid burns, in sats (100 per token unit)
+    burn_base     every burn nonce <= burn_base is SETTLED: paid, or set aside (burn nonces start at 1)
+    liabilities   sats owed for L2 value: credited deposits minus paid burns, in sats (100 per token unit). A burn that
+                  is set aside and not yet paid is still inside this number: its coins stay in the vault
     owner_due     fee sats owed to the owner's address and not yet paid out
     feerate       sat/vB this transaction charged its items (lets anyone recompute every credit and payout)
-    paid          burn nonces > burn_base already paid (a set; encoded as a bitmap)
+    paid          burn nonces > burn_base already settled (a set; encoded as a bitmap)
+
+    Two fields describe THIS transaction only (they are not state; the set of burns set aside and still unpaid is
+    rebuilt by replaying the thread, btc_policy.replay_tx):
+    aside_through 0, or a burn nonce T: every nonce in (parent's burn_base, T] that the parent had not settled is set
+                  aside by this transaction: counted as settled so the window moves on, NOT paid, payable later
+    late          burn nonces set aside by an earlier transaction that this transaction pays (ascending, at most 4)
     """
 
-    def __init__(self, next_deposit=0, burn_base=0, liabilities=0, owner_due=0, feerate=0, paid=()):
+    def __init__(self, next_deposit=0, burn_base=0, liabilities=0, owner_due=0, feerate=0, paid=(), aside_through=0, late=()):
         self.next_deposit, self.burn_base = next_deposit, burn_base
         self.liabilities, self.owner_due, self.feerate = liabilities, owner_due, feerate
         self.paid = frozenset(paid)
+        self.aside_through, self.late = aside_through, tuple(late)
 
     def normalised(self):
         base, paid = self.burn_base, set(self.paid)
         while base + 1 in paid:
             base += 1
             paid.discard(base)
-        return Marker(self.next_deposit, base, self.liabilities, self.owner_due, self.feerate, paid)
+        return Marker(self.next_deposit, base, self.liabilities, self.owner_due, self.feerate, paid, self.aside_through, self.late)
 
     def is_paid(self, nonce):
+        """Settled in the marker: paid, or set aside. Whether a settled burn was PAID needs the replayed set of
+        burns set aside (`settled_unpaid` of the thread state): see btc_policy.burn_paid."""
         return nonce <= self.burn_base or nonce in self.paid
 
     def encode(self):
         m = self.normalised()
-        for v, bits in ((m.next_deposit, 64), (m.burn_base, 64), (m.liabilities, 64), (m.owner_due, 64), (m.feerate, 16)):
+        for v, bits in ((m.next_deposit, 64), (m.burn_base, 64), (m.liabilities, 64), (m.owner_due, 64), (m.feerate, 16),
+                        (m.aside_through, 64)):
             if not 0 <= v < 1 << bits:
                 raise ValueError('marker field out of range')
-        bitmap = bytearray(MAX_BITMAP)
+        late = list(m.late)
+        if len(late) > MAX_LATE or late != sorted(set(late)) or any(not 0 < n < 1 << 64 for n in late):
+            raise ValueError('at most 4 late payments per vault transaction, ascending')
+        ops = bytes([(0x80 if m.aside_through else 0) | len(late)])
+        if m.aside_through:
+            ops += m.aside_through.to_bytes(8, 'big')
+        ops += b''.join(n.to_bytes(8, 'big') for n in late)
+        room = MARKER_PAYLOAD - (MARKER_FIXED - 1) - len(ops)
+        bitmap = bytearray(room)
         for n in m.paid:
             i = n - m.burn_base - 1
-            if not 0 <= i < 8 * MAX_BITMAP:
-                raise ValueError('a paid burn lies outside the marker window; pay the older burns first')
+            if not 0 <= i < 8 * room:
+                raise ValueError('a paid burn lies outside the marker window; pay the older burns first, or set aside '
+                                 'the ones that cannot be paid now')
             bitmap[i // 8] |= 1 << (i % 8)
         payload = (MARKER_TAG + m.next_deposit.to_bytes(8, 'big') + m.burn_base.to_bytes(8, 'big')
                    + m.liabilities.to_bytes(8, 'big') + m.owner_due.to_bytes(8, 'big') + m.feerate.to_bytes(2, 'big')
-                   + bytes(bitmap).rstrip(b'\0'))
+                   + ops + bytes(bitmap).rstrip(b'\0'))
         return bytes([OP_RETURN]) + (bytes([len(payload)]) if len(payload) < 76 else b'\x4c' + bytes([len(payload)])) + payload
 
     @staticmethod
@@ -451,19 +474,35 @@ class Marker:
             raise ValueError('not a marker')
         body = spk[2:] if spk[1] < 76 else spk[3:]
         declared = spk[1] if spk[1] < 76 else (spk[2] if spk[1] == 0x4c and len(spk) > 2 else -1)
-        if declared != len(body) or not 39 <= len(body) <= 39 + MAX_BITMAP or body[:5] != MARKER_TAG:
+        if declared != len(body) or not MARKER_FIXED <= len(body) <= MARKER_PAYLOAD or body[:5] != MARKER_TAG:
             raise ValueError('not a marker')
         f = lambda o, n: int.from_bytes(body[o:o + n], 'big')
-        base = f(13, 8)
-        paid = {base + 1 + i for i in range(8 * (len(body) - 39)) if body[39 + i // 8] >> (i % 8) & 1}
-        m = Marker(f(5, 8), base, f(21, 8), f(29, 8), f(37, 2), paid)
-        if m.encode() != spk:
+        base, ops, at = f(13, 8), body[39], MARKER_FIXED
+        if ops & 0x70 or (ops & 0x0f) > MAX_LATE:
+            raise ValueError('non-canonical marker')
+        through = 0
+        if ops & 0x80:
+            through, at = f(at, 8), at + 8
+        late = []
+        for _ in range(ops & 0x0f):
+            late.append(f(at, 8))
+            at += 8
+        if at > len(body):
+            raise ValueError('non-canonical marker')
+        paid = {base + 1 + i for i in range(8 * (len(body) - at)) if body[at + i // 8] >> (i % 8) & 1}
+        m = Marker(f(5, 8), base, f(21, 8), f(29, 8), f(37, 2), paid, through, late)
+        try:
+            same = m.encode() == spk
+        except ValueError:
+            same = False
+        if not same:
             raise ValueError('non-canonical marker')
         return m
 
     def as_dict(self):
         return {'next_deposit': self.next_deposit, 'burn_base': self.burn_base, 'liabilities': self.liabilities,
-                'owner_due': self.owner_due, 'feerate': self.feerate, 'paid': sorted(self.paid)}
+                'owner_due': self.owner_due, 'feerate': self.feerate, 'paid': sorted(self.paid),
+                'aside_through': self.aside_through, 'late': list(self.late)}
 
 
 # ── L2 identities (what BridgedStablecoinV3 binds) ───────────────────────────
@@ -587,12 +626,6 @@ def refund_text(vault_id, txid, vout, bitcoin_address):
     """What the L2 recipient of an unswept deposit signs to have it sent back."""
     return (f'bloch.bbtc.refund.v1: refund the deposit {txid}:{vout} of vault {vault_id.hex()} '
             f'to the Bitcoin address {bitcoin_address}')
-
-
-def claim_text(vault_id, l2_chain_id, token, burn_nonce, bitcoin_address):
-    """What the burner of a burn made directly on the token (not through the router) signs to be paid."""
-    return (f'bloch.bbtc.claim.v1: pay burn {burn_nonce} of token {token.lower()} on chain {l2_chain_id} '
-            f'(vault {vault_id.hex()}) to the Bitcoin address {bitcoin_address}')
 
 
 def p2wpkh_hash(network, bitcoin_address):

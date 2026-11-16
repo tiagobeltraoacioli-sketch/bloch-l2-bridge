@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {BitcoinBurnRouter} from "../contracts/btc/BitcoinBurnRouter.sol";
 
@@ -46,7 +46,7 @@ contract BitcoinBurnRouterTest {
 
     function setUp() public {
         token = new RouterTestToken();
-        router = new BitcoinBurnRouter(address(token), "bc");
+        router = new BitcoinBurnRouter(address(token), "bc", 100, 5, 402, 546, 200);
     }
 
     function test_decodesTheBip173VectorAndTheOwnersFeeAddress() public view {
@@ -78,10 +78,12 @@ contract BitcoinBurnRouterTest {
         vm.prank(user);
         token.approve(address(router), 3_000);
         vm.prank(user);
-        bytes32 id = router.burnTo(3_000, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+        bytes32 id = router.burnTo(3_000, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 50);
         require(id != 0 && token.lastAmount() == 3_000 && token.lastBurner() == address(router));
         require(token.lastRecipient() == address(bytes20(hex"751e76e8199196d454941c45d1b3a323f1433bd6")));
         require(token.balanceOf(user) == 2_000 && token.balanceOf(address(router)) == 0);
+        require(router.maxFeeRateOf(id) == 50, "the burner's fee ceiling is recorded under the burn id");
+        require(router.maxFeeRateOf(bytes32(uint256(1))) == 0, "an unknown burn id has no ceiling");
     }
 
     function test_aBadAddressBurnsNothing() public {
@@ -91,14 +93,118 @@ contract BitcoinBurnRouterTest {
         token.approve(address(router), 3_000);
         vm.prank(user);
         vm.expectRevert(BitcoinBurnRouter.NotAP2wpkhAddress.selector);
-        router.burnTo(3_000, "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544");
+        router.burnTo(3_000, "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544", 50);
         require(token.balanceOf(user) == 5_000);
     }
 
     function test_regtestPrefix() public {
-        BitcoinBurnRouter r = new BitcoinBurnRouter(address(token), "bcrt");
+        BitcoinBurnRouter r = new BitcoinBurnRouter(address(token), "bcrt", 100, 5, 402, 546, 200);
         require(r.keyHashOf("bcrt1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22tkfggv") == bytes20(hex"906600553abcaea9c4ab138875ac72adfc72194a"));
         vm.expectRevert(BitcoinBurnRouter.NotAP2wpkhAddress.selector);
         r.keyHashOf("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+    }
+
+    // ── R325-BTC-2P-2: the burner bounds the miner charge ───────────────────
+    function test_quoteIsTheVaultRule() public view {
+        // btc_policy.release_payout: gross - floor(gross * bps / 10000) - fee rate x 402
+        (uint256 payout, uint256 fee, uint256 charge) = router.quote(1_000, 200);
+        require(payout == 19_550 && fee == 50 && charge == 80_400, "smallest burn at the ceiling");
+        (payout, fee, charge) = router.quote(250_000, 6);
+        require(payout == 25_000_000 - 12_500 - 2_412 && fee == 12_500 && charge == 2_412);
+        (payout,,) = router.quote(1, 200);
+        require(payout == 0, "never underflows");
+    }
+
+    function test_aFeeCeilingOutsideOneToThePolicyCeilingIsRefused() public {
+        address user = address(0xA11CE);
+        token.give(user, 5_000);
+        vm.prank(user);
+        token.approve(address(router), 5_000);
+        vm.prank(user);
+        vm.expectRevert(BitcoinBurnRouter.BadFeeRate.selector);
+        router.burnTo(3_000, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 0);
+        vm.prank(user);
+        vm.expectRevert(BitcoinBurnRouter.BadFeeRate.selector);
+        router.burnTo(3_000, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 201);
+        require(token.balanceOf(user) == 5_000);
+    }
+
+    function test_aBurnWhosePayoutWouldBeDustAtItsOwnCeilingIsRefused() public {
+        address user = address(0xA11CE);
+        token.give(user, 5_000);
+        vm.prank(user);
+        token.approve(address(router), 5_000);
+        // 804 units = 80,400 sat gross: at 200 sat/vB the charge alone is 80,400
+        vm.prank(user);
+        vm.expectRevert(BitcoinBurnRouter.PayoutBelowDustAtFeeRate.selector);
+        router.burnTo(804, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
+        // the boundary: payout must be >= 546. 810 units at 200: 81,000 - 40 - 80,400 = 560; 809: 80,900 - 40 - 80,400 = 460
+        vm.prank(user);
+        vm.expectRevert(BitcoinBurnRouter.PayoutBelowDustAtFeeRate.selector);
+        router.burnTo(809, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
+        vm.prank(user);
+        router.burnTo(810, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
+        // the same small amount is accepted under a low ceiling: it waits for that market instead of losing most of itself
+        vm.prank(user);
+        router.burnTo(804, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 10);
+        require(token.balanceOf(user) == 5_000 - 810 - 804);
+    }
+
+    function test_fuzz_anAcceptedBurnAlwaysPaysAtLeastDustAtItsCeiling(uint64 amount, uint16 rate) public {
+        address user = address(0xA11CE);
+        token.give(user, amount);
+        vm.prank(user);
+        token.approve(address(router), amount);
+        (uint256 payout,,) = router.quote(amount, rate);
+        vm.prank(user);
+        try router.burnTo(amount, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", rate) returns (bytes32 id) {
+            require(rate >= 1 && rate <= 200 && payout >= 546 && router.maxFeeRateOf(id) == rate);
+        } catch {
+            require(rate == 0 || rate > 200 || payout < 546);
+        }
+    }
+
+    // ── R325-BTC-2P-1: a direct burn is paid only on its burner's claim ─────
+    function test_aDirectBurnClaimIsKeyedByTheCallerAndSetOnce() public {
+        address burner = address(0xB0B);
+        address other = address(0xBAD);
+        vm.prank(burner);
+        router.claimDirectBurn(7, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 40);
+        (bytes20 keyHash, uint16 rate) = router.claimOf(burner, 7);
+        require(keyHash == bytes20(hex"751e76e8199196d454941c45d1b3a323f1433bd6") && rate == 40);
+        // somebody else's call lands under their own address: the signers never read it for this burn
+        vm.prank(other);
+        router.claimDirectBurn(7, "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk", 40);
+        (keyHash, rate) = router.claimOf(burner, 7);
+        require(keyHash == bytes20(hex"751e76e8199196d454941c45d1b3a323f1433bd6"), "another caller cannot touch the burner's claim");
+        (keyHash, rate) = router.claimOf(burner, 8);
+        require(keyHash == bytes20(0) && rate == 0, "no claim");
+        vm.prank(burner);
+        vm.expectRevert(BitcoinBurnRouter.AlreadyClaimed.selector);
+        router.claimDirectBurn(7, "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk", 40);
+    }
+
+    function test_aClaimNeedsACheckedAddressAndAFeeCeiling() public {
+        vm.expectRevert(BitcoinBurnRouter.NotAP2wpkhAddress.selector);
+        router.claimDirectBurn(7, "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544", 40);
+        vm.expectRevert(BitcoinBurnRouter.BadFeeRate.selector);
+        router.claimDirectBurn(7, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 0);
+        vm.expectRevert(BitcoinBurnRouter.BadFeeRate.selector);
+        router.claimDirectBurn(7, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 201);
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        router.claimDirectBurn(0, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 40);
+    }
+
+    function test_constructorRefusesNumbersThatCannotBeAVaultPolicy() public {
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        new BitcoinBurnRouter(address(token), "bc", 0, 5, 402, 546, 200);
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        new BitcoinBurnRouter(address(token), "bc", 100, 10_000, 402, 546, 200);
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        new BitcoinBurnRouter(address(token), "bc", 100, 5, 0, 546, 200);
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        new BitcoinBurnRouter(address(token), "bc", 100, 5, 402, 0, 200);
+        vm.expectRevert(BitcoinBurnRouter.BadConfig.selector);
+        new BitcoinBurnRouter(address(token), "bc", 100, 5, 402, 546, 0);
     }
 }

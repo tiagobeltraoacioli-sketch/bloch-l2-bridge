@@ -12,13 +12,23 @@ and compared with the token at the L2 `finalized` block:
   fees due         = marker.owner_due                        owed to the owner's address, not yet paid out
   fee pool         = vault - owed - fees due                 >= 0, <= poolTargetSats
   L2 supply        = totalSupply + pendingSupply             (token units)
-  unpaid burns     = finalized burns whose nonce the marker does not mark paid
+  unpaid burns     = finalized burns the thread has not paid (a burn set aside is settled in the marker and NOT paid)
   in flight        = swept deposits the token has not minted or queued yet
 
   identity:  owed to holders == (L2 supply + unpaid burns + in flight) * 100
              vault            == owed to holders + fees due + fee pool
-  deficit (hard): owed < (supply + unpaid burns) * 100, or the marker pays a burn the finalized L2 does not have.
-  held (hard):    the token's mint chain is not the ledger's chain (a credited mint without a swept deposit).
+  deficit (hard): owed < (supply + unpaid burns) * 100, or the marker pays a burn the finalized L2 does not have, or a
+                  payout went somewhere other than the router's key hash (router burn) or the burner's claim (direct).
+  held (hard):    the token's mint chain is not the ledger's chain (a credited mint without a swept deposit), or the
+                  thread set aside a burn the finalized L2 does not have.
+
+What is never paid, and why the books still balance. A burn made directly on the token (not through
+BitcoinBurnRouter) is never paid to the 20 bytes it names; it is paid only when the account that burned claims it on
+the router, and there is no timeout. Until then its bBTC is gone from the L2 supply while its coins stay in the vault:
+the line reports them as `unclaimed_direct_burns` (count, units, sats, nonces), they are part of `unpaid_burn_units`,
+and `owed_sats` therefore exceeds the L2 supply by exactly that amount (plus the other unpaid burns). `set_aside_burns`
+lists every burn the thread set aside and has not paid (unclaimed, or under a fee ceiling its burner set), with the
+reason for each.
 
 guard. For every mint queued on the token (latest): its id must be the ledger's deposit id for its slot, with the same
 amount and recipient, and its sweep must still be in this node's chain. Otherwise the line says `cancel` with the
@@ -77,24 +87,39 @@ def main():
     except btc_l2.L2Error as e:
         emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=str(e))
     known = {b['nonce'] for b in burns}
-    # Every payout against the L2 burn it settles (R325-BTC-6): the amount always; the key hash for a burn made through
-    # the router. A direct burn may be paid to another address, the one its burner signed a claim for: listed, since the
-    # claim is not on either chain.
+    # Every payout against the L2 burn it settles (R325-BTC-6): the amount always; the key hash the router burned with
+    # for a router burn; the key hash the burner claimed on the router for a direct burn (the claim is L2 state, read
+    # at the finalized block, so both are compared exactly). A direct burn paid without a claim is a wrong payout.
     by_nonce = {b['nonce']: b for b in burns}
-    router = str(cfg.get('burn_router', '')).lower()
-    wrong, redirected = [], []
+    router_address = str(cfg.get('burn_router', '')).lower()
+    router = btc_l2.Router(token, router_address)
+    try:
+        terms = {b['nonce']: btc_l2.burn_terms(router, router_address, b['from'], b['burn_id'], b['nonce'], b['recipient'], at)
+                 for b in burns}
+    except btc_l2.L2Error as e:
+        emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=str(e))
+    wrong, claimed = [], []
     for e in view.entries[1:]:
         for x in e['build']['payouts']:
             b = by_nonce.get(x['nonce'])
             if b is None:
                 continue  # reported as a phantom below
-            if b['units'] != x['units'] or (b['from'] == router and b['recipient'] != x['spk'][2:]):
+            if b['units'] != x['units'] or terms[x['nonce']]['destination'] != x['spk'][2:]:
                 wrong.append({'nonce': x['nonce'], 'txid': e['txid']})
-            elif b['recipient'] != x['spk'][2:]:
-                redirected.append(x['nonce'])
-    phantom = sorted(n for n in list(range(1, marker.burn_base + 1)) + sorted(marker.paid) if n not in known)
-    unpaid = sum(b['units'] for b in burns if not marker.is_paid(b['nonce']))
-    paid = sum(b['units'] for b in burns if marker.is_paid(b['nonce']))
+            elif not terms[x['nonce']]['through_router']:
+                claimed.append(x['nonce'])
+    aside = pol.set_aside(tip)
+    phantom = sorted(n for n in list(range(1, marker.burn_base + 1)) + sorted(marker.paid) if n not in known and n not in aside)
+    phantom_aside = sorted(n for n in aside if n not in known)
+    is_paid = lambda n: pol.burn_paid(tip, n)
+    unpaid = sum(b['units'] for b in burns if not is_paid(b['nonce']))
+    paid = sum(b['units'] for b in burns if is_paid(b['nonce']))
+    never = [b for b in burns if not is_paid(b['nonce']) and terms[b['nonce']]['state'] == 'unclaimed']
+    set_aside_in = view.set_aside_in()
+    aside_lines = [{'nonce': n, 'units': by_nonce[n]['units'], 'set_aside_in': set_aside_in.get(n),
+                    'reason': 'unclaimed direct burn' if terms[n]['state'] == 'unclaimed'
+                    else f"fee ceiling {terms[n]['max_fee_rate']} sat/vB set by its burner"}
+                   for n in sorted(aside) if n in by_nonce]
     credited = sum(x['units'] for x in credits)
     owed = marker.liabilities
     pool = tip['value'] - owed - marker.owner_due
@@ -107,10 +132,16 @@ def main():
             'identity_vault': tip['value'] == owed + marker.owner_due + pool and pool >= 0,
             'identity_books': owed == (credited - paid) * unit and not phantom,
             'refunded_deposits': sum(len(e['build']['refunds']) for e in view.entries[1:]),
-            'direct_burns_paid_to_a_claimed_address': redirected}
+            'direct_burns_paid_to_their_claim': claimed,
+            'unclaimed_direct_burns': {'count': len(never), 'units': sum(b['units'] for b in never),
+                                       'sats': sum(b['units'] for b in never) * unit, 'nonces': [b['nonce'] for b in never][:200],
+                                       'why': btc_l2.UNCLAIMED + '; counted in unpaid_burn_units and in owed_sats'},
+            'set_aside_burns': aside_lines[:200], 'set_aside_count': len(aside)}
     if wrong:
-        emit(2, **line, status='deficit', reason='a payout does not match the L2 burn it settles (amount, or the key hash of a '
-             'router burn)', payouts=wrong[:20])
+        emit(2, **line, status='deficit', reason='a payout does not match the L2 burn it settles (amount; the key hash of a '
+             'router burn; the claimed key hash of a direct burn, which is never paid without a claim)', payouts=wrong[:20])
+    if phantom_aside:
+        emit(2, **line, status='held', reason='the thread set aside burns the finalized L2 does not have', nonces=phantom_aside[:20])
     if problem or count > len(credits) or head != pol.mint_chain(vault, credits[:count])[count][2]:
         emit(2, **line, status='held', reason=problem or 'the token mint chain is not the ledger chain')
     if phantom:

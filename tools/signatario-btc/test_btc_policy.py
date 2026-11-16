@@ -94,6 +94,47 @@ class Core(unittest.TestCase):
         with self.assertRaises(ValueError):
             c.Marker.decode(spk[:1] + bytes([spk[1] + 1]) + spk[2:] + b'\0')  # trailing zero bitmap byte
 
+    def test_marker_operations_roundtrip_and_canonical(self):
+        rnd = random.Random(2)
+        seen = 0
+        for _ in range(600):
+            base = rnd.randrange(0, 1 << 40)
+            late = sorted(rnd.sample(range(1, base + 2), min(base + 1, rnd.randrange(0, 5))))
+            through = rnd.choice([0, base, base + 1, 1 << 63])
+            room = 8 * (c.MARKER_PAYLOAD - c.MARKER_FIXED - (8 if through else 0) - 8 * len(late))
+            paid = {base + 2 + rnd.randrange(0, max(1, room - 1)) for _ in range(rnd.randrange(0, 12))} if room > 1 else set()
+            m = c.Marker(rnd.randrange(1 << 40), base, rnd.randrange(1 << 50), rnd.randrange(1 << 30), rnd.randrange(1, 500),
+                         paid, through, late)
+            spk = m.encode()
+            self.assertLessEqual(len(spk), 83)   # 80 bytes of payload: standard under every relay policy deployed
+            back = c.Marker.decode(spk)
+            self.assertEqual(back.as_dict(), m.normalised().as_dict())
+            seen += bool(through) and bool(late)
+        self.assertGreater(seen, 50)
+        self.assertEqual(len(c.Marker().encode()), 2 + c.MARKER_FIXED)
+        # the window: 320 nonces with no operation, fewer with each one; never a longer payload
+        self.assertEqual(8 * c.MAX_BITMAP, 320)
+        c.Marker(0, 0, 0, 0, 1, {320}).encode()
+        with self.assertRaises(ValueError):
+            c.Marker(0, 0, 0, 0, 1, {321}).encode()
+        c.Marker(0, 10, 0, 0, 1, {11 + 255}, 10, ()).encode()
+        with self.assertRaises(ValueError):
+            c.Marker(0, 10, 0, 0, 1, {11 + 256}, 10, ()).encode()
+        for bad in ((3, 2), (2, 2), (0,), (1, 2, 3, 4, 5)):
+            with self.assertRaises(ValueError):
+                c.Marker(0, 9, 0, 0, 1, (), 0, bad).encode()
+        # non-canonical encodings are not markers: unknown operation bits, a zero set-aside mark behind its flag
+        good = c.Marker(1, 4, 5, 0, 1, {6}, 0, (2,)).encode()
+        at = 2 + 39
+        self.assertEqual(good[at], 1)
+        for ops in (0x11, 0x41, 0x05):
+            with self.assertRaises(ValueError):
+                c.Marker.decode(good[:at] + bytes([ops]) + good[at + 1:])
+        zero_mark = c.Marker(1, 4, 5, 0, 1, (), 0, ()).encode()
+        forged = zero_mark[:1] + bytes([zero_mark[1] + 8]) + zero_mark[2:at] + b'\x80' + bytes(8)
+        with self.assertRaises(ValueError):
+            c.Marker.decode(forged)
+
 
 class Addresses(unittest.TestCase):
     def test_deposit_address_commits_recipient_vault_and_keys(self):
@@ -312,6 +353,202 @@ class Rules(unittest.TestCase):
         self.assertEqual([x[0] for x in chain], [0, 1, 2])
         self.assertEqual(chain[2][1], sum(cr['units'] for cr in b['credits']))
         self.assertEqual(len({x[2] for x in chain}), 3)
+
+
+def after(b):
+    """The thread state a build leaves, as btc_vault.VaultView keeps it."""
+    return {'txid': b['tx'].txid(), 'vout': 0, 'value': b['tx'].outputs[0][0], 'marker': b['marker'], 'aside': b['aside']}
+
+
+def burn(n, units=1_000):
+    return {'nonce': n, 'units': units, 'recipient': bytes([1 + n % 200]) * 20}
+
+
+class SetAside(unittest.TestCase):
+    """Round 17 (R325-BTC-2P-1, -2P-2): a burn that is never paid without a claim, or that waits under its burner's fee
+    ceiling, must not hold the burns after it. It is set aside: settled in the marker, not paid, payable later."""
+
+    def funded(self, v, sats=10**8):
+        return after(pol.build_vault_tx(v, tip(200_000), [dep(0, sats)], [], [], 1))
+
+    def test_a_burn_set_aside_is_not_paid_keeps_its_coins_and_is_paid_later_once(self):
+        v = vault()
+        s0 = self.funded(v)
+        owed = s0['marker'].liabilities
+        # burns 1 and 2 cannot be paid (unclaimed); burn 3 can. One transaction sets 1..2 aside and pays 3.
+        b = pol.build_vault_tx(v, s0, [], [], [burn(3)], 2, aside_through=2)
+        self.assertEqual((b['set_aside'], b['late'], sorted(b['aside'])), ([1, 2], [], [1, 2]))
+        self.assertEqual([x['nonce'] for x in b['payouts']], [3])
+        self.assertEqual(len(b['tx'].outputs), 3)                       # thread, marker, ONE payout: nobody else is paid
+        self.assertEqual(b['marker'].liabilities, owed - 100_000)       # only burn 3 left the books
+        self.assertEqual(b['marker'].burn_base, 3)                      # the window moved past all three
+        s1 = after(b)
+        self.assertTrue(pol.burn_paid(s1, 3))
+        self.assertFalse(pol.burn_paid(s1, 1) or pol.burn_paid(s1, 2))  # settled in the marker, NOT paid
+        self.assertTrue(s1['marker'].is_paid(1))
+        again = pol.replay_tx(v, s0, b['inputs'], b['tx'].outputs)      # chain data alone gives the same state
+        self.assertEqual((again['tx'].txid(), again['aside'], again['set_aside']), (b['tx'].txid(), b['aside'], [1, 2]))
+        # later burn 2 is claimed: a late payment, charged like any release
+        late = pol.build_vault_tx(v, s1, [], [], [burn(2, 5_000)], 3)
+        self.assertEqual((late['late'], sorted(late['aside']), late['marker'].late), ([2], [1], (2,)))
+        self.assertEqual(late['payouts'][0]['sats'], 500_000 - 250 - 3 * v.release_vb)
+        self.assertEqual(late['marker'].liabilities, owed - 100_000 - 500_000)
+        s2 = after(late)
+        self.assertTrue(pol.burn_paid(s2, 2))
+        again = pol.replay_tx(v, s1, late['inputs'], late['tx'].outputs)
+        self.assertEqual((again['tx'].txid(), again['aside']), (late['tx'].txid(), frozenset({1})))
+        # never twice: neither the late one nor an ordinary one
+        for n in (2, 3):
+            with self.assertRaises(pol.PolicyError) as e:
+                pol.build_vault_tx(v, s2, [], [], [burn(n)], 3)
+            self.assertIn('already paid', e.exception.reason)
+        # and the same late payment on the same state twice conflicts on Bitcoin: same thread input
+        self.assertEqual(late['tx'].inputs[0], pol.build_vault_tx(v, s1, [], [], [burn(2, 5_000), burn(1)], 3)['tx'].inputs[0])
+
+    def test_one_unpayable_burn_no_longer_holds_the_burns_behind_the_window(self):
+        v = vault()
+        s = self.funded(v, 10**9)
+        m = s['marker']
+        # burn 1 never claimed; 320 later burns already paid: the next one (322) is outside the window
+        held = {**s, 'marker': c.Marker(m.next_deposit, 0, m.liabilities, m.owner_due, 1, range(2, 321))}
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, held, [], [], [burn(322)], 1)
+        self.assertTrue(e.exception.wait and 'set aside' in e.exception.reason)
+        b = pol.build_vault_tx(v, held, [], [], [burn(322)], 1, aside_through=1)
+        self.assertEqual((b['marker'].burn_base, sorted(b['marker'].paid), sorted(b['aside'])), (320, [322], [1]))
+        self.assertEqual(pol.replay_tx(v, held, b['inputs'], b['tx'].outputs)['aside'], frozenset({1}))
+
+    def test_setting_aside_is_refused_where_it_is_not_what_the_rules_allow(self):
+        v = vault()
+        s0 = self.funded(v)
+        cases = [
+            (dict(burns=[burn(1)], aside_through=1), 'both set aside and paid'),
+            (dict(burns=[burn(2)], aside_through=3), 'both set aside and paid'),
+            (dict(burns=[burn(3)], aside_through=0 - 1), 'malformed'),
+            (dict(burns=[burn(9000)], aside_through=5000), 'too far'),
+        ]
+        for kw, word in cases:
+            with self.assertRaises(pol.PolicyError) as e:
+                pol.build_vault_tx(v, s0, [], [], kw['burns'], 1, aside_through=kw['aside_through'])
+            self.assertIn(word, e.exception.reason, kw)
+        # setting aside alone pays no miner charge, so it would spend the fee pool: refused like every such transaction
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, s0, [], [], [], 1, aside_through=2)
+        self.assertIn('fee pool', e.exception.reason)
+        s1 = after(pol.build_vault_tx(v, s0, [], [], [burn(4)], 1, aside_through=2))   # 1, 2 aside; 3 open; 4 paid
+        for mark in (1, 2, 4):  # already settled: the mark must be an unsettled burn
+            with self.assertRaises(pol.PolicyError) as e:
+                pol.build_vault_tx(v, s1, [], [], [burn(6)], 1, aside_through=mark)
+            self.assertIn('not an unsettled burn', e.exception.reason)
+        b = pol.build_vault_tx(v, s1, [], [], [burn(6)], 1, aside_through=5)
+        self.assertEqual((b['set_aside'], sorted(b['aside']), b['marker'].burn_base), ([3, 5], [1, 2, 3, 5], 6))
+        # at most four late payments in one transaction
+        s2 = after(b)
+        mixed = pol.build_vault_tx(v, s2, [], [], [burn(n) for n in (1, 2, 3, 5)] + [burn(7)], 1)   # four late and one ordinary
+        self.assertEqual(([x['nonce'] for x in mixed['payouts']], mixed['late']), ([1, 2, 3, 5, 7], [1, 2, 3, 5]))
+        four = pol.build_vault_tx(v, s2, [], [], [burn(n) for n in (1, 2, 3, 5)], 1)
+        self.assertEqual((four['late'], sorted(four['aside'])), ([1, 2, 3, 5], []))
+        s3 = after(pol.build_vault_tx(v, s2, [], [], [burn(8)], 1, aside_through=7))
+        with self.assertRaises(pol.PolicyError) as e:
+            pol.build_vault_tx(v, s3, [], [], [burn(n) for n in (1, 2, 3, 5, 7)], 1)
+        self.assertTrue(e.exception.wait and 'late payments' in e.exception.reason)
+
+    def test_replay_refuses_a_marker_that_lies_about_what_was_set_aside_or_paid_late(self):
+        v = vault()
+        s0 = self.funded(v)
+        b = pol.build_vault_tx(v, s0, [], [], [burn(3)], 2, aside_through=2)
+        s1 = after(b)
+        outs = list(b['tx'].outputs)
+
+        def with_marker(m):
+            return [outs[0], (0, m.encode())] + outs[2:]
+
+        good = c.Marker.decode(outs[1][1])
+        lies = [
+            c.Marker(good.next_deposit, good.burn_base, good.liabilities, good.owner_due, good.feerate, good.paid, 0, ()),       # 1, 2 "paid" with no payout
+            c.Marker(good.next_deposit, good.burn_base, good.liabilities, good.owner_due, good.feerate, good.paid, 1, ()),       # only 1 set aside
+            c.Marker(good.next_deposit, good.burn_base, good.liabilities, good.owner_due, good.feerate, good.paid, 3, ()),       # 3 set aside but paid
+            c.Marker(good.next_deposit, good.burn_base, good.liabilities - 100_000, good.owner_due, good.feerate, good.paid, 2, ()),
+            c.Marker(good.next_deposit, 10**9, good.liabilities, good.owner_due, good.feerate, (), 2, ()),                       # a base no transaction reaches
+        ]
+        for m in lies:
+            with self.assertRaises(pol.PolicyError):
+                pol.replay_tx(v, s0, b['inputs'], with_marker(m))
+        # a late payment of a burn that was never set aside, or was already paid late
+        late = pol.build_vault_tx(v, s1, [], [], [burn(2)], 2)
+        louts = list(late['tx'].outputs)
+        lm = c.Marker.decode(louts[1][1])
+        forged = c.Marker(lm.next_deposit, lm.burn_base, lm.liabilities, lm.owner_due, lm.feerate, lm.paid, 0, (3,))
+        with self.assertRaises(pol.PolicyError):
+            pol.replay_tx(v, s1, late['inputs'], [louts[0], (0, forged.encode())] + louts[2:])
+        s2 = after(late)
+        with self.assertRaises(pol.PolicyError):   # the same outputs on the next state: burn 2 is no longer set aside
+            pol.replay_tx(v, s2, [{**late['inputs'][0], 'txid': s2['txid']}], louts)
+
+    def test_property_books_and_replay_with_burns_set_aside(self):
+        rnd = random.Random(17)
+        v = vault(windowLimitSats=10**13)
+        state = {**tip(value=200_000), 'aside': frozenset()}
+        next_burn, units_of, waiting, outstanding, paid_once = 0, {}, set(), 0, set()
+        pays = asides = lates = 0
+        for step in range(400):
+            deposits = [dep(step * 5 + j, rnd.choice([10**6, 3 * 10**7, rnd.randrange(200_000, 10**7)]), bytes([1 + step % 250]) * 20)
+                        for j in range(rnd.randrange(0, 3))]
+            # new burns appear on the L2; a third of them cannot be paid now (unclaimed, or a low fee ceiling)
+            for _ in range(rnd.randrange(0, 5)):
+                u = rnd.randrange(1_000, 50_000)
+                if u <= outstanding:
+                    next_burn += 1
+                    units_of[next_burn] = u
+                    outstanding -= u
+                    if rnd.random() < 0.35:
+                        waiting.add(next_burn)
+            for n in list(waiting):          # some waiting burns become payable (claimed, market fell)
+                if rnd.random() < 0.08:
+                    waiting.discard(n)
+            m = state['marker'].normalised()
+            aside = set(state['aside'])
+            unsettled = [n for n in range(m.burn_base + 1, next_burn + 1) if n not in m.paid]
+            # set aside the leading run of waiting burns, if any; pay payable ones above it and a few late ones
+            mark = 0
+            for n in unsettled:
+                if n in waiting:
+                    mark = n
+                else:
+                    break
+            if mark and rnd.random() < 0.3:
+                mark = 0
+            payable = [n for n in unsettled if n > mark and n not in waiting][:rnd.randrange(0, 5)]
+            late = [n for n in sorted(aside) if n not in waiting][:rnd.randrange(0, 5)]
+            burns = [{'nonce': n, 'units': units_of[n], 'recipient': bytes([1 + n % 250]) * 20} for n in payable + late]
+            try:
+                b = pol.build_vault_tx(v, state, deposits, [], burns, rnd.choice([1, 2, 7, 60]), aside_through=mark)
+            except pol.PolicyError as e:
+                self.assertTrue(e.wait or 'empty' in e.reason, e.reason)
+                continue
+            tx, new = b['tx'], b['marker']
+            for x in b['payouts']:
+                self.assertNotIn(x['nonce'], paid_once)                 # no burn is ever paid twice
+                paid_once.add(x['nonce'])
+                self.assertNotIn(x['nonce'], waiting)
+            self.assertEqual(len(tx.outputs) - 2 - (1 if b['owner_paid'] else 0), len(burns))   # one output per burn PAID
+            self.assertEqual(sorted(b['aside']), sorted((aside | set(b['set_aside'])) - set(late)))
+            outstanding += sum(cr['units'] for cr in b['credits'])
+            unpaid_units = sum(u for n, u in units_of.items() if n not in paid_once)
+            # the books: what the vault owes = the L2 supply + every burn not paid yet (set aside or not)
+            self.assertEqual(new.liabilities, (outstanding + unpaid_units) * 100)
+            self.assertGreaterEqual(tx.outputs[0][0], new.liabilities + new.owner_due)
+            self.assertEqual(state['value'] + sum(d['value'] for d in deposits), sum(o[0] for o in tx.outputs) + b['fee'])
+            again = pol.replay_tx(v, state, b['inputs'], tx.outputs)
+            self.assertEqual((again['tx'].txid(), again['aside'], again['late'], again['set_aside']),
+                             (tx.txid(), b['aside'], b['late'], b['set_aside']))
+            state = after(b)
+            for n in paid_once:
+                self.assertTrue(pol.burn_paid(state, n))
+            for n in state['aside']:
+                self.assertFalse(pol.burn_paid(state, n))
+            pays, asides, lates = pays + len(payable), asides + len(b['set_aside']), lates + len(b['late'])
+        self.assertTrue(pays > 100 and asides > 40 and lates > 20, (pays, asides, lates))
 
 
 class ReviewR16(unittest.TestCase):

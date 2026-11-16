@@ -143,6 +143,11 @@ class VaultView:
             raise Held('the vault anchor is not in the chain')
         if v.anchor[1] >= len(anchor['tx'].outputs) or anchor['tx'].outputs[v.anchor[1]][1] != v.thread_spk:
             raise Held('the vault anchor does not pay the thread script')
+        # The anchor seeds the fee pool with exactly the target: with more, the difference could go to miners once
+        # (the pool rule only forbids falling below the target); with less, the pool never reaches it by rule.
+        if anchor['tx'].outputs[v.anchor[1]][0] != v.policy['poolTargetSats']:
+            raise Held(f"the vault anchor holds {anchor['tx'].outputs[v.anchor[1]][0]} sat, not exactly poolTargetSats "
+                       f"({v.policy['poolTargetSats']}): fund a new anchor with exactly that amount")
         tip = self._confirmed_tip()
         # walk back from the tip to the anchor through input 0, then replay forward
         chain, cursor = [], tip
@@ -158,7 +163,7 @@ class VaultView:
             if len(chain) > 1_000_000:
                 raise Held('thread too long')
         state = {'txid': v.anchor[0], 'vout': v.anchor[1], 'value': anchor['tx'].outputs[v.anchor[1]][0],
-                 'marker': v.genesis_marker()}
+                 'marker': v.genesis_marker(), 'aside': frozenset()}
         self.entries = [{'txid': v.anchor[0], 'confirmations': anchor['confirmations'], 'height': anchor['height'],
                          'time': anchor['time'], 'blockhash': anchor['blockhash'], 'value': state['value'],
                          'marker': state['marker'], 'build': None, 'state': state}]
@@ -244,7 +249,7 @@ class VaultView:
             build = pol.replay_tx(v, state, inputs, tx.outputs)
         except pol.PolicyError as e:
             raise Held(f'thread transaction {tx.txid()} is outside the rules: {e.reason}')
-        new = {'txid': tx.txid(), 'vout': 0, 'value': tx.outputs[0][0], 'marker': build['marker']}
+        new = {'txid': tx.txid(), 'vout': 0, 'value': tx.outputs[0][0], 'marker': build['marker'], 'aside': build['aside']}
         self.entries.append({'txid': new['txid'], 'confirmations': got['confirmations'], 'height': got['height'],
                              'time': got['time'], 'blockhash': got['blockhash'], 'value': new['value'],
                              'marker': build['marker'], 'build': build, 'state': new, 'raw': got['raw']})
@@ -272,6 +277,15 @@ class VaultView:
         unit = self.vault.policy['unitSats']
         out = [(e['time'], sum(x['units'] for x in e['build']['payouts']) * unit) for e in self.entries[1:]]
         return [x for x in out if x[1]]
+
+    def payments(self):
+        """{burn nonce: txid of the confirmed vault transaction that paid it}."""
+        return {x['nonce']: e['txid'] for e in self.entries[1:] for x in e['build']['payouts']}
+
+    def set_aside_in(self):
+        """{burn nonce: txid of the confirmed vault transaction that set it aside} for burns still set aside."""
+        where = {n: e['txid'] for e in self.entries[1:] for n in e['build']['set_aside']}
+        return {n: where[n] for n in sorted(pol.set_aside(self.tip_state()))}
 
 
 def load_vault(path):

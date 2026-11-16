@@ -77,6 +77,73 @@ class Token:
         return sorted(out, key=lambda b: b['nonce'])
 
 
+class Router:
+    """Read-only view of BitcoinBurnRouter through the same JSON-RPC as the token (pass the Token that was verified).
+
+    What it answers decides where and when a burn is paid, so signers read it at the finalized block of the L2 they
+    verified themselves, after comparing the router's runtime code with the pinned hash (btc_signer.py)."""
+
+    def __init__(self, token, router):
+        self.token, self.router = token, str(router).lower()
+
+    def _call(self, signature, *words, block='latest'):
+        data = '0x' + c.keccak256(signature.encode())[:4].hex() + b''.join(c.abi_word(w) for w in words).hex()
+        out = self.token.rpc('eth_call', [{'to': self.router, 'data': data}, block])
+        if not isinstance(out, str) or len(out) < 66 or (len(out) - 2) % 64:
+            raise L2Error(f'router {signature}: malformed answer')
+        return bytes.fromhex(out[2:])
+
+    def code_keccak(self, block='latest'):
+        code = self.token.rpc('eth_getCode', [self.router, block])
+        return None if code in ('0x', '') else '0x' + c.keccak256(bytes.fromhex(code[2:])).hex()
+
+    def numbers(self, block='latest'):
+        """The immutables a payout is computed from, plus the token and prefix the router serves."""
+        out = {k: int.from_bytes(self._call(k + '()', block=block)[:32], 'big')
+               for k in ('unitSats', 'releaseFeeBps', 'chargeVbytes', 'dustSats', 'feeRateCeiling')}
+        out['token'] = '0x' + self._call('token()', block=block)[12:32].hex()
+        raw = self._call('hrp()', block=block)
+        out['hrp'] = raw[64:64 + int.from_bytes(raw[32:64], 'big')].decode('ascii', 'replace')
+        return out
+
+    def max_fee_rate(self, burn_id, block='latest'):
+        """Highest fee rate the burner of a router burn accepts (sat/vB); 0 when the router did not make this burn."""
+        return int.from_bytes(self._call('maxFeeRateOf(bytes32)', bytes.fromhex(str(burn_id).removeprefix('0x')), block=block)[:32], 'big')
+
+    def claim(self, burner, nonce, block='latest'):
+        """(key hash, fee ceiling) the burner of a direct burn claimed on the router, or None when it made no claim."""
+        raw = self._call('claimOf(address,uint64)', bytes.fromhex(str(burner).removeprefix('0x')), int(nonce), block=block)
+        if len(raw) != 64 or any(raw[20:32]):
+            raise L2Error('router claimOf: malformed answer')
+        rate = int.from_bytes(raw[32:64], 'big')
+        if rate == 0 or not any(raw[:20]):
+            return None
+        return raw[:20], rate
+
+
+def burn_terms(router, router_address, burn_from, burn_id, nonce, named, block='latest'):
+    """Where a burn is paid and the highest fee rate its burner accepts: {'through_router', 'destination': 20 bytes or
+    None, 'max_fee_rate': int or None, 'state': 'payable' | 'unclaimed'}.
+
+    A burn made through the router is paid to the key hash the router checked and burned with (`named`). A burn made
+    directly on the token is NEVER paid to the 20 bytes it names (they may be an Ethereum address): it is paid to the
+    address the burning account claimed on the router, and until it claims it is not paid at all. There is no timeout.
+    """
+    if str(burn_from).lower() == str(router_address).lower():
+        rate = router.max_fee_rate(burn_id, block)
+        if rate < 1:
+            raise L2Error('a burn made by the router has no fee ceiling recorded: not the pinned router')
+        return {'through_router': True, 'destination': named, 'max_fee_rate': rate, 'state': 'payable'}
+    got = router.claim(burn_from, nonce, block)
+    if got is None:
+        return {'through_router': False, 'destination': None, 'max_fee_rate': None, 'state': 'unclaimed'}
+    return {'through_router': False, 'destination': got[0], 'max_fee_rate': got[1], 'state': 'payable'}
+
+
+UNCLAIMED = ('made directly on the token and not claimed: never paid to the 20 bytes it names; paid when the account '
+             'that burned calls BitcoinBurnRouter.claimDirectBurn (no timeout). Its coins stay in the vault')
+
+
 def ledger_prefix_problem(token, vault, credits, block='latest'):
     """None if every mint the token holds agrees with the vault's deposit ledger; otherwise the reason to hold.
 

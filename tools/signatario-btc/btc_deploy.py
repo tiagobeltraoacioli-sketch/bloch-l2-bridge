@@ -14,8 +14,9 @@ Offline unless a node is named. It never reads a key, a keystore or a password, 
            The thread (bare 5-of-7) address to fund once: that payment is the vault's anchor. Works before the anchor is set.
   vault    --config VAULT.json [--btc-rpc URL --btc-cookie PATH]
            Everything derived from the config: vault id, source chain id / vault / route for the L2 token, policy hash,
-           charge sizes. With a node: the anchor exists, pays the thread script, is confirmed and (before the token is
-           deployed) unspent.
+           charge sizes. With a node: the anchor exists, pays the thread script, is confirmed, holds EXACTLY
+           `poolTargetSats` (refused otherwise: every tool holds on such a vault) and (before the token is deployed)
+           is unspent.
   address  --config VAULT.json --recipient 0xL2ADDRESS
   token    --config VAULT.json --token-config TOKEN.json --artifact out/BridgedStablecoinV3.sol/BridgedStablecoinV3.json
            The constructor arguments and init code of the L2 token (BridgedStablecoinV3, frozen creation code), after the
@@ -23,6 +24,13 @@ Offline unless a node is named. It never reads a key, a keystore or a password, 
            fit the vault policy. Prints the exact `cast send --create` data; the owner's deployer sends it.
   verify   --config VAULT.json --token-config TOKEN.json --l2-rpc URL --token 0x...
            Reads the deployed token back and compares every immutable with the plan.
+  router   --config VAULT.json --token 0x... --artifact out/BitcoinBurnRouter.sol/BitcoinBurnRouter.json [--out FILE]
+           The constructor arguments and init code of BitcoinBurnRouter for this vault: the address prefix of the
+           network and the numbers of the vault policy a payout is computed from (unit, release fee, charged vbytes,
+           dust, fee ceiling).
+  router-verify --config VAULT.json --token 0x... --l2-rpc URL --router 0x...
+           Reads the deployed router back, compares every immutable with the vault, and prints the runtime code hash
+           each signer pins (`burn_router_code_keccak`).
 UNAUDITED.
 """
 import json
@@ -211,6 +219,52 @@ def abi_constructor(plan):
     return head + name + symbol + signers + guard
 
 
+def router_numbers(vault):
+    """What BitcoinBurnRouter must state for this vault: the router's `quote` is then `btc_policy.release_payout`."""
+    p = vault.policy
+    return {'hrp': c.HRP[vault.network], 'unitSats': p['unitSats'], 'releaseFeeBps': p['releaseFeeBps'],
+            'chargeVbytes': vault.release_vb, 'dustSats': p['dustSats'], 'feeRateCeiling': p['maxFeerate']}
+
+
+def cmd_router(args):
+    cfg, vault = load(args)
+    token = option(args, '--token').lower()
+    if len(token) != 42 or not token.startswith('0x'):
+        refuse('--token must be the deployed bBTC token address')
+    n = router_numbers(vault)
+    w = c.abi_word
+    hrp = n['hrp'].encode()
+    enc = (w(bytes.fromhex(token[2:])) + w(7 * 32) + w(n['unitSats']) + w(n['releaseFeeBps']) + w(n['chargeVbytes'])
+           + w(n['dustSats']) + w(n['feeRateCeiling']) + w(len(hrp)) + hrp.ljust(32, b'\0'))
+    art = json.loads(Path(option(args, '--artifact')).read_text())
+    creation = bytes.fromhex(art['bytecode']['object'].removeprefix('0x'))
+    init = creation + enc
+    print(json.dumps({'decision': 'ok', 'token': token, 'constructor': n, 'constructorArgs': '0x' + enc.hex(),
+                      'creationCodeKeccak': '0x' + c.keccak256(creation).hex(),
+                      'initCodeKeccak': '0x' + c.keccak256(init).hex(), 'initCodeBytes': len(init),
+                      'deploy': 'cast send --create <initCode> from any funded L2 account; then `router-verify` and pin '
+                                'the runtime code hash it prints in every signer config'}, indent=2))
+    out = option(args, '--out', '')
+    if out:
+        Path(out).write_text('0x' + init.hex() + '\n')
+
+
+def cmd_router_verify(args):
+    cfg, vault = load(args)
+    token = btc_l2.Token(option(args, '--l2-rpc'), option(args, '--token'))
+    router = btc_l2.Router(token, option(args, '--router'))
+    want = {**router_numbers(vault), 'token': token.token}
+    try:
+        got = router.numbers()
+        code = router.code_keccak()
+    except btc_l2.L2Error as e:
+        refuse(f'the router cannot be read: {e}')
+    bad = {k: got.get(k) for k in want if got.get(k) != want[k]}
+    print(json.dumps({'decision': 'refused' if bad or code is None else 'ok', 'differences': bad, 'expected': want,
+                      'router': router.router, 'runtimeCodeKeccak': code}, indent=2))
+    raise SystemExit(1 if bad or code is None else 0)
+
+
 def cmd_verify(args):
     cfg, vault, plan = cmd_token(args, verify=True)
     token = btc_l2.Token(option(args, '--l2-rpc'), option(args, '--token'))
@@ -243,7 +297,12 @@ def main():
     args = sys.argv[1:]
     if not args or args[0] in ('-h', '--help'):
         raise SystemExit(__doc__)
-    cmd = next((a for a in args if a in ('keys', 'message', 'thread', 'vault', 'address', 'token', 'verify')), None)
+    cmd = next((a for a in args if a in ('keys', 'message', 'thread', 'vault', 'address', 'token', 'verify', 'router',
+                                         'router-verify')), None)
+    if cmd == 'router':
+        return cmd_router(args)
+    if cmd == 'router-verify':
+        return cmd_router_verify(args)
     if cmd == 'keys':
         return cmd_keys(args)
     if cmd == 'message':
@@ -259,7 +318,10 @@ def main():
         cfg, vault = load(args, need_anchor=False)
         print(json.dumps({'decision': 'ok', 'thread_address': vault.thread_address(), 'witness_script': vault.thread_script.hex(),
                           'keys_in_script_order': [k.hex() for k in vault.keys],
-                          'fund': 'send the fee-pool seed (>= poolTargetSats) to thread_address ONCE; that output is the anchor'}, indent=2))
+                          'anchor_sats': vault.policy['poolTargetSats'],
+                          'fund': f"send EXACTLY {vault.policy['poolTargetSats']} sat (poolTargetSats, the fee-pool seed) to "
+                                  'thread_address ONCE, as one output; that output is the anchor. Any other amount is '
+                                  'refused by `btc_deploy.py vault --btc-rpc` and by every tool'}, indent=2))
         return
     cfg, vault = load(args)
     if cmd == 'address':
@@ -277,7 +339,12 @@ def main():
             if got is None or got['confirmations'] < 1 or vault.anchor[1] >= len(got['tx'].outputs) \
                     or got['tx'].outputs[vault.anchor[1]][1] != vault.thread_spk:
                 refuse('the anchor is not a confirmed output paying the thread script')
-            out['anchor_check'] = {'confirmations': got['confirmations'], 'sats': got['tx'].outputs[vault.anchor[1]][0],
+            sats = got['tx'].outputs[vault.anchor[1]][0]
+            if sats != vault.policy['poolTargetSats']:
+                refuse('the anchor does not hold exactly poolTargetSats: with more, the difference could be paid to '
+                       'miners once instead of reaching the owner; fund a new anchor with exactly that amount and name it',
+                       anchor_sats=sats, poolTargetSats=vault.policy['poolTargetSats'])
+            out['anchor_check'] = {'confirmations': got['confirmations'], 'sats': sats,
                                    'unspent': node.unspent(*vault.anchor) is not None}
         print(json.dumps(out, indent=2))
         return

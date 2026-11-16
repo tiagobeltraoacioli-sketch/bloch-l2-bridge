@@ -112,5 +112,24 @@ class Deploy(unittest.TestCase):
         self.assertTrue(addr['deposit_address'].startswith('bc1q') and addr['deposit_address'] != out['thread_address'])
 
 
+    def test_router_arguments_are_the_vault_policy_and_the_thread_command_names_the_exact_anchor_amount(self):
+        import btc_deploy
+        import btc_policy as pol
+        import json as j
+        from pathlib import Path as P
+        cfg = j.loads(P(self.vault(anchor={'txid': 'ab' * 32, 'vout': 1})).read_text())
+        v = pol.Vault.from_config(cfg)
+        n = btc_deploy.router_numbers(v)
+        self.assertEqual(n, {'hrp': 'bc', 'unitSats': 100, 'releaseFeeBps': 5, 'chargeVbytes': 402, 'dustSats': 546, 'feeRateCeiling': 200})
+        # the router's quote is then the vault's rule, for every amount and rate
+        for units, rate in ((1_000, 200), (250_000, 6), (1_000, 1), (99_999, 137)):
+            payout, fee, charge = pol.release_payout(v, units, rate)
+            gross = units * n['unitSats']
+            self.assertEqual((gross - gross * n['releaseFeeBps'] // 10_000 - rate * n['chargeVbytes'], rate * n['chargeVbytes']), (payout, charge))
+        rc, out = run('thread', '--config', self.vault())
+        self.assertEqual((rc, out['anchor_sats']), (0, 200_000))
+        self.assertIn('EXACTLY 200000 sat', out['fund'])
+
+
 if __name__ == '__main__':
     unittest.main()
