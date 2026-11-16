@@ -913,6 +913,37 @@ def main_flow(r):
           [out_with, out_without])
     notes['direct_burn_claim'] = {'burn_tx': txd, 'burn_id': burnd, 'text': text}
 
+    # ── review 331 (round 17), demonstrations only ───────────────────────────────
+    # A1 (R331-XLM-1). A second direct burn by the same account. A stranger (no key of the burner) writes a claim file
+    #     whose "signature" is an option of the external verifier. `cast wallet verify ... --help` prints help, exit 0.
+    mallory = r.identity('mallory')
+    r.classic('change-trust', '--source-account', 'mallory', '--line', r.asset)
+    txm = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(70 * U), r.alice)['transactionHash']
+    r.cast('rpc', 'anvil_mine', '0x80', '--rpc-url', r.l2)
+    r.wait_bucket(70 * U)
+    burnm = [l['topics'][1] for l in json.loads(r.cast('receipt', txm, '--rpc-url', r.l2, '--json'))['logs']
+             if l['topics'][0] == burned_topic][0]
+    forged_file = r.dir / 'claims' / f'{burnm[2:]}.json'
+    forged_file.write_text(json.dumps({'stellar_address': mallory, 'signature': '--help'}))
+    balm = r.balance(mallory)
+    okm, cm = r.certify(txm, 'r331a1')
+    rcm, sentm = r.submit(cm) if okm else (1, cm)
+    rc_g, out_g = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-1.json', 'check')
+    check('R331-A1 (EXPECTED TO FAIL until fixed): a claim file with no signature of the burner ("signature": "--help") '
+          'is refused by the signers', not okm, {'certified': okm, 'relay': sentm, 'paid_to_stranger': r.balance(mallory) - balm,
+                                                 'guardian_check_exit': rc_g, 'guardian_findings': out_g.get('findings')})
+    notes['r331_a1'] = {'burn_tx': txm, 'burn_id': burnm, 'certified_by_5': okm, 'relay': sentm,
+                        'stranger_received_stroops': r.balance(mallory) - balm, 'guardian_check_exit': rc_g}
+    # A2. A guardian whose L2 node is behind (here: its "finalized" block is the one before that burn) reads an honest,
+    #     paid release as a forgery: exit 2, which the operator's unit answers with a pause that voids the whole queue.
+    lag_block = int(json.loads(r.cast('receipt', txm, '--rpc-url', r.l2, '--json'))['blockNumber'], 16) - 1
+    g1 = json.loads((r.dir / 'guard-1.json').read_text())
+    (r.dir / 'guard-lag.json').write_text(json.dumps({**g1, 'l2_finalized_tag': str(lag_block)}))
+    rc_lag, out_lag = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-lag.json', 'check')
+    check('R331-A2 (EXPECTED TO FAIL until fixed): a guardian check on an L2 view that is behind the burn reports no '
+          'finding for an honest release (it should say "cannot judge yet")', rc_lag != 2, out_lag)
+    notes['r331_a2'] = {'lag_block': lag_block, 'exit': rc_lag, 'out': out_lag}
+
     # 13. diverging and stale views are held
     fork = lying_rpc(r.rpc, r.anvil_port + 20, 'fork')
     stale = lying_rpc(r.rpc, r.anvil_port + 21, 'stale')
