@@ -243,6 +243,7 @@ class Rehearsal:
         self.deployer, self.user_l2, self.relayer_l2 = ANVIL_KEYS[0], ANVIL_KEYS[1], ANVIL_KEYS[5]
         self.l2_guardians = sorted(((address_of(k), k) for k in ANVIL_KEYS[2:5]))
         self.user_l2_addr = address_of(self.user_l2)
+        self.evidence = {}  # compute units as the validator reports them (computeUnitsConsumed of the transaction)
 
     def wallet(self, prefix, i):
         return ['--keystore', str(WORK / 'keys' / f'{prefix}{i}'), '--password-file', str(WORK / 'pw'), '--cast', CAST]
@@ -457,6 +458,7 @@ class Rehearsal:
         check('controls with 4 of 7 signatures refused on chain (InvalidCertificate)', code == 104, code=code)
         r = self.vault('controls-submit', *sigs, *self.pay)
         check('controls with 5 of 7 signatures open deposits and releases', r['ok'] and r['depositsEnabled'] and r['releasesEnabled'], answer=r)
+        self.evidence['set_controls, 5 signatures'] = {'units': r.get('units')}
         code, _ = self.certified_raw(S.controls_authorization(self.config.source_chain_id, self.a.vault20, self.a.route, True, True, 0, int(valid_until)),
                                      self.release_keys[:5], self.ix.set_controls(True, True, 0, int(valid_until)))
         check('the same controls certificate replayed is refused (InvalidControls)', code == 105, code=code)
@@ -476,6 +478,7 @@ class Rehearsal:
         r = self.vault('deposit', '--keypair', str(self.user_path), '--amount', str(amount), '--l2-recipient', self.user_l2_addr)
         if expect_ok:
             assert r['ok'] and r['deposit'], r
+            self.evidence.setdefault('deposit', {'units': r.get('units')})
             return r['deposit']
         return r
 
@@ -580,12 +583,12 @@ class Rehearsal:
         self.n1 = int(c['doc']['release']['nonce'])
         r = self.vault('approve', '--cert', str(c['cert']), *self.pay)
         check('the relayer approves the release with the certificate', r['ok'], answer=r)
-        self.evidence = {'approve': {'units': r.get('units'), 'signature': r.get('signature')}}
+        self.evidence['approve_release, 5 signatures'] = {'units': r.get('units'), 'signature': r.get('signature')}
         before = self.sol.balance(S.associated_token_address(wallet, self.mint))
         r = self.vault('execute', '--nonce', str(self.n1), '--owner', S.b58encode(wallet), *self.pay)
         paid = self.sol.balance(S.associated_token_address(wallet, self.mint)) - before
         check('the committed wallet is paid the burned amount less 5 bps', r['ok'] and paid == 50 * U - 25_000, paid=paid, answer=r)
-        self.evidence['execute'] = {'units': r.get('units'), 'signature': r.get('signature')}
+        self.evidence['execute_release'] = {'units': r.get('units'), 'signature': r.get('signature')}
         r = self.vault('sweep', *self.pay)
         check('sweep refused while the fee owner has no associated token account', not r['ok'], answer=r)
         r = self.vault('create-fee-account', *self.pay)
@@ -796,7 +799,7 @@ class Rehearsal:
         r = self.vault('pause-submit', '--cert', str(f), *self.pay)
         t_pause = time.time()
         check('one guardian signature pauses the vault; a fee payer with no role delivers it', r['ok'], answer=r)
-        self.evidence['pause'] = {'units': r.get('units')}
+        self.evidence['guardian_pause, 1 signature'] = {'units': r.get('units')}
         r = self.vault('pause-submit', '--cert', str(f), *self.pay)
         check('the same pause authorization replayed is refused', not r['ok'], answer=r)
         r = self.deposit(20 * U, expect_ok=False)
@@ -874,7 +877,7 @@ class Rehearsal:
         check('5 of 7 cannot end a pause on chain (InvalidCertificate)', code == 104, code=code)
         r = self.vault('unpause-submit', *sigs, *self.pay)
         check('6 of 7 end the pause early', r['ok'], answer=r)
-        self.evidence['unpause'] = {'units': r.get('units')}
+        self.evidence['unpause, 6 signatures'] = {'units': r.get('units')}
         f = WORK / 'pause3.json'
         r = self.vault('pause-sign', *self.wallet('guard', 3), '--out', str(f))
         r = self.vault('pause-submit', '--cert', str(f), *self.pay)
@@ -946,7 +949,8 @@ class Rehearsal:
         execute = next((x for x in lines if x.get('kind') == 'relay-execute' and x.get('ok')), {})
         check('relay daemon: approve, then execute in the same pass (wallet read from the L2 registry); paid less 5 bps',
               approve.get('ok') and execute.get('ok') and self.sol.balance(ata) - before == 10 * U - 5_000, log=lines[-6:])
-        self.evidence['daemon'] = {'approve_units': approve.get('units'), 'execute_units': execute.get('units')}
+        self.evidence['relay daemon: approve_release, 5 signatures'] = {'units': approve.get('units'), 'signature': approve.get('tx')}
+        self.evidence['relay daemon: execute_release'] = {'units': execute.get('units'), 'signature': execute.get('tx')}
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
         check('relay daemon: a further pass sends nothing (the paid record at `finalized` decides)',

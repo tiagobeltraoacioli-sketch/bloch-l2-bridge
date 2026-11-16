@@ -9,8 +9,7 @@ Branch `codex/bridge-solana-r16-20261116` (from the Ethereum bridge freeze `cc25
 
 ## 1. New code
 
-Line counts by `wc -l` on 2026-11-16, at the commit that adds this note; they are refreshed when the branch is
-final. The Python tools under `tools/signatario-solana/` were still being written and are not counted here.
+Line counts by `wc -l` on 2026-11-16, refreshed when the Python tools were finished.
 
 | Path | Lines | What | In scope |
 |---|---|---|---|
@@ -20,7 +19,13 @@ final. The Python tools under `tools/signatario-solana/` were still being writte
 | `solana/bloch-sol-vault/src/abi.rs` | 219 | Identities and digests in the EVM byte layouts | Yes |
 | `solana/bloch-sol-vault/src/error.rs`, `lib.rs` | 61 | Error codes, entrypoint | Yes |
 | `contracts/solana/SolanaRecipientRegistry.sol` | 39 | The L2 notice board for burn recipients | Yes (small) |
-| `tools/signatario-solana/` | not counted | Source half, vault CLI, watcher and relayer | Yes: the source half decides what a signer signs |
+| `tools/signatario-solana/sol_half.py` | 318 | The source half: what a signer reads on its Solana node before the unchanged `signatario.py` signs a mint or a release | Yes, first among the tools |
+| `tools/signatario-solana/solana_lib.py` | 780 | Encodings, addresses, digests, account layouts, legacy transactions, RPC; a second implementation of the program's formulas (the rehearsal runs one against the other) | Yes |
+| `tools/signatario-solana/sol_vault.py` | 484 | Owner and operator CLI: validate, init, verify, deposit, approve, execute, pause, controls, unpause, sweep, reserves | Yes |
+| `tools/signatario-solana/sol_vigia.py` | 367 | Sign and relay daemon: a subclass of `tools/signatario-stable/vigia.py` (unchanged) with the Solana source side | Yes: the overridden methods |
+| `tools/signatario-solana/sol_guardiao.py` | 310 | Guardian watch: a subclass of `tools/guardiao/guardiao.py` (unchanged) with the Solana source side and the vault pause | Yes: the overridden methods |
+| `tools/signatario-solana/sol_deploy_token.py` | 251 | The L2 token's deployment path: `tools/deploy-pontes/deploy_pontes.py` (unchanged) with its source reader answered from the Solana vault | Yes |
+| `tools/signatario-solana/rehearse_local.py` | 1,067 | The end-to-end rehearsal on a private solana-test-validator and an anvil | Supporting |
 | `solana/vault-tests/tests/vault.rs`, `tests/common/mod.rs` | 1,002 and 883 | The SVM test suite and its rig, with encoders written independently of the program | Supporting |
 | `solana/test-helper-program/src/lib.rs` | 27 | Test only: a program that accepts anything, and a CPI relay | No (never deployed) |
 | `solidity-tests/SolanaRecipientRegistry.t.sol` | 109 | Registry tests | Supporting |
@@ -79,6 +84,13 @@ check against section 3, item 5.
    data account; the mint checks.
 8. **The source half (`sol_half.py`)**: what a signer reads before it signs a mint or a release, at which
    commitment, and what it does when the node lags or disagrees.
+9. **The two subclasses and the deployment wrapper.** `sol_vigia.py` and `sol_guardiao.py` inherit from modules
+   written for an Ethereum source and replace the methods that read it; `sol_deploy_token.py` replaces
+   `deploy_pontes.py`'s source reader and one policy constant inside its own process. Question: is there a parent
+   code path that still reaches `eth_rpc`, an Ethereum log scan or the Ethereum finished-item cache for this
+   bridge (the rehearsal configs carry no `eth_rpc` at all, so such a path fails rather than reading a wrong chain,
+   but only the paths the rehearsal took are shown). The signature feed (`bridge_feed.py`) was not run over this
+   bridge.
 
 ## 4. Known limits (decided, not defects to rediscover)
 
@@ -99,8 +111,15 @@ check against section 3, item 5.
 - The test suite runs in litesvm on the Agave 4.3 runtime, which does not enforce the 1,232-byte packet limit;
   sizes are computed by the tests, not enforced by them.
 
+- Signers read at `finalized`, which is some seconds behind an approval or a payment. Inside that interval a
+  signer can certify a burn whose release is already approved; the vault refuses the duplicate
+  (`AlreadyReleased`), and the certificate is for the same release, so nothing can come of it.
+- A voided approval can be approved again with the same certificate while it is valid; the mainnet values make the
+  pause outlast every certificate, and only the tool (`sol_vault.py validate`) enforces that relation
+  (`docs/SOLANA-VAULT.md` section 3.4.1).
+
 ## 5. Not in this note
 
-Results of the end-to-end rehearsal on `solana-test-validator`, the Python tools' line counts and tests, and the
-reproducibility of the program binary are reported by agent 322 in
-`agents/322-bridge-solana-r16.md`, not here.
+Results of the end-to-end rehearsal on `solana-test-validator` and the reproducibility of the program binary are
+reported by agent 322 in `agents/322-bridge-solana-r16.md`, not here. The Python tools have no unit test suite
+of their own: they are exercised by the rehearsal only.

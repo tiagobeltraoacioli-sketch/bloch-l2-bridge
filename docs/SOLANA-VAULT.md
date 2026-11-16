@@ -156,6 +156,34 @@ The release bucket then applies: `available = min(window_limit, bucket + elapsed
 paid `amount - fee` with `fee = amount * release_fee_bps / 10000`, and the fee moves to `fees_accrued`. The
 vault's balance must fall by exactly the paid amount and the destination's must rise by exactly it.
 
+### 3.4.1 Between the two steps
+
+An approval is a record `(release id, recipient, amount, ready_at, approval number)`. What can happen to it
+between `approve_release` and `execute_release`:
+
+| Event between the steps | Effect on the standing approval |
+|---|---|
+| The committee changes | Cannot happen. The signer set, the threshold and the guardians are part of the configuration, whose hash is in the vault's address; the program has no instruction that changes them and no upgrade authority. A new committee means a new vault with its own token |
+| The limits change (cap, window, large threshold, delay, fees) | Cannot happen, for the same reason. The payment applies the bucket, the delay and the fee of the one fixed configuration, at payment time: an approval made when the bucket was full is still `RateLimited` if the bucket is empty when it is paid |
+| The committee switches releases off (`set_controls`, 5 of 7) | The approval stays and is still paid: `execute_release` checks the pause, not `releases_enabled` (row 18 of section 8, as on Ethereum). New approvals are refused. Stopping a standing approval takes a guardian pause |
+| A guardian pause | The approval is voided and can never be paid: `execute_release` answers `Voided`. Nothing is lost: the record is not a spent replay key. After the pause, `approve_release` accepts a threshold certificate for the same burn nonce again and overwrites the record (new approval number, new `ready_at`); a paid record is never overwritten |
+| The certificate's `valid_until` passes | Nothing. `valid_until` bounds `approve_release` only; an approval, once recorded, does not expire |
+| The recipient's token account is missing or frozen | The payment fails in that transaction and the approval stays payable |
+
+A guardian pause therefore cannot lose a user's exit. The burn is final on the L2; the vault has no paid record
+for its nonce; the signers' own rule refuses a second certificate only for a paid release or a standing approval
+(and their local database allows the same release under a new context), so after the pause five signers certify
+the burn again and it is approved and paid once. The local rehearsal does exactly this on a real validator: an
+approval voided by a pause is refused with `Voided`, the same burn is certified again by the unchanged signer,
+approved again and paid once.
+
+A voided approval can be approved again with the SAME certificate while that certificate is still valid. With the
+mainnet values the pause (259,200 s) outlasts every certificate (`max_valid_seconds` 3,600 s), so a voided
+certificate is dead when the pause ends; `sol_vault.py validate` refuses a mainnet configuration in which
+`pauseDuration` is not above `maxValidSeconds`. The program itself does not enforce that relation. A 6-of-7
+unpause that ends a pause within the hour re-opens the window for a still valid certificate: the six signers who
+end a pause early are stating that the voided approvals may stand.
+
 ### 3.5 `guardian_pause`
 
 The certificate must hold exactly one signature, of a guardian, over the pause authorization for pause number
@@ -452,6 +480,13 @@ itself runs in the native program and is not counted in these compute units.
 | `unpause` | 6 | 925 | 6,473 |
 | `set_controls` | 5 | 831 | 6,448 |
 | `initialize` (7 signers, 3 guardians) | 0 | 850 | not measured |
+
+On a real validator (solana-test-validator of Agave v4.4.1, the local rehearsal, `computeUnitsConsumed` of the
+transaction): `approve_release` with 5 signatures 15,550; `execute_release` 13,994 for the wallet of one run (the
+program searches the bump of the recipient's associated token address, about 1,500 units per miss, so the figure
+depends on the wallet: each further miss has probability one half, and a wallet ground to cost 40 misses would
+still stay under 80,000); `guardian_pause` 6,120; `unpause` with 6 signatures 6,473. The figures of each run are
+in the rehearsal's `result.json`.
 
 All are far below the default limit of 200,000 compute units per instruction; no compute budget instruction is
 needed. The canonical certificate is `61 + 96 n` bytes for `n` signatures.
