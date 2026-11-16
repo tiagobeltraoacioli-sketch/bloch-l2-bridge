@@ -21,7 +21,7 @@ A2opt	197	145	109	a01f6d02617e5d60c037757bdce420bd93e9c39fda72bc54264b6b92319b92
 A2opt	1013	780	638	c1014305153472f5dc0bd1ff633e68833624ae6006a36dd893c8cb79f02ab6ca	tools/deploy-pontes/verifier_review.py
 A2opt	344	266	242	e0966e3e219d8e708b75d8d61a2e57a0ef880284a49a137a303ecb29cba0b133	tools/signatario-stable/preflight_signer.py
 A-cfg	117	-	-	4975487f2fc705d45e09d5b45327baf2dbdb53bd26523bde33d244b327f38c84	deployments/mainnet/busdc-mainnet.config.json
-A-cfg	109	-	-	3910d85e98f380c4df4879c770cf0827a912ccdfe54ab48ec45c7b51fa70011c	deployments/mainnet/busdc-vault-mainnet.config.json
+A-cfg	109	-	-	58e9492c9d5ab0a9342bd9339e5109b5bc4608d3084651fe38fc8d10ff8d4e45	deployments/mainnet/busdc-vault-mainnet.config.json
 A-cfg	17	-	-	46b7e622487418fd8178a58e4b28acf4b0bb966f0d486e3c386fab0dbe9a9a59	deployments/mainnet/busdc-ops/eth-half.template.json
 A-cfg	34	-	-	51057688af436a13ad8b60f7f8c5bd52005c5030cdfbb6aed7da8efcf557d194	deployments/mainnet/busdc-ops/guardiao.template.json
 A-cfg	56	-	-	f742ce2b4f09d8ac6fc6b4632dc9131be9fa3ba8fafb52484c0e82432d238d49	deployments/mainnet/busdc-ops/relayer.template.json

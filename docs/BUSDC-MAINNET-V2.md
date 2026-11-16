@@ -342,7 +342,7 @@ been made on real L2 data.
 | 3 L2 guardian operators and fresh addresses | L2 config `guardians.set[]` |
 | Vault address, route, code hash, cap | L2 config `ethereum.*` (from 4.4) |
 | L2 gas price cap | L2 config `tx.maxGasPriceWei` |
-| cap, windowLimit, minDeposit (11 USDC with the fee), switchDelay (proposed 14 d), fee treasury address (`provenance.fees.recipient`); switchThreshold 6 is decided (4.11) | vault config (proposed values filled) |
+| cap, windowLimit, minDeposit (11 USDC with the fee), switchDelay (proposed 14 d); switchThreshold 6 is decided (4.11); the fee treasury address (`provenance.fees.recipient`) is filled (owner, 2026-11-16: `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) | vault config (proposed values filled) |
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |

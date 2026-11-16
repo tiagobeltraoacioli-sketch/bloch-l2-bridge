@@ -12,8 +12,9 @@ touched here. Nothing was sent to anyone.
 
 - Repository `bloch-l2-bridge`, branch `codex/bridge-r15-20261110`.
 - **The freeze commit is the commit that adds the two round 15 manifests** (the last commit that touches
-  `docs/audit-rfp-r12/phase2-bridge.manifest.tsv`). It differs from its parent only in `docs/audit-rfp-r12/` (this
-  file and the two manifests). Every file in the scope lists is byte-identical in both, so the manifests, computed
+  `docs/audit-rfp-r12/phase2-bridge.manifest.tsv`): since 2026-11-16 the commit that fills the fee treasury
+  (section 6). It differs from the code freeze `b5c5763` only in the mainnet vault config (one address), four
+  documents and the Phase 2 manifest line of that config; no contract, tool or test differs. Every file in the scope lists is byte-identical in both, so the manifests, computed
   at the parent, are reproduced at the freeze commit:
 
 ```
@@ -148,7 +149,12 @@ freeze".
 
 ## 6. What can still change after the freeze (owner inputs only)
 
-Addresses and choices, none of which changes code in scope: the fee treasury; signer, guardian and deployer addresses;
+**Filled on 2026-11-16 (owner input): the bridge fee treasury on Ethereum, `vault.provenance.fees.recipient` =
+`0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`** in `deployments/mainnet/busdc-vault-mainnet.config.json`, a single externally owned address by the owner's
+choice. It is a constructor argument, immutable once the vault is deployed; no code in scope and no code hash moved
+(the config file's sha256 in `phase2-bridge.manifest.tsv` did, which is why the freeze commit moved with it).
+
+Addresses and choices still open, none of which changes code in scope: signer, guardian and deployer addresses;
 the Bloch Inc Safe; `recoveryAuthority` and `handoffAuthority` members; `handoffDelay`; the SP1 verifier deployment;
 the mint verifier's anchor, `maxStepGap`, `maxHeadLag` and the two vkeys (from the audited programs); the primary
 relayer; the pager command.

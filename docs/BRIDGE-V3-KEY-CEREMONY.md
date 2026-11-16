@@ -398,7 +398,7 @@ Fill every line before the deploy. Each answer is public data only.
 | 15 | `key_inventory.py check` output with `"signaturesChecked": true`, run by the owner and by a second reviewer | TBD-owner |
 | 16 | Each deployer's balance swept and final nonce 1 recorded after verification | TBD-owner |
 | 17 | Ceremony dates, outside the hour around L1 fork activations (KES at e8620) | TBD-owner |
-| 18 | Bridge fee treasury on Ethereum (`vault.provenance.fees.recipient`, immutable; receives the 5 bps deposit and release fees through `sweepFees()`): an owner-controlled address, not a signer, guardian, deployer, the token or the vault | TBD-owner |
+| 18 | Bridge fee treasury on Ethereum (`vault.provenance.fees.recipient`, immutable; receives the 5 bps deposit and release fees through `sweepFees()`): an owner-controlled address, not a signer, guardian, deployer, the token or the vault. **It is a constructor argument and can never be changed after the vault is deployed: whoever holds this key receives the bridge fee for the life of the vault. Confirm it on the second channel before the deploy** | `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544` (owner, 2026-11-16; a single externally owned address by the owner's choice, not a multisig) |
 
 ## 9. Rehearsal (2026-11-02, throwaway keys)
 

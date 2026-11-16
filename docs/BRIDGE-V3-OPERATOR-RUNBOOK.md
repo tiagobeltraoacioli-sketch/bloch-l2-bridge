@@ -209,7 +209,7 @@ The 18 lines of `docs/BRIDGE-V3-KEY-CEREMONY.md` section 8. No key, seed or pass
 | 15 | Inventory check | `key_inventory.py check ... ` prints `"decision": "ok"` with `"signaturesChecked": true`, by the owner and a second reviewer |
 | 16 | Deployers swept | After verification: balance 0 and nonce 1 of each deployer, recorded |
 | 17 | Dates | Outside the hour around any L1 fork activation (KES enforcement at e8620, 2026-11-17) |
-| 18 | Fee treasury | An owner-controlled Ethereum address; `vault_pontes.py validate` refuses a signer, guardian, deployer, the token or the vault |
+| 18 | Fee treasury | **Closed 2026-11-16:** `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544` in `busdc-vault-mainnet.config.json` (an externally owned address, the owner's choice). `vault_pontes.py validate` refuses a signer, guardian, deployer, the token, the vault or a retired address there. Immutable once deployed |
 
 After line 18, each signer operator runs section 3 on its host and sends the last line of the output to the owner.
 
