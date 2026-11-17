@@ -486,10 +486,12 @@ def flow(rig):
 
     # ── 13. first deposit and exit ──
     uw = new_keystore(rig, rig.work / 'user', 'user')
-    l2_me, eth_me = new_keystore(rig, rig.work / 'user', 'l2me')[3], new_keystore(rig, rig.work / 'user', 'ethme')[3]
+    eth_me = new_keystore(rig, rig.work / 'user', 'ethme')[3]
     user = Host(rig, 'user', 'user', cwd=rig.repo)
     user.state.write_text(owner.state.read_text())
-    user.run('params', {'USER_WALLET': uw[0], 'L2_ME': l2_me, 'ETH_ME': eth_me, 'USDC': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'})
+    user.run('params', {'USER_WALLET': uw[0], 'ETH_ME': eth_me, 'USDC': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'})
+    user.run('l2-me')
+    check('[13] the L2 recipient is the user wallet itself', user.var('L2_ME').lower() == uw[3])
     rig.fund(rig.eth, uw[3], 10**18)
     rig.fund(rig.l2, uw[3], 10**18)
     rig.fund_usdc(uw[3], 1_000 * U)
@@ -500,7 +502,19 @@ def flow(rig):
     daemons.passes('before Ethereum finality')
     check('[13] no mint is queued before Ethereum finality', daemons.tview('nextSlot()(uint64)') == '0')
     rig.mine(rig.eth, 0x80)
-    daemons.passes('after finality')
+    daemons.passes('after finality, chain 700770')
+    refusals = [e for e in daemons.events if e.get('kind') == 'mint' and not e.get('signed')]
+    check('[13] guard kept: signatario.py refuses to sign for chain 700770 without the pinned L2 binaries (l2_pins)',
+          refusals and all('needs l2_pins' in str(e.get('reason')) for e in refusals) and daemons.tview('nextSlot()(uint64)') == '0',
+          refusals[-1:])
+    # REHEARSAL: the daemon leg needs the real L2 path (pinned follower, produce-dev and settled-rpc binaries, the rebuild)
+    # on chain 700770, which an anvil cannot give; the guard above refuses anything less. The L2 stand-in therefore
+    # switches its chain id to 700771 (anvil_setChainId; the token computes its EIP-712 domain and burn ids from
+    # block.chainid) and the daemons run in the suites' test form there. Every user and owner command is unchanged.
+    rig.c('rpc', 'anvil_setChainId', '700771', url=rig.l2)
+    daemons.retarget(700771)
+    note('L2 stand-in chain id switched to 700771 for the daemon leg (signatario.py refuses 700770 without l2_pins)')
+    daemons.passes('after finality, daemon leg')
     if not check('[13] after finality 5 of 7 attest and the relayer queues the mint (T = 0)', daemons.tview('nextSlot()(uint64)') == '1'
                  and daemons.tview('mintCount()(uint64)') == '0'):
         print(json.dumps(daemons.events[-12:])[:4000], flush=True)
@@ -519,6 +533,8 @@ def flow(rig):
     user.run('sweep')
     fees = rig.usdc_balance(FEE_TO) - fee_before
     check('[13] sweepFees pays 0.0505 + 0.1000 USDC to the owner fee address 0x775a…0544', fees == 50_500 + 100_000, fees)
+    rig.mine(rig.eth, 0x80)
+    rig.mine(rig.l2, 0x80)
     rc, rep = daemons.reserves()
     check('[13] reserves: ok (totalLocked = supply + pending at finalized)', rc == 0, rep)
 
@@ -607,6 +623,12 @@ class Daemons:
         self.relay_cfg = self.dir / 'relayer.json'
         self.relay_cfg.write_text(json.dumps(rel))
         self.events = []
+
+    def retarget(self, chain):
+        for p in self.cfgs + [self.relay_cfg]:
+            c = json.loads(p.read_text())
+            c['l2_chain_id'] = chain
+            p.write_text(json.dumps(c))
 
     def vigia(self, cfg, mode):
         env = dict(os.environ, PATH=f'{self.rig.bin}:{os.environ["PATH"]}', FOUNDRY_BIN=str(self.rig.bin))

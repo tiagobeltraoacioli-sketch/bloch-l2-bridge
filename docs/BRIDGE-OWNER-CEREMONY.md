@@ -645,12 +645,17 @@ It must print `true`. To switch them off again (for a failed first round trip, s
 
 ## 13. The first small deposit and exit (the owner as a user, with a small amount)
 
-From the owner's own wallet (not a bridge key), the smallest deposit (101 USDC: it nets 100.9495 bUSDC) to the
-owner's own L2 address `L2_ME`, and later the smallest exit (100 bUSDC, paid 99.90 USDC on Ethereum to `ETH_ME`):
+From the owner's own wallet (not a bridge key; the same account on both chains), the smallest deposit (101 USDC: it
+nets 100.9495 bUSDC) to that account on the L2, and later the smallest exit (100 bUSDC, paid 99.90 USDC on Ethereum to
+`ETH_ME`, any address of the owner's):
 
 <!-- step user params -->
 ```
-export USER_WALLET="--ledger --mnemonic-derivation-path m/44'/60'/43'/0/0" L2_ME=0xTBD-owner ETH_ME=0xTBD-owner USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+export USER_WALLET="--ledger --mnemonic-derivation-path m/44'/60'/43'/0/0" ETH_ME=0xTBD-owner USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+```
+<!-- step user l2-me -->
+```
+export L2_ME=$(cast wallet address $USER_WALLET)
 ```
 <!-- step user approve -->
 ```
@@ -866,7 +871,10 @@ The rehearsal had to stand in for these things, and only these:
 - the L2: a loopback anvil with chain id 700770 (not the real L2: its genesis hash is the stand-in's own, written into
   the token config by the rehearsal; no settlement, so "L2 finality" is anvil's `finalized` tag);
 - the daemons run from configs built from `handover.json` in the test form the suites use (`l2_source: rpc` and a
-  local shared directory instead of the pinned L2 binaries and the network feeds);
+  local shared directory instead of the pinned L2 binaries and the network feeds). `signatario.py` refuses to sign
+  anything for chain 700770 without the pinned L2 binaries (`l2_pins`), and the rehearsal checks that it does; for the
+  daemon leg (section 13) the L2 stand-in therefore switches its chain id to 700771 (`anvil_setChainId`; the token
+  derives its EIP-712 domain and burn ids from `block.chainid`). The owner's and the user's commands are unchanged;
 - the Safe: a throwaway address (its owner checks are not rehearsed); funding of the deployers and the user by
   `anvil_setBalance` and a USDC balance write.
 
