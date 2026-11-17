@@ -7,7 +7,7 @@
     "token": "USDT (TRC-20) TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t = 41a614f803b6fd780986a42c78ec9c7f77e6ded13c, the address in Tether's own list of supported protocols; Circle stopped minting USDC on TRON on 2024-02-21 and its address table lists no TRON contract, which is why the asset here is USDT",
     "addresses": "TRON addresses may be written as Base58Check (T...) or as the 20-byte 0x form; the tool converts and checks the checksum. Signers and guardians are the same secp256k1 keys as on the Ethereum vault, so their 0x addresses are the same 20 bytes (TRON derives an address from a key exactly as Ethereum does and prefixes 0x41)",
     "limits": "the Ethereum bridge's launch values, proposed for this network: cap 100,000 USDT (must equal the L2 supplyCap), window 10,000 per 24 h (also the largest deposit and the largest burn), minDeposit 66, l2MinBurn 65 (derived from the fixed release fee: the fee is at most 20% of the smallest exit), 6 of 7 to end a pause or switch, 14 days switch delay, 72 h pause and cooldown",
-    "fees": "5 bps of each deposit, and 5 bps plus a fixed 13 USDT of each release (releaseFlat 13000000; the bps ceiling is 30 in the contract). The fixed fee is NOT an estimate: it is the worst-case cost of one release to its relayer (no staked energy, a recipient that never held USDT) at the chain's current unit prices and USDT's dynamic-energy factor, times 1.5, rounded up to a whole USDT. The measured numbers, the chain values, the TRX price and the formula are in vault.provenance.fees.basis; `tron_deploy.py validate` recomputes it and refuses a fee below it or above 20% of l2MinBurn, and `create` recomputes it again from the node and the day's TRX price. Decided by the coordinator (technical) on 2026-11-17; the 5 + 5 bps stay. All fees are accrued outside the backing; anyone calls sweepFees() and the vault pays the recipient. recipient TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc = 0x1aa1fc9a1b311556132b30af41026ca5c6b6fafc, the owner's TRON address given on 2026-11-16 (Base58Check checksum verified). It is a constructor argument: immutable once deployed. Relayers stake or rent energy, so their real cost is far below the fee",
+    "fees": "5 bps of each deposit, and 5 bps plus a fixed 14 USDT of each release (releaseFlat 14000000; the bps ceiling is 30 in the contract). The fixed fee is NOT an estimate: it is the worst-case cost of one release to its relayer (no staked energy, a recipient that never held USDT) at the chain's current unit prices and USDT's dynamic-energy factor, times 1.5, rounded up to a whole USDT. The measured numbers, the chain values, the TRX price and the formula are in vault.provenance.fees.basis; `tron_deploy.py validate` recomputes it and refuses a fee below it or above 20% of l2MinBurn, and `create` recomputes it again from the node and the day's TRX price. Decided by the coordinator (technical) on 2026-11-17; the 5 + 5 bps stay. All fees are accrued outside the backing; anyone calls sweepFees() and the vault pays the recipient. recipient TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc = 0x1aa1fc9a1b311556132b30af41026ca5c6b6fafc, the owner's TRON address given on 2026-11-16 (Base58Check checksum verified). It is a constructor argument: immutable once deployed. Relayers stake or rent energy, so their real cost is far below the fee",
     "deploy": "consumeUserResourcePercent 100 and originEnergyLimit 1: callers pay all energy, the deployer account never subsidises a call. TRON lets the creator account change these two settings and clear the stored ABI later; none of them touches funds or logic (docs/TRON-VAULT-DIFF.md section 2). feeLimitSun 1,500 TRX covers the creation (4.42 M energy measured = about 442 TRX at 100 sun) with margin; the chain maximum is 15,000 TRX",
     "TBD-owner": "source.revision; deployer.address (a fresh TRON account with at least 600 TRX, used once); the 7 release signers (operator and address, the same keys as the Ethereum vault's release signers); the 3 guardians (operator and address); confirm cap, windowLimit, switchDelay"
   },
@@ -75,8 +75,8 @@
       "windowSeconds": 86400,
       "switchThreshold": 6,
       "switchDelay": 1209600,
-      "minDeposit": 66000000,
-      "l2MinBurn": 65000000
+      "minDeposit": 71000000,
+      "l2MinBurn": 70000000
     },
     "guard": {
       "guardians": [
@@ -104,15 +104,15 @@
         "recipient": "TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc",
         "depositBps": 5,
         "releaseBps": 5,
-        "releaseFlat": 13000000,
+        "releaseFlat": 14000000,
         "basis": {
-          "rule": "tools/signatario-tron/tron_deploy.py release_fee_rule; docs/BRIDGE-TRON-USDT.md section 5. Recompute with `tron_deploy.py fee --config THIS --node http://127.0.0.1:8090 --trx-usdt PRICE` at the ceremony",
+          "rule": "tools/signatario-tron/tron_deploy.py release_fee_rule; docs/BRIDGE-TRON-USDT.md section 5. Recompute with `tron_deploy.py fee --config THIS --node http://127.0.0.1:8090 --trx-usdt binance=PRICE@UNIX --trx-usdt coingecko=PRICE@UNIX` at the ceremony",
           "measured": {
-            "releaseEnergyBase": 143973,
+            "releaseEnergyBase": 158945,
             "tokenTransferFreshBase": 29650,
             "tokenBalanceOfBase": 935,
             "releaseBytes": 1563,
-            "source": "rehearse_tron_producers.py on a private network of three stock java-tron 4.8.2.4 producers, the vault built by TRON's own compiler (deployments/tron/vault-build.pin.json), the real TetherToken bytecode (agents/332-evidence/tron-producers-p*.json): vault.release with a 5-of-7 certificate to a recipient that never held USDT: 143,973 energy, the highest of four such releases in two runs (143,905 to 143,973; 128,885 to 128,905 to a holder), 1,563 bytes; the token alone: transfer to a fresh address 29,650, balanceOf 935. A release calls the token five times: one transfer and four balanceOf. The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
+            "source": "THE WORST CASE (review R342-TRX-1, round 18): vault.release with a 5-of-7 certificate to a recipient that never held USDT, made right after sweepFees() (feesAccrued written from zero again: +15,000 in the vault's own code): 158,945 energy, measured by reviewer 342 on its own private network of three stock java-tron 4.8.2.4 producers with the vault built by TRON's compiler and the real TetherToken bytecode (agents/342-evidence/tron-producers-p1.json; the three ordinary releases of that run: 143,913, 128,925, 143,925). rehearse_tron_producers.py check E5 searches the states that change a storage write and refuses a basis below the most expensive release it measures. Round 17's ordinary-state measurements (agents/332-evidence/tron-producers-p*.json): 143,905 to 143,973 to a fresh recipient, 128,885 to 128,905 to a holder; 1,563 bytes; the token alone: transfer to a fresh address 29,650, balanceOf 935. A release calls the token five times: one transfer and four balanceOf. The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
           },
           "chain": {
             "energyFeeSun": 100,
@@ -122,7 +122,7 @@
           },
           "trxUsdtMicro": 305400,
           "priceSource": "TRXUSDT 0.3054 (api.binance.com ticker) and 0.305091 USD (api.coingecko.com), both read 2026-11-17 00:35 UTC",
-          "result": "143,973 - 33,390 + 33,390 x 4.4 = 257,499 energy; x 100 sun + 1,563 bytes x 1,000 sun = 27.3129 TRX = 8.3414 USDT at 0.3054; x 1.5 = 12.512; rounded up: 13 USDT. l2MinBurn 65 USDT (the fee is 20% of it), minDeposit 66 USDT"
+          "result": "158,945 - 33,390 + 33,390 x 4.4 = 272,471 energy; x 100 sun + 1,563 bytes x 1,000 sun = 28.8101 TRX = 8.7986 USDT at 0.3054; x 1.5 = 13.198; rounded up: 14 USDT. l2MinBurn 70 USDT (the fee is 20% of it), minDeposit 71 USDT. The same 14 holds up to a TRX price of 0.323960 USDT (at 0.323961 the rule gives 15: 6.1% above the recorded 0.3054); the values are final only at the ceremony, where `create` recomputes them from the node and two fresh prices"
         }
       }
     }

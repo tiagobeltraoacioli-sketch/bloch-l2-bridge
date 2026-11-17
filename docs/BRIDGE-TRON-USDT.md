@@ -16,7 +16,7 @@ ceremony, 7 deployment, 8 operator runbook, 9 tests and rehearsal, 10 audit note
 A user deposits USDT on TRON into a vault (`contracts/tron/TronSourceVault.sol`). After the deposit's block is
 solidified, 5 of the 7 committee keys attest it, and `bUSDT.trx` is minted on the Bloch L2 (chain 700770) after the
 12 hour mint delay, 1:1 less 5 bps. Burning `bUSDT.trx` on the L2 is certified by 5 of 7 after L2 finality, and the
-vault pays USDT on TRON less 5 bps and less a fixed 13 USDT (section 5). The fees accrue in the vault outside the backing and are swept to the owner's
+vault pays USDT on TRON less 5 bps and less a fixed 14 USDT (section 5). The fees accrue in the vault outside the backing and are swept to the owner's
 address `TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc`, which is a constructor argument.
 
 | Piece | What | Reuse |
@@ -230,9 +230,9 @@ until they return. Fail-safe: hold.
 |---|---|---|---|
 | Deposit | 5 bps of the amount | at deposit | accrued, swept to the owner's address |
 | Release, proportional | 5 bps of the burned amount | at release | same |
-| Release, fixed (TRON-7) | **13 USDT** (`releaseFlat` 13000000) | at release | same |
+| Release, fixed (TRON-7) | **14 USDT** (`releaseFlat` 14000000) | at release | same |
 
-A burn of A pays out `A - floor(A * 5 / 10000) - 13` USDT. Minimum burn 65 USDT, minimum deposit 66 USDT (the fixed
+A burn of A pays out `A - floor(A * 5 / 10000) - 14` USDT. Minimum burn 70 USDT, minimum deposit 71 USDT (the fixed
 fee is at most 20% of the smallest exit; the vault's constructor enforces "at most half", the deploy tool the 20%).
 Ceilings in the contract: 30 bps each way; the fixed fee is immutable. Fees accrue in `feesAccrued`, outside
 `totalLocked`. Anyone may call `sweepFees()`; the vault pays the whole accrued amount to the recipient fixed at
@@ -261,7 +261,7 @@ recipient that never held USDT (a new storage slot in the token).
 
 | Input | Value | Source |
 |---|---|---|
-| `E_release`: a whole `vault.release`, 5-of-7 certificate, fresh recipient | **143,973 energy** | measured: stock java-tron 4.8.2.4, three producers, the vault built by TRON's compiler, the real TetherToken bytecode (section 9a; `agents/332-evidence/`). The highest of four fresh-recipient releases in two runs (143,905 to 143,973; the certificate's bytes differ from run to run). A recipient that already holds USDT: 128,885 to 128,905 |
+| `E_release`: a whole `vault.release`, 5-of-7 certificate, fresh recipient, **right after `sweepFees()`** (the worst case: `feesAccrued` is written from zero again, +15,000; review R342-TRX-1) | **158,945 energy** | measured by reviewer 342 on its own network: stock java-tron 4.8.2.4, three producers, the vault built by TRON's compiler, the real TetherToken bytecode (`agents/342-evidence/tron-producers-p1.json`); `rehearse_tron_producers.py` check E5 searches these states and refuses a basis below the most expensive release it measures. Round 17's ordinary-state releases (section 9a; `agents/332-evidence/`): the highest of four fresh-recipient releases in two runs 143,973 (143,905 to 143,973; the certificate's bytes differ from run to run). A recipient that already holds USDT: 128,885 to 128,905 |
 | `bytes`: the release transaction | **1,563 bytes** | the same receipts |
 | `E_token`: what the release spends inside the token: 1 `transfer` to a fresh address + 4 `balanceOf` (the vault's and the recipient's balance, before and after) | 29,650 + 4 x 935 = **33,390 energy** | constant calls on the same network. TRON mainnet charges the same two numbers before its factor: simulated read-only on 2026-11-17, a transfer to a fresh address costs 130,285 energy of which 100,635 is penalty (base 29,650), `balanceOf` 4,062 of which 3,127 (base 935) |
 | `factor`: USDT's dynamic-energy factor | **34,000** (x 4.4) | mainnet `getcontractinfo` of USDT, `contract_state.energy_factor`; it equals the chain's maximum `getDynamicEnergyMaxFactor` 34,000, so it cannot rise without a governance vote |
@@ -272,19 +272,30 @@ recipient that never held USDT (a new storage slot in the token).
 All mainnet values were read anonymously and read-only from `api.trongrid.io` at block 88,067,219 on 2026-11-17
 (`agents/332-evidence/tron-mainnet-reading.json`). Result:
 
-    energy = 143,973 - 33,390 + 146,916 = 257,499
-    cost   = 257,499 x 100 + 1,563 x 1,000 = 27,312,900 sun = 27.3129 TRX = 8.3414 USDT
-    fee    = 8.3414 x 1.5 = 12.512  ->  13 USDT;   l2MinBurn 65 USDT;   minDeposit 66 USDT
+    energy = 158,945 - 33,390 + 146,916 = 272,471
+    cost   = 272,471 x 100 + 1,563 x 1,000 = 28,810,100 sun = 28.8101 TRX = 8.7986 USDT
+    fee    = 8.7986 x 1.5 = 13.198  ->  14 USDT;   l2MinBurn 70 USDT;   minDeposit 71 USDT
+
+    (14 USDT holds up to a TRX price of 0.323960 USDT, 6.1% above the recorded 0.3054; at 0.323961 the rule gives 15.
+    The three numbers are therefore final only at the ceremony, where `create` recomputes them.)
 
 The numbers and their sources are recorded in the vault config (`vault.provenance.fees.basis`), so the value can be
 recomputed at the ceremony:
 
 - `tron_deploy.py validate` recomputes the rule from the recorded values and **refuses** a mainnet config whose fixed
   fee is below it, above 20% of `l2MinBurn`, or that carries no basis.
-- `tron_deploy.py fee --config CFG --node http://127.0.0.1:8090 --trx-usdt PRICE` recomputes it from the operator's
-  own node (energy price, bandwidth price, USDT's factor) and the day's TRX price.
+- `tron_deploy.py fee --config CFG --node http://127.0.0.1:8090 --trx-usdt binance=PRICE@UNIX --trx-usdt coingecko=PRICE@UNIX`
+  recomputes it from the operator's own node (energy price, bandwidth price, USDT's factor) and the day's TRX price
+  (`--trx-usdt PRICE` once: a what-if only).
 - `tron_deploy.py create` on mainnet does the same before it builds the transaction and refuses a fee below the
-  rule at that moment (`--trx-usdt` is required; its source goes into the ceremony record).
+  rule at that moment. The TRX price (review R342-TRX-4): `--trx-usdt SOURCE=PRICE@UNIX_SECONDS` twice, from two
+  different sources, each read at most 15 minutes before, within 2% of each other; the HIGHER is used (the relayer is
+  never under-paid by the choice); a price more than 20% from the recorded basis is refused unless
+  `--accept-price-move` is given; ASCII digits only; the node's head must be at most 60 s old. The readings, the
+  price used and its distance from the basis go into the plan the ceremony record keeps. Read them from
+  `https://api.binance.com/api/v3/ticker/price?symbol=TRXUSDT` and
+  `https://api.coingecko.com/api/v3/simple/price?ids=tron&vs_currencies=usd` (anonymous, read-only) and write the
+  Unix time of each reading.
 
 How the fee moves (whole USDT, by the rule):
 
@@ -298,8 +309,8 @@ The margin of 1.5 is for changes after deployment (the fee is immutable): the fe
 while `energy price x TRX price` is at most 1.56 times today's, for example TRX at 0.476 USDT, or energy at 155 sun.
 Beyond that a relayer that burns TRX loses the difference on each release; a relayer with staked energy does not.
 
-**A griefing burst costs the attacker more than the operators.** Each minimum burn (65 USDT) costs the attacker
-13.03 USDT in fees to the owner's address, plus its deposit fee and deposit energy; it costs a relayer at most 8.34
+**A griefing burst costs the attacker more than the operators.** Each minimum burn (70 USDT) costs the attacker
+14.035 USDT in fees to the owner's address, plus its deposit fee and deposit energy; it costs a relayer at most 8.80
 USDT of TRX. The relayers still need TRX at hand: the fee arrives in USDT at the owner's address, not at the
 relayer. So: `tron_max_releases_per_hour` (default 120 per relayer; at most about 3,300 TRX an hour when nothing
 is staked) bounds how fast a float can be spent, a burn above the cap stays payable, and the float alert below
@@ -326,8 +337,9 @@ account instead (a lower `consume_user_resource_percent`) was rejected: it would
 caller, including an attacker's deposits.
 
 **No longer an open owner input.** The owner delegated the value ("best technique"); the coordinator decided the
-rule above on 2026-11-17. What the owner still sees and may veto before deployment: 13 USDT fixed plus 5 bps,
-minimum burn 65, minimum deposit 66; all three immutable once deployed, recomputed by the tool on the day.
+rule above on 2026-11-17 (worst case corrected in round 18, review R342-TRX-1). What the owner still sees and may veto
+before deployment: 14 USDT fixed plus 5 bps, minimum burn 70, minimum deposit 71; all three immutable once deployed,
+recomputed by the tool on the day.
 
 **The issuer's own fee is not the bridge's.** If Tether switches its transfer fee on, the recipient of a release
 (and the owner's address on a sweep) receives less by that fee; the bridge's books do not change (section 2,
@@ -458,7 +470,7 @@ address:
 python3 tools/signatario-tron/tron_send.py --config send.json call 'setControls(bool,bool,uint64,uint256,bytes[])' true true 0 VALIDUNTIL '[SIG1,SIG2,SIG3,SIG4,SIG5]'
 ```
 
-**7.10 First deposit**: the smallest allowed (66 USDT), by the owner, followed through credit, burn and release
+**7.10 First deposit**: the smallest allowed (71 USDT), by the owner, followed through credit, burn and release
 before the address is published in `deployments/tron/bridge.network.json`.
 
 ## 8. Operator runbook: the delta
@@ -662,7 +674,7 @@ age. The five signers' figures are the same (each has its own shim in production
 On mainnet, calls that touch USDT cost more: USDT is at the maximum dynamic-energy factor (a simulated mainnet
 transfer used 64,285 energy, 49,635 of it penalty). Expect roughly 55,000 more energy for a deposit, a release and
 a sweep (section 5 sizes the fixed release fee on 200,000). At these prices a deposit costs the user on the order
-of 15 TRX plus an approval, which is material against the 66 USDT minimum; the frontend must show it.
+of 15 TRX plus an approval, which is material against the 71 USDT minimum; the frontend must show it.
 
 **What the rig cannot show**: the quickstart node solidifies every block at once and cannot reorganise. "Not yet
 solidified" and "a solidified block is lost" are produced by a proxy in front of `/walletsolidity` that the
@@ -823,7 +835,7 @@ with real keys on one.
 |---|---|
 | Repeat section 3 on a machine of the owner's (TRON's compiler: download, hash, `build_vault_tron_solc.py` must say `ok`) before the ceremony; verify the release's PGP signature if a trusted copy of TRON's signing key is available | section 3 |
 | The external audit of this bridge | - |
-| The fixed release fee is decided (coordinator, technical): the rule of section 5 gives **13 USDT, minimum burn 65, minimum deposit 66** today. The owner's part: the TRX price and its source on the day of the ceremony (`tron_deploy.py fee --node ... --trx-usdt PRICE`), and a veto if the result is not wanted. Immutable once deployed | section 5; `deployments/tron/busdt-trx-vault.config.json` |
+| The fixed release fee is decided (coordinator, technical): the rule of section 5 gives **14 USDT, minimum burn 70, minimum deposit 71** today (from the worst case, review R342-TRX-1; 13 / 65 / 66 in round 17 came from an ordinary release). The owner's part: the TRX prices from two sources on the day of the ceremony (`tron_deploy.py create ... --trx-usdt SRC=PRICE@UNIX` twice), and a veto if the result is not wanted. Immutable once deployed | section 5; `deployments/tron/busdt-trx-vault.config.json` |
 | Operators stake or rent energy for the relayer keys (how much TRX is a spending decision); who converts fee income to TRX and tops the relayers up | section 5 |
 | What the DEX does with `bUSDT.trx` pools while the reserves monitor reports a shortfall or the vault is blacklisted (R325-TRX-10) | - |
 | Confirm the limits (cap 100,000; window 10,000 per day; 12 h delay) and the percentage fee (5 + 5 bps) | `deployments/tron/busdt-trx-vault.config.json` |
@@ -869,7 +881,7 @@ Reviewer's section: `agents/325-bridges-review-r16.md` section 7, on tip `639abb
 | R325-TRX-2P-3: the fee is income in USDT, the cost is TRX at the relayer; float | Info | Float status and alert in the sender and the relayer daemon; staking documented as the operating mode; float sizes corrected (section 5, section 8) | `test_tron_tools.py` "float: …" (5) |
 | R325-TRX-2P-4: mainnet catch-up not measured | Info | A read-only sample of mainnet block sizes, and a measurement plan for an operator's own node with pass lines (section 8a, section 11 item 6a). Not measured on an operator node: no agent has one | - |
 | R325-TRX-2P-5 / R325-TRX-9: the vault built with TRON's own compiler | Info, before launch | Built with the official release, pinned by hash (compiler, options, sources, build), the deploy tool refuses any other creation code on mainnet, rehearsed 66 of 66 and on three producers (section 3) | `test_tron_tools.py` "build pin: …" (4); `scripts/tron/build_vault_tron_solc.py` on the host: `ok` |
-| The fixed release fee (TRON-7), decided by the coordinator on 2026-11-17 | - | Computed from a measured release and mainnet's chain values instead of an estimate: 13 USDT (was 8), minimum burn 65 (was 20), minimum deposit 66 (was 21); the rule is recomputed by `tron_deploy.py validate`, `fee` and `create`, which refuse a fee below it (section 5). Constructor VALUES change; the vault's code does not | `test_tron_tools.py` "fee rule: …" (8) and seven refused configs; `rehearse_tron_producers.py` E2, E2b on a vault with the launch values |
+| The fixed release fee (TRON-7), decided by the coordinator on 2026-11-17 | - | Computed from a measured release and mainnet's chain values instead of an estimate: 13 USDT (was 8), minimum burn 65 (was 20), minimum deposit 66 (was 21), corrected in round 18 to 14 / 70 / 71 from the worst-case release (review R342-TRX-1); the rule is recomputed by `tron_deploy.py validate`, `fee` and `create`, which refuse a fee below it (section 5). Constructor VALUES change; the vault's code does not | `test_tron_tools.py` "fee rule: …" (8) and seven refused configs; `rehearse_tron_producers.py` E2, E2b on a vault with the launch values |
 
 Not changed in round 17, on purpose: the vault's source (`scripts/tron/vault_diff.py`: the diff is the reviewed
 one, 83 added, 22 removed), the 66-check rehearsal's own amounts (it still deploys a fixed fee of 8 with minimums

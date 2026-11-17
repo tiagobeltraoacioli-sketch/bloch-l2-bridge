@@ -838,7 +838,7 @@ def test_deploy(tmp):
     s = tron_deploy.shape(base)
     check('config: filled with throwaway addresses it has the decided shape (7 signers, 5 to release, 6 to switch, 3 guardians, 5 + 5 bps)',
           (s['chain'], s['mainnet'], len(s['signers']), s['threshold'], s['policy'][2], len(s['guardians']), s['fees'])
-          == (728126428, True, 7, 5, 6, 3, (OWNER_HEX, 5, 5, 13_000_000)), s)
+          == (728126428, True, 7, 5, 6, 3, (OWNER_HEX, 5, 5, 14_000_000)), s)
     check('config: the token is USDT and the fee recipient is the owner address', s['token'] == USDT_HEX and tronlib.base58(s['fees'][0]) == OWNER)
     check('config: signers and guardians are passed to the constructor in ascending order',
           s['signers'] == sorted(s['signers'], key=lambda x: int(x, 16)) and s['guardians'] == sorted(s['guardians'], key=lambda x: int(x, 16)))
@@ -850,13 +850,13 @@ def test_deploy(tmp):
         'a zero fee on mainnet': lambda c: c['vault']['provenance']['fees'].update(depositBps=0, releaseBps=0),
         'no fixed release fee on mainnet (a release costs the relayer the same energy whatever its size)':
             set_(['vault', 'provenance', 'fees', 'releaseFlat'], 0),
-        'a fixed release fee above half of the minimum burn': set_(['vault', 'provenance', 'fees', 'releaseFlat'], 32_500_001),
-        'a fixed release fee below the measured cost rule (12 USDT where the rule gives 13)':
-            set_(['vault', 'provenance', 'fees', 'releaseFlat'], 12_000_000),
+        'a fixed release fee above half of the minimum burn': set_(['vault', 'provenance', 'fees', 'releaseFlat'], 35_000_001),
+        'a fixed release fee below the measured cost rule (13 USDT, round 17\'s value, where the worst case gives 14)':
+            set_(['vault', 'provenance', 'fees', 'releaseFlat'], 13_000_000),
         'the round-16 estimate (8 USDT): below even the bare cost of one release (8.34 USDT)':
             set_(['vault', 'provenance', 'fees', 'releaseFlat'], 8_000_000),
-        'a fixed release fee above 20% of the smallest exit (13 USDT with a minimum burn of 64)':
-            lambda c: c['vault']['policy'].update(l2MinBurn=64_000_000),
+        'a fixed release fee above 20% of the smallest exit (14 USDT with a minimum burn of 69)':
+            lambda c: c['vault']['policy'].update(l2MinBurn=69_000_000),
         'a mainnet config without the fee basis': lambda c: c['vault']['provenance']['fees'].pop('basis'),
         'a fee basis whose recorded energy price makes the fee too small (420 sun per energy)':
             lambda c: c['vault']['provenance']['fees']['basis']['chain'].update(energyFeeSun=420),
@@ -946,10 +946,10 @@ def test_float(tmp):
     soft = status(2_000, max_sends_per_hour=120)
     hard = status(279, max_sends_per_hour=120)
     empty = status(None, max_sends_per_hour=120)
-    check('float: 4,000 TRX covers 142 releases at 28 TRX, above one hour at the cap of 120: no alert',
-          (ok['kind'], ok['covers_releases'], ok['hours_at_the_cap']) == ('tron-float', 142, 1.18), ok)
-    check('float: the reviewer\'s case, 2,000 TRX against a cap of 120 releases an hour (3,360 TRX): soft alert',
-          (soft['kind'], soft['severity'], soft['id'], soft['covers_releases']) == ('alert', 'soft', 'tron-relayer-float', 71), soft)
+    check('float: 4,000 TRX covers 137 releases at 29 TRX (the worst case of round 18), above one hour at the cap of 120: no alert',
+          (ok['kind'], ok['covers_releases'], ok['hours_at_the_cap']) == ('tron-float', 137, 1.14), ok)
+    check('float: the reviewer\'s case, 2,000 TRX against a cap of 120 releases an hour (3,480 TRX): soft alert',
+          (soft['kind'], soft['severity'], soft['id'], soft['covers_releases']) == ('alert', 'soft', 'tron-relayer-float', 68), soft)
     check('float: fewer than ten releases of TRX left, or an account that does not exist: hard alert',
           (hard['severity'], hard['covers_releases'], empty['severity'], empty['balance_trx']) == ('hard', 9, 'hard', 0.0), (hard, empty))
     staked = status(300, max_sends_per_hour=120, release_cost_sun=2_000_000)
@@ -962,19 +962,22 @@ def test_fee_rule():
     """Round 17 (coordinator decision): the fixed release fee is computed, not estimated, and the tool recomputes it."""
     basis = filled()['vault']['provenance']['fees']['basis']
     r = tron_deploy.release_fee_rule(basis)
-    check('fee rule: 143,973 measured - 33,390 in the token + 33,390 x 4.4 on mainnet = 257,499 energy; x 100 sun + 1,563 bytes x '
-          '1,000 sun = 27.3129 TRX; at 0.3054 = 8.341360 USDT; x 1.5 rounded up = 13 USDT; smallest exit 65 USDT',
+    check('fee rule: 158,945 measured (the worst case, right after sweepFees: R342-TRX-1) - 33,390 in the token + 33,390 x 4.4 on '
+          'mainnet = 272,471 energy; x 100 sun + 1,563 bytes x 1,000 sun = 28.8101 TRX; at 0.3054 = 8.798605 USDT; x 1.5 rounded up '
+          '= 14 USDT; smallest exit 70 USDT',
           (r['energy'], r['energyInVault'], r['energyInToken'], r['costSun'], r['costUsdtUnits'], r['requiredFlatUnits'], r['minL2MinBurnUnits'])
-          == (257_499, 110_583, 146_916, 27_312_900, 8_341_360, 13_000_000, 65_000_000), r)
-    check('fee rule: it moves with each input: energy price 210 sun -> 26 USDT; TRX at 0.50 -> 21 USDT; the token factor at 0 -> 8 USDT; '
+          == (272_471, 125_555, 146_916, 28_810_100, 8_798_605, 14_000_000, 70_000_000), r)
+    check('fee rule: it moves with each input: energy price 210 sun -> 27 USDT; TRX at 0.50 -> 22 USDT; the token factor at 0 -> 8 USDT; '
           'a cheaper chain never rounds below one whole USDT',
           [tron_deploy.release_fee_rule(basis, c, p)['requiredFlatUnits'] // 10**6 for c, p in (
               ({'energyFeeSun': 210}, None), (None, 500_000), ({'usdtEnergyFactor': 0}, None), ({'energyFeeSun': 1, 'transactionFeeSun': 0}, None))]
-          == [26, 21, 8, 1])
-    check('fee rule: check_fee accepts the configured 13 / 65, refuses 12.999999, refuses 13 with a minimum burn of 64.999999',
-          tron_deploy.check_fee(13_000_000, 65_000_000, r, 'x') is None
-          and 'below the rule' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 12_999_999, 65_000_000, r, 'x')
-          and 'above 20%' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 13_000_000, 64_999_999, r, 'x'))
+          == [27, 22, 8, 1])
+    check('fee rule: check_fee accepts the configured 14 / 70, refuses 13.999999 (and round 17\'s 13), refuses 14 with a minimum '
+          'burn of 69.999999',
+          tron_deploy.check_fee(14_000_000, 70_000_000, r, 'x') is None
+          and 'below the rule' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 13_999_999, 70_000_000, r, 'x')
+          and 'below the rule' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 13_000_000, 70_000_000, r, 'x')
+          and 'above 20%' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 14_000_000, 69_999_999, r, 'x'))
 
     class Live:
         def __init__(self, params, state):
@@ -990,10 +993,10 @@ def test_fee_rule():
     live = tron_deploy.live_chain(Live(mainnet_now, {'energy_factor': 34000}), USDT_HEX)
     check('fee rule: the chain values are read from the operator\'s node (energy price, bandwidth price, the token\'s energy factor)',
           live == {'energyFeeSun': 100, 'transactionFeeSun': 1000, 'usdtEnergyFactor': 34000, 'dynamicEnergyMaxFactor': 34000}
-          and tron_deploy.release_fee_rule(basis, live)['requiredFlatUnits'] == 13_000_000, live)
+          and tron_deploy.release_fee_rule(basis, live)['requiredFlatUnits'] == 14_000_000, live)
     dearer = tron_deploy.live_chain(Live({**mainnet_now, 'getEnergyFee': 210}, {'energy_factor': 34000}), USDT_HEX)
-    check('fee rule: if the chain charges more on the day (energy at 210 sun) the configured 13 USDT is refused before the creation',
-          'below the rule' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 13_000_000, 65_000_000,
+    check('fee rule: if the chain charges more on the day (energy at 210 sun) the configured 14 USDT is refused before the creation',
+          'below the rule' in raises(tron_deploy.Refuse, tron_deploy.check_fee, 14_000_000, 70_000_000,
                                      tron_deploy.release_fee_rule(basis, dearer), 'now'))
     check('fee rule: a node without the chain parameters is refused; a token with no dynamic-energy record counts factor 0',
           raises(tron_deploy.Refuse, tron_deploy.live_chain, Live({}, {}), USDT_HEX) != ''

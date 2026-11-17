@@ -7,8 +7,10 @@
                           mainnet only the pinned build of deployments/tron/vault-build.pin.json is accepted; a forge
                           artifact is accepted on a rehearsal chain only)
   tron_deploy.py create   --config CFG.json --artifact ART.json --node URL --keystore K --password-file P [--broadcast]
+                          on mainnet also: --trx-usdt SOURCE=PRICE@UNIX_SECONDS twice (two sources, each read at most
+                          15 minutes before, within 2% of each other; the higher is used) [--accept-price-move]
   tron_deploy.py verify   --config CFG.json --artifact ART.json --node URL --vault T...
-  tron_deploy.py fee      --config CFG.json [--node URL] [--trx-usdt PRICE]
+  tron_deploy.py fee      --config CFG.json [--node URL] [--trx-usdt PRICE | --trx-usdt SRC=PRICE@UNIX --trx-usdt SRC2=PRICE@UNIX]
                           The fixed release fee recomputed from the measured energy of a release, the chain's unit
                           prices and USDT's dynamic-energy factor (from the config's record, or read NOW from the
                           operator's node with --node), and the TRX price (the config's, or --trx-usdt). Exit 1 when
@@ -24,7 +26,8 @@ validate  refuses an undecided value (null, TBD-owner, TBD-deploy), a bad Base58
           `consume_user_resource_percent` 100 (the deployer never pays for other people's calls).
 plan      prints the constructor arguments, the creation code hashes and the transaction settings. Nothing is sent.
 create    on mainnet first recomputes the fixed-fee rule from the node's CURRENT chain parameters and USDT energy factor
-          and the TRX price given with --trx-usdt, and refuses a configured fee below it. It then
+          and the TRX price read from two sources (prices_now: fresh, agreeing, within 20% of the recorded basis or
+          explicitly accepted), on a node whose head is at most a minute old, and refuses a configured fee below it. It then
           builds the CreateSmartContract transaction HERE (tronlib), shows it, and with --broadcast signs and sends it,
           then waits for the SOLIDIFIED receipt. Without --broadcast it only simulates nothing and prints the plan
           and the transaction id it would sign.
@@ -133,12 +136,68 @@ def live_chain(node, token):
             'dynamicEnergyMaxFactor': int(params.get('getDynamicEnergyMaxFactor', 0))}
 
 
+ASCII_DIGITS = frozenset('0123456789')
+PRICE_MAX_AGE_S = 900          # a price read more than 15 minutes before the creation is stale
+PRICE_MAX_SPREAD_BPS = 200     # two sources must agree within 2%
+PRICE_MAX_MOVE_BPS = 2_000     # 20% from the recorded basis needs --accept-price-move (a mistyped price is refused)
+HEAD_MAX_AGE_S = 60            # the operator's node must be in sync: its head at most a minute old
+
+
 def price_micro(text):
-    """A TRX price in USDT as text ('0.3054') -> micro-USDT per TRX, exactly."""
+    """A TRX price in USDT as text ('0.3054') -> micro-USDT per TRX, exactly. ASCII digits only (review R342-TRX-4:
+    `str.isdigit` accepts other scripts' digits)."""
     whole, _, frac = str(text).strip().partition('.')
-    if not whole.isdigit() or (frac and not frac.isdigit()) or len(frac) > 6:
+    if not whole or not set(whole) <= ASCII_DIGITS or (frac and not set(frac) <= ASCII_DIGITS) or len(frac) > 6 \
+            or (text is not None and '.' in str(text).strip() and not frac):
         raise Refuse('--trx-usdt is a decimal price of one TRX in USDT with at most 6 decimals, for example 0.3054')
-    return int(whole) * UNIT + int(frac.ljust(6, '0') or 0)
+    value = int(whole) * UNIT + int(frac.ljust(6, '0') or 0)
+    if value <= 0:
+        raise Refuse('--trx-usdt must be above zero')
+    return value
+
+
+def prices_now(values, basis_micro, now, accept_move=False):
+    """The TRX price a creation uses (review R342-TRX-4): at least two readings `SOURCE=PRICE@UNIX_SECONDS` from
+    DIFFERENT sources, each read at most PRICE_MAX_AGE_S before `now` (and not in the future), agreeing within
+    PRICE_MAX_SPREAD_BPS; the HIGHER one is used (a higher TRX price makes the fee higher: the relayer is never
+    under-paid by the choice). A price more than PRICE_MAX_MOVE_BPS from the recorded basis is refused unless
+    `accept_move`, so a mistyped or stale number cannot pass silently. -> (micro-USDT, record for the plan)."""
+    readings, seen = [], set()
+    for v in values:
+        source, _, rest = str(v).partition('=')
+        price, _, when = rest.partition('@')
+        if not source or not source[0].isascii() or not source[0].isalpha() \
+                or not set(source) <= set('abcdefghijklmnopqrstuvwxyz0123456789.-') or len(source) > 32 \
+                or not when or not set(when) <= ASCII_DIGITS:
+            raise Refuse('--trx-usdt is SOURCE=PRICE@UNIX_SECONDS (for example binance=0.3057@1794891234), once per source')
+        if source in seen:
+            raise Refuse(f'--trx-usdt names the source {source} twice: two different sources are required')
+        seen.add(source)
+        t, micro = int(when), price_micro(price)
+        if not now - PRICE_MAX_AGE_S <= t <= now + 60:
+            raise Refuse(f'the {source} price was read at {t}, {now - t} s before now: at most {PRICE_MAX_AGE_S} s old, never in the future')
+        readings.append({'source': source, 'trxUsdtMicro': micro, 'readAt': t})
+    if len(readings) < 2:
+        raise Refuse('TRON mainnet: two TRX prices from two different sources are required (--trx-usdt twice)')
+    lo, hi = min(r['trxUsdtMicro'] for r in readings), max(r['trxUsdtMicro'] for r in readings)
+    if (hi - lo) * 10_000 > PRICE_MAX_SPREAD_BPS * lo:
+        raise Refuse(f'the TRX prices disagree by more than {PRICE_MAX_SPREAD_BPS / 100:g}%: {readings}')
+    move = abs(hi - int(basis_micro)) * 10_000
+    if move > PRICE_MAX_MOVE_BPS * int(basis_micro) and not accept_move:
+        raise Refuse(f'the TRX price {hi / UNIT:g} is more than {PRICE_MAX_MOVE_BPS / 100:g}% from the recorded basis '
+                     f'{int(basis_micro) / UNIT:g}: check it, then pass --accept-price-move (the plan records both)')
+    return hi, {'used': hi, 'readings': readings, 'basis': int(basis_micro), 'checkedAt': now,
+                'movedFromBasisBps': move // int(basis_micro)}
+
+
+def node_in_sync(node, now):
+    """The chain values of the rule are read at the node's head: refuse a node whose head is older than a minute."""
+    head = node.head()
+    age = now - int(head['timestamp_ms']) // 1000
+    if age > HEAD_MAX_AGE_S:
+        raise Refuse(f'the node\'s head block {head.get("number")} is {age} s old: the node is not in sync, its chain values '
+                     'cannot be the chain\'s values now')
+    return head
 
 
 def shape(cfg):
@@ -297,7 +356,12 @@ def main():
             if opt('--node'):
                 node = tronlib.Node(opt('--node'), opt('--solidity'), cast=opt('--cast'), allow_remote='--allow-remote-node' in a)
                 chain = live_chain(node, s['token'])
-            rule = release_fee_rule(s['fee_basis'], chain, price_micro(opt('--trx-usdt')) if opt('--trx-usdt') else None)
+            values = [a[i + 1] for i, x in enumerate(a[:-1]) if x == '--trx-usdt']
+            if values and all('=' in v for v in values):
+                price = prices_now(values, s['fee_basis']['trxUsdtMicro'], int(time.time()), '--accept-price-move' in a)[0]
+            else:
+                price = price_micro(values[0]) if values else None   # a what-if at one typed price (never used to create)
+            rule = release_fee_rule(s['fee_basis'], chain, price)
             check_fee(s['fees'][3], s['policy'][5], rule, 'at the values read now' if chain or opt('--trx-usdt') else
                       "at the config's recorded chain values and price")
             report(True, configuredFlat=s['fees'][3], l2MinBurn=s['policy'][5], minDeposit=s['policy'][4], rule=rule,
@@ -319,13 +383,15 @@ def main():
             if s['mainnet'] and not opt('--keystore'):
                 raise Refuse('TRON mainnet: a keystore is required')
             if s['mainnet']:
-                # the fee is immutable once created: recompute the rule from what the chain charges NOW
-                if not opt('--trx-usdt'):
-                    raise Refuse('TRON mainnet: --trx-usdt PRICE (one TRX in USDT today, with its source in the ceremony '
-                                 'record) is required: the fixed release fee is recomputed before the creation')
-                rule = release_fee_rule(s['fee_basis'], live_chain(node, s['token']), price_micro(opt('--trx-usdt')))
+                # the fee is immutable once created: recompute the rule from what the chain charges NOW, at a TRX price
+                # read now from two sources (review R342-TRX-4), on a node that is in sync
+                now = int(time.time())
+                values = [a[i + 1] for i, x in enumerate(a[:-1]) if x == '--trx-usdt']
+                price, prices = prices_now(values, s['fee_basis']['trxUsdtMicro'], now, '--accept-price-move' in a)
+                node_in_sync(node, now)
+                rule = release_fee_rule(s['fee_basis'], live_chain(node, s['token']), price)
                 check_fee(s['fees'][3], s['policy'][5], rule, 'at the values read now from this node')
-                plan = {**plan, 'feeRuleNow': rule}
+                plan = {**plan, 'feeRuleNow': rule, 'trxPrice': prices}
             me = node.run(node.cast, 'wallet', 'address', *wallet).lower()
             if me != s['deployer']:
                 raise Refuse(f'this key is {tronlib.base58(me)}, the config names deployer {tronlib.base58(s["deployer"])}')

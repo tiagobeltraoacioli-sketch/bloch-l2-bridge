@@ -36,7 +36,7 @@ and it cannot be replaced or repriced. So the rule is simpler and stronger:
 The float (review R325-TRX-2P-3). The fixed release fee is income in USDT at the owner's address; what a release costs
 is TRX at each relayer's own key, so somebody must convert and top up, and a relayer that runs dry stops paying exits.
 `float_status()` (the `float` command; the relayer daemon logs it every round) compares the sender's TRX balance with
-`release_cost_sun` (default 28 TRX: one release with no staked energy to a recipient that never held USDT, measured;
+`release_cost_sun` (default 29 TRX: one release with no staked energy to a recipient that never held USDT, measured;
 a relayer that stakes or rents energy sets its real cost): `soft` alert below one hour of releases at the hourly cap
 (`max_sends_per_hour`, or 20 when there is no cap), `hard` below ten releases.
 """
@@ -54,7 +54,7 @@ DEFAULT_FEE_LIMIT = 150_000_000
 ENERGY_MARGIN = (3, 2)  # the simulated energy times 3/2 must fit the fee limit
 MIN_FEE_LIMIT = 1_000_000
 BACKOFF_S, BACKOFF_MAX_S = 60, 3600  # after a transaction that landed and failed: 60 s, doubling, at most an hour
-RELEASE_COST_SUN = 28_000_000        # 257,499 energy x 100 sun + 1,563 bytes x 1,000 sun = 27.3 TRX (docs section 5), rounded up
+RELEASE_COST_SUN = 29_000_000        # 272,471 energy x 100 sun + 1,563 bytes x 1,000 sun = 28.81 TRX (docs section 5: the worst case, review R342-TRX-1), rounded up
 FLOAT_HARD_RELEASES = 10             # below this many releases of float: hard alert
 
 
