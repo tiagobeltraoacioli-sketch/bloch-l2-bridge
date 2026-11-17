@@ -961,6 +961,132 @@ class Rehearsal:
         check('backing after the restart: token balance equals locked plus fees not yet swept',
               s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
 
+    def run_r330c(self):
+        """Agent 330, third pass (review of the fixes at 32e124c): the relayer's and the guardian's new paths on the
+        real validator, and a destination that changes between the signers' read and the payment. Reviewer's branch
+        only; run with --r330c (after the developer's setup, honest path and destinations section; nothing else)."""
+        (WORK / 'relayer.key').write_text(self.relayer_l2 + '\n')
+        (WORK / 'relayer.key').chmod(0o600)
+        self.vigia_cfgs = []
+        for i, (cfg, half_cfg) in enumerate(self.signer_cfgs[:5], 1):
+            doc = json.loads(cfg.read_text())
+            doc.update(shared_dir=str(WORK / 'shared'), sol_half_config=str(half_cfg), signer_name=f's{i}', token_from_block=0,
+                       l2_relayer_key=str(WORK / 'relayer.key'), sol_fee_payer=str(self.payer_path), relay_role='primary',
+                       recipient_registry=self.registry, burn_router=self.router, round_margin=20,
+                       max_release_signs_per_hour=30, max_valid_seconds=VALID + 10,
+                       relayer_state=str(WORK / 'relayer-nonces.json'))
+            path = WORK / f'vigia{i}.json'
+            path.write_text(json.dumps(doc))
+            self.vigia_cfgs.append(path)
+        run(CAST, 'wallet', 'import', 'l2guard1', '--private-key', self.l2_guardians[0][1], '--keystore-dir', WORK / 'keys',
+            '--unsafe-password', 'rehearsal-password')
+        self.guardian_cfg = WORK / 'guardian.json'
+        self.guardian_cfg.write_text(json.dumps({
+            'kind': 'stable', 'provenance': True, 'name': 'busdc-sol', 'l2_rpc': L2_URL, 'l2_chain_id': L2_CHAIN,
+            'token': self.token, 'vault': self.a.summary()['sourceVault'], 'keystore': str(WORK / 'keys' / 'l2guard1'),
+            'password_file': str(WORK / 'pw'), 'cast': CAST, 'state': str(WORK / 'guardian-state.json'), 'sol_rpc': SOL_URL,
+            'vault_config': str(self.config_path), 'vault_pause': False, 'sol_keystore': str(WORK / 'keys' / 'guard3'),
+            'sol_password_file': str(WORK / 'pw'), 'sol_fee_payer': str(self.payer_path), 'reserves_grace_s': 0,
+            'provenance_grace_s': 0}))
+
+        def rounds_of(burn_id):
+            return [len(list(r.glob('s*.json'))) for r in (WORK / 'shared' / 'release' / burn_id[2:]).glob('r-*')]
+
+        def alerts(lines, burn_id):
+            return sorted({str(x.get('id')) for x in lines if x.get('kind') == 'alert' and x.get('burn') == burn_id})
+
+        def nonce_of(burn_id):
+            r = self.vault('burn-status', *self.l2_args, '--burn', burn_id)
+            return (r.get('burns') or [{}])[0]
+
+        section('R330 third pass: a destination that becomes a mint AFTER five signers certified (relayer, tools, guardian)')
+        k1, _ = self.sol.keygen('r330c-k1')
+        tx1 = self.burn(10 * U, k1.public)
+        b1 = self.burn_id_of(tx1)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        first = self.sign_passes()
+        check('3P: five sign daemons certify a burn to an address that is absent from the chain (a fresh keypair)',
+              rounds_of(b1) == [5], rounds=rounds_of(b1), log=first[0][-4:])
+        # the holder of that key now creates a MINT at the address (only the key holder can)
+        self.sol.create_mint(self.payer, 'r330c-k1', self.payer.public)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 1)
+        s0 = self.state()
+        _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        s1 = self.state()
+        check('3P: the relay daemon withholds the five-signature certificate (certificate-withheld-destination): no approval',
+              'certificate-withheld-destination' in alerts(lines, b1) and s1['approvalSeq'] == s0['approvalSeq']
+              and not any(x.get('kind') == 'relay-approve' and x.get('burn') == b1 for x in lines),
+              alerts=alerts(lines, b1), log=[x for x in lines if x.get('burn') == b1][-4:])
+        row = nonce_of(b1)
+        check('3P: burn-status now reads it as held (destination-not-a-wallet)',
+              row.get('state') == 'held' and row.get('hold') == 'destination-not-a-wallet', row=row)
+        n1 = row.get('nonce')
+        calls = list((WORK / 'shared' / 'release' / b1[2:]).glob('r-*/release.call'))
+        check('3P: the certificate file exists in the shared directory (anyone holding it can deliver it)', len(calls) == 1, found=len(calls))
+        if calls and n1 is not None:
+            ra = self.vault('approve', '--cert', str(calls[0]), '--owner', S.b58encode(k1.public), *self.pay)
+            check('3P: sol_vault.py approve --owner refuses to deliver it (the destination is not a wallet)',
+                  not ra['ok'] and 'not a wallet' in json.dumps(ra), answer=ra)
+            ra = self.vault('approve', '--cert', str(calls[0]), *self.pay)
+            check('3P: delivered WITHOUT --owner the same tool approves it on chain (nothing in the vault can refuse it)', ra['ok'], answer=ra)
+            self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+            _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+            check('3P: the relay daemon does not pay the approval (approved-destination-not-a-wallet)',
+                  'approved-destination-not-a-wallet' in alerts(lines, b1)
+                  and not any(x.get('kind') == 'relay-execute' and x.get('ok') and x.get('burn') == b1 for x in lines),
+                  alerts=alerts(lines, b1), log=[x for x in lines if x.get('burn') == b1][-4:])
+            rx = self.vault('execute', '--nonce', str(n1), '--owner', S.b58encode(k1.public), '--create-account', *self.pay)
+            check('3P: sol_vault.py execute refuses to pay it', not rx['ok'] and 'not a wallet' in json.dumps(rx), answer=rx)
+            code, lines = self.daemon('sol_guardiao.py', self.guardian_cfg, 'check')
+            ids = sorted({str(x.get('id')) for x in lines if x.get('kind') == 'alert'})
+            check('3P (R330-SOL-3P-2): the guardian watch raises NO finding for the standing approval whose destination is a mint',
+                  not any(str(n1) in i for i in ids), exit=code, ids=ids)
+            ata = S.associated_token_address(k1.public, self.mint)
+            code, _ = self.sol.tx(self.payer, [S.create_ata_instruction(self.payer.public, k1.public, self.mint),
+                                               self.ix.execute_release(int(n1), k1.public)])
+            check('3P (R330-SOL-3P-2): anyone still pays it with two raw instructions: 9.995 USDC land in the token account of a mint address',
+                  code is None and self.sol.balance(ata) == 10 * U - 5_000, code=code)
+
+        section('R330 third pass: a held destination (a keypair token account) is closed by its owner; the hold does not last')
+        k2, _ = self.sol.keygen('r330c-k2')
+        rent = self.sol.rpc.call('getMinimumBalanceForRentExemption', [165])
+        create = S.Instruction(S.SYSTEM_PROGRAM, [S.Meta(self.payer.public, True, True), S.Meta(k2.public, True, True)],
+                               (0).to_bytes(4, 'little') + rent.to_bytes(8, 'little') + (165).to_bytes(8, 'little') + S.TOKEN_PROGRAM)
+        init = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(k2.public, False, True), S.Meta(self.mint)], bytes([18]) + self.thief.public)
+        code, res = self.sol.tx(self.payer, [create, init], extra=[k2])
+        check('3P: a token account of the mint exists at a keypair address (an old-style deposit account), owned by a third party',
+              code is None and self.sol.balance(k2.public) == 0, code=code)
+        tx2 = self.burn(10 * U, k2.public)
+        b2 = self.burn_id_of(tx2)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        first = self.sign_passes()
+        check('3P: the router burns for it and every sign daemon holds it (release-held-destination): nothing signed',
+              'release-held-destination' in alerts(first[0], b2) and not rounds_of(b2), alerts=alerts(first[0], b2), rounds=rounds_of(b2))
+        # the third party closes its empty token account: the address is absent from the chain again
+        close = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(k2.public, False, True), S.Meta(self.payer.public, False, True),
+                                                S.Meta(self.thief.public, True, False)], bytes([9]))
+        code, _ = self.sol.tx(self.payer, [close], extra=[self.thief])
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 1)
+        _, _, data, _ = self.sol.rpc.account(k2.public, 'finalized')
+        check('3P: the owner closes that token account; the address is absent at finalized', code is None and data is None, code=code)
+        second = self.sign_passes()
+        check('3P (R330-SOL-3P-1): the SAME burn, held a moment ago, is now certified by five sign daemons',
+              rounds_of(b2) == [5], rounds=rounds_of(b2), log=second[0][-4:])
+        _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        approve = [x for x in lines if x.get('kind') == 'relay-approve' and x.get('burn') == b2]
+        check('3P (R330-SOL-3P-1): and approved by the relay daemon; it creates no token account (not a funded System account)',
+              bool(approve) and approve[0].get('ok') and 'recipient-account-missing' in alerts(lines, b2),
+              approve=approve, alerts=alerts(lines, b2))
+        row = nonce_of(b2)
+        if row.get('nonce') is not None:
+            ata = S.associated_token_address(k2.public, self.mint)
+            code, _ = self.sol.tx(self.payer, [S.create_ata_instruction(self.payer.public, k2.public, self.mint),
+                                               self.ix.execute_release(int(row['nonce']), k2.public)])
+            check('3P (R330-SOL-3P-1): anyone pays it: the USDC leaves the vault for the token account of an address whose key '
+                  'its creator had no reason to keep', code is None and self.sol.balance(ata) == 10 * U - 5_000, code=code)
+        s = self.state()
+        check('3P: backing equation after both cases', s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
+
     def write_intent(self, rel, ctx, name='intent.json'):
         s = self.a.summary()
         doc = {'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': int(s['sourceChainId']), 'vault': s['sourceVault'],
@@ -1645,7 +1771,11 @@ def main():
         r.open_vault()
         r.run_honest()
         r.run_destinations()
-        if '--r330' in sys.argv:  # agent 330 (review): its own cases after the honest path, nothing else
+        if '--r330c' in sys.argv:  # agent 330, third pass: its own cases, nothing else
+            r.run_r330c()
+            evidence = r.evidence
+            raise_after = True
+        elif '--r330' in sys.argv:  # agent 330 (review): its own cases after the honest path, nothing else
             r.run_r330()
             evidence = r.evidence
             raise_after = True
