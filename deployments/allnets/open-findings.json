@@ -1,8 +1,21 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
-  "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T19:47:00Z",
+  "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17. Round 19 (agent 403): `findings` also carries the Medium-or-above findings of routes that are held or out by their own source (Base, BNB Smart Chain), so the table is complete per route; they cannot change such a route's state (the registry only lowers `launchable` or `undeclared`). `listed` now carries EVERY finding below Medium that a reviewer's last pass (329/379, 330/376, 331/377, 342/378) leaves open, standing or unverified, per route.",
+  "asOf": "2026-11-17T21:40:00Z",
   "findings": [
+    {
+      "id": "R325-EVM-1",
+      "routes": [
+        "base",
+        "bnb"
+      ],
+      "severity": "High",
+      "state": "open",
+      "owner": 372,
+      "reviewer": 379,
+      "what": "a release cannot be relied on to land inside the vault's window with the production signer path (rebuild per signature): Base pays only when every signer is warm and the margin shrinks daily; BNB Smart Chain not measured (out of v1). Both are refused by every tool (R329-EVM-1 closed)",
+      "source": "agents/329-bridge-evm-review-r17.md section 1 (open for Base) and 3P.0 (379: Base not deployable)"
+    },
     {
       "id": "R329-EVM-3P-2",
       "routes": [
@@ -14,6 +27,18 @@
       "reviewer": 379,
       "what": "Base signer prototype: warm_stale checks only values the writer of warm_dir supplies; Base must not be lifted on this prototype (the prototype is never merged here)",
       "source": "cross-area 2026-11-17 04:41 UTC (agent 379)"
+    },
+    {
+      "id": "R325-EVM-2",
+      "routes": [
+        "bnb"
+      ],
+      "severity": "Medium",
+      "state": "partly-fixed",
+      "owner": 372,
+      "reviewer": 379,
+      "what": "BNB Smart Chain unit token: the address is pinned but the deploy tool never compares the code at it; acceptable only while BNB is out of v1",
+      "source": "agents/329-bridge-evm-review-r17.md section 1"
     }
   ],
   "removed": [
@@ -95,6 +120,62 @@
   ],
   "listed": [
     {
+      "id": "R329-SHARED-1",
+      "routes": [
+        "ethereum"
+      ],
+      "severity": "Info",
+      "what": "shared tools, wGSMH only (not on any launch path): the `cast` wrappers of `tools/signatario-gnb` lack the option guard the Ethereum-line wrappers got",
+      "source": "agents/329-bridge-evm-review-r17.md 3P.2 (379)"
+    },
+    {
+      "id": "F374-1",
+      "routes": [
+        "ethereum"
+      ],
+      "severity": "Info (test flake)",
+      "what": "`test_settle_quorum` \"mint hold: the token and the vault both pause\" can fail on a loaded machine (two on-demand anvils: the Ethereum head older than the L2 mint block); the guardian is right, the test should mine one Ethereum block first",
+      "source": "agents/341-bridge-signer-verify-r17.md 8.1 (374)"
+    },
+    {
+      "id": "R329-EVM-3P-3",
+      "routes": [
+        "arbitrum-one",
+        "linea",
+        "op-mainnet"
+      ],
+      "severity": "Info",
+      "what": "the signer's window hold is lifted by `measure` runs that do not time the source half: a persistently slow source node re-holds after each release (liveness only, alerts fire)",
+      "source": "agents/329-bridge-evm-review-r17.md 3P.1 (379)"
+    },
+    {
+      "id": "R325-EVM-11 (residual)",
+      "routes": [
+        "arbitrum-one"
+      ],
+      "severity": "Info",
+      "what": "closed for the vault's anchor check and the signer's anchor rule under real Nitro execution; a release through the daemons over a Nitro node with a nonzero parent-chain data fee is still not shown",
+      "source": "agents/329-bridge-evm-review-r17.md sections 1, 3 and 3P.0"
+    },
+    {
+      "id": "R342-BTC-4",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "the window can still be held, bounded to 12 hours or a day, behind a claimed burn in its large-release delay or waiting for the daily window (stated design limit)",
+      "source": "agents/342-bridge-btc-tron-review-r17.md section 1 and P2.2"
+    },
+    {
+      "id": "R342-BTC-5",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "the launch-pin run exercises `verified_burns` on one burn only; `cmd_sign` has never been entered with launch pins on a settled private L2",
+      "source": "agents/342-bridge-btc-tron-review-r17.md 2.3 and P2.2"
+    },
+    {
       "id": "R342-BTC-2P-5",
       "routes": [
         "bitcoin"
@@ -131,6 +212,33 @@
       "source": "same"
     },
     {
+      "id": "R342-TRX-5",
+      "routes": [
+        "tron"
+      ],
+      "severity": "Info",
+      "what": "the TRON-compiler build is reproducible and pinned but not executable in the EVM, so no forge test runs the bytecode that would be deployed; the pin is a repository file, not a constant of the tool; the compiler's PGP signature is unchecked",
+      "source": "agents/342-bridge-btc-tron-review-r17.md section 1, 2.4 and P2.5"
+    },
+    {
+      "id": "R342-TRX-6",
+      "routes": [
+        "tron"
+      ],
+      "severity": "Info",
+      "what": "solidified state shown on three stock producers only; the catch-up on an operator node and a release simulated against mainnet state are not shown",
+      "source": "agents/342-bridge-btc-tron-review-r17.md section 1, 2.5 and P2.5"
+    },
+    {
+      "id": "R374-1",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Info (question, answered by a test)",
+      "what": "off-chain acceptance of high s and recovery ids 0 / 1 must equal the native secp256k1 program's rule; 371 added `test_secp_rule.py` (`54e8e63`), not re-derived by reviewer 376",
+      "source": "agents/341-bridge-signer-verify-r17.md section 5; agents/330-bridge-solana-review-r17.md 4P.2a"
+    },
+    {
       "id": "R330-SOL-1 (residual)",
       "routes": [
         "solana"
@@ -158,6 +266,15 @@
       "source": "376 fourth pass"
     },
     {
+      "id": "R331-XLM-4P (Info, no id)",
+      "routes": [
+        "stellar"
+      ],
+      "severity": "Info",
+      "what": "rehearsal driver: other alert kinds no longer fail the direct-burn alert check (one narrowed assertion, `b43cc08`; 377: not a weakened product check)",
+      "source": "agents/331-bridge-stellar-review-r17.md 4P.8 and 4P.9"
+    },
+    {
       "id": "R331-XLM-4P-7",
       "routes": [
         "stellar"
@@ -167,7 +284,7 @@
       "source": "agents/331-bridge-stellar-review-r17.md"
     }
   ],
-  "noteListed": "listed: findings below Medium that the coordinator or a reviewer asked to be shown in main's README; they do not hold a route.",
+  "noteListed": "listed: every finding below Medium that a reviewer's last pass leaves open, standing or unverified; they do not hold a route.",
   "removedListed": [
     {
       "id": "R342-BTC-2P-8",

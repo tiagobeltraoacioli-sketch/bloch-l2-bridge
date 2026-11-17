@@ -4,7 +4,9 @@ import copy
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -107,6 +109,61 @@ class Registry(unittest.TestCase):
             if r['launch']['sourceState'] == 'undeclared':
                 self.assertFalse(r['launch']['v1'], net)
 
+
+    # Round 19 (agent 403): the launch table is ONE table of every open finding per route.
+
+    def row(self, route):
+        rows = [l for l in registry.readme_table(self.reg).splitlines() if l.startswith(f'| {route} |')]
+        self.assertEqual(len(rows), 1, route)
+        return rows[0]
+
+    def test_every_finding_below_medium_is_in_its_route_s_row(self):
+        listed = self.reg['listedFindings']
+        self.assertTrue(listed)
+        for f in listed:
+            for route in f['routes']:
+                self.assertIn(f"{f['id']} ({f['severity']})", self.row(route))
+
+    def test_every_finding_of_medium_or_above_is_in_its_route_s_row(self):
+        for f in self.findings:
+            for route in f['routes']:
+                self.assertIn(f"{f['id']} ({f['severity']}, {f['state']})", self.row(route))
+
+    def test_a_row_names_no_finding_of_another_route(self):
+        every = self.findings + self.reg['listedFindings']
+        for r in self.reg['routes']:
+            for f in every:
+                if r['id'] not in f['routes']:
+                    self.assertNotIn(f"{f['id']} (", self.row(r['id']))
+
+    def test_findings_on_a_held_or_out_route_leave_its_state(self):
+        # Base and BNB carry Medium-or-above findings (R325-EVM-1 High, R329-EVM-3P-2, R325-EVM-2): still held / out,
+        # never `not-launchable-until-fixed` (which would read as "launchable once fixed").
+        for net, state in (('base', 'held'), ('bnb', 'out')):
+            launch = self.routes[net]['launch']
+            self.assertTrue(launch['openFindings'], net)
+            self.assertEqual((launch['state'], launch['v1']), (state, False))
+        self.assertIn('High', [f['severity'] for f in self.routes['base']['launch']['openFindings']])
+
+    def test_c8_listed_finding_of_unknown_route_refused(self):
+        doc = json.loads(registry.FINDINGS.read_text())
+        doc['listed'].append({'id': 'X-1', 'routes': ['nowhere'], 'severity': 'Low', 'what': 'x', 'source': 'x'})
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'open-findings.json'
+            f.write_text(json.dumps(doc))
+            with mock.patch.object(registry, 'FINDINGS', f):
+                _, errors = registry.build()
+        self.assertTrue(any(e.startswith('C8 finding X-1') for e in errors), errors)
+
+    def test_a_finding_without_a_severity_word_is_refused(self):
+        doc = json.loads(registry.FINDINGS.read_text())
+        doc['listed'].append({'id': 'X-2', 'routes': ['tron'], 'severity': 'minor', 'what': 'x', 'source': 'x'})
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'open-findings.json'
+            f.write_text(json.dumps(doc))
+            with mock.patch.object(registry, 'FINDINGS', f):
+                _, errors = registry.build()
+        self.assertTrue(any(e.startswith('C8 finding X-2') for e in errors), errors)
 
 if __name__ == '__main__':
     unittest.main()
