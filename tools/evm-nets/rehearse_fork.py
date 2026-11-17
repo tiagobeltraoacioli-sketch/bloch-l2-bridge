@@ -142,6 +142,16 @@ class Rig:
         return '0x' + hashlib.sha256(f'{self.salt}:{label}'.encode()).hexdigest()
 
     def anvil(self, port, *extra):
+        # Ports of a shared host can lie in its ephemeral range: an outgoing connection may hold one for a moment.
+        for attempt in range(10):
+            try:
+                return self.anvil_once(port, *extra)
+            except SystemExit as e:
+                if 'Address already in use' not in str(e) or attempt == 9:
+                    raise
+                time.sleep(1.5)
+
+    def anvil_once(self, port, *extra):
         log = open(self.work / f'anvil-{port}.log', 'w')
         self.anvil_logs = getattr(self, 'anvil_logs', []) + [self.work / f'anvil-{port}.log']
         quiet = [] if '--fork-url' in extra else ['--silent']  # the fork's own log names a failing upstream request
