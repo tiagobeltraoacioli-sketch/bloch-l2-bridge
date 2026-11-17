@@ -182,6 +182,16 @@
           "commit": "1d78d307cad7123a36bb4e121a91e5f6702bb1cb"
         }
       ]
+    },
+    "operator-pkg": {
+      "branch": "codex/bridge-operator-pkg-r18-20261117",
+      "commit": "ba23175043c5bdaf4474bf3a1b3019498bf8a161",
+      "agent": 381,
+      "routes": [
+        "ethereum"
+      ],
+      "conflicts": [],
+      "history": []
     }
   }
 }
