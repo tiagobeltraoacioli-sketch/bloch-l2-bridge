@@ -175,12 +175,35 @@ class ForgeryWhileTheL2MovesAtItsLaunchCadence(T.GuardianCheck):
         self.assertEqual(code, 2)
 
 
+class AnEmptyEventPageIsNotTheEnd(T.GuardianCheck):
+    """R331-XLM-4P-5 (High). Stellar RPC `getEvents` scans a bounded ledger range per request (10,000 on the
+    rehearsal image) and answers an empty page with a cursor when that range holds no vault event (measured on a real
+    RPC: agents/331-evidence/p4-events-pagination.txt). Every scan of the route stops at the first empty page. Here
+    the fake RPC behaves like that: from ledger 1 it scans to ledger 500 and finds nothing; the forgery sits at 990.
+    Fixed behaviour: page by the cursor to the latest ledger; a guardian that cannot reach it exits 3, never 0."""
+
+    def test_DEFECT_the_guardian_sees_no_release_behind_an_empty_page_and_answers_ok(self):
+        self.release(self.forged(1), MALLORY, ledger=990, event='release_queued', names=(100, block_hash(100)))
+        self.assertEqual(self.check()[0], 2)                       # seen: a finding (a forgery naming a final block)
+        real = FakeVault.events
+
+        def bounded(self_, start):
+            if start < 500:
+                return [], 1000, 1                                   # empty page: the scan range ended at 500
+            return real(self_, start)
+        patch = mock.patch.object(FakeVault, 'events', bounded)
+        patch.start()
+        self.addCleanup(patch.stop)
+        code, out = self.check()
+        self.assertEqual((code, out['releases_checked'], out['findings']), (0, 0, []))   # blind, and says ok
+
+
 def load_tests(loader, tests, pattern):
     """Only the cases defined here (the base classes' own tests are the developer's and run in their own file)."""
     suite = unittest.TestSuite()
     for cls in (HalfSignsForAnAddressThatCannotReceive, StallRuleOnSomethingElseThanAStall,
                 PaidForgeryUnderAnUnreachableBlock, NamingsAtTheGuardian,
-                ForgeryWhileTheL2MovesAtItsLaunchCadence):
+                ForgeryWhileTheL2MovesAtItsLaunchCadence, AnEmptyEventPageIsNotTheEnd):
         for name in sorted(n for n in vars(cls) if n.startswith('test_')):
             suite.addTest(cls(name))
     return suite
