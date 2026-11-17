@@ -954,11 +954,13 @@ flag) FAILS when a row has no passing check in it. "Where" is the section of the
 | `release-mismatch:destination` | guardian | the same with `pause_on_destination` (hard) | Exit rule, 3P-2 |
 | `release-before-final` | guardian | an approval of a burn the L2 has not finalized | Committee outside the rule |
 | `mint-chain` | guardian | an unbacked mint after a rollback | Rollback |
+| `release-held-no-router-log` | sign daemon | a signer whose `router_from_block` is above the burn finds no `SolanaExit`: held, not latched | Exit rule |
+| `deposit-record-changed` | guardian | a deposit record read before a Solana rollback is replaced by another at its nonce (soft) | Rollback |
+| `vault-pause-failed` | guardian | a pause inside the cooldown after a committee unpause is refused by the vault | Exit rule |
 
 Not staged on the validator, with the test that covers each instead (`REQUIRED_ELSEWHERE` in the driver):
-`release-held-no-router-log` (unreachable on chain: the router logs in the transaction of every burn it makes;
-`test_exit_rule.Rule`), `release-held-redirect-destination` (the code path of `release-held-destination` for a
-redirect key; `test_exit_rule.Latch`), the other `certificate-withheld-*` codes (the same branch),
-`watch-gap-exceeds-retention` and the guardian's refusals of a slow `--interval` or a retention below the floor
-(outside a rehearsal only; `test_r330_review.R330Sol3Retention`), `deposit-record-changed` (needs a rollback that
-rewrites a finalized deposit record; not staged), `vault-pause-failed` (not staged).
+`release-held-redirect-destination` (the code path of `release-held-destination` for a redirect key;
+`test_exit_rule.Latch`), the other `certificate-withheld-*` codes (the same branch), and the rules that apply only
+outside a rehearsal (`watch-gap-exceeds-retention`, the guardian's refusals of a slow `--interval` or a retention
+below the floor; `test_r330_review.R330Sol3Retention`). Since round 18 every finding and refusal that can happen on
+a rehearsal validator has its case (27 rows).
