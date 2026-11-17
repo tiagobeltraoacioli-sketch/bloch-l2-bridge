@@ -1,6 +1,9 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # bloch-l2-bridge
 
+
+**Branches pushed on 2026-11-17** (which line is what, audited, reviewed or work in progress, and how to verify it): [BRANCHES.md](BRANCHES.md).
+
 **The bridge on the path to mainnet is the bUSDC 5-of-7 committee vault:** see
 [the activation handoff](docs/MAINNET-USDC-ACTIVATION-HANDOFF.md) and
 [BUSDC-MAINNET-V2](docs/BUSDC-MAINNET-V2.md). The custody preflight, deployment evidence, authority ceremony,
@@ -199,7 +202,16 @@ pattern) — deliberately excluded from the product root workspace.
 
 ## License
 
-MIT OR Apache-2.0.
+Not one licence for the whole tree; the `SPDX-License-Identifier` line of each file governs it.
+
+| Path | Licence | Text |
+|---|---|---|
+| everything not listed below | MIT OR Apache-2.0 | `LICENSE-MIT`, `LICENSE-APACHE` |
+| `tools/signatario-stable/sigfeed.py`, `tools/signatario-stable/bridge_feed.py` (the signature transport shared with the L2 attestor tools of bloch-l2-evm) | AGPL-3.0-or-later | `LICENSE-AGPL-3.0` |
+| Solidity files whose header says `MIT` only (`contracts/stable/`, `contracts/bridged/`, `contracts/wblch/`, `contracts/wgnb/`; `contracts/sp1/` is Succinct's SP1 verifier, MIT) | MIT | `LICENSE-MIT` |
+| `contracts/vendor/openzeppelin-v5.0.2/` | MIT (OpenZeppelin) | `contracts/vendor/openzeppelin-v5.0.2/LICENSE` |
+
+Find every AGPL file with `git grep -l 'SPDX-License-Identifier: AGPL'`.
 
 ### Bitcoin observation groundwork
 
