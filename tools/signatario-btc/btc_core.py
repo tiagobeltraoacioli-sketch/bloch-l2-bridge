@@ -276,7 +276,7 @@ def address_from_spk(network, spk):
 # ── scripts ──────────────────────────────────────────────────────────────────
 OP_DROP, OP_CHECKMULTISIG, OP_RETURN = 0x75, 0xae, 0x6a
 THREAD_TAG = b'bloch.bbtc.vault.v1'
-MARKER_TAG = b'BBTC\x03'  # format 3: set-aside mark with its L2 block, late payments by rank (formats 1 and 2 are refused)
+MARKER_TAG = b'BBTC\x04'  # format 4: set-aside mark with its L2 block, late payments by 2-byte rank (formats 1-3 refused)
 MAX_KEYS = 15
 
 
@@ -405,7 +405,8 @@ MARKER_FIXED = 40    # tag, four 8-byte fields, the fee rate, the operations byt
 MAX_BITMAP = MARKER_PAYLOAD - MARKER_FIXED  # bytes of bitmap when the transaction sets nothing aside and pays no late burn
 MAX_LATE = 4         # late payments (burns set aside earlier) one vault transaction may carry
 MAX_ASIDE = 4        # burns one vault transaction may set aside: never more than one transaction can pay late
-LATE_RANKS = 256     # a late payment names the burn by its rank among the burns set aside (oldest first), one byte
+LATE_RANKS = 65_536  # a late payment names the burn by its rank among the burns set aside (oldest first), two bytes
+LATE_BYTES = 2       # (format 3 had one byte: 256 abandoned set-aside burns made every later one unpayable, R342-BTC-2P-1)
 ASIDE_BYTES = 7      # the set-aside mark as a distance below the burn base (2 bytes) and the L2 block it was judged at (5)
 
 
@@ -427,14 +428,19 @@ class Marker:
     aside_block   the finalized L2 block the set-aside was judged at (0 without a mark). A burn set aside returns to
                   payable only by a call of its burner on the router in a LATER L2 block
     late          the burns set aside earlier that this transaction pays, each as its RANK among the burns set aside
-                  and unpaid in the parent state, oldest first (ascending, at most 4, below 256)
+                  and unpaid in the parent state, oldest first (ascending, at most 4, below 65,536, two bytes each)
 
     Sizes: 40 fixed bytes; a set-aside costs 7 (the mark as a 2-byte distance below the burn base, the L2 block in 5);
-    a late payment 1; the rest of the 80 bytes is the bitmap: 320 nonces with no operation, 264 with a set-aside,
-    312 down to 288 with one to four late payments, 232 with everything.
-    Formats 1 (round 16, no operations byte) and 2 (round 17 first form: an 8-byte mark, 8-byte late nonces, no L2
-    block) are NOT read: their tags are refused, so a thread that carries one holds every tool. Nothing was deployed
-    with them, and the policy version (inside the route) is 3 with this format.
+    a late payment 2; the rest of the 80 bytes is the bitmap: 320 nonces with no operation, 264 with a set-aside,
+    304 down to 256 with one to four late payments, 200 with everything.
+    Why two bytes (review R342-BTC-2P-1): with one byte only the 256 oldest burns set aside could be paid late, and
+    abandoned direct burns (set aside by the `age` rule, their burners never act) are never paid, so 256 of them made
+    every later set-aside burn unpayable for ever. With two bytes the same stop needs 65,536 abandoned burns: at the
+    0.001 BTC minimum burn that is 65.5 BTC locked by the attacker (65 times the proposed supply cap) and at least
+    16,384 vault transactions (four set-asides each, each with a paying item).
+    Formats 1 (round 16, no operations byte), 2 (round 17 first form: an 8-byte mark, 8-byte late nonces, no L2
+    block) and 3 (1-byte ranks) are NOT read: their tags are refused, so a thread that carries one holds every tool.
+    Nothing was deployed with them, and the policy version (inside the route) is 4 with this format.
     """
 
     def __init__(self, next_deposit=0, burn_base=0, liabilities=0, owner_due=0, feerate=0, paid=(), aside_through=0, late=(),
@@ -465,7 +471,7 @@ class Marker:
                 raise ValueError('marker field out of range')
         late = list(m.late)
         if len(late) > MAX_LATE or late != sorted(set(late)) or any(type(n) is not int or not 0 <= n < LATE_RANKS for n in late):
-            raise ValueError('at most 4 late payments per vault transaction, by ascending rank below 256')
+            raise ValueError('at most 4 late payments per vault transaction, by ascending rank below 65,536')
         ops = bytes([(0x80 if m.aside_through else 0) | len(late)])
         if m.aside_through:
             below = m.burn_base - m.aside_through   # a mark is itself set aside, so it lies at or below the new base
@@ -474,7 +480,7 @@ class Marker:
             ops += below.to_bytes(2, 'big') + m.aside_block.to_bytes(5, 'big')
         elif m.aside_block:
             raise ValueError('an L2 block without a set-aside mark')
-        ops += bytes(late)
+        ops += b''.join(n.to_bytes(LATE_BYTES, 'big') for n in late)
         room = MARKER_PAYLOAD - (MARKER_FIXED - 1) - len(ops)
         bitmap = bytearray(room)
         for n in m.paid:
@@ -495,7 +501,7 @@ class Marker:
         body = spk[2:] if spk[1] < 76 else spk[3:]
         declared = spk[1] if spk[1] < 76 else (spk[2] if spk[1] == 0x4c and len(spk) > 2 else -1)
         if declared != len(body) or not MARKER_FIXED <= len(body) <= MARKER_PAYLOAD or body[:5] != MARKER_TAG:
-            raise ValueError('not a marker of format 3')
+            raise ValueError('not a marker of format 4')
         f = lambda o, n: int.from_bytes(body[o:o + n], 'big')
         base, ops, at = f(13, 8), body[39], MARKER_FIXED
         if ops & 0x70 or (ops & 0x0f) > MAX_LATE:
@@ -505,10 +511,10 @@ class Marker:
             if at + ASIDE_BYTES > len(body):
                 raise ValueError('non-canonical marker')
             through, block, at = base - f(at, 2), f(at + 2, 5), at + ASIDE_BYTES
-        if at + (ops & 0x0f) > len(body):
+        if at + LATE_BYTES * (ops & 0x0f) > len(body):
             raise ValueError('non-canonical marker')
-        late = list(body[at:at + (ops & 0x0f)])
-        at += ops & 0x0f
+        late = [f(at + LATE_BYTES * i, LATE_BYTES) for i in range(ops & 0x0f)]
+        at += LATE_BYTES * (ops & 0x0f)
         paid = {base + 1 + i for i in range(8 * (len(body) - at)) if body[at + i // 8] >> (i % 8) & 1}
         m = Marker(f(5, 8), base, f(21, 8), f(29, 8), f(37, 2), paid, through, late, block)
         try:

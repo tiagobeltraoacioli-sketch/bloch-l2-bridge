@@ -26,6 +26,7 @@ Prints PASS/FAIL per check, a count at the end, exit 0 only if every check passe
   R round 18: signers serve only a listed relayer's fresh, signed proposals
   X review 342's attack cases as regression tests: set-aside by a relayer's fee rate, a replacement that drops a pending
     payout, five keys hiding a burn inside the rules (reserves held, honest signers hold, release by acknowledgement)
+  Y review 378's case: a pending payout at its burner's ceiling does not freeze the thread after a fee rise
 The node runs with -acceptnonstdtxn=0: every vault transaction passes mainnet relay policy. Each signer has two keys in
 separate keystores: an L2 mint key and a Bitcoin vault key.
 """
@@ -1254,18 +1255,23 @@ def run(rig):
           'it beside a paying burn',
           r_relay['propose'][0] != 0 and 'travels only with' in stray_only and all_refuse(r['signs'], 'may not be set aside')
           and received(victim['address']) == 0, (r_relay['propose'][1], stray_only, reasons(r['signs'])[:1]))
-    # X2. A replacement that drops a payout pending in the mempool is refused (rule 5b); the pending one confirms.
-    honest = rig.vault_tx(10, burns=[victim, other], tag='x2-honest')                 # broadcast, not mined
+    # X2. A replacement that drops a payout pending in the mempool is refused (rule 5b) when that payout is still payable
+    # at the replacement's rate (here `third`, ceiling 200, dropped at 20); the pending one confirms. (Dropping a payout
+    # whose ceiling the market has passed is allowed since review R342-BTC-2P-2: section Y.)
+    third = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    honest = rig.vault_tx(10, burns=[victim, other, third], tag='x2-honest')          # broadcast, not mined
     in_pool = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode == 0
     evil = rig.vault_tx(20, burns=[other], signers=range(7), tag='x2-replace')
     still = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode == 0
     rig.mine(1)
     rig.l2_mine(3)
     rc, res = rig.reserves()
-    check('X2 (R342-BTC-1) a replacement at a higher fee rate that drops a payout pending in the mempool is refused by all 7 '
-          'signers; the pending payout confirms and pays both burns at 10',
+    check('X2 (R342-BTC-1) a replacement at a higher fee rate that drops a payout pending in the mempool (still payable at that '
+          'rate) is refused by all 7 signers; the pending payout confirms and pays the burns at 10',
           in_pool and still and (evil['propose'][0] != 0 or all_refuse(evil['signs'], 'keep every payout'))
-          and received(victim['address']) == 300_000 - 300 - 10 * 402 and rc == 0 and res['status'] == 'ok',
+          and received(victim['address']) == 300_000 - 300 - 10 * 402 and received(third['address']) == 300_000 - 300 - 10 * 402
+          and rc == 0 and res['status'] == 'ok',
           (evil['propose'][1], reasons(evil['signs'])[:1], res.get('status')))
     # X3. Five keys INSIDE the rules hide a burn: a rule-shaped transaction sets aside a payable router burn (ceiling 200,
     # transaction at 1 sat/vB), riding with a real payout of another burn (a set-aside with nothing paying is refused by
@@ -1310,6 +1316,40 @@ def run(rig):
           r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == [hidden['nonce']]
           and received(hidden['address']) == 300_000 - 300 - 402 and rc == 0 and res['status'] == 'ok'
           and res['set_aside_count'] == 0 and [v['txid'] for v in res['acknowledged_violations']] == [xtx.txid()], (r, res))
+
+    # ── Y. review 378 (round 18): R342-BTC-2P-2, kept as a regression test ─────────────────────────────────────────
+    # (X3b's acknowledgement stays in every config: the thread holds one acknowledged violation from here on.)
+    who_k = alice_k if rig.balance(alice) >= rig.balance(bob) else bob_k
+    # An exit whose burner named exactly the rate the honest relayer then pays (10 sat/vB), and an ordinary one.
+    tight = burn(who_k, 3_000, max_rate=10)
+    loose = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    honest = rig.vault_tx(10, burns=[tight], tag='y-honest')                  # broadcast, not mined
+    pending = honest['propose'][1].get('txid', '00')
+    in_pool = rig.bcli('getmempoolentry', pending, ok=False).returncode == 0
+    # The fee market rises: the relayer tries to replace it at 11, keeping the tight burn (check 4 refuses: ceiling 10)
+    keep = rig.vault_tx(11, burns=[tight, loose], tag='y-keep')
+    # ... or leaving it out: allowed, its ceiling (10) is below the new rate and below every signer's market reading
+    drop = rig.vault_tx(11, burns=[loose], tag='y-drop')
+    still = rig.bcli('getmempoolentry', pending, ok=False).returncode == 0
+    note(f"Y1: pending {pending} in mempool {in_pool}; replacement keeping the tight burn: propose {keep['propose'][0]} "
+         f"signed {sum(1 for c0, _ in keep['signs'] if c0 == 0)} of 7 ({reasons(keep['signs'])[:1]}); replacement dropping it: "
+         f"propose {drop['propose'][0]} signed {sum(1 for c0, _ in drop['signs'] if c0 == 0)} of 7 ({reasons(drop['signs'])[:1]}); "
+         f"pending still in mempool {still}")
+    check('Y1 (R342-BTC-2P-2) after a fee rise, a pending vault transaction that pays a burn at exactly its ceiling can still '
+          'be replaced at a higher rate (otherwise every later exit, sweep and refund waits for it)',
+          in_pool and ((keep['combine'] and keep['combine'][0] == 0) or (drop['combine'] and drop['combine'][0] == 0)),
+          (reasons(keep['signs']), reasons(drop['signs']), keep['propose'][1], drop['propose'][1]))
+    rig.mine(1)
+    rig.l2_mine(3)
+    r = rig.vault_tx(10, burns=[tight], tag='y-after')
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    check('Y1b once the replacement confirms the thread moves again: the burn left out waits in order and is paid at its '
+          'ceiling (10) by the next transaction; both exits paid once, reserves ok',
+          r['combine'] and r['combine'][0] == 0 and received(tight['address']) == 300_000 - 300 - 10 * 402
+          and received(loose['address']) == 300_000 - 300 - 11 * 402 and rc == 0 and res['status'] == 'ok', (r, res))
 
     # ── G. the limit an auditor must accept ──────────────────────────────────
     st = rig.status()

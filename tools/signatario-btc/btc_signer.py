@@ -47,7 +47,9 @@ Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 
   4e. The thread so far (confirmed transactions once each) against the finalized L2 (btc_audit.audit_thread,
      review R342-BTC-2): a thread in which five keys already signed outside the L2-side rules is HELD.
   5b. A replacement of a pending vault transaction must keep every payout, sweep and refund of it: it may add items
-     and raise the fee rate, it cannot cancel a payment that is already in the mempool.
+     and raise the fee rate, it cannot cancel a payment that is already in the mempool. One exception (review
+     R342-BTC-2P-2, else a fee spike freezes the thread behind a payout at its burner's ceiling): a payout whose
+     burner's ceiling is below the new rate and below this signer's own estimate may be left out; it waits in order.
   5. Fee rate at most 1.5 times this signer's own node's estimate (`estimatesmartfee 2 economical`, the mode pinned
      here, not the node's default) and the policy ceiling (a mainnet signer without an estimate signs nothing); a
      replacement of a pending vault transaction must pay a higher fee rate than it.
@@ -344,7 +346,7 @@ def cmd_sign(cfg, args):
     if aside_through and (not to_set_aside or len(to_set_aside) > pol.MAX_ASIDE_PER_TX):
         refuse('the set-aside mark is not above the oldest unsettled burn of this thread, or names more than 4 burns')
     was_aside = pol.aside_at(tip)
-    paid_nonces = []
+    paid_nonces, droppable = [], set()
     try:
         if refs or aside_refs:
             verified, final_token, proc, work = verified_burns(ctx, list(refs) + list(aside_refs))
@@ -479,6 +481,22 @@ def cmd_sign(cfg, args):
                        'page the operators and the guardians', violations=bad[:10])
             journal_now['audited'] = sorted(audited | {e['txid'] for e in view.entries[1:] if e['confirmations'] > 0})
             journal_save(cfg['journal'], journal_now)
+            # 5b, the L2 part (review R342-BTC-2P-2): which payouts of the pending transaction a replacement may leave out.
+            # Only a burn that can no longer be paid at the replacement's rate, because its burner's ceiling is below
+            # that rate AND below this signer's own estimate of the market: the fee market really moved above it. Such a
+            # burn becomes unsettled again (not set aside): it waits in order and is paid when a transaction at its
+            # ceiling can be made. Every other payout, and every sweep and refund, must be kept.
+            if view.pending is not None and view.pending['txid'] != str(proposal.get('txid', '')):
+                market = own_estimate(node)
+                if market is None and vault.network != 'bitcoin-mainnet':
+                    market = float(cfg.get('feerate_without_estimate', 1))
+                for x in view.pending['build']['payouts']:
+                    b = log.get(x['nonce'])
+                    if b is None or market is None:
+                        continue
+                    t = at_final(b, None)
+                    if t['state'] != 'unclaimed' and t['max_fee_rate'] < feerate and t['max_fee_rate'] < int(market):
+                        droppable.add(x['nonce'])
     finally:
         if proc is not None:
             proc.kill()
@@ -500,11 +518,13 @@ def cmd_sign(cfg, args):
         # 5b. A replacement keeps every payment of the pending transaction (review R342-BTC-1): it may add items and
         # pay miners more; it cannot cancel a payout, a sweep or a refund that is already in the mempool.
         was = view.pending['build']
-        dropped = {'payouts': sorted({x['nonce'] for x in was['payouts']} - {b['nonce'] for b in burns}),
+        dropped = {'payouts': sorted({x['nonce'] for x in was['payouts']} - {b['nonce'] for b in burns} - droppable),
                    'sweeps': sorted({f"{x['txid']}:{x['vout']}" for x in was['credits']} - {f"{d['txid']}:{d['vout']}" for d in deposits}),
                    'refunds': sorted({f"{x['txid']}:{x['vout']}" for x in was['refunds']} - {f"{d['txid']}:{d['vout']}" for d in refunds})}
         if any(dropped.values()):
-            refuse('a replacement must keep every payout, sweep and refund of the pending vault transaction', **dropped)
+            refuse('a replacement must keep every payout, sweep and refund of the pending vault transaction (a payout may be '
+                   'left out only when its burner\'s ceiling is below both the new fee rate and this signer\'s own estimate)',
+                   **dropped)
 
     # 6. rebuild and compare
     try:

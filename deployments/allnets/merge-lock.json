@@ -38,12 +38,21 @@
     },
     "bitcoin": {
       "branch": "codex/bridge-btc-r17-20261117",
-      "commit": "e5f7780072afb1765bc17d1042a02806dd9a8480",
+      "commit": "c50b8f3fc7e436dcdcbda008ab5052ef53a07620",
       "agent": 370,
       "routes": [
         "bitcoin"
       ],
-      "conflicts": [],
+      "conflicts": [
+        {
+          "path": "tools/deploy-pontes/vault_pontes.py",
+          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.8139aa90ab9d13ec"
+        },
+        {
+          "path": "tools/signatario-stable/signatario.py",
+          "resolution": "recorded resolution tools__signatario-stable__signatario.py.8fbb4b09a4fd1845"
+        }
+      ],
       "history": [
         {
           "branch": "codex/bridge-btc-r17-20261117",
@@ -60,6 +69,10 @@
         {
           "branch": "codex/bridge-btc-r17-20261117",
           "commit": "88dd66459188c68b1ebe97687de9ad7a0f0ec9e1"
+        },
+        {
+          "branch": "codex/bridge-btc-r17-20261117",
+          "commit": "e5f7780072afb1765bc17d1042a02806dd9a8480"
         }
       ]
     },
