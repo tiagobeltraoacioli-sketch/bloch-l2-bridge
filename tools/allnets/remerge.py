@@ -153,7 +153,7 @@ def finish(line, tip, resolved, how=None):
             print(f'registry.py write refused after merging {line["id"]} (the merge is committed; fix, then rerun):\n'
                   f'{done.stdout}{done.stderr}')
         else:
-            git('add', 'deployments/bridges.json')
+            git('add', 'deployments/bridges.json', 'README.md')
     text = [f'Merge {line["id"]} line: {line["branch"]} at {tip[:7]}', '']
     if how:
         text += [how]

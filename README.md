@@ -8,6 +8,33 @@ qualification, trust intake and activation readiness paragraphs below describe t
 is legacy and does not apply to that vault. Its tools remain for reference and still enforce three-of-five on purpose.
 The 3-of-5 Bloch Inc Safe (it only funds deployer gas) and the L2's 3-of-5 attestors are separate and current.
 
+## Bridge routes from every network (integration line; NOT launchable until fixed)
+
+One tree holds every route (Ethereum bUSDC, Arbitrum One, OP Mainnet, Linea, Bitcoin, TRON, Solana, Stellar; Base held,
+BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.md), registry `deployments/bridges.json`
+(generated; read `launch.v1`), one test entry point `tools/allnets/test_all.py`. Nothing is deployed. A route is
+**not launchable until fixed** while a finding of severity Medium or above is open in
+`deployments/allnets/open-findings.json`; the list below is checked against the registry by
+`tools/allnets/test_registry.py`:
+
+<!-- allnets-launch-table:begin -->
+| Route | L2 token | Launch status | Open findings (Medium or above) |
+|---|---|---|---|
+| ethereum | bUSDC | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open) |
+| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified) |
+| base | bUSDC.base | held | R329-EVM-1 (Medium, fixed-unverified) |
+| bitcoin | bBTC | not-launchable-until-fixed | R342-BTC-1 (Medium, open) |
+| bnb | bUSDC.bnb | out | R329-EVM-1 (Medium, fixed-unverified) |
+| linea | bUSDC.linea | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified), R329-EVM-4 (Medium, open) |
+| op-mainnet | bUSDC.op | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified), R329-EVM-4 (Medium, open) |
+| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual) |
+| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-3P-1 (Medium, open) |
+| tron | bUSDT.trx | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open) |
+<!-- allnets-launch-table:end -->
+
+Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before
+any real funds; the bridge windows and caps are an open owner decision.
+
 **Reference components, unaudited, no live bridge deployment.** The historical
 v1 BLCH vault design is custodial. The new
 [Color-Changing Chameleon v1](docs/CHAMELEON-V1.md) implements a separate

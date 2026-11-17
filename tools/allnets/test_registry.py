@@ -29,6 +29,12 @@ class Registry(unittest.TestCase):
     def test_committed_registry_is_current(self):
         self.assertEqual(registry.OUT.read_text(), registry.render(self.reg))
 
+    def test_readme_launch_table_is_the_registry_s(self):
+        self.assertEqual(registry.README.read_text(), registry.readme_with(self.reg))
+        for r in self.reg['routes']:
+            for f in r['launch']['openFindings']:
+                self.assertIn(f['id'], registry.readme_table(self.reg))
+
     def test_every_route_file_is_in_the_registry(self):
         files = sorted(p.parent.name for p in (registry.ROOT / 'deployments').glob('*/bridge.network.json'))
         self.assertEqual(sorted(set(self.routes) - {'ethereum'}), files)

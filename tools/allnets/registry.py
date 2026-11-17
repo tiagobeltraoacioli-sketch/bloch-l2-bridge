@@ -32,7 +32,7 @@ BRIEF-ROUND16.md architecture point 2 rests on:
   C6 the fee recipient of each route is the owner's address for that network kind (BRIEF-ROUND18.md owner facts)
   C7 the committee is one committee: same scheme, threshold, switch threshold, guardian power and pause on every route
   C8 every open finding names known routes only
-Standard library only. Reads files; writes only deployments/bridges.json.
+Standard library only. Reads files; writes only deployments/bridges.json and the launch table between the markers of README.md.
 """
 import json
 from pathlib import Path
@@ -228,6 +228,26 @@ def cross_checks(out, findings):
     return errs
 
 
+README = ROOT / 'README.md'
+MARK_BEGIN, MARK_END = '<!-- allnets-launch-table:begin -->', '<!-- allnets-launch-table:end -->'
+
+
+def readme_table(reg):
+    rows = ['| Route | L2 token | Launch status | Open findings (Medium or above) |', '|---|---|---|---|']
+    for r in reg['routes']:
+        l = r['launch']
+        ids = ', '.join(f"{f['id']} ({f['severity']}, {f['state']})" for f in l['openFindings']) or '-'
+        rows.append(f"| {r['id']} | {r['l2']['symbol']} | {l['state']} | {ids} |")
+    return '\n'.join(rows)
+
+
+def readme_with(reg):
+    """README.md with the launch table between its markers regenerated from the registry."""
+    text = README.read_text()
+    a, b = text.index(MARK_BEGIN) + len(MARK_BEGIN), text.index(MARK_END)
+    return text[:a] + '\n' + readme_table(reg) + '\n' + text[b:]
+
+
 def render(reg):
     return json.dumps(reg, indent=2, ensure_ascii=False) + '\n'
 
@@ -249,11 +269,15 @@ def main(argv):
     text = render(reg)
     if mode == 'write':
         OUT.write_text(text)
-        print(f'wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C8 passed')
+        README.write_text(readme_with(reg))
+        print(f'wrote README.md launch table; wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C8 passed')
         return 0
     if mode == 'check':
         if not OUT.exists() or OUT.read_text() != text:
             print(f'{OUT.relative_to(ROOT)} differs from what the route files generate: run `registry.py write`')
+            return 1
+        if README.read_text() != readme_with(reg):
+            print('README.md launch table differs from the registry: run `registry.py write`')
             return 1
         print(f'{OUT.relative_to(ROOT)} current: {len(reg["routes"])} routes, checks C1-C8 passed')
         return 0
