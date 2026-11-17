@@ -121,3 +121,19 @@ group or others). The fixture now sets 0700 explicitly; the rule is unchanged. N
 0775 and IS refused by the relayer and by `private_file`, and the same directory is accepted after `chmod 0700`
 (it fails if the directory-mode condition is removed from `private_file`). `test_relayer_key`: 9 tests, 1 error
 under umask 002 before (OK under 022 and 077); 10 tests OK under umask 000, 002, 022 and 077 after.
+
+Round 19 (agent 403), second fixture of the same class (F403-1), found by running `scripts/tests` under umask 002,
+022 and 077 on the build host: the four custody verifier test classes (`scripts/tests/test_custody_deployment_ancestry.py`,
+`_inclusion.py`, `_state.py`, `_vault.py`) handed the tools the binary exactly as cargo left it in `target/debug`, whose
+mode follows the process umask (0775 under umask 002); `_stage_verifier` (`scripts/usdt_observer/l2_settlement.py`)
+rightly refuses a verifier that group or others can write. Under umask 002 the ancestry class gave 1 error and 1
+failure (until now counted among the "crate download" errors of the host's table; only the three `setUpClass` errors
+of inclusion, state and vault are downloads), and with every crate present all four classes failed (4 failures, 7
+errors of 419). The tests now pass the tools a private copy with an explicit mode (`scripts/tests/verifier_fixture.py`);
+no rule changed (`scripts/*.py`, `scripts/usdt_observer/`, `src/`, `Cargo.*` untouched). New test
+`test_a_group_or_other_writable_verifier_is_refused` pins the rule (0775, 0757, 0777, 0520, 0502 and a file created
+under umask 002 are refused by the library and by the CLI; 0755 and 0500 accepted; it fails when the mode condition
+is removed from `_stage_verifier`). `scripts/tests` on the host, crates present: 420 OK under umask 002, 022 and 077
+(419 before, OK only under 022); with the host's own offline registry: 401 run, 3 errors (the downloads). The crates
+are obtained, on an online host, with `CARGO_HOME=<dir> ~/.cargo/bin/cargo +1.94.1 fetch --locked` at the repository
+root; nothing is vendored. Phase 2 manifest: byte-equal.

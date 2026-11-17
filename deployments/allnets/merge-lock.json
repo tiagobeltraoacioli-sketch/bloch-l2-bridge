@@ -3,7 +3,7 @@
   "lines": {
     "shared-tools": {
       "branch": "codex/bridge-signer-verify-r17-20261117",
-      "commit": "4c4cbbbee55ef89057a0407103ca087558a510c4",
+      "commit": "fb146b90178eb1b2fffd1318dde1fc2509636d9c",
       "agent": 374,
       "routes": [
         "ethereum"
@@ -25,6 +25,10 @@
         {
           "branch": "codex/bridge-signer-verify-r17-20261117",
           "commit": "056fea5aa38f431a5c80d0212d2c999138ad82ce"
+        },
+        {
+          "branch": "codex/bridge-signer-verify-r17-20261117",
+          "commit": "4c4cbbbee55ef89057a0407103ca087558a510c4"
         }
       ]
     },

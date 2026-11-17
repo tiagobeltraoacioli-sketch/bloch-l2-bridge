@@ -17,6 +17,7 @@ from custody_deployment_compare import NON_AUTHORIZING
 from custody_deployment_manifest import canonical_sha256
 from custody_deployment_state import SCHEMA, IMPLEMENTATION_SLOT, collect_custody_deployment_state, verify_custody_deployment_state
 from test_custody_deployment_inclusion import inclusion_fixture, rebind
+from verifier_fixture import private_copy
 
 VECTORS = json.loads((ROOT / 'test-vectors/ethereum-deployment-state/synthetic.json').read_text())['cases']
 
@@ -88,7 +89,9 @@ class StateTest(unittest.TestCase):
         if result.returncode:
             raise AssertionError('real state verifier build failed: ' + result.stderr)
         target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
-        cls.executable = (ROOT / target if not target.is_absolute() else target) / 'debug/ethereum_deployment_state_verifier'
+        cls.built = (ROOT / target if not target.is_absolute() else target) / 'debug/ethereum_deployment_state_verifier'
+        # A private copy with an explicit mode, never cargo's output under the process umask (verifier_fixture.py).
+        cls.executable = private_copy(cls, cls.built)
         cls.pin = '0x' + hashlib.sha256(cls.executable.read_bytes()).hexdigest()
 
     def verify(self, inputs, pin=None):
