@@ -38,7 +38,7 @@
     },
     "bitcoin": {
       "branch": "codex/bridge-btc-r17-20261117",
-      "commit": "88dd66459188c68b1ebe97687de9ad7a0f0ec9e1",
+      "commit": "e5f7780072afb1765bc17d1042a02806dd9a8480",
       "agent": 370,
       "routes": [
         "bitcoin"
@@ -56,6 +56,10 @@
         {
           "branch": "codex/bridge-btc-r17-20261117",
           "commit": "28dcff31b5a33614671fc4b3511d2cae91da263a"
+        },
+        {
+          "branch": "codex/bridge-btc-r17-20261117",
+          "commit": "88dd66459188c68b1ebe97687de9ad7a0f0ec9e1"
         }
       ]
     },
