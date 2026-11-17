@@ -1,12 +1,52 @@
 # Bridges from Linea, Arbitrum One, Base, OP Mainnet and BNB Smart Chain into the Bloch L2
 
-Round 16, agent 320. Branch `codex/bridge-evm-nets-r16-20261116`, from the Ethereum bridge freeze `cc2511a`.
+Rounds 16 and 17 (agents 320 and 337), on the Ethereum bridge freeze `cc2511a`. Reviews: `agents/325-bridges-review-r16.md`
+section 6 and `agents/329-bridge-evm-review-r17.md`. **Launchable in bridge v1: Arbitrum One, OP Mainnet, Linea. Base is
+held and BNB Smart Chain is out of v1: every tool refuses them (section 0).**
 
 **UNAUDITED. Nothing is deployed, nothing was sent to any public network, no real key was used.** Each of these
 bridges needs its own external audit before real funds. The Ethereum bridge documents stay the reference:
 `docs/AUDIT-SCOPE-BRIDGE-V3.md` (design, trust model, known limits), `docs/BRIDGE-V3-KEY-CEREMONY.md`,
 `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md`, `docs/BUSDC-MAINNET-V2.md` (deployment sequence). This document states only
 what differs per network.
+
+## 0. Launch status, and what enforces it (round 17, review R329-EVM-1)
+
+| Network | Status | Why |
+|---|---|---|
+| Arbitrum One, OP Mainnet, Linea | launchable | sections 4.2 and 4.4 |
+| Base | **held** | no release has landed inside its 256-block window (about 51 s; 49 s to join) with the production signer path. Reviewer 329, paced fork at 0.2 s blocks, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures) |
+| BNB Smart Chain | **out of v1** | a custodial 18-decimal peg token behind a wrapper that is new unaudited code, and a second transaction per recipient (section 6) |
+
+The decision is recorded twice, on purpose: in `tools/evm-nets/networks.json` (`networks.<name>.launch` = `{"v1", "state",
+"reason"}`) and in code, `DECIDED` in `tools/evm-nets/launch.py`. `launch.refusal(chain_id)` is asked by every tool that
+validates, deploys, signs, relays or generates configuration:
+
+| Tool | What it refuses for a network that is not launchable |
+|---|---|
+| `tools/deploy-pontes/vault_pontes.py` | `validate`, `args` and `verify` (no constructor arguments, no `forge` line, no node asked) |
+| `tools/deploy-pontes/deploy_pontes.py` | the L2 token over that source chain id, with or without `--rehearsal` |
+| `tools/evm-nets/evm_nets.py` | writes no vault config, token config or operator template (`write` removes them, `check` fails while one exists); `verify-unit` |
+| `tools/signatario-stable/preflight_signer.py --network` | fails at once |
+| `tools/signatario-stable/signatario.py` | `mint`, `remint`, `release`, `combine`, `measure` when `source_chain_id` is that network |
+| `tools/signatario-stable/eth_half.py` | `deposit` and `release`, by the chain id its own node answers |
+| `tools/signatario-stable/vigia.py` | `sign` and `relay`, at start |
+
+No flag, environment variable or operator file lifts a refusal. If the two records disagree (a registry edited by hand,
+missing or unreadable, a network added in one place only) every network of the registry is refused, the launchable
+ones included. Lifting Base is one reviewed commit that changes `DECIDED` and `networks.json` together, after which
+`evm_nets.py write` generates its files. `deployments/base/` and `deployments/bnb/` hold only `bridge.network.json`,
+whose `launch` block and first note say the same to the DEX and the pages (schema: optional top-level `launch`).
+
+Ethereum (chain 1) is not in the registry and none of this code runs for it. A chain id that is neither 1 nor in the
+registry is a local rehearsal chain: nothing signed for it is valid on a real network (every digest binds the chain
+id). The fork rehearsal of Base or BNB Smart Chain therefore runs under a rehearsal chain id (900,000,000 + the
+network's id), never under the network's own. Tests: `tools/evm-nets/test_launch_r17.py`; the reviewer's demonstration,
+now asserted: `tools/evm-nets/r329_demo_deploy_gate.py`.
+
+Also pinned by the registry for its networks (reviews R329-EVM-2, R329-EVM-5): the vault config's fee recipient
+(`0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) and both rates (5 and 5 bps), and the L2 token's name and symbol per
+source chain id. A config that differs is refused by the deploy tools.
 
 ## 1. The model, unchanged
 
@@ -281,6 +321,35 @@ answered a query for a block 3,000 back on each (`scratchpad/a320/host/`, and th
 to stay byte-identical if the rebuild proves slow: an incremental rebuild in the signer (the Ethereum bridge's
 tooling, outside this task), or not offering Base and BNB Smart Chain in v1.
 
+### 4.4 The timing watch and the hold (round 17, review R329-EVM-4)
+
+The rebuild that precedes every release signature starts at genesis and grows with the chain; on a network with a
+short window that is a slow leak in liveness. Nothing bounded it or watched it. Now, for every network of the registry:
+
+- **Measured on every release.** `vigia.py sign` passes `--timing` to `signatario.py`, which writes how long the run
+  took: `reconstruct_s`, `rebuild_s` (with the private RPC's start), the L2 reads, the source half and the total; the
+  source half reports the anchor's age at the signature in the EVM's own numbers. The daemon logs a `timing` line and
+  keeps the last 50 in `timing_state` (default `<shared_dir>/.timing/<signer>.json`).
+- **Alerted at a stated fraction of the window.** The join window of a network is `anchor_max_age x
+  anchorBlockSeconds` (`timing` in `networks.json`): Arbitrum One 2,400 s, OP Mainnet 500 s, Linea 250 s at its fastest
+  block pace. At `alertFraction` (0.2: 480 s, 100 s, 50 s) of work for one signature, or of anchor age at a signature,
+  the signer logs `release-window-budget` (warning). `tools/evm-nets/signer_timing.py check --timing FILE` is the
+  monitor: it reads the exported file with the registry's limits and exits 2 with `release-window-budget`,
+  `release-window-hold`, `timing-stale` or `timing-unreadable`, in the format of `reservas.py`. Wire it into the same
+  alerting as the reserves monitor, one file per signer and network.
+- **A signer starts no round it cannot finish.** By its own recent measurements (the largest of the last 3 within
+  6 hours): above `holdFraction` (0.5) of the window it opens and joins nothing and alerts `release-window-hold`
+  (critical); it measures again every 300 s with `signatario.py measure` (the same rebuild, no burn read, nothing
+  signed) and resumes only when its measurements allow. It does not join a round whose anchor would be older than
+  the window by the time its own work is done, so it spends no rebuild and no hourly slot on it. With no measurement
+  yet it measures first. Holding is the safe side: no signature, the burn stays payable, the alert says why.
+- **The bounded rebuild is not on this line.** When `release-window-budget` first fires on OP Mainnet or Linea, the
+  rebuild must be bounded before the hold is reached; a prototype is on branch
+  `codex/bridge-evm-base-signer-r17-20261117` (not reviewed).
+
+Ethereum is not in the registry: its signer is not timed and never holds (the Ethereum bridge is unchanged). The same
+growth applies to it with a 1,920 s window; adding it is a decision for that line.
+
 ## 5. Differences from the Ethereum bridge
 
 | Topic | Ethereum | These networks | Why |
@@ -402,15 +471,19 @@ network (own configuration directory, own databases, own shared directory, own g
    derivation, so that `finalized` is the operator's own view), a Linea node, a BNB Smart Chain node. A shared RPC
    provider across operators would make that provider a common point of failure for attestation. Owner input:
    whether operators run all five or the bridges open one network at a time.
-2. **Signer source half:** `deployments/<network>/ops/eth-half.template.json` (generated): `eth_chain_id`,
-   `anchor_policy`, `anchor_depth`, `anchor_window`, `anchor_max_age`, `finalized_margin`. Signer and relayer
-   templates are the Ethereum ones with `eth_chain_id`, `source_chain_id`, `source_vault`, `source_route`, `token`
-   of the network and the same `anchor_policy` / `anchor_window` / `anchor_max_age` keys (`vigia.py` reads them).
-3. **Timers.** The Ethereum defaults (60 s passes, anchors up to 160 blocks old) assume a 51 minute window. Per
-   network (`networks.json`, generated into `ops/eth-half.template.json`): Arbitrum One: defaults, `anchor_depth` 2,
-   `anchor_max_age` 200 (Ethereum block numbers); OP Mainnet and Linea: `vigia.py --interval 20`, `anchor_depth` 0,
-   `anchor_max_age` 250; **Base and BNB Smart Chain: `vigia.py --interval 5` for both `sign` and `relay`,
-   `anchor_max_age` 250, and section 4's limit on the work before each signature.** A relayer that sends a
+2. **Operator files:** three generated templates per launchable network, `deployments/<network>/ops/`:
+   `eth-half.template.json`, `signer.template.json`, `relayer.template.json` (own directories, databases, feed and
+   gas keys per network: no file is shared with the Ethereum bridge's daemons). **The anchor settings are not operator
+   choices** (review R329-EVM-3): `anchor_policy`, `anchor_depth`, `anchor_max_age` and `finalized_margin` are taken
+   from `networks.json` by the chain id, by `eth_half.py` and by `vigia.py` alike. A file that omits them gets the
+   registry's values; a file that contradicts them is refused at start (before, a signer file without
+   `anchor_policy` took the Ethereum rule, and on Arbitrum One no round could ever be joined). `probe` is refused on
+   chain 1. `preflight_signer.py --network NAME` checks the same before go-live.
+3. **Timers and budgets** (`signer` in `networks.json`; review R329-EVM-6). Run the daemons WITHOUT `--interval`: the
+   network's own is the default and a longer one is refused. Arbitrum One: 60 s passes, depth 2, 200 Ethereum block
+   numbers, 6 certificates per burn per hour, a refused round tried again after 300 s (the Ethereum values). OP
+   Mainnet: 20 s, depth 2, 250 blocks, 6 an hour, 120 s. Linea: 20 s, depth 2, 250 blocks, 8 an hour, 60 s. The
+   hourly budget and the retry may be set in the operator file; they default to these. A relayer that sends a
    certificate too late pays gas for a revert; nothing else is lost.
 4. **Relayer gas:** ETH on the four rollups, BNB on BNB Smart Chain; the 300 gwei ceiling of Ethereum is far above
    these networks' prices: set `eth_max_gas_price_gwei` per network (proposed 5 on the rollups, 10 on BNB Smart
@@ -422,6 +495,10 @@ network (own configuration directory, own databases, own shared directory, own g
    (`asset.balanceOf(unitToken) >= unitToken.totalSupply() * 10^12`): **not implemented in `reservas.py`**.
 7. **Sequencer outage on a rollup:** deposits and releases wait; nothing to do. **Linea finality stall:** deposits
    wait; releases keep working while the head advances.
+8. **Signature timing** (section 4.4): run `python3 tools/evm-nets/signer_timing.py check --timing
+   /var/lib/bloch-busdc-<network>-signer/timing.json --max-age 86400` from the monitoring host's schedule, beside the
+   reserves monitor. `release-window-budget` means: plan the bounded rebuild now. `release-window-hold` means: this
+   signer signs no release on this network until its rebuild is faster; five of seven are needed.
 
 ## 9. Gas and deployment cost
 
@@ -459,8 +536,10 @@ most, against windows of hours and days).
 
 ## 10. Deployment and ceremony (owner)
 
-Order per network: unit token (BNB Smart Chain only), vault, verify at finality, L2 token, operators, enable.
-`$NET` is one of `arbitrum-one`, `base`, `op-mainnet`, `linea`, `bnb`. The committee addresses are the ones of the
+Order per network: vault, verify at finality, L2 token, operators, enable.
+`$NET` is one of `arbitrum-one`, `op-mainnet`, `linea`. **`base` and `bnb` are refused by every command below**
+(section 0); the BNB Smart Chain unit-token step is kept only as the record of what that option would need. The
+committee addresses are the ones of the
 Ethereum ceremony (`docs/BRIDGE-V3-KEY-CEREMONY.md` section 8): **no new key ceremony, the same 7 + 3 + 7 + 3
 addresses are written into each network's two config files.** A fresh deployer per network (nonce 0, no other
 role). Every step below is the Ethereum step of `docs/BUSDC-MAINNET-V2.md` section 4 with this network's files.
@@ -477,8 +556,14 @@ Rehearse the network on a local fork first (no key, nothing sent):
 python3 tools/evm-nets/rehearse_fork.py $NET
 ```
 
-BNB Smart Chain only, dry run of the unit token (add `--broadcast` and the wallet for the one-way creation), then
-write its address into `vault.token` of `deployments/bnb/busdc-vault.config.json`:
+Check the launch status the tools will apply:
+
+```
+python3 tools/evm-nets/launch.py status
+```
+
+Not in v1 (BNB Smart Chain, record only; no vault config exists for it and none validates): the unit token would be
+created with
 
 ```
 forge create --rpc-url "$SOURCE_RPC" contracts/evmnets/ScaledUnitToken.sol:ScaledUnitToken --constructor-args 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d "Bloch bridge unit of Binance-Peg USD Coin" "uUSDC.bnb"
@@ -520,34 +605,45 @@ python3 tools/evm-nets/network_json.py check deployments/$NET/bridge.network.jso
 | `contracts/usdt/ProvenanceSourceVault.sol`, `contracts/stable/BridgedStablecoinV3.sol` and bases | 0 changed | byte-identical to the Ethereum freeze; in the Ethereum audit |
 | `contracts/evmnets/ScaledUnitToken.sol` | 153 | **new**, in the money path on BNB Smart Chain |
 | `tools/signatario-stable/evm_anchor.py` | 39 | new: the anchor probe |
-| `tools/signatario-stable/eth_half.py` | +58, -1 | changed: optional `anchor_policy`, `anchor_depth`, `finalized_margin`; without them the frozen path, checks and messages (the Ethereum suites pass unchanged, agent report section 5) |
-| `tools/signatario-stable/vigia.py` | +7 | changed: round discovery with the probe, only when `anchor_policy` is `probe` |
-| `tools/deploy-pontes/vault_pontes.py`, `deploy_pontes.py` | +48 -11, +7 -1 | changed: source networks from the registry; a chain-1 config is validated as before |
-| `tools/evm-nets/` (registry, generator, checker, fork rehearsal, tests) | about 1,300 | new tooling, moves no funds |
+| `tools/signatario-stable/eth_half.py` | see `git diff cc2511a` | changed: on a chain other than 1, the launch check and the registry's anchor settings; optional `anchor_policy`, `anchor_depth`, `finalized_margin`, `deposit_cursor`. With chain 1 the frozen path, checks and messages (the Ethereum suites pass unchanged) |
+| `tools/signatario-stable/signatario.py` | see `git diff cc2511a` | changed (round 17): launch check when `source_chain_id` is not 1; `--timing FILE` and `measure` (write-only timing, nothing decides on it here) |
+| `tools/signatario-stable/vigia.py` | see `git diff cc2511a` | changed: round discovery with the probe; for a source chain other than 1 the launch check, registry anchor settings and pacing, the timing record, the alert and the hold (section 4.4) |
+| `tools/signatario-stable/preflight_signer.py` | see `git diff cc2511a` | changed: `--network NAME`; without it unchanged |
+| `tools/deploy-pontes/vault_pontes.py`, `deploy_pontes.py` | see `git diff cc2511a` | changed: source networks, launch status, fee and token-name pins from the registry; a chain-1 config is validated as before |
+| `tools/evm-nets/launch.py` | new | the launch decision in code and the registry lookups: **read this first** |
+| `tools/evm-nets/` (registry, generator, checker, timing monitor, fork and Nitro rehearsals, tests) | new | tooling, moves no funds |
+
+`contracts/evmnets/ScaledUnitToken.sol` serves only BNB Smart Chain, which is out of v1: an auditor of Arbitrum One,
+OP Mainnet and Linea can leave it out of scope. `tools/evm-nets/r329_nitro_sim.py` and `solidity-tests/R329NitroSim.sol`
+are the reviewer's read-only simulation harness (no product code).
 
 What an auditor should look at first: (1) the `probe` anchor: that no path lets a non-final anchor stand in for
 finality, and the new read of the deposit chain at `finalized` (section 3.2); (2) `ScaledUnitToken`:
 `wrapAndDeposit`, the balance-difference checks, reentrancy through a hostile `vault` argument or a hostile asset;
 (3) cross-network replay of every digest with shared keys; (4) Arbitrum's `block.number` (an Ethereum block number)
 in the vault's `sourceAnchorNumber >= block.number` check and its ArbOS `blockhash`; (5) the vault's fixed 256-block
-window against each network's block time (section 4).
+window against each network's block time (section 4); (6) `launch.py`: that no path of any tool acts for chain 8453
+or 56, and that a registry that disagrees with the code closes every network; (7) the hold of section 4.4: that it
+can only withhold a signature, never produce one.
 
 ## 12. Not done, not proven
 
 The agent report (`agents/320-bridge-evm-nets-r16.md`, last sections) has the full list. The main ones:
 
 - No run on a real network or public testnet; everything is anvil forks with throwaway keys.
-- **Release timing on Base and BNB Smart Chain is not established** for production signers (section 4): the L2
-  rebuild time is unmeasured.
-- **Arbitrum is still not proven end to end** (review R325-EVM-11). anvil does not reproduce Arbitrum after the
-  fork block. Tried on 2026-11-16: a local Nitro node in Docker (`offchainlabs/nitro-node:v3.6.8-d6c96a5`, image
-  digest `sha256:0a20cd86…be63`, `--dev`, loopback) with `tools/evm-nets/nitro_release.py`: the frozen vault deploys
-  and takes a deposit there, but a `--dev` node has no parent chain, so `block.number` inside the EVM stays 0 and
-  `blockhash` returns zero: no anchor can exist and the signer has no `finalized`. The evidence needs a Nitro node
-  WITH a parent chain (the multi-container `nitro-testnode`: an L1, a sequencer and a batch poster), which was not
-  set up. The script is ready for it. What stands today: read-only probes of the real network, and the fork run.
-- Signing rounds were measured with one shared signature directory, without the feed transport and without the L2
-  rebuild.
+- **Base is held and BNB Smart Chain is out** (section 0). The rebuild is measured (4.1; reviewer 329 on the real L1
+  mainnet store: 2.5 s warm, 18 s cold at 191,319 L1 blocks) but still unbounded; its L2 term rests on at most 69 L2
+  blocks, the longest settled L2 history that exists on the rehearsal host.
+- **Arbitrum on a Nitro node with a parent chain: shown on a private chain** (round 17,
+  `tools/evm-nets/nitro_daemons.py`, agent report 337): `offchainlabs/nitro-node:v3.6.8-d6c96a5-dev` as sequencer and
+  batch poster over a local parent chain, the rollup deployed by the image's own `deploy`; the real daemons attested a
+  deposit at the node's `finalized`, five signer daemons signed one round anchored on a PARENT block number, and the
+  relayer daemon's transaction paid the release (18 of 18 checks). Limits: a private chain, so the parent-chain data
+  fee was zero and the token was a stand-in; ArbOS records a parent block's hash only when the chain makes a block,
+  which a busy network always does. The reviewer's read-only simulation on Arbitrum One itself covers the real
+  network's execution (`r329_nitro_sim.py`).
+- The fork rehearsals sign with one shared signature directory and `l2_source: rpc`; no run joins the real rebuild,
+  the feed transport and a source fork in one process chain on this line.
 - The Ethereum suites were written for one source network; only the fork rehearsal and `test_evm_nets.py` exercise
   the per-network settings. `reservas.py` does not watch the unit token's own backing on BNB Smart Chain.
 - Binance's collateral for the peg tokens and their owner powers were not confirmed from a Binance document.
