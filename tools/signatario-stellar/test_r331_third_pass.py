@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -29,6 +30,10 @@ def address(d):
 
 TO = sn.strkey_encode('account', bytes(range(32)))
 OTHER = sn.strkey_encode('account', bytes(range(1, 33)))
+
+
+def address_g(seed):
+    return sn.strkey_encode('account', __import__('hashlib').sha256(seed).digest())
 
 
 class CliValues(unittest.TestCase):
@@ -132,18 +137,27 @@ class TheOtherClaim(unittest.TestCase):
         for word in ('recipient_claims', 'claim_grace', 'load_claim'):
             self.assertNotIn(word, source)
 
-    def test_a_release_paid_on_the_one_claim_is_ok_and_any_other_address_is_a_finding(self):
+    def test_a_release_paid_on_either_claim_of_the_burner_is_ok_and_any_other_address_is_a_finding(self):
+        """Restated in round 18 (claims accumulate on the router; was: one set-once claim). The reviewer's scenario
+        itself: the committee paid TO on the burner's claim, and the burner also claimed OTHER: a release paid to
+        either is ok (in revision 3 the guardian paused on it); an address no claim names, even at the guardian's
+        newest block, is a finding; one named only in a block not yet final here is "cannot judge"."""
         burner, router, token = address(0xA11CE), '0x' + '60' * 20, '0x' + '5e' * 20
         g = G.Guardian.__new__(G.Guardian)
-        g.router, g.token, g.fin = router, token, {'number': 50}
-        claims = {'answer': TO}
-        g.agreed = lambda read: claims['answer']          # what every source's router storage holds at the final block
+        g.router, g.token, g.fin, g.head = router, token, {'number': 50}, {'number': 60}
+        at = {50: [TO, OTHER], 60: [TO, OTHER]}           # the burner's claims, by block, on every source
+        g.agreed = lambda read: read(None)
+        stub = lambda l2, r, who, nonce, n: at[n]          # noqa: E731
         burned = {'from': burner, 'nonce': 7}
-        self.assertIsNone(g.destination_verdict(burned, TO))
-        self.assertIn('claimed on the router', g.destination_verdict(burned, OTHER))
-        claims['answer'] = None                           # the claim is not in this guardian's final view yet
-        with self.assertRaises(G.CannotJudge):
-            g.destination_verdict(burned, TO)
+        with mock.patch.object(sn, 'claims_of', stub):
+            self.assertIsNone(g.destination_verdict(burned, TO))
+            self.assertIsNone(g.destination_verdict(burned, OTHER))
+            self.assertIn('claimed on the router', g.destination_verdict(burned, address_g(b'nobody')))
+            at[50] = [TO]                                      # OTHER is not final in this guardian's view yet
+            with self.assertRaises(G.CannotJudge):
+                g.destination_verdict(burned, OTHER)
+            at.update({50: [], 60: []})
+            self.assertIn('has claimed no address', g.destination_verdict(burned, TO))
 
 
 if __name__ == '__main__':

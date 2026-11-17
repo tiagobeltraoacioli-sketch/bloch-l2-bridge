@@ -73,7 +73,8 @@ class StellarCtx(S.Ctx):
         if kind == 'release':
             recipient = out.get('stellar_recipient')
             intent = json.loads(Path(subs['intent']).read_text())
-            mine = ((intent.get('l2') or {}).get('stellar') or {}).get('recipient')
+            named = (intent.get('l2') or {}).get('stellar') or {}
+            mine = named.get('redirect') if out.get('via') == 'redirect' else named.get('recipient')
             if not isinstance(recipient, str) or recipient != mine:
                 S.refuse('the Stellar half answered with another recipient than the one this signer read from its '
                          'final L2', half=recipient, own=mine)
@@ -141,7 +142,9 @@ _finalized_burn = S.finalized_burn
 
 def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
     """signatario.finalized_burn, then WHERE the burn is paid, read from the same L2 (`url`: this signer's own final
-    view) at the same final block: stellar_net.burn_destination. Refuses a burn that is not payable yet."""
+    view) at the same final block: stellar_net.burn_destination (the router's address, or the LATEST claim of a
+    direct burn's burner; for a router exit also its latest redirect, which the half applies only while the exit is
+    held). Refuses a burn that is not payable yet."""
     release, l2 = _finalized_burn(ctx, url, burn_tx, status, burn_id_wanted)
     try:
         node = sn.L2(url)
@@ -153,7 +156,7 @@ def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
                      router=ctx.router)
         burned = {'burn_id': release['nativeBurn'], 'nonce': release['nonce'], 'from': str(l2['from']).lower(),
                   'recipient': release['recipient'], 'block': l2['burn_block']}
-        recipient, via = sn.burn_destination(node, ctx.router, burned, final['number'])
+        recipient, via, redirect = sn.burn_destination(node, ctx.router, burned, final['number'])
     except sn.StellarError as e:
         S.refuse(f'where this burn is paid could not be read from the final L2: {e}')
     if recipient is None:
@@ -163,6 +166,10 @@ def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
                  'the router\'s log for this burn could not be read from the final L2', burner=burned['from'],
                  nonce=burned['nonce'])
     l2['stellar'] = {'recipient': recipient, 'via': via, 'router': ctx.router}
+    if redirect is not None:
+        # The latest redirect of this router exit by its own burner, final at the same block. The Stellar half pays
+        # it INSTEAD of `recipient` only while the exit is held (`recipient` cannot receive the asset).
+        l2['stellar']['redirect'] = redirect
     return release, l2
 
 
@@ -178,11 +185,13 @@ def cmd_combine(ctx, args):
     first = {f: sigs[0][f] for f in fields}
     half = sigs[0].get('eth') or {}
     recipient, pause_count = half.get('stellar_recipient'), half.get('pause_count')
-    via = ((sigs[0].get('l2') or {}).get('stellar') or {}).get('via')
+    named = (sigs[0].get('l2') or {}).get('stellar') or {}
+    via = half.get('via') or named.get('via')   # the half's answer: 'redirect' when it paid a held exit's redirect
     for s in sigs[1:]:
         h = s.get('eth') or {}
         if s.get('kind') != 'stable-release' or {f: s.get(f) for f in fields} != first \
-                or h.get('stellar_recipient') != recipient or h.get('pause_count') != pause_count:
+                or h.get('stellar_recipient') != recipient or h.get('pause_count') != pause_count \
+                or (h.get('via') or ((s.get('l2') or {}).get('stellar') or {}).get('via')) != via:
             S.refuse('the partial signatures are for different messages',
                      differ=[f for f in fields if s.get(f) != first[f]])
     rel, c = first['release'], first['context']
@@ -191,7 +200,10 @@ def cmd_combine(ctx, args):
     # and no L2 is read at combination, so there the five signatures over the digest are what binds it.
     try:
         sn.strkey_decode(recipient)
-        if via != 'claim' and '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
+        if via == 'redirect':
+            if named.get('via') != 'router' or named.get('redirect') != recipient:
+                S.refuse('a redirect is paid only for a router exit, and only the redirect its signers read')
+        elif via != 'claim' and '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
             S.refuse('the Stellar recipient does not hash to the release\'s recipient commitment')
     except sn.StellarError as e:
         S.refuse(f'the partials name no Stellar recipient: {e}')

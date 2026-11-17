@@ -22,9 +22,11 @@ release  the pinned Wasm; the route; releases enabled; no pause; the vault's `bu
          amount within `total_locked` and the release bucket; the burn's chain head
          equals the vault's head at its mint count; the Stellar recipient is the one the signer read from its
          own final L2 by the route's one rule (stellar_net.burn_destination, in the intent as `l2.stellar`): for a
-         router burn it must hash to the burn's 20-byte recipient, checked here again; for a burn made directly on
-         the token it is its burner's claim on the router (set once on the L2), which this half reads again from
-         its own `l2_rpc` at that final block and requires to be the same; the vault's balance covers its books. `validUntil` in (ledger time, ledger time + max_valid_seconds], never above the vault's
+         router burn it must hash to the burn's 20-byte recipient, checked here again (and if the exit is HELD,
+         that address cannot receive the asset on this node's ledger, the latest redirect by the exit's own burner,
+         final at that block, is paid instead); for a burn made directly on the token it is its burner's LATEST
+         claim on the router at that final block, which this half reads again from its own `l2_rpc` and requires
+         to be the same; the vault's balance covers its books. `validUntil` in (ledger time, ledger time + max_valid_seconds], never above the vault's
          MAX_VALIDITY. The anchor is a recent closed ledger of this node; a proposed anchor is accepted only if this
          node holds the same hash for that ledger (the signers then share one ledger history). The anchor is not part
          of the signed digest (the vault cannot check a ledger hash); it travels with the certificate so the k
@@ -35,10 +37,12 @@ release  the pinned Wasm; the route; releases enabled; no pause; the vault's `bu
          and this half signs it again like any other burn: no operator step. A burn whose nonce or id counts for
          another release (`burn_status` 3: a forgery took it) is refused until a guardian pause voids that one.
          The signature is an Ethereum personal message (EIP-191) over the vault's digest.
-direct   A burn made directly on the token is NEVER paid to the 20 bytes it names. It is paid to the one address its
-         burner claimed with `StellarBurnRouter.claimDirectBurn` on the L2: set once, read from the final L2, the
-         same for every signer and every guardian. There are no claim files and no hint files. This half remembers
-         the release it signed for a nonce and for a burn and refuses any other, without exception.
+direct   A burn made directly on the token is NEVER paid to the 20 bytes it names. It is paid to the latest address
+         its burner claimed with `StellarBurnRouter.claimDirectBurn` on the L2, read from the final L2. There are
+         no claim files and no hint files. This half remembers the release it signed for a nonce and for a burn
+         and signs another one only once its earlier signature is dead for the vault (validUntil passed on the
+         ledger clock, or a pause moved the count) and the burn is still open: it never holds two live signatures
+         for one burn, so the latest naming before the vault records a release wins and none after.
 asset    `asset_contract` (the Stellar Asset Contract the vault must hold; on the public network Circle's USDC,
          stellar_net.CIRCLE_USDC) is REQUIRED: the route this half signs for is recomputed from that pinned asset,
          never from the asset the deployed vault reports.
@@ -46,7 +50,8 @@ asset    `asset_contract` (the Stellar Asset Contract the vault must hold; on th
 Config (one JSON per signer): `stellar_rpc`, `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account`,
 `keystore`, `password_file`, `db`, `asset_contract`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
 `vault_from_ledger`, `finality_ledgers` (12), `max_ledger_age` (60), `valid_seconds` (1800), `max_valid_seconds`
-(3600), `l2_rpc` (this operator's L2 RPC: when given, a claimed recipient is read from it again and must agree).
+(3600), `l2_rpc` (this operator's L2 RPC: when given, a claimed recipient or a redirect is read from it again and
+must agree), `asset_code` and `asset_issuer` (the classic asset of `asset_contract`; needed to pay a redirect).
 """
 import fcntl
 import json
@@ -236,6 +241,23 @@ class Half:
             if via == 'router':
                 if sn.recipient_commitment(recipient) != commitment:
                     refuse('the recipient does not hash to the burn\'s recipient commitment', recipient=recipient)
+                redirect = named.get('redirect')
+                if redirect is not None:
+                    sn.strkey_decode(redirect)
+                    if self.cfg.get('l2_rpc'):
+                        own = sn.redirects_of(sn.L2(self.cfg['l2_rpc']), named['router'], intent['release']['nonce'],
+                                              l2['finalized_number'])
+                        if (own[-1] if own else None) != redirect:
+                            refuse('this operator\'s L2 RPC holds another redirect (or none) for this exit at that '
+                                   'final block: holding', intent=redirect, own=own[-1:] or None)
+                    # The redirect is paid INSTEAD only while the exit is held: the address given to burnTo cannot
+                    # receive the asset on this node's ledger. Otherwise the exit is paid where burnTo said.
+                    if self.cannot_receive(recipient):
+                        problems = self.cannot_receive(redirect)
+                        if problems:
+                            refuse('the exit is held (its address cannot receive the asset) and the redirect cannot '
+                                   'receive it either: holding', problems=problems)
+                        return redirect, 'redirect'
             elif via == 'claim':
                 if self.cfg.get('l2_rpc'):
                     again = sn.claim_of(sn.L2(self.cfg['l2_rpc']), named['router'], l2['from'],
@@ -248,6 +270,23 @@ class Half:
         except (sn.StellarError, KeyError, TypeError, ValueError) as e:
             refuse('the intent names no usable Stellar recipient', error=str(e))
         return recipient, via
+
+    def cannot_receive(self, address):
+        """[] when `address` can receive the vault's asset on this node's latest ledger; otherwise what is missing.
+        A contract (`C...`) holds the asset without a trustline. An account needs to exist and to hold a trustline
+        for `asset_code:asset_issuer` that the issuer authorized. Needs `asset_code` and `asset_issuer`, whose asset
+        contract must be the pinned `asset_contract`; without them nothing is redirected (fail closed)."""
+        c = self.cfg
+        try:
+            code, issuer = c['asset_code'], c['asset_issuer']
+            if sn.asset_contract_id(self.net.passphrase, code, issuer) != c['asset_contract']:
+                raise ValueError('asset_code:asset_issuer is not the pinned asset_contract')
+        except (KeyError, TypeError, ValueError, sn.StellarError) as e:
+            refuse('a redirect needs `asset_code` and `asset_issuer` of the pinned asset to tell whether the exit is '
+                   'held: holding', error=str(e))
+        if sn.strkey_decode(address)[0] == 'contract':
+            return []
+        return sn.fee_account_problems(self.net, address, code, issuer)
 
     def release(self, args):
         intent = json.loads(Path(args['--intent']).read_text())
@@ -338,12 +377,16 @@ class Half:
         with open(str(self.db_path) + '.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             db = json.loads(self.db_path.read_text()) if self.db_path.exists() else {'nonces': {}, 'burns': {}}
+            # A burn's destination may change before the vault records a release (the burner's latest claim, a
+            # held exit's redirect): see `resign_allowed`.
             for table, key in (('nonces', str(nonce)), ('burns', burn.hex())):
                 prior = db[table].get(key)
-                if prior is not None and prior != core:
-                    refuse('this signer already signed another release for this nonce or burn', prior=prior, now=core)
-            db['nonces'][str(nonce)] = core
-            db['burns'][burn.hex()] = core
+                if prior is not None and not resign_allowed(prior, core, now, int(state['pause_count'])):
+                    refuse('this signer already signed another release for this nonce or burn, and that signature is '
+                           'still live for the vault', prior=prior, now=core)
+            record = {'core': core, 'valid_until': valid_until, 'pause_count': int(state['pause_count'])}
+            db['nonces'][str(nonce)] = record
+            db['burns'][burn.hex()] = record
             tmp = self.db_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(db, indent=2) + '\n')
             os.replace(tmp, self.db_path)
@@ -358,6 +401,27 @@ class Half:
                         'nativeFinalizedNumber': ctx['native_finalized_number'],
                         'nativeFinalizedHash': native['nativeFinalizedHash']},
                digest=hx(sn.personal(digest)), signature=signature)
+
+
+def resign_allowed(prior, core, now, pause_count):
+    """May this signer sign `core` for a burn it already signed `prior` for? Yes for the same release (a renewal).
+    For another one only if (1) it differs in the recipient alone (a newer claim of a direct burn's burner, or the
+    redirect of a held router exit: nonce, amount, burn id and mint chain never change), and (2) the earlier signature
+    is DEAD for the vault: its validUntil is before this ledger's close time, or a guardian pause moved the count
+    since. The caller has checked that the vault still shows the burn open (burn_status 0: never recorded, or voided
+    by a pause), so no release for it is queued or paid. So a signer never holds two live signatures for one burn,
+    and two addresses can never both gather a quorum. A record without validUntil and pause count (an older
+    database) counts as live."""
+    old = prior.get('core', prior) if isinstance(prior, dict) else None
+    if old == core:
+        return True
+    if not isinstance(old, dict) or {k: v for k, v in old.items() if k != 'recipient'} != \
+            {k: v for k, v in core.items() if k != 'recipient'}:
+        return False
+    vu, pc = prior.get('valid_until'), prior.get('pause_count')
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in (vu, pc)):
+        return False
+    return vu < now or pc != pause_count
 
 
 def main():

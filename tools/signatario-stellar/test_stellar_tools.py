@@ -68,6 +68,7 @@ def g_address(seed):
 
 BURNER, STRANGER = address(key(1)), address(key(2))
 PAYEE, MALLORY = g_address(b'payee'), g_address(b'mallory')
+PAYEE2 = g_address(b'payee2')
 BURN = hashlib.sha256(b'burn').hexdigest()
 
 
@@ -206,16 +207,41 @@ class FakeL2:
     def burns(self, upto):
         return [b for b in self.s['burns'] if b['block'] <= upto]
 
+    def namings(self, data, number):
+        """(list of addresses final at `number`, rest of the call data) for the router's history views."""
+        for sig in ('claimCount(address,uint64)', 'claimAt(address,uint64,uint256)', 'claimOf(address,uint64)'):
+            if data.startswith(sn.selector(sig)):
+                burner, nonce = '0x' + data[10 + 24:10 + 64], int(data[10 + 64:10 + 128], 16)
+                got = self.s['claims'].get((burner, nonce), [])
+                got = [got] if isinstance(got, tuple) else got
+                return [a for a, at in got if at <= number], data[10 + 128:]
+        for sig in ('redirectCount(uint64)', 'redirectAt(uint64,uint256)'):
+            if data.startswith(sn.selector(sig)):
+                nonce = int(data[10:10 + 64], 16)
+                return [a for a, at in self.s.get('redirects', {}).get(nonce, []) if at <= number], data[10 + 64:]
+        return None, None
+
     def call_word(self, to, data, number):
+        if data.startswith(sn.selector('claimCount(address,uint64)')) or data.startswith(sn.selector('redirectCount(uint64)')):
+            assert to == ROUTER
+            return len(self.namings(data, number)[0])
         assert to == TOKEN and data == sn.selector('burnNonce()')
         return len(self.burns(number))
 
     def call(self, to, data, number):
         if data.startswith(sn.selector('claimOf(address,uint64)')):
             assert to == ROUTER
-            burner, nonce = '0x' + data[10 + 24:10 + 64], int(data[10 + 64:], 16)
-            address, at = self.s['claims'].get((burner, nonce), ('', 0))
-            return abi_string_answer(address if at <= number else '')
+            got, _ = self.namings(data, number)
+            return abi_string_answer(got[-1] if got else '')
+        if data.startswith(sn.selector('claimAt(address,uint64,uint256)')) or \
+                data.startswith(sn.selector('redirectAt(uint64,uint256)')):
+            assert to == ROUTER
+            got, rest = self.namings(data, number)
+            return abi_string_answer(got[int(rest, 16)])
+        if data.startswith(sn.selector('exitBurnerOf(uint64)')):
+            nonce = int(data[10:], 16)
+            got = [b for b in self.burns(number) if b['nonce'] == nonce and b['from'] == ROUTER]
+            return '0x' + '00' * 12 + (got[0].get('exit_from', BURNER)[2:] if got else '00' * 20)
         assert to == TOKEN and data.startswith(sn.selector('burnIdOf(uint64)'))
         nonce = int(data[10:], 16)
         got = [b for b in self.burns(number) if b['nonce'] == nonce]
@@ -299,8 +325,14 @@ class Rig(unittest.TestCase):
         return b
 
     def claim(self, nonce, to, block, burner=BURNER, only=('a', 'b')):
+        """One more claim of `burner` (round 18: claims accumulate; the latest final one counts)."""
         for u in only:
-            FakeL2.state[u]['claims'][(burner, nonce)] = (to, block)
+            got = FakeL2.state[u]['claims'].get((burner, nonce), [])
+            FakeL2.state[u]['claims'][(burner, nonce)] = ([got] if isinstance(got, tuple) else got) + [(to, block)]
+
+    def redirect(self, nonce, to, block, only=('a', 'b')):
+        for u in only:
+            FakeL2.state[u].setdefault('redirects', {}).setdefault(nonce, []).append((to, block))
 
     def burned(self, b):
         return {'burn_id': '0x' + b['id'], 'nonce': b['nonce'], 'from': b['from'], 'recipient': b['recipient'],
@@ -312,23 +344,43 @@ class Destination(Rig):
 
     def test_a_router_burn_is_paid_to_the_address_the_router_logged_and_committed_to(self):
         b = self.burn(1, 100, PAYEE)
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'router'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'router', None))
         b['logged'] = MALLORY   # a log whose string does not hash to the burn's 20 bytes names nobody
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'router'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'router', None))
+
+    def test_round18_a_router_exit_carries_its_latest_final_redirect(self):
+        b = self.burn(1, 100, PAYEE)
+        self.redirect(1, MALLORY, 200)
+        self.redirect(1, PAYEE2, 240)                                # not final at 236
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'router', MALLORY))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 240), (PAYEE, 'router', PAYEE2))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 199), (PAYEE, 'router', None))
+        self.assertEqual(sn.redirects_of(FakeL2('a'), ROUTER, 1, 240), [MALLORY, PAYEE2])
+
+    def test_round18_the_latest_final_claim_of_the_burner_counts(self):
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150)
+        self.claim(1, PAYEE2, 200)
+        self.claim(1, MALLORY, 240)                                  # not final at 236
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE2, 'claim', None))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 199), (PAYEE, 'claim', None))
+        self.assertEqual(sn.claims_of(FakeL2('a'), ROUTER, BURNER, 1, 236), [PAYEE, PAYEE2])
+        with mock.patch.object(FakeL2, 'call_word', return_value=sn.MAX_NAMINGS + 1), self.assertRaises(sn.StellarError):
+            sn.claims_of(FakeL2('a'), ROUTER, BURNER, 1, 236)          # a history above the router's own bound
 
     def test_a_direct_burn_is_paid_only_to_its_burners_claim_at_the_final_block(self):
         b = self.burn(1, 100, direct=True)
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim', None))
         self.claim(1, PAYEE, 230)
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim'))
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 229), (None, 'claim'))  # not yet then
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim', None))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 229), (None, 'claim', None))  # not yet then
         self.claim(1, MALLORY, 100, burner=STRANGER)   # a stranger's claim for that nonce is the stranger's own slot
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim', None))
 
     def test_a_direct_burn_is_never_paid_to_the_20_bytes_it_names(self):
         b = self.burn(1, 100, direct=True)
         b['recipient'] = '0x' + sn.recipient_commitment(MALLORY).hex()   # even when they are a commitment
-        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim', None))
 
     def test_malformed_answers_are_errors_not_claims(self):
         b = self.burn(1, 100, direct=True)
@@ -380,6 +432,7 @@ class SignerDestination(Rig):
     def half(self, intent, **cfg):
         h = object.__new__(stellar_half.Half)
         h.cfg = cfg
+        h.net = mock.Mock(passphrase=PASS)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             try:
@@ -405,6 +458,34 @@ class SignerDestination(Rig):
         self.assertEqual(self.half(intent, l2_rpc='a'), (PAYEE, 'claim'))          # own RPC agrees
         intent['l2']['stellar']['recipient'] = MALLORY
         self.assertIn('holds another claim', self.half(intent, l2_rpc='a'))       # own RPC disagrees: hold
+
+
+    def test_round18_a_held_router_exit_is_paid_to_its_redirect_and_only_while_held(self):
+        issuer = g_address(b'issuer')
+        asset = {'asset_code': 'USDC', 'asset_issuer': issuer,
+                 'asset_contract': sn.asset_contract_id(PASS, 'USDC', issuer)}
+        b = self.burn(1, 100, PAYEE)
+        self.redirect(1, PAYEE2, 200)
+        intent = {'release': {'nonce': 1, 'recipient': b['recipient']},
+                  'l2': {'from': ROUTER, 'finalized_number': 236,
+                         'stellar': {'recipient': PAYEE, 'via': 'router', 'router': ROUTER, 'redirect': PAYEE2}}}
+        unable = {PAYEE: ['no trustline'], PAYEE2: []}
+        with mock.patch.object(sn, 'fee_account_problems', side_effect=lambda net, a, c, i: unable[a]):
+            self.assertEqual(self.half(intent, **asset), (PAYEE2, 'redirect'))            # held: the redirect
+            self.assertEqual(self.half(intent, l2_rpc='a', **asset), (PAYEE2, 'redirect'))  # own RPC agrees
+            unable[PAYEE] = []
+            self.assertEqual(self.half(intent, **asset), (PAYEE, 'router'))                # not held: burnTo's address
+            unable.update({PAYEE: ['no account'], PAYEE2: ['no trustline']})
+            self.assertIn('cannot receive it either', self.half(intent, **asset))
+            unable[PAYEE2] = []
+            self.assertIn('needs `asset_code`', self.half(intent))                          # fail closed
+            self.assertIn('needs `asset_code`', self.half(intent, **{**asset, 'asset_issuer': g_address(b'other')}))
+            intent['l2']['stellar']['redirect'] = MALLORY                                   # not what the router holds
+            self.assertIn('another redirect', self.half(intent, l2_rpc='a', **asset))
+            intent['l2']['stellar']['redirect'] = '--help'
+            self.assertIn('no usable Stellar recipient', self.half(intent, **asset))
+        intent['l2']['stellar'].pop('redirect')
+        self.assertEqual(self.half(intent), (PAYEE, 'router'))   # no redirect: nothing about holding is asked
 
 
 class GuardianCheck(Rig):
@@ -626,18 +707,62 @@ class GuardianCheck(Rig):
         self.assertEqual(code, 2)
         self.assertIn('claimed on the router', out['findings'][0]['reason'])
 
-    def test_3p1_a_direct_burn_paid_with_no_final_claim_is_cannot_judge_then_the_stall_rule(self):
+    def test_3p1_a_direct_burn_paid_with_no_final_claim_is_a_finding_or_cannot_judge_then_the_stall_rule(self):
+        """Restated in round 18 (was: no claim -> cannot judge, then the stall rule). With claims that may change,
+        the guardian also reads its NEWEST block: an address no claim of the burner names even there was chosen by
+        nobody but a forger, so it is a finding at once (stronger than before); an address the burner named in a
+        block not yet final here is "cannot judge", bounded by the stall rule as before; final: ok."""
         b = self.burn(1, 100, direct=True)
         self.release(b, MALLORY, ledger=990, event='release_queued')
         code, out = self.check(stall_deadline=100)
+        self.assertEqual(code, 2)
+        self.assertIn('has claimed no address', out['findings'][0]['reason'])
+        self.claim(1, PAYEE, 250)                                    # a claim of another address changes nothing
+        code, out = self.check(stall_deadline=100)
+        self.assertEqual(code, 2)
+        self.assertIn('claimed on the router', out['findings'][0]['reason'])
+        self.claim(1, MALLORY, 260)                                  # the burner names it; not final here yet
+        code, out = self.check(stall_deadline=100)
         self.assertEqual((code, out['findings']), (3, []))
-        self.assertIn('no claim', out['cannot_judge'][0]['reason'])
-        self.claim(1, PAYEE, 250)                                    # a claim that is not final yet does not count
-        self.assertEqual(self.check(stall_deadline=100)[0], 3)
-        FakeVault.events_list[0]['ledger'] = 900
+        self.assertIn('not final in this guardian', out['cannot_judge'][0]['reason'])
+        FakeVault.events_list[0]['ledger'] = 900                     # older than the deadline, finality where it was
         self.assertEqual(self.check(stall_deadline=100)[0], 2)
-        self.claim(1, MALLORY, 150)                                  # (the honest case: the claim final, and paid)
+        for st in FakeL2.state.values():
+            st['fin'] = 270                                          # the naming is final: ok
         self.assertEqual(self.check(stall_deadline=100)[0], 0)
+
+    def test_round18_a_direct_burn_paid_to_an_earlier_claim_of_its_burner_is_never_a_forgery(self):
+        """The class of R331-XLM-3P-1: two claims of one burner are a normal state; a release paid to either is ok
+        for every guardian, whichever claim it holds as the latest."""
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150)
+        self.claim(1, PAYEE2, 200)
+        self.release(b, PAYEE)
+        for sources in ({}, {'l2_rpc_others': ['b']}, {'l2_rpc': 'b'}):
+            self.assertEqual(self.check(**sources)[0], 0)
+        self.claim(1, MALLORY, 150, burner=STRANGER)                  # a stranger's claim never makes an address ok
+        FakeVault.events_list = []
+        self.release(b, MALLORY)
+        self.assertEqual(self.check()[0], 2)
+
+    def test_round18_a_redirected_router_exit(self):
+        b = self.burn(1, 100, PAYEE)
+        self.redirect(1, PAYEE2, 200)
+        self.release(b, PAYEE2)
+        self.assertEqual(self.check()[0], 0)                         # paid to the final redirect of its own burner
+        FakeVault.events_list = []
+        self.release(b, PAYEE)
+        self.assertEqual(self.check()[0], 0)                         # or where burnTo said (the exit was not held)
+        FakeVault.events_list = []
+        self.redirect(1, MALLORY, 280)                               # at the head only
+        self.release(b, MALLORY, event='release_queued')
+        code, out = self.check()
+        self.assertEqual((code, out['findings']), (3, []))
+        FakeVault.events_list = []
+        self.release(b, g_address(b'nobody named this'))
+        code, out = self.check()
+        self.assertEqual(code, 2)
+        self.assertIn('neither the one the router committed to nor a redirect', out['findings'][0]['reason'])
 
     def test_3p1_sources_that_disagree_on_the_claim_cannot_judge(self):
         b = self.burn(1, 100, direct=True)
@@ -656,6 +781,30 @@ class GuardianCheck(Rig):
             G.Guardian({**self.cfg, 'valid_seconds': 86400, 'cast': '/nonexistent'}).pause('/nonexistent/p.json')
         self.assertEqual(e.exception.code, 1)
         self.assertIn('never signed in advance', json.loads(out.getvalue())['reason'])
+
+
+class Resign(unittest.TestCase):
+    """Round 18 (brief 373): the latest naming before the vault records a release wins, and a signer never holds
+    two live signatures for one burn (the rule of revision 3's `repin_allowed`, now for claims and redirects)."""
+
+    def test_resign(self):
+        core = {'nonce': 4, 'recipient': PAYEE, 'amount': 9, 'burn': BURN, 'mint_count': 1, 'mint_head': 'aa'}
+        other = {**core, 'recipient': MALLORY}
+        prior = {'core': core, 'valid_until': 100, 'pause_count': 2}
+        ok = stellar_half.resign_allowed
+        self.assertTrue(ok(prior, core, now=50, pause_count=2))                    # the same release: a renewal
+        self.assertTrue(ok(prior, other, now=101, pause_count=2))                  # the old signature expired
+        self.assertFalse(ok(prior, other, now=100, pause_count=2))                 # still usable at 100
+        self.assertFalse(ok(prior, other, now=50, pause_count=2))
+        self.assertTrue(ok(prior, other, now=50, pause_count=3))                   # a pause killed it
+        self.assertFalse(ok(prior, {**other, 'amount': 10}, now=101, pause_count=2))   # only the recipient may differ
+        self.assertFalse(ok(prior, {**other, 'nonce': 5}, now=101, pause_count=2))
+        self.assertFalse(ok(prior, {**other, 'burn': 'bb'}, now=101, pause_count=2))
+        self.assertFalse(ok(core, other, now=101, pause_count=2))                  # an older database entry: live
+        self.assertTrue(ok(core, core, now=101, pause_count=2))
+        self.assertFalse(ok({'core': core, 'valid_until': True, 'pause_count': 2}, other, now=101, pause_count=2))
+        self.assertFalse(ok({'core': core, 'pause_count': 2}, other, now=101, pause_count=2))
+        self.assertFalse(ok(None, other, now=101, pause_count=2))
 
 
 class Asset(unittest.TestCase):

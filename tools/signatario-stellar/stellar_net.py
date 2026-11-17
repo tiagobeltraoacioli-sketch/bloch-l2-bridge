@@ -810,9 +810,10 @@ def vault_file_problems(doc):
 
 # ── where a burn is paid: one rule, read from the FINAL L2, for signers, watchers and guardians ──────────────────
 def claim_of(l2, router, burner, nonce, number):
-    """The Stellar address `burner` claimed on the router for its direct burn `nonce`, as the router's storage holds
-    it at L2 block `number`; None while there is no claim. The router sets a claim once and never changes it
-    (contracts/stellar/StellarBurnRouter.sol `claimDirectBurn`), so this answer at a final block is THE claim."""
+    """The LATEST Stellar address `burner` claimed on the router for its direct burn `nonce`, as the router's storage
+    holds it at L2 block `number`; None while there is no claim. A burner may claim again (round 18: the latest claim
+    final before the vault records a release wins; contracts/stellar/StellarBurnRouter.sol `claimDirectBurn`), so
+    this answer is the claim AT THAT FINAL BLOCK; `claims_of` gives the whole history."""
     data = selector('claimOf(address,uint64)') + '00' * 12 + address20(burner, 'burner')[2:] + uint(nonce).hex()
     text = abi_string(l2.call(router, data, number), 0)
     if text is None:
@@ -821,6 +822,46 @@ def claim_of(l2, router, burner, nonce, number):
         return None
     strkey_decode(text)
     return text
+
+
+MAX_NAMINGS = 16   # StellarBurnRouter.MAX_NAMINGS
+
+
+def _history(l2, router, count_data, at_data, number, what):
+    n = l2.call_word(router, count_data, number)
+    if n > MAX_NAMINGS:
+        raise StellarError(f'the router reports {n} {what}s, above its own bound')
+    out = []
+    for i in range(n):
+        text = abi_string(l2.call(router, at_data(i), number), 0)
+        if not text:
+            raise StellarError(f'the router\'s {what} {i} is malformed')
+        strkey_decode(text)
+        out.append(text)
+    return out
+
+
+def claims_of(l2, router, burner, nonce, number):
+    """Every claim of `burner` for its direct burn `nonce`, in order, at L2 block `number` (the last is `claim_of`)."""
+    who = '00' * 12 + address20(burner, 'burner')[2:] + uint(nonce).hex()
+    return _history(l2, router, selector('claimCount(address,uint64)') + who,
+                    lambda i: selector('claimAt(address,uint64,uint256)') + who + uint(i).hex(), number, 'claim')
+
+
+def exit_burner_of(l2, router, nonce, number):
+    """The account that called `burnTo` for burn `nonce` (zero address for a burn made elsewhere)."""
+    word = l2.call(router, selector('exitBurnerOf(uint64)') + uint(nonce).hex(), number)
+    if len(word) != 66 or word[2:26] != '0' * 24:
+        raise StellarError('the router\'s exitBurnerOf answer is malformed')
+    return '0x' + word[26:]
+
+
+def redirects_of(l2, router, nonce, number):
+    """Every address the exit's burner named with `redirectHeldBurn` for router burn `nonce`, in order, at L2 block
+    `number`. Only the account that called `burnTo` can append (the router checks it)."""
+    n = uint(nonce).hex()
+    return _history(l2, router, selector('redirectCount(uint64)') + n,
+                    lambda i: selector('redirectAt(uint64,uint256)') + n + uint(i).hex(), number, 'redirect')
 
 
 def router_exit_address(l2, router, burned):
@@ -838,15 +879,26 @@ def router_exit_address(l2, router, burned):
 
 
 def burn_destination(l2, router, burned, final_number):
-    """THE Stellar address a burn is paid to, from the final L2 alone: (address or None, 'router' | 'claim').
+    """WHERE a burn is paid, from the final L2 alone: (address or None, 'router' | 'claim', redirect or None).
 
-    router   the burn was made by the router: the address the router checked, committed to and logged.
+    router   the burn was made by the router: the address the router checked, committed to and logged. `redirect`
+             is the latest address the exit's own burner named with `redirectHeldBurn` at `final_number` (None if
+             none); it is paid INSTEAD only while the exit is held (the router address cannot receive the asset),
+             which the signer's Stellar half decides from its own ledger; otherwise the router address is paid.
     claim    the burn was made directly on the token: it is NEVER paid to the 20 bytes it names; it is paid to the
-             address its burner claimed on the router (set once), read at the final block `final_number`.
+             LATEST address its burner claimed on the router, read at the final block `final_number`.
     None means: not payable yet (no claim in the final L2, or the router's log cannot be served)."""
     router = address20(router, 'router')
     if burned['block'] > int(final_number):
         raise StellarError('the burn is not in the final L2 block given')
     if burned['from'] == router:
-        return router_exit_address(l2, router, burned), 'router'
-    return claim_of(l2, router, burned['from'], burned['nonce'], final_number), 'claim'
+        address = router_exit_address(l2, router, burned)
+        # Only the account that called `burnTo` can append a redirect (the router checks it in the same contract
+        # that wrote the exit), so the history needs no further filter.
+        redirect = l2_latest(redirects_of(l2, router, burned['nonce'], final_number)) if address else None
+        return address, 'router', redirect
+    return claim_of(l2, router, burned['from'], burned['nonce'], final_number), 'claim', None
+
+
+def l2_latest(history):
+    return history[-1] if history else None

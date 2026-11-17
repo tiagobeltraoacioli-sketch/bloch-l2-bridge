@@ -15,15 +15,18 @@ pause    signs `pause_digest(pause_count, valid_until)` (an Ethereum personal me
 check    read-only. Every release the vault paid or queued (its events in the RPC's retained window) is compared with
          the L2 token's FINAL history, read over JSON-RPC in this process. WHERE a burn is paid is decided by the
          route's one rule, the same the signers apply (stellar_net.burn_destination), from the final L2 alone: a
-         burn made by the router is paid to the address the router committed to; a burn made directly on the token
-         is paid to the one address its burner claimed on the router (`claimDirectBurn`, set once, never changed).
-         The guardian holds no claim file and judges against no other source. Three answers per release:
+         burn made by the router is paid to the address the router committed to, or, while that exit is held, to a
+         redirect named by the exit's own burner (`redirectHeldBurn`); a burn made directly on the token is paid to
+         the latest address its burner claimed on the router (`claimDirectBurn`) when the signers sign. The guardian
+         accepts any address that person named for the burn, and nothing else. It holds
+         no claim file and judges against no other source. Three answers per release:
 
          ok        the token's final history holds the burn of that nonce with that id and amount, and the address
-                   paid is the burn's destination by that rule.
+                   paid is one the burn's own burner named, final in this guardian's view.
          FINDING   the release contradicts the final L2: the final history holds another burn id for that nonce;
-                   or another amount; or the address paid is not the one the router committed to; or it is not the
-                   burner's claim on the router; or the L2 block the release names is final in this guardian's view
+                   or another amount; or the address paid was named by nobody but a forger (it is neither the
+                   router's committed address, nor a redirect or a claim of the burn's own burner, even at this
+                   guardian's newest block); or the L2 block the release names is final in this guardian's view
                    and holds no such burn (or is another block than the one named). These need no clock at all:
                    block numbers and finality only.
                    Also a finding, by the STALL RULE: a release that is still QUEUED, that this guardian could not
@@ -32,8 +35,8 @@ check    read-only. Every release the vault paid or queued (its events in the RP
                    that still does not reach a queued release after that time means the L2's finality stands still
                    while releases land, or the release is forged (for instance under the nonce of the forger's own
                    pending burn, naming a block nobody reaches): both are reasons to pause before it is paid.
-         CANNOT JUDGE  the final view does not reach the release yet (the burn, or the claim of a direct burn, is
-                   not final here), or the L2 sources do not answer, serve another chain or disagree, or the token
+         CANNOT JUDGE  the final view does not reach the release yet (the burn, or the burner's naming of the
+                   address paid, is in this guardian's newest blocks but not final here), or the L2 sources do not answer, serve another chain or disagree, or the token
                    or router code is not the pinned one. Exit 3 at once: page a person.
 
          Exit 0: every release ok (or already voided by a pause). Exit 2: at least one FINDING: the operator's unit
@@ -205,20 +208,47 @@ class Guardian:
         return named
 
     def destination_verdict(self, burned, recipient):
-        """Is `recipient` where this final burn is paid, by the route's one rule? None (yes), a finding text, or
-        CannotJudge while a direct burn's claim is not in this guardian's final L2 view."""
-        if burned['from'] == self.router:
+        """Is `recipient` an address the person behind this final burn named for it? None (yes), a finding text, or
+        CannotJudge.
+
+        The one rule the signers apply (stellar_net.burn_destination) pays the address given to `burnTo`, or a
+        redirect of a held router exit by that exit's own burner, or the LATEST claim of a direct burn's burner,
+        each as final when the signers sign. Which of the burner's namings was the latest when they signed cannot be
+        read back (the certificate binds no L2 block of the naming), so the guardian accepts any naming of that
+        person and nothing else (the address given to `burnTo`, checked by its commitment; the exit burner's
+        redirects; the direct burner's claims: `stellar_net.redirects_of`, `claims_of`):
+
+        ok          the address paid is among the namings at this guardian's FINAL block.
+        FINDING     it is not among them even at this guardian's newest block (the lowest head of its agreeing
+                    sources): nobody but a forger chose it. Honest signers sign a naming only once it is final for
+                    them, and a final block is older than every node's head unless this guardian's every source is
+                    behind by more than the L2's finality depth (the stated residual: then a false pause, no loss).
+        CANNOT JUDGE  it is among the namings at the head but not yet at the final block (the view is behind the
+                    naming): page; the stall rule bounds it for a queued release."""
+        fin, head = self.fin['number'], max(self.head['number'], self.fin['number'])
+        router_burn = burned['from'] == self.router
+        if router_burn:
+            # The address given to `burnTo` is bound to the burn by its commitment: checked by hash, so a pruned
+            # router log can never turn an honest exit into a finding. Only redirects are read from the router.
             if '0x' + sn.recipient_commitment(recipient).hex() == burned['recipient']:
                 return None
-            return 'the burn came through the router, and the address paid is not the one the router committed to'
-        claim = self.agreed(lambda s: sn.claim_of(s, self.router, burned['from'], burned['nonce'], self.fin['number']))
-        if claim == recipient:
+            namings = lambda s, n: sn.redirects_of(s, self.router, burned['nonce'], n)  # noqa: E731
+        else:
+            namings = lambda s, n: sn.claims_of(s, self.router, burned['from'], burned['nonce'], n)  # noqa: E731
+        final = self.agreed(lambda s: namings(s, fin))
+        if recipient in final:
             return None
-        if claim is None:
-            raise CannotJudge('a burn made directly on the token was paid, and this guardian\'s final L2 holds no claim '
-                              'of its burner on the router yet: the view is behind the claim, or the release is forged')
-        return ('the address paid is not the one the account that burned claimed on the router (a claim is set once '
-                'and never changes)')
+        newest = self.agreed(lambda s: namings(s, head))
+        if recipient in newest:
+            raise CannotJudge('the address paid was named by the burn\'s own burner in a block that is not final in '
+                              'this guardian\'s view yet: the view is behind the naming')
+        if router_burn:
+            return ('the burn came through the router, and the address paid is neither the one the router committed '
+                    'to nor a redirect by the exit\'s own burner')
+        return ('the address paid is not one the account that burned claimed on the router (no claim of the burner '
+                'names it, even at this guardian\'s newest block)' if newest else
+                'a burn made directly on the token was paid, and the account that burned has claimed no address on '
+                'the router, even at this guardian\'s newest block')
 
     def judge(self, e):
         """None when the release is a final L2 burn paid to its destination; a finding text; or CannotJudge."""
