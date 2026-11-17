@@ -1,0 +1,5 @@
+# Host toolchain for the unit tests and the SVM test crate (litesvm 0.18.2 needs rustc 1.97.1 or newer).
+# The on-chain build does not use it: cargo-build-sbf brings its own compiler (platform-tools v1.57).
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"

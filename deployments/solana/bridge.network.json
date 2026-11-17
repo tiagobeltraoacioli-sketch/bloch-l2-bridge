@@ -1,0 +1,144 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "network": {
+    "id": "solana",
+    "name": "Solana",
+    "kind": "svm",
+    "chainId": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "nativeCurrency": {
+      "symbol": "SOL",
+      "decimals": 9
+    }
+  },
+  "asset": {
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "id": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "issuer": "Circle",
+    "issuerNative": true,
+    "issuerPowers": [
+      "blacklist"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading on https://api.mainnet-beta.solana.com: getAccountInfo of the mint at finalized, slot 470242302",
+        "date": "2026-11-16",
+        "note": "owner program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA (classic SPL Token, not Token-2022), 6 decimals, mint authority BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG, freeze authority 7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar (the issuer can freeze any USDC token account, which is the blacklist power here)"
+      },
+      {
+        "source": "https://developers.circle.com/stablecoins/usdc-contract-addresses (Circle's own address table)",
+        "date": "2026-11-16"
+      }
+    ]
+  },
+  "custody": {
+    "type": "svm-program",
+    "address": "TBD-deploy",
+    "contract": "solana/bloch-sol-vault (program); the vault is a program-derived account of the configuration hash, its token account a program-derived account of the vault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDC (Solana)",
+    "symbol": "bUSDC.sol",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "11000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "10000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8",
+    "paidOn": "source",
+    "collection": "accrued in the vault's token account outside the backing; anyone sends sweep_fees and the vault pays the recipient's USDC associated token account 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg, which must exist first",
+    "networkFee": "the depositor pays the deposit transaction and the rent of its deposit record (about 0.0024 SOL, not returned); the relayer pays the two release transactions and advances the rent of the release record (about 0.0023 SOL), which returns to it when the record is closed after 7 days"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its deposit record account is read at finalized commitment, at least 150 slots below the finalized slot, on every Solana endpoint of the signer (at least two, of different operators), and all of them show the same record.",
+    "tag": "finalized",
+    "confirmations": 150,
+    "typicalSeconds": 90,
+    "worstCaseSeconds": 3600,
+    "reorg": "Signers read only finalized account state. Every mint waits 12 hours on the L2; a mint whose deposit record is gone after a cluster restart is cancelled by the guardians. If it credits anyway, the vault refuses every later burn because the token's mint chain no longer equals the vault's deposit chain: releases are held, nothing is credited twice and nothing is paid without a deposit."
+  },
+  "deposit": {
+    "method": "program-instruction",
+    "recipientEncoding": "the 20 bytes of the L2 address, in the instruction data after the amount",
+    "function": "instruction 1 (deposit) of the vault program: data = 0x01 | amount u64 little-endian | 20-byte L2 address; accounts: depositor (signer, writable), depositor USDC token account (writable), vault (writable), vault token account (writable), USDC mint, deposit record PDA [\"deposit\", vault, deposit count as u64 little-endian] (writable), token program, system program, then optionally the deposit record PDAs of the next counts (up to 7 more, writable)",
+    "steps": [
+      "read the vault account to learn the deposit count n and derive the deposit record addresses of counts n to n+3 (the program uses the one of the count it finds, so deposits sent at the same time do not fail each other)",
+      "send the deposit instruction signed by the wallet that holds the USDC (it also pays about 0.0024 SOL of rent for the deposit record)",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to the L2 address"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "a zero L2 address",
+      "a deposit while the vault is paused or deposits are switched off",
+      "any token account that is not classic SPL USDC",
+      "do not name a contract as the L2 address unless it can move the token"
+    ]
+  },
+  "release": {
+    "l2Function": "approve(router, amount) on the token, then burnTo(uint64 amount, string recipient) on SolanaBurnRouter (contracts/solana/SolanaBurnRouter.sol, constructor (token, bytes32 solanaMint), address TBD-deploy), recipient = the wallet's base58 address, taken from a CONNECTED Solana wallet that first signs the destination proof (see notes). The router refuses what is not a wallet address (a token account or other program-derived address, an Ethereum address, the small-order points, the USDC mint, the token program ids), computes the 20-byte commitment, burns and logs SolanaExit(burnId, from, amount, commitment, recipient). Do NOT call burn(uint64,address) on the token directly",
+    "recipientEncoding": "the wallet's base58 address as text, given to the router. On the token the burn then names a 20-byte commitment: the last 20 bytes of keccak256(\"BLOCH-SVM-ACCOUNT-ID-v1\" || the 32-byte wallet address). The vault pays only the USDC associated token account of the wallet that hashes to it. Commit the WALLET, never a token account",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDC, the burned amount less 0.05%",
+    "notes": [
+      "the wallet's USDC associated token account must exist before the payment; relayers do not create it by default, and anyone (the user included) may create it and may send the payment transaction",
+      "a release above 1,000 USDC waits 1,800 seconds on Solana between approval and payment; a guardian pause voids approvals not yet paid, and the committee then certifies the burn again: an exit is never lost to a pause",
+      "a burn made directly on the token (not through the router) is HELD by the signers until a wallet that hashes to its 20 bytes is announced on SolanaRecipientRegistry (announce(bytes32 wallet)); if its 20 bytes are not a wallet commitment (an Ethereum address, a token account) it can never be paid and there is no refund path yet",
+      "a wallet that is a program-derived address (a multisig vault) is refused by the router: exit to a key wallet",
+      "DESTINATION PROOF (required of every page, review 330 R330-SOL-1): before calling the router the page has the connected Solana wallet sign, with signMessage, the single line of printable ASCII 'Bloch bridge exit: pay bUSDC.sol exits to my Solana wallet <WALLET>. L2 account <0x + 40 hex lowercase>. Router <0x + 40 hex lowercase>. Chain 700770. Issued <unix seconds>.' and verifies the 64-byte Ed25519 signature against the wallet's public key over the UTF-8 bytes of that line, or over the Solana off-chain message envelope around it (0xff 'solana offchain', 0x00 version, 0x00 format, 2-byte little-endian length, the line); it refuses a signature older than 600 seconds. Reference text and verifier: tools/signatario-solana/sol_proof.py exit-message / verify; specification docs/SOLANA-VAULT.md 11.3. A destination typed or pasted as text is not accepted",
+      "a mint, a token account, a program id or any account owned by another program is NOT a wallet, even when its address is on the curve: the signers read the destination on Solana at finalized and HOLD the burn unless the address is absent from the chain or a System account without data. A held burn is not certified, approved or paid, stays held while the chain shows that, and has no refund path yet. The page should make the same read before burning",
+      "what the signers cannot detect: an on-curve address nobody holds a key for that is absent from the chain (or only holds lamports) looks like a fresh wallet. Only the destination proof prevents paying it, and only for exits made through a page that asks for it",
+      "states of an exit: read the release record of the burn nonce (address derived from the vault and the nonce; layout docs/SOLANA-VAULT.md 4.4); if it is absent or its first two bytes are zero, read the nonce's bit in the paid page (address derived from the vault and nonce / 8192; layout 4.5): bit set = PAID (the record was closed, from 7 days after payment). Otherwise: approved = payable at ready_at; absent or voided = waiting for signatures, OR HELD. Held is not on chain: it is the signers' decision, reported with its reason by 'sol_vault.py burn-status' (hold: no-wallet | destination-not-a-wallet) and by the reserves monitor; an operator-run status endpoint for pages is not built",
+      "relayers never create the token account of an address that is not a funded System account; a wallet whose associated token account was given to another owner, or is frozen by the issuer, cannot be paid until that changes"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://explorer.solana.com/tx/{tx}",
+      "address": "https://explorer.solana.com/address/{address}",
+      "block": "https://explorer.solana.com/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
+    "custody.address will be the program id and the vault account address, written as <programId>/<vaultAddress>; custody.codeHash the sha256 of the deployed program binary.",
+    "Solana-only vault values that the schema's limits do not carry: largeReleaseThreshold 1000000000 and releaseDelay 1800 seconds on the source side, maxValidSeconds 3600.",
+    "The source chain id inside every signed message is keccak256(\"BLOCH-SVM-CHAIN-ID-v1\" || genesis hash bytes) = 0x720ef12f64972f1d7a826f17e9d177f041fbca3173c9bce00aa50eac2c22fdec.",
+    "The L2 side of an exit is SolanaBurnRouter.burnTo(uint64,string), the same shape as StellarBurnRouter and BitcoinBurnRouter; router address TBD-deploy. Its walletOf(string) and commitment(string) are view functions (they read the immutable mint).",
+    "Solana-only vault value: recordRetention 604800 seconds (a paid release record may be closed after it; the paid page keeps the nonce spent).",
+    "Solana-only tool rules since review 330: recordRetention has a floor of 259200 seconds outside a rehearsal; a vault file with rehearsal true is refused on mainnet-beta, devnet, testnet and for any endpoint that is not on loopback; the fee owner's USDC account must exist and be owned by the fee owner before the vault is initialized."
+  ]
+}

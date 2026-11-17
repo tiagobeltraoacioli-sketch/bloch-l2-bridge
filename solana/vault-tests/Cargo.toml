@@ -1,0 +1,29 @@
+# Tests of the built vault program (the .so) in an in-process SVM (litesvm, Agave 4.3 runtime).
+# This crate does not depend on the program crate: it builds every instruction and recomputes every digest
+# from the specification with its own code (sha2, sha3, libsecp256k1), so an encoding error in the program is
+# not mirrored here.
+[package]
+name = "bloch-sol-vault-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[dev-dependencies]
+litesvm = { version = "=0.18.2", features = ["precompiles"] }
+solana-account = "4.3.0"
+solana-address = "~2.7.0"
+solana-clock = "~3.2.0"
+solana-instruction = "~3.5.0"
+solana-keypair = "3.1.2"
+solana-message = "4.2.4"
+solana-signer = "3.0.1"
+solana-transaction = "4.1.5"
+solana-transaction-error = "~3.4.0"
+libsecp256k1 = "0.7.2"
+sha2 = "0.10.9"
+sha3 = "0.10.8"

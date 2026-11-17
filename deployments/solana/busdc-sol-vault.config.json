@@ -1,0 +1,115 @@
+{
+  "domain": "bloch.bridge.solana-vault-deploy.v1",
+  "notes": {
+    "status": "UNAUDITED. Nothing is deployed. The Solana vault needs its own external audit before any real funds",
+    "tool": "tools/signatario-solana/sol_vault.py (validate / address / init / verify); the owner deploys the program and initializes the vault, never an agent",
+    "sequence": "docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md; specification docs/SOLANA-VAULT.md",
+    "units": "1 USDC = 1e6 units (6 decimals)",
+    "address": "the vault address is derived from the hash of every value under vault (and the chain id derived from solana.genesisHash): changing any value gives another vault at another address. Nothing here can be changed after initialize; the program has no owner and no setter",
+    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v is Circle's USDC mint on Solana (Circle's address table and getAccountInfo at finalized, 2026-11-16): classic SPL Token program, 6 decimals, mint authority BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG, freeze authority 7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar",
+    "sourceChainId": "not in this file: the tool derives it from solana.genesisHash as keccak256(\"BLOCH-SVM-CHAIN-ID-v1\" || the 32 genesis hash bytes). For mainnet-beta: 0x720ef12f64972f1d7a826f17e9d177f041fbca3173c9bce00aa50eac2c22fdec",
+    "labels": "sourceDomainLabel, nativeDomainLabel and assetLabel become bytes32 by right-padding the ASCII text with zeros, as Solidity bytes32(\"...\")",
+    "cap": "proposed 100,000 USDC, equal to the L2 token's supplyCap (busdc-sol-token.config.json)",
+    "windowLimit": "proposed 10,000 USDC per 24 h: the release token bucket and the largest single deposit; equal to the L2 bucketCapacity, the largest single burn",
+    "signers": "the seven eth-release-signer keys of docs/BRIDGE-V3-KEY-CEREMONY.md, as 0x Ethereum-style addresses, ascending; threshold 5. The same keys as the Ethereum vault: every digest contains this vault's chain id and vault id, so a certificate of one vault is not valid on the other. A release approval of 7 signatures does not fit a Solana transaction; 5 and 6 do",
+    "unpauseThreshold": "6 of 7 to end a guardian pause early (switchThreshold on Ethereum; this vault has no light-client switch)",
+    "guard": "the three eth-vault-guardian secp256k1 keys, as 0x addresses, ascending, none of them a signer. A guardian signs a pause authorization; anyone delivers it. 72 h pause, 72 h cooldown. A pause voids approvals not yet paid",
+    "largeRelease": "Solana only: a release above largeReleaseThreshold (proposed 1,000 USDC) waits releaseDelay (proposed 1,800 s) between approval and payment. The Ethereum launch vault has releaseDelay 0: this is a difference for the coordinator to confirm or set to 0 / 0",
+    "maxValidSeconds": "a certificate's validUntil may be at most this far ahead (proposed 3,600 s)",
+    "recordRetention": "a paid release record may be closed by anyone this long after its payment (proposed 604,800 s = 7 days, at most 30 days); its rent returns to the relayer that paid it and the nonce stays spent in a paid page. A guardian watch must run at least once in this time to see every paid record in full",
+    "pauseRule": "the program requires guard.pauseDuration above policy.maxValidSeconds (a pause outlasts every certificate), and refuses every release certificate that could have been signed before the last guardian pause",
+    "minDeposit": "proposed 11 USDC: with the 5 bps deposit fee it nets 10.9945 USDC, above l2MinBurn 10",
+    "fees": "5 bps of each deposit and 5 bps of each release, ceiling 30 bps in the program. Fees accrue outside the backing; anyone calls sweep_fees and the vault pays the associated token account of fees.owner. owner: BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8, the owner's address on Solana (round 16 brief, 2026-11-16); it is a point on the ed25519 curve (a wallet address) and had no account on chain on 2026-11-16. Its USDC associated token account is 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg (seeds: owner, token program, mint; bump 253), which must be created before the first sweep. Immutable once the vault is initialized",
+    "TBD-owner": "source.revision; program.id and program.elfSha256 (from the build and the program keypair); deployer.address (the fee payer that deploys); the 7 signer operators and addresses; the 3 guardian operators and addresses; confirm cap, windowLimit, largeReleaseThreshold, releaseDelay"
+  },
+  "solana": {
+    "cluster": "mainnet-beta",
+    "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+    "rehearsal": false
+  },
+  "source": {
+    "revision": null
+  },
+  "program": {
+    "id": null,
+    "elfSha256": null
+  },
+  "deployer": {
+    "address": null
+  },
+  "vault": {
+    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "sourceDomainLabel": "solana-mainnet",
+    "nativeDomainLabel": "bloch-l2-700770",
+    "assetLabel": "USDC",
+    "cap": 100000000000,
+    "signers": {
+      "threshold": 5,
+      "set": [
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        }
+      ]
+    },
+    "policy": {
+      "windowLimit": 10000000000,
+      "windowSeconds": 86400,
+      "unpauseThreshold": 6,
+      "minDeposit": 11000000,
+      "l2MinBurn": 10000000,
+      "largeReleaseThreshold": 1000000000,
+      "releaseDelay": 1800,
+      "maxValidSeconds": 3600,
+      "recordRetention": 604800
+    },
+    "guard": {
+      "guardians": [
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        },
+        {
+          "operator": null,
+          "address": null
+        }
+      ],
+      "pauseDuration": 259200,
+      "pauseCooldown": 259200
+    },
+    "fees": {
+      "owner": "BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8",
+      "depositBps": 5,
+      "releaseBps": 5
+    }
+  }
+}

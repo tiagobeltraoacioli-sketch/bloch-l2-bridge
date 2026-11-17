@@ -55,6 +55,15 @@
           "resolution": "schema owner's version (ours)"
         }
       ]
+    },
+    "solana": {
+      "branch": "codex/bridge-solana-r17-20261117",
+      "commit": "b2fa301f41b07a72017656c098f4c44b8441acae",
+      "agent": 336,
+      "routes": [
+        "solana"
+      ],
+      "conflicts": []
     }
   }
 }

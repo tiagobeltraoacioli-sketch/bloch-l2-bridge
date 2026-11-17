@@ -1,0 +1,18 @@
+# TEST ONLY. Never deployed with the vault. A stand-in for "some other program" in the adversarial tests.
+[package]
+name = "bloch-sol-test-helper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = { version = "=5.2.0", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_os, values("solana"))'] }
