@@ -293,6 +293,10 @@ class FakeVault:
     def events(self, start):
         return [e for e in FakeVault.events_list if e['ledger'] >= start], 1000, 1
 
+    def scan(self, start):
+        events, latest, _ = self.events(start)
+        return events, latest, latest
+
     def ledger(self, seq):
         return {'sequence': seq, 'close_time': FakeVault.now - (1000 - seq) * 5}
 
@@ -913,6 +917,92 @@ class Resign(unittest.TestCase):
         self.assertFalse(ok({'core': core, 'valid_until': True, 'pause_count': 2}, other, now=101, pause_count=2))
         self.assertFalse(ok({'core': core, 'pause_count': 2}, other, now=101, pause_count=2))
         self.assertFalse(ok(None, other, now=101, pause_count=2))
+
+
+class EventScan(unittest.TestCase):
+    """Round 18 (agent 373, found by rehearsal m7): stellar-rpc scans at most 10,000 ledgers per getEvents request and
+    then answers an EMPTY page with a cursor at the end of the scanned range. Every reader that stopped on an empty
+    page saw no event once the RPC held more than 10,000 ledgers before the vault's events: the half found no deposit,
+    the watcher no deposit or queued release, and the guardian no release at all (exit 0 while blind). A page that
+    ends inside a ledger also lost that ledger's further events. The readers now follow the RPC's cursor to its
+    latest ledger (stellar_net.Net.scan)."""
+
+    class FakeRpc:
+        """getEvents as stellar-rpc answers it: at most `cap` ledgers scanned per request, `limit` events per page."""
+
+        def __init__(self, events, latest, cap=10_000):
+            self.ev, self.latest, self.cap, self.calls = events, latest, cap, 0
+
+        def __call__(self, method, params=None):
+            assert method == 'getEvents'
+            self.calls += 1
+            limit = params['pagination']['limit']
+            cur = params['pagination'].get('cursor')
+            if cur:
+                led, idx = int(cur.split('-')[0]) >> 32, int(cur.split('-')[1])
+                after = [e for e in self.ev if (e[0], e[1]) > (led, idx)]
+                first = led
+            else:
+                first = params['startLedger']
+                after = [e for e in self.ev if e[0] >= first]
+            end = min(first + self.cap - 1, self.latest)
+            page = [e for e in after if e[0] <= end][:limit]
+            if len(page) == limit:
+                cursor = '%019d-%010d' % (page[-1][0] << 32, page[-1][1])
+            elif page and page[-1][0] >= end:
+                cursor = '%019d-%010d' % (page[-1][0] << 32, page[-1][1])
+            else:
+                cursor = '%019d-%010d' % ((end << 32) + (1 << 32) - 1, 4294967295)
+            return {'events': [{'ledger': led, 'txHash': 'aa' * 32, 'topicJson': [{'symbol': name}],
+                                'valueJson': {'map': [{'key': {'symbol': 'n'}, 'val': {'u64': str(i)}}]}}
+                               for led, i, name in page],
+                    'cursor': cursor, 'latestLedger': self.latest, 'oldestLedger': 7}
+
+    def net(self, rpc):
+        n = object.__new__(sn.Net)
+        n.vault = VAULT
+        n.rpc = rpc
+        return n
+
+    def test_events_beyond_the_rpcs_scan_window_are_found(self):
+        rpc = self.FakeRpc([(15_000, 1, 'deposited'), (15_000, 2, 'deposited'), (15_001, 1, 'released')], 15_500)
+        events, latest, reached = self.net(rpc).scan(7, limit=1)
+        self.assertEqual([(e['ledger'], e['name'], e['data']['n']) for e in events],
+                         [(15_000, 'deposited', 1), (15_000, 'deposited', 2), (15_001, 'released', 1)])
+        self.assertEqual((latest, reached), (15_500, 15_500))
+
+    def test_the_old_reading_loop_saw_nothing(self):
+        """The loop every reader used before (start at the oldest ledger, stop on an empty page): nothing found."""
+        rpc = self.FakeRpc([(15_000, 1, 'deposited')], 15_500)
+        events, latest, _ = self.net(rpc).events(7)
+        self.assertEqual(events, [])                                   # the page the old loop stopped on
+
+    def test_the_half_finds_a_deposit_beyond_the_window(self):
+        rpc = self.FakeRpc([], 15_500)
+        dep = 'ab' * 32
+        rpc.ev = [(15_000, 1, 'deposited')]
+
+        def answer(method, params=None):
+            r = rpc(method, params)
+            for e in r['events']:
+                e['topicJson'].append({'bytes': dep})
+                e['valueJson'] = {'map': [{'key': {'symbol': k}, 'val': v} for k, v in (
+                    ('sender', {'address': PAYEE}), ('amount', {'i128': '110000000'}),
+                    ('l2_recipient', {'bytes': '11' * 20}))]}
+            return r
+        h = object.__new__(stellar_half.Half)
+        h.cfg, h.net = {}, self.net(answer)
+        h.net.health = lambda: {'oldestLedger': 7}
+        got = h.find_fields(bytes.fromhex(dep), None)
+        self.assertEqual((got['sender'], got['amount'], got['ledger']), (PAYEE, 110000000, 15_000))
+
+    def test_a_scan_that_does_not_progress_is_an_error_not_an_empty_answer(self):
+        def stuck(method, params=None):
+            return {'events': [], 'cursor': '%019d-%010d' % (100 << 32, 0), 'latestLedger': 15_500, 'oldestLedger': 7}
+        with self.assertRaises(sn.StellarError):
+            self.net(stuck).scan(7)
+        with self.assertRaises(sn.StellarError):
+            self.net(lambda m, p=None: {'events': [], 'latestLedger': 15_500}).scan(7)   # no cursor
 
 
 class Asset(unittest.TestCase):

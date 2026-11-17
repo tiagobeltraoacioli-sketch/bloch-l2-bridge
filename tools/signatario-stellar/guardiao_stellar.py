@@ -395,29 +395,27 @@ class Guardian:
         self.height_margin()   # a wrong value is refused at once, not only when the rule is reached
         still_since = self.finality_still_since(now) if not view_problem else None
         findings, unjudged, seen = [], [], 0
-        while True:
-            events, latest, _ = self.net.events(start)
-            for e in events:
-                if e['name'] not in ('released', 'release_queued'):
-                    continue
-                seen += 1
-                row = {'release': e['topics'][0], 'event': e['name'], 'nonce': int(e['data']['nonce']),
-                       'ledger': e['ledger']}
-                try:
-                    if view_problem:
-                        raise CannotJudge(view_problem)
-                    if e['name'] == 'release_queued':
-                        self.named_block(e)   # remembered for the `released` event of its later execution
-                    reason = self.judge(e)
-                    if reason:
-                        findings.append({**row, 'reason': reason})
-                except CannotJudge as why:
-                    unjudged.append({**row, 'reason': str(why), 'stalled': why.behind and not view_problem})
-                except (KeyError, TypeError, ValueError, sn.StellarError) as err:
-                    unjudged.append({**row, 'reason': f'the release could not be compared: {err}'})
-            if not events or events[-1]['ledger'] >= latest:
-                break
-            start = events[-1]['ledger'] + 1
+        # One complete scan, following the RPC's cursor to its latest ledger (round 18: stellar_net.Net.scan; a
+        # scan that stopped on the first empty page saw no release at all once the RPC held more than 10,000 ledgers).
+        events, latest, _ = self.net.scan(start)
+        for e in events:
+            if e['name'] not in ('released', 'release_queued'):
+                continue
+            seen += 1
+            row = {'release': e['topics'][0], 'event': e['name'], 'nonce': int(e['data']['nonce']),
+                   'ledger': e['ledger']}
+            try:
+                if view_problem:
+                    raise CannotJudge(view_problem)
+                if e['name'] == 'release_queued':
+                    self.named_block(e)   # remembered for the `released` event of its later execution
+                reason = self.judge(e)
+                if reason:
+                    findings.append({**row, 'reason': reason})
+            except CannotJudge as why:
+                unjudged.append({**row, 'reason': str(why), 'stalled': why.behind and not view_problem})
+            except (KeyError, TypeError, ValueError, sn.StellarError) as err:
+                unjudged.append({**row, 'reason': f'the release could not be compared: {err}'})
 
         # A queued release that a pause voided pays no one: reported, but neither a finding nor an open question.
         def voided(f):

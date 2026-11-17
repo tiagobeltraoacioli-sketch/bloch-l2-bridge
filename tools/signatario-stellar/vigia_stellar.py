@@ -135,16 +135,13 @@ class VigiaStellar(V.Vigia):
         if all(n in self.known_deposits or n in found for n in range(count)):
             return found
         start = max(int(self.cfg.get('vault_from_ledger', 0)), int(self.net.health().get('oldestLedger', 1)))
-        while True:
-            events, latest, _ = self.net.events(start)
-            for e in events:
-                if e['name'] == 'deposited' and e['topics']:
-                    d = e['data']
-                    found.setdefault(int(d['nonce']), {'sender': d['sender'], 'amount': int(d['amount']),
-                                                       'l2_recipient': d['l2_recipient']})
-            if not events or events[-1]['ledger'] >= latest:
-                return found
-            start = events[-1]['ledger'] + 1
+        events, _, _ = self.net.scan(start)
+        for e in events:
+            if e['name'] == 'deposited' and e['topics']:
+                d = e['data']
+                found.setdefault(int(d['nonce']), {'sender': d['sender'], 'amount': int(d['amount']),
+                                                   'l2_recipient': d['l2_recipient']})
+        return found
 
     def deposits(self):
         derived = self.net.view('derived')
@@ -403,15 +400,12 @@ class VigiaStellar(V.Vigia):
         from the vault's `release_queued` events; the vault decides (queued, due, not paused, open, the bucket)."""
         start = self.queue_cursor or max(int(self.cfg.get('vault_from_ledger', 0)),
                                          int(self.net.health().get('oldestLedger', 1)))
-        while True:
-            events, latest, _ = self.net.events(start)
-            for e in events:
-                if e['name'] == 'release_queued' and e['topics']:
-                    self.queued.add(e['topics'][0])
-            if not events or events[-1]['ledger'] >= latest:
-                self.queue_cursor = (events[-1]['ledger'] if events else start)
-                break
-            start = events[-1]['ledger'] + 1
+        events, _, reached = self.net.scan(start)
+        for e in events:
+            if e['name'] == 'release_queued' and e['topics']:
+                self.queued.add(e['topics'][0])
+        # Next pass from the last ledger seen in full (rescanning it is harmless: `queued` is a set).
+        self.queue_cursor = max([start, reached] + [e['ledger'] for e in events])
         st = self.net.view('state')
         now = self.latest()['close_time']
         if now < int(st['paused_until']) or not st['releases_enabled']:
