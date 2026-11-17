@@ -515,7 +515,7 @@ class Timing(unittest.TestCase):
         return result, [json.loads(l) for l in buf.getvalue().splitlines() if l.startswith('{')]
 
     def sample(self, total, age=0, mode='join', **more):
-        return {'t': int(time.time()), 'mode': mode, 'signed': True, 'total_s': total, 'rebuild_s': max(0, total - 1),
+        return {'t': int(time.time()), 'mode': mode, 'signed': mode != 'measure', 'ok': True, 'total_s': total, 'rebuild_s': max(0, total - 1),
                 'source_half_s': 1.0, 'anchor_age_s': age, **more}
 
     def test_no_measurement_yet_measures_first_and_then_decides(self):
@@ -528,6 +528,14 @@ class Timing(unittest.TestCase):
         self.assertTrue(any(l.get('kind') == 'timing' and l.get('mode') == 'measure' for l in lines))
         doc = json.loads(v.timing_path.read_text())
         self.assertEqual((doc['network'], doc['recent_work_s'], doc['held']), ('op-mainnet', 4.0, False))
+
+    def test_a_measurement_that_did_not_complete_is_not_a_measurement(self):
+        v = self.signer()
+        v.next_sample = {**self.sample(0.2, mode='measure'), 'ok': False}  # e.g. the follower was stale: refused at once
+        ok, lines = self.logs(lambda: v.window_allows({'burn_id': '0xb', 'nonce': 1}))
+        self.assertFalse(ok)
+        self.assertIsNone(v.recent_work())
+        self.assertTrue(any(l.get('held') and 'no measurement' in l.get('reason', '') for l in lines))
 
     def test_a_signer_too_slow_for_the_window_holds_and_alerts(self):
         # OP Mainnet: window 500 s, hold above 250 s. Nothing is opened or joined, and the alert is critical.
@@ -594,12 +602,12 @@ class Timing(unittest.TestCase):
             done = run('measure', '--timing', str(Path(tmp) / 't.json'))
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
             doc = json.loads((Path(tmp) / 't.json').read_text())
-            self.assertEqual((doc['mode'], doc['signed'], doc['l2_source']), ('measure', False, 'rpc'))
+            self.assertEqual((doc['mode'], doc['signed'], doc['ok'], doc['l2_source']), ('measure', False, True, 'rpc'))
             self.assertGreaterEqual(doc['total_s'], 0)
             # a release that is refused still reports how long it took; without --timing nothing is written
             done = run('release', '--burn-tx', '0x' + '88' * 32, '--out', str(Path(tmp) / 'o.json'), '--timing', str(Path(tmp) / 't2.json'))
             self.assertEqual(done.returncode, 1)
-            self.assertEqual(json.loads((Path(tmp) / 't2.json').read_text())['signed'], False)
+            self.assertEqual([json.loads((Path(tmp) / 't2.json').read_text())[k] for k in ('signed', 'ok')], [False, False])
             before = sorted(p.name for p in Path(tmp).iterdir())
             run('release', '--burn-tx', '0x' + '88' * 32, '--out', str(Path(tmp) / 'o.json'))
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), before)

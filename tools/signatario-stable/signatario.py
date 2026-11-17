@@ -803,7 +803,8 @@ def write_timing(path, mode, source):
     """The seconds this run took, for the daemon and the monitor. Never decides anything and never fails a signature."""
     try:
         doc = {'t': int(time.time()), 'mode': mode, 'l2_source': source, 'signed': bool(TIMING.get('signed')),
-               'total_s': round(time.time() - STARTED, 3), **{k: v for k, v in TIMING.items() if k != 'signed'}}
+               'ok': bool(TIMING.get('signed') or TIMING.get('measured')),
+               'total_s': round(time.time() - STARTED, 3), **{k: v for k, v in TIMING.items() if k not in ('signed', 'measured')}}
         tmp = Path(str(path) + '.tmp')
         tmp.write_text(json.dumps(doc) + '\n')
         os.replace(tmp, path)
@@ -826,13 +827,14 @@ def cmd_measure(ctx, args):
             _, proc, _, _ = own_l2(ctx, work)
         elif source != 'rpc':
             refuse(f'unknown l2_source {source}')
+        TIMING['measured'] = True  # the whole pre-signature work ran: a refused run is not a measurement of it
     finally:
         if proc is not None:
             proc.kill()
             proc.wait()
         shutil.rmtree(work, ignore_errors=True)
         write_timing(timing, 'measure', source)
-    print(json.dumps({'measured': True, 'l2_source': source, **TIMING}))
+    print(json.dumps({'l2_source': source, **TIMING}))
 
 
 def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):

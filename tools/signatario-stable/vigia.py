@@ -321,7 +321,7 @@ class Vigia:
         runs that reached the source half (or measured the rebuild alone), None when none is recent enough."""
         t, now = self.timing, time.time()
         done = [x for x in self.timing_samples if now - x['t'] <= t['measurement_ttl_s'] and isinstance(x.get('total_s'), (int, float))
-                and (x.get('mode') == 'measure' or 'source_half_s' in x)]
+                and ((x.get('mode') == 'measure' and x.get('ok') is True) or 'source_half_s' in x)]
         return max((x['total_s'] for x in done[-t['recent']:]), default=None)
 
     def save_timing(self, held=False):
@@ -391,7 +391,8 @@ class Vigia:
             return True
         work = self.recent_work()
         since = time.time() - self.last_measure
-        if (work is None and since >= min(60, t['remeasure_s'])) or (work is not None and work > t['hold_s'] and since >= t['remeasure_s']):
+        if (work is None and since >= min(t['interval_s'], t['remeasure_s'])) \
+                or (work is not None and work > t['hold_s'] and since >= t['remeasure_s']):
             self.measure_work()  # no recent measurement, or held: measure again (a rebuild, no signature)
             work = self.recent_work()
         if work is None:
