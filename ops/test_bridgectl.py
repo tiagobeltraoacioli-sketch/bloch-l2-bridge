@@ -237,9 +237,22 @@ class Ctl(unittest.TestCase):
         rc, doc = self.run_ctl('rollback', inst)
         self.assertEqual(rc, 0, doc)
         self.assertEqual(doc['current'], first)
-        self.assertNotIn(b'# v2', (self.root / f'opt/bloch-bridge/{inst}/current/tools/reservas/reservas.py').read_bytes())
+
+        def provenance(f):  # a rebuild from another revision changes only the _bundle text of the templates
+            code(f)
+            p = 'etc/templates/reservas.json'
+            d = json.loads(f[p][0])
+            d['_bundle'] = d['_bundle'].replace('Rendered', 'Rendered (other revision)')
+            f[p] = ((json.dumps(d, indent=2) + '\n').encode(), 0o644)
+            f['tools/reservas/README.md'] = (f['tools/reservas/README.md'][0] + b'x', 0o644)
+        datap, shap = make(tweak=provenance)
+        rc, doc = self.run_ctl('upgrade', inst, self.write(datap, 'vp.tar.gz'), '--sha256', shap, '--allow-unreleased')
+        self.assertEqual(rc, 0, doc)
         rc, doc = self.run_ctl('rollback', inst)
-        self.assertEqual(doc['current'], second, 'a second rollback returns to the release rolled back from')
+        self.assertEqual((rc, doc['current']), (0, first), doc)
+        self.assertNotIn(b'# v2', (self.root / f'opt/bloch-bridge/{inst}/current/tools/reservas/reservas.py').read_bytes())
+        rc, doc = self.run_ctl('upgrade', inst, self.write(data2, 'v2.tar.gz'), '--sha256', sha2, '--allow-unreleased')
+        self.assertEqual(doc.get('to'), second, 'a rolled-back release can be re-applied')
 
         def tpl(f):
             p = 'etc/templates/reservas.json'

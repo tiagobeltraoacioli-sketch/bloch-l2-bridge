@@ -685,6 +685,13 @@ def switch_to(inst, release, restart):
     return man
 
 
+def template_lines(text):
+    """A template's lines for comparison, without `_bundle` (provenance text naming the revisions, not a setting)."""
+    doc = json.loads(text)
+    doc.pop('_bundle', None)
+    return json.dumps(doc, indent=2, sort_keys=True).splitlines()
+
+
 def cmd_upgrade(args):
     inst, bundle = args[0], args[1]
     rec = load_record(inst)
@@ -700,8 +707,8 @@ def cmd_upgrade(args):
     old_rel = inst_dir(inst) / 'releases' / old_id
     diffs = []
     for name in sorted(set(old['configs']) | set(man['configs'])):
-        a = (old_rel / 'etc/templates' / name).read_text().splitlines() if name in old['configs'] else []
-        b = files[f'etc/templates/{name}'][0].decode().splitlines() if name in man['configs'] else []
+        a = template_lines((old_rel / 'etc/templates' / name).read_text()) if name in old['configs'] else []
+        b = template_lines(files[f'etc/templates/{name}'][0].decode()) if name in man['configs'] else []
         if a != b:
             diffs += list(difflib.unified_diff(a, b, f'current/{name}', f'new/{name}', lineterm='', n=1))
     if diffs and '--config-reviewed' not in args:

@@ -299,6 +299,16 @@ def journal(c, unit, since='-30min'):
     return ex(c, f'journalctl -u {unit} --since {shlex.quote(since)} -o cat --no-pager', ok=False).stdout
 
 
+def save_journals():
+    """Evidence: every bloch-bridge unit's journal and the alert hook's lines, per container (throwaway keys only)."""
+    d = WORK / 'journals'
+    d.mkdir(exist_ok=True)
+    for c in ['a381-chain', *ROLES]:
+        done = dk('exec', c, 'bash', '-c', 'journalctl -o short-iso --no-pager -u "bloch-bridge-*" -t bloch-bridge-alert -u "a381-*"', ok=False)
+        if done.returncode == 0:
+            (d / f'{c}.txt').write_text(done.stdout)
+
+
 def _term(signum, frame):
     raise KeyboardInterrupt(f'signal {signum}')
 
@@ -322,6 +332,7 @@ def main():
     except BaseException as e:  # an abort is a failure, never a silent partial pass
         check('the rehearsal ran to its end', False, f'{type(e).__name__}: {e}')
     finally:
+        save_journals()
         if '--keep' not in args:
             cleanup()
         failed = [n for n, ok in results if not ok]
@@ -569,10 +580,10 @@ def upgrade_drills(bundles):
     try:
         f = wt / 'tools/reservas/reservas.py'
         f.write_text(f.read_text() + '\n# rehearsal v2 (agent 381): a code change that keeps behaviour\n')
-        sh('git', '-C', wt, 'commit', '-qam', 'rehearsal v2 (local, never pushed)')
+        sh('git', '-C', wt, '-c', 'user.name=a381-rehearsal', '-c', 'user.email=a381-rehearsal@localhost', 'commit', '-qam', 'rehearsal v2 (local, never pushed)')
         v2 = sh('git', '-C', wt, 'rev-parse', 'HEAD').stdout.strip()
         f.write_text(f.read_text() + '\nraise SystemExit("rehearsal: broken release")\n')
-        sh('git', '-C', wt, 'commit', '-qam', 'rehearsal broken (local, never pushed)')
+        sh('git', '-C', wt, '-c', 'user.name=a381-rehearsal', '-c', 'user.email=a381-rehearsal@localhost', 'commit', '-qam', 'rehearsal broken (local, never pushed)')
         broken = sh('git', '-C', wt, 'rev-parse', 'HEAD').stdout.strip()
         built = {}
         for tag, rev in (('v2', v2), ('broken', broken)):
