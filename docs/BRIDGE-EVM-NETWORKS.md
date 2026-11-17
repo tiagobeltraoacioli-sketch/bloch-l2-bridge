@@ -475,8 +475,8 @@ network (own configuration directory, own databases, own shared directory, own g
    `eth-half.template.json`, `signer.template.json`, `relayer.template.json` (own directories, databases, feed and
    gas keys per network: no file is shared with the Ethereum bridge's daemons). **The anchor settings are not operator
    choices** (review R329-EVM-3): `anchor_policy`, `anchor_depth`, `anchor_max_age` and `finalized_margin` are taken
-   from `networks.json` by the chain id, by `eth_half.py` and by `vigia.py` alike. A file that omits them gets the
-   registry's values; a file that contradicts them is refused at start (before, a signer file without
+   from `networks.json` by the chain id, by `eth_half.py` and by `vigia.py` alike. A file that omits one the
+   registry sets, or contradicts one, is refused at start (round 18; round 17 filled an omitted key) (before, a signer file without
    `anchor_policy` took the Ethereum rule, and on Arbitrum One no round could ever be joined). `probe` is refused on
    chain 1. `preflight_signer.py --network NAME` checks the same before go-live.
 3. **Timers and budgets** (`signer` in `networks.json`; review R329-EVM-6). Run the daemons WITHOUT `--interval`: the

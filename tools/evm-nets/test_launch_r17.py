@@ -51,6 +51,12 @@ def addr(label):
     return '0x' + hashlib.sha256(('r17-' + label).encode()).hexdigest()[:40]
 
 
+def registry_keys(chain, tool):
+    """The keys an operator file of this network must state (round 18: a missing one is refused at start)."""
+    settings = launch.signer_settings(chain) or {}
+    return {k: settings[k] for k in launch.SHARED_BY[tool] if k in settings}
+
+
 @contextlib.contextmanager
 def stub_node(chain_id):
     """A JSON-RPC stub that answers every request with the chain id (enough for the checks made before any real read)."""
@@ -397,7 +403,7 @@ class SignerGate(unittest.TestCase):
 
     def eth_half_cfg(self, tmp, url, chain, **more):
         cfg = {'eth_rpc': url, 'eth_chain_id': chain, 'vault': '0x' + '11' * 20, 'vault_code_keccak': '0x' + '22' * 32, 'keystore': 'k',
-               'password_file': 'p', 'db': str(Path(tmp) / 'db.json'), 'provenance': True, **more}
+               'password_file': 'p', 'db': str(Path(tmp) / 'db.json'), 'provenance': True, **registry_keys(chain, 'eth_half'), **more}
         (Path(tmp) / 'eth.json').write_text(json.dumps(cfg))
         return Path(tmp) / 'eth.json'
 
@@ -407,7 +413,8 @@ class SignerGate(unittest.TestCase):
                'vault_threshold': 5, 'keystore': 'k', 'password_file': 'p', 'eth_signer': '0x' + '66' * 20,
                'db': str(Path(tmp) / 'db.json'), 'l2_source': 'rpc', 'work_dir': str(tmp), 'provenance': True,
                'eth_half_deposit': ['false'], 'eth_half_release': ['false'], 'shared_dir': str(Path(tmp) / 'shared'),
-               'eth_rpc': url, 'eth_chain_id': chain, 'vault_from_block': 1, 'l2_relayer_key': 'x', 'eth_relayer_key': 'x', **more}
+               'eth_rpc': url, 'eth_chain_id': chain, 'vault_from_block': 1, 'l2_relayer_key': 'x', 'eth_relayer_key': 'x',
+               **registry_keys(chain, 'vigia'), **more}
         (Path(tmp) / 'cfg.json').write_text(json.dumps(cfg))
         return Path(tmp) / 'cfg.json'
 
@@ -486,20 +493,35 @@ class SignerGate(unittest.TestCase):
 
 
 class AnchorPolicy(unittest.TestCase):
-    def vigia(self, chain, **more):
+    def vigia(self, chain, fill=True, **more):
         import vigia
         d = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__('shutil').rmtree(d, ignore_errors=True))
         cfg = {'shared_dir': str(d), 'token': '0x' + '33' * 20, 'source_vault': '0x' + '11' * 20, 'source_route': '0x' + '55' * 32,
-               'threshold': 5, 'source_chain_id': chain, 'eth_chain_id': chain, 'signer': 1, **more}
+               'threshold': 5, 'source_chain_id': chain, 'eth_chain_id': chain, 'signer': 1,
+               **(registry_keys(chain, 'vigia') if fill else {}), **more}
         (d / 'c.json').write_text(json.dumps(cfg))
         return vigia.Vigia(d / 'c.json')
 
-    def test_a_missing_key_is_filled_from_the_registry_by_chain_id(self):
+    def test_a_missing_key_is_refused_at_start(self):
         # R329-EVM-3: on Arbitrum One a signer file without `anchor_policy` took the Ethereum branch and no round ever fit.
+        # Round 17 filled the key from the registry; round 18 (coordinator: "missing key refused at start") refuses the
+        # file instead, so an operator file always states the network's settings and never takes the Ethereum branch.
         for name in launch.launchable():
             spec = NETS[name]
-            v = self.vigia(spec['chainId'])
+            full = {k: spec['signer'][k] for k in launch.SHARED_BY['vigia']}
+            for key in full:
+                more = {k: v for k, v in full.items() if k != key}
+                with self.assertRaises(SystemExit) as e:
+                    self.vigia(spec['chainId'], fill=False, **more)
+                self.assertIn('missing', str(e.exception), (name, key))
+                self.assertIn(key, str(e.exception), (name, key))
+
+    def test_the_registry_values_are_taken_by_chain_id(self):
+        # The property the round-17 test asserted (the registry's values are the ones in force) stays covered.
+        for name in launch.launchable():
+            spec = NETS[name]
+            v = self.vigia(spec['chainId'], fill=False, **{k: spec['signer'][k] for k in launch.SHARED_BY['vigia']})
             self.assertEqual(v.cfg['anchor_policy'], spec['signer']['anchor_policy'], name)
             self.assertEqual(v.anchor_max_age, spec['signer']['anchor_max_age'], name)
             self.assertEqual((v.signs_per_hour, v.refused_retry), (spec['signer']['max_release_signs_per_hour'], spec['signer']['refused_retry']))
@@ -530,9 +552,11 @@ class AnchorPolicy(unittest.TestCase):
 
     def test_eth_half_takes_the_registry_values_and_refuses_a_contradiction(self):
         with stub_node(10) as url, tempfile.TemporaryDirectory() as tmp:
-            def run(**more):
+            def run(fill=True, **more):
                 cfg = {'eth_rpc': url, 'eth_chain_id': 10, 'vault': '0x' + '11' * 20, 'vault_code_keccak': '0x' + '22' * 32, 'keystore': 'k',
                        'password_file': 'p', 'db': str(Path(tmp) / 'db.json'), **more}
+                if fill:
+                    cfg = {**registry_keys(10, 'eth_half'), **cfg}
                 (Path(tmp) / 'c.json').write_text(json.dumps(cfg))
                 done = subprocess.run([sys.executable, str(STABLE / 'eth_half.py'), '--config', str(Path(tmp) / 'c.json'), 'release',
                                        '--intent', str(Path(tmp) / 'none.json')], capture_output=True, text=True, env=ENV)
@@ -541,17 +565,24 @@ class AnchorPolicy(unittest.TestCase):
                 out = run(**more)
                 self.assertIn('config contradicts the network registry', out, more)
                 self.assertIn(next(iter(more)), out)
-            # No key at all, and the registry's own values: both get past the start (they stop at the missing intent file).
-            for more in ({}, {'anchor_policy': 'probe', 'anchor_depth': 2, 'anchor_max_age': 250, 'finalized_margin': 0}):
-                out = run(**more)
-                self.assertNotIn('contradicts', out)
-                self.assertIn('none.json', out)
+            # Round 18: a file that omits a key the registry sets is refused at start (it was filled in round 17).
+            full = {'anchor_policy': 'probe', 'anchor_depth': 2, 'anchor_max_age': 250, 'finalized_margin': 0}
+            for key in ('',) + tuple(full):
+                out = run(fill=False, **{k: v for k, v in full.items() if k != key})
+                if key:
+                    self.assertIn('config misses keys the network registry sets', out, key)
+                    self.assertIn(key, out)
+                else:
+                    # The registry's own values get past the start (they stop at the missing intent file).
+                    self.assertNotIn('contradicts', out)
+                    self.assertNotIn('misses', out)
+                    self.assertIn('none.json', out)
 
     def test_an_interval_longer_than_the_network_allows_is_refused(self):
         with stub_node(10) as url, tempfile.TemporaryDirectory() as tmp:
             cfg = {'shared_dir': str(Path(tmp) / 's'), 'token': '0x' + '33' * 20, 'source_vault': '0x' + '11' * 20,
                    'source_route': '0x' + '55' * 32, 'threshold': 5, 'source_chain_id': 10, 'eth_chain_id': 10, 'signer': 1,
-                   'l2_rpc': url, 'eth_rpc': url}
+                   'l2_rpc': url, 'eth_rpc': url, **registry_keys(10, 'vigia')}
             (Path(tmp) / 'c.json').write_text(json.dumps(cfg))
             done = subprocess.run([sys.executable, str(STABLE / 'vigia.py'), '--config', str(Path(tmp) / 'c.json'), 'sign', '--once',
                                    '--interval', '60'], capture_output=True, text=True, env=ENV)
@@ -577,7 +608,8 @@ class Timing(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__('shutil').rmtree(d, ignore_errors=True))
         cfg = {'shared_dir': str(d), 'token': '0x' + '33' * 20, 'source_vault': '0x' + '11' * 20, 'source_route': '0x' + '55' * 32,
-               'threshold': 5, 'source_chain_id': chain, 'eth_chain_id': chain, 'signer': 1, 'eth_rpc': 'http://127.0.0.1:9'}
+               'threshold': 5, 'source_chain_id': chain, 'eth_chain_id': chain, 'signer': 1, 'eth_rpc': 'http://127.0.0.1:9',
+               **registry_keys(chain, 'vigia')}
         (d / 'c.json').write_text(json.dumps(cfg))
         v = vigia.Vigia(d / 'c.json')
         v.timing_samples = [dict(s) for s in samples]
@@ -800,6 +832,12 @@ class Generator(unittest.TestCase):
             (Path(tmp) / 's.json').write_text(json.dumps(signer))
             report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'])
             self.assertTrue(any(r['group'] == 'network' and 'anchor_policy' in r['detail'] for r in report.failed))
+            # Round 18: a file that omits a key the registry sets fails the preflight too, as the daemons refuse it at start.
+            del signer['anchor_policy']
+            (Path(tmp) / 's.json').write_text(json.dumps(signer))
+            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'])
+            self.assertTrue(any(r['group'] == 'network' and 'states every anchor setting' in r['check'] and 'anchor_policy' in r['detail']
+                                for r in report.failed), [r for r in report.failed if r['group'] == 'network'])
 
 
 if __name__ == '__main__':
