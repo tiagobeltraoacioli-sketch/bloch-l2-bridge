@@ -428,9 +428,10 @@ its whole life. Confirm it on the second channel before section 8.
 
 ## 8. The Ethereum vault (deposits and releases start OFF)
 
-The Safe sends the vault deployer the gas only: the creation uses about 4.25 M gas (measured; section 17); at the cap
-`ETH_MAX_GWEI` that is `4.25e6 x ETH_MAX_GWEI x 1e-9` ETH (0.13 ETH at 30 gwei; about 0.0005 ETH at today's
-0.11 gwei). Send 1.2 times the amount at the price you will accept.
+The Safe sends the vault deployer the gas only: the creation used 4,598,076 gas in the rehearsal (section 17); the
+kit's gas limit is 5,000,000 and it signs at up to twice the node's gas price quote, capped at `ETH_MAX_GWEI`, and
+refuses to sign unless the balance covers `5,000,000 x that price`. At 30 gwei that is 0.15 ETH; at today's 0.11 gwei
+quote (0.23 gwei paid) about 0.0012 ETH. Send `5,000,000 x 2 x the current quote` plus a margin.
 
 The dry run (read-only: validate, the pinned revision, the frozen creation code keccak `0x901d52d0…3a74`, the
 predicted address, nonce 0, balance, gas price, a simulated creation):
@@ -858,8 +859,22 @@ verdict and its merge into `main` by the integrator (agent 375), and none before
 
 ## 17. Rehearsal record
 
-`deploy/ceremony/rehearse_ceremony.py` (round 18) runs sections 2 to 14 as written. Its result, the measured gas and
-every stand-in are in agent 380's report (`agents/380-bridge-ceremony-r18.md`) and in the run's own output.
+`deploy/ceremony/rehearse_ceremony.py` (round 18) runs sections 2 to 14 as written:
+
+```
+FOUNDRY_BIN=<directory of cast, forge, anvil 1.7.1> python3 deploy/ceremony/rehearse_ceremony.py
+```
+
+Result on 2026-11-17 (agent 380; details in `agents/380-bridge-ceremony-r18.md`): 128 of 128 marked blocks run,
+49 of 49 checks pass, `CEREMONY REHEARSAL OK`: 27 key records from 12 hosts and the owner re-verified; configs filled
+and every tool's mainnet-policy check passed with no rehearsal flag; the vault created on a fork of Ethereum mainnet
+over the real USDC at the planned address (4,598,076 gas) and verified at finality; the token created on the 700770
+stand-in (4,822,592 gas, under the 5,000,000 limit) and verified with its vault; both chains equal the configs and
+the fee schedule; 5-of-7 controls (4 signatures and a non-member's refused); 101 USDC in, 100.9495 bUSDC after the
+12 h delay, 100 bUSDC out, 99.90 USDC paid, 0.1505 USDC of fees swept to `0x775a…0544`, reserves `ok`; vault and token
+paused by one guardian each and unpaused by 6 of 7 (5 refused). Adversarial checks with the document's own commands:
+a forged record, a wrong `--confirm`, too few and foreign signatures.
+
 The rehearsal had to stand in for these things, and only these:
 
 - the hosts: each operator is a directory; `/etc`, `/opt`, `/var` in operator blocks are rewritten under that
