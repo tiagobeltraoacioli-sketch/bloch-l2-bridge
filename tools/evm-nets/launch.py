@@ -117,7 +117,12 @@ def network_of(chain_id, path=None):
 
 def refusal(chain_id, path=None):
     """None when a tool may act for this chain id; otherwise the reason it must refuse (a string)."""
-    chain_id = int(chain_id)
+    # Review R329-EVM-3P-1: only an integer is a chain id here (`int(8453.0)` and `int(True)` would coerce a value a
+    # caller compared in another form). Strings of decimal digits come from command lines and node answers.
+    if isinstance(chain_id, str) and chain_id.isdigit():
+        chain_id = int(chain_id)
+    if not isinstance(chain_id, int) or isinstance(chain_id, bool) or chain_id < 1:
+        return f'chain id {chain_id!r} is not a positive integer: refused'
     if chain_id == ETHEREUM:
         return None
     try:

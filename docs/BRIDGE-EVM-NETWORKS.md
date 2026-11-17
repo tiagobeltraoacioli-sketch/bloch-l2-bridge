@@ -668,6 +668,7 @@ python3 tools/evm-nets/network_json.py check deployments/$NET/bridge.network.jso
 | `tools/deploy-pontes/vault_pontes.py`, `deploy_pontes.py` | see `git diff cc2511a` | changed: source networks, launch status, fee and token-name pins from the registry; a chain-1 config is validated as before |
 | `tools/evm-nets/launch.py` | new | the launch decision in code and the registry lookups: **read this first** |
 | `tools/evm-nets/` (registry, generator, checker, timing monitor, fork and Nitro rehearsals, tests) | new | tooling, moves no funds |
+| Agent 374's shared signer-tools fix (`codex/bridge-signer-verify-r17-20261117`, merged in round 18: `sigverify.py`, `plain()` in the deploy tools, guarded `alert_command`) | see `git diff cc2511a` | only the two code commits `0f07e10` and `8bc9ed8` are on this line; the Ethereum line's refreeze record (`ec79cf8`: Phase 2 manifest, list, refreeze document) is not, because its hashes name the Ethereum tree (review R329-EVM-3P-4). Tests: `tools/signatario-stable/test_sigverify_r17.py` (25), `test_signer_verify_r17.py .` (anvil, 23) |
 
 `contracts/evmnets/ScaledUnitToken.sol` serves only BNB Smart Chain, which is out of v1: an auditor of Arbitrum One,
 OP Mainnet and Linea can leave it out of scope. `tools/evm-nets/r329_nitro_sim.py` and `solidity-tests/R329NitroSim.sol`

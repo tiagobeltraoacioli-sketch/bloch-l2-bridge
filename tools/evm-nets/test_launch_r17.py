@@ -186,6 +186,19 @@ class Launch(unittest.TestCase):
             self.assertIsNone(launch.signer_settings(r))
 
 
+class ChainIdForm(unittest.TestCase):
+    def test_refusal_takes_only_an_integer_chain_id(self):
+        # R329-EVM-3P-1: int(8453.0) and int(True) would coerce a value its caller compared in another form.
+        for bad in (8453.0, 56.0, 10.0, True, False, 0, -1, None, '8453.0', '0x2105', [8453]):
+            self.assertIsNotNone(launch.refusal(bad), bad)
+            self.assertIn('not a positive integer', launch.refusal(bad), bad)
+        self.assertIsNone(launch.refusal(1))
+        self.assertIsNone(launch.refusal(10))
+        self.assertIsNone(launch.refusal('42161'))
+        self.assertIn('not launchable', launch.refusal(8453))
+        self.assertIn('not launchable', launch.refusal('56'))
+
+
 @unittest.skipUnless(CAST.exists(), 'cast not found')
 class DeployGate(unittest.TestCase):
     def vault(self, cfg, command='validate', *extra, env=None, token_cfg=None):
@@ -216,6 +229,33 @@ class DeployGate(unittest.TestCase):
             self.assertIn('Base (chain 8453) is not launchable in bridge v1 (held)', r['reason'])
             self.assertNotIn('constructorArgs', r)
             self.assertNotIn('forge', r)
+
+    def test_r379_a_chain_id_that_is_not_a_json_integer_is_refused_before_anything_else(self):
+        # R329-EVM-3P-1 (379, round 18): `"chainId": 8453.0` skipped the launch gate (not an int) but matched the
+        # registry row (8453.0 == 8453), so a Base config validated and printed its forge line. `true` matched chain 1.
+        for name, value in (('base', 8453.0), ('bnb', 56.0), ('op-mainnet', 10.0), ('op-mainnet', True), ('op-mainnet', '10'),
+                            ('op-mainnet', 0), ('op-mainnet', -10)):
+            c = filled_vault(name)
+            c['ethereum']['chainId'] = value
+            for command in ('validate', 'args'):
+                rc, r = self.vault(c, command)
+                self.assertEqual((rc, r['decision']), (1, 'refused'), (name, value, command, r))
+                self.assertIn('ethereum.chainId must be a positive JSON integer', r['reason'], (name, value))
+                self.assertNotIn('constructorArgs', r)
+                self.assertNotIn('forge', r)
+        # the float form in the raw JSON text, exactly as the reviewer wrote it
+        c = filled_vault('base')
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / 'c.json'
+            p.write_text(json.dumps(c).replace('"chainId": 8453', '"chainId": 8.453e3'))
+            done = subprocess.run([sys.executable, str(ROOT / 'tools/deploy-pontes/vault_pontes.py'), 'validate', '--config', str(p)],
+                                  capture_output=True, text=True, env=ENV)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn('positive JSON integer', json.loads(done.stdout)['reason'])
+
+    def test_r379_the_source_networks_are_the_launchable_ones_only(self):
+        import vault_pontes
+        self.assertEqual(set(vault_pontes.source_networks()), {1} | {s['chainId'] for s in launch.launchable().values()})
 
     def test_r329_op_mainnet_control_still_validates(self):
         rc, r = self.vault(filled_vault('op-mainnet'))
