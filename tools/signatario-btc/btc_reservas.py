@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Proof of reserves for bBTC, and the guardian's view of queued mints. Read-only: no key, no transaction.
 
-  python3 btc_reservas.py --config CFG.json check     exit 0 ok, 2 deficit or held, 3 surplus above tolerance, 1 unverifiable
+  python3 btc_reservas.py --config CFG.json check     exit 0 ok, 2 deficit or held, 3 surplus above tolerance,
+                                                      4 stalled (payable burns unpaid too long), 1 unverifiable
   python3 btc_reservas.py --config CFG.json guard     queued mints the Bitcoin ledger does not back -> cancel votes
 
 check. The vault thread is replayed from the anchor on this node (every transaction must be the rules' own output),
@@ -20,7 +21,11 @@ and compared with the token at the L2 `finalized` block:
   deficit (hard): owed < (supply + unpaid burns) * 100, or the marker pays a burn the finalized L2 does not have, or a
                   payout went somewhere other than the router's key hash (router burn) or the burner's claim (direct).
   held (hard):    the token's mint chain is not the ledger's chain (a credited mint without a swept deposit), or the
-                  thread set aside a burn the finalized L2 does not have.
+                  thread set aside a burn the finalized L2 does not have, or the thread breaks a rule that needs the
+                  L2 (btc_audit.audit_thread: a set-aside the rule did not allow at its own L2 block, a late payment
+                  without its burner's call, a payout above its burner's ceiling): review R342-BTC-2.
+  stalled (alert): a finalized burn payable at this node's fee estimate is unpaid `max_wait_seconds` (default 6 h)
+                  after it could first be paid.
 
 What is never paid, and why the books still balance. A burn made directly on the token (not through
 BitcoinBurnRouter) is never paid to the 20 bytes it names; it is paid only when the account that burned claims it on
@@ -35,8 +40,9 @@ amount and recipient, and its sweep must still be in this node's chain. Otherwis
 arguments of `voteCancelMint`; a guardian daemon (tools/guardiao) casts the vote. A reorganisation that removed an
 attested sweep is caught here during the token's mint delay. UNAUDITED.
 
-Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "tolerance_units": 0,
-         "burn_router": address}
+Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc" (must serve state at past blocks: set-asides are judged at
+         their own L2 block), "token", "token_from_block": n, "tolerance_units": 0, "burn_router": address,
+         "max_wait_seconds": 21600}
 
 Not on the vault's books and reported apart: coins at deposit addresses that were never swept. They are spendable by
 the same five keys; each is refundable at its L2 recipient's signed request (btc_relay.py --refund).
@@ -47,6 +53,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import btc_audit  # noqa: E402
 import btc_l2  # noqa: E402
 import btc_policy as pol  # noqa: E402
 import btc_vault  # noqa: E402
@@ -98,6 +105,21 @@ def main():
                  for b in burns}
     except btc_l2.L2Error as e:
         emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=str(e))
+    # The L2-side rules again, afterwards (review R342-BTC-2): every set-aside judged on the burn's terms AT the L2
+    # block its marker names, every late payment after its burner's call, every payout within its burner's ceiling;
+    # and finalized burns that are payable and stay unpaid. Replay alone cannot see any of this.
+    def terms_at(b, block):
+        if block is None:
+            return terms[b['nonce']]
+        return btc_l2.burn_terms(router, router_address, b['from'], b['burn_id'], b['nonce'], b['recipient'], hex(block))
+    try:
+        violations = btc_audit.audit_thread(vault, view.entries, by_nonce, terms_at, lambda b: token.block_time(b['block']))
+        estimate = node.call('estimatesmartfee', 2, 'economical')
+        rate_now = max(1, int(float(estimate['feerate']) * 100_000 + 0.999999)) if estimate and estimate.get('feerate') else None
+        stalled = btc_audit.stalled_burns(vault, tip, by_nonce, terms_at, lambda b: token.block_time(b['block']), rate_now,
+                                          view.at['mtp'], int(cfg.get('max_wait_seconds', 21_600)))
+    except btc_l2.L2Error as e:
+        emit(1, kind='reserves', bridge='bbtc', status='unverifiable', reason=f'the L2 cannot be read at a set-aside block: {e}')
     wrong, claimed = [], []
     for e in view.entries[1:]:
         for x in e['build']['payouts']:
@@ -116,9 +138,22 @@ def main():
     paid = sum(b['units'] for b in burns if is_paid(b['nonce']))
     never = [b for b in burns if not is_paid(b['nonce']) and terms[b['nonce']]['state'] == 'unclaimed']
     set_aside_in = view.set_aside_in()
+    # The reason of a set-aside is the rule's own answer at the set-aside block (not the burn's terms today)
+    reasons = {}
+    for i, e in enumerate(view.entries[1:], 1):
+        for n in e['build']['set_aside']:
+            if n in aside and n in by_nonce and e['time'] is not None:
+                t = terms_at(by_nonce[n], e['build']['marker'].aside_block)
+                reasons[n] = pol.may_set_aside(vault.policy, view.entries[i - 1]['state']['marker'].normalised(),
+                                               {'nonce': n, 'time': token.block_time(by_nonce[n]['block']),
+                                                'claimed': t['state'] != 'unclaimed', 'max_fee_rate': t['max_fee_rate']},
+                                               e['build']['marker'].feerate,
+                                               [x['nonce'] for x in e['build']['payouts'] if x['nonce'] not in set(e['build']['late'])],
+                                               e['time'])
+    aside_at = pol.aside_at(tip)
     aside_lines = [{'nonce': n, 'units': by_nonce[n]['units'], 'set_aside_in': set_aside_in.get(n),
-                    'reason': 'unclaimed direct burn' if terms[n]['state'] == 'unclaimed'
-                    else f"fee ceiling {terms[n]['max_fee_rate']} sat/vB set by its burner"}
+                    'set_aside_at_l2_block': aside_at.get(n), 'rule': reasons.get(n),
+                    'payable_again': terms[n]['state'] != 'unclaimed' and terms[n]['updated_block'] > aside_at.get(n, 0)}
                    for n in sorted(aside) if n in by_nonce]
     credited = sum(x['units'] for x in credits)
     owed = marker.liabilities
@@ -136,7 +171,12 @@ def main():
             'unclaimed_direct_burns': {'count': len(never), 'units': sum(b['units'] for b in never),
                                        'sats': sum(b['units'] for b in never) * unit, 'nonces': [b['nonce'] for b in never][:200],
                                        'why': btc_l2.UNCLAIMED + '; counted in unpaid_burn_units and in owed_sats'},
-            'set_aside_burns': aside_lines[:200], 'set_aside_count': len(aside)}
+            'set_aside_burns': aside_lines[:200], 'set_aside_count': len(aside),
+            'fee_rate_now': rate_now, 'stalled_payable_burns': stalled[:200], 'rule_violations': violations[:50]}
+    if violations:
+        emit(2, **line, status='held', reason='the thread breaks an L2-side rule (a set-aside outside the rule, a late payment '
+             'without its burner\'s call, or a payout above its burner\'s ceiling): five keys signed outside the rules',
+             action='pause')
     if wrong:
         emit(2, **line, status='deficit', reason='a payout does not match the L2 burn it settles (amount; the key hash of a '
              'router burn; the claimed key hash of a direct burn, which is never paid without a claim)', payouts=wrong[:20])
@@ -148,6 +188,9 @@ def main():
         emit(2, **line, status='deficit', reason='the vault paid burns the finalized L2 does not have', nonces=phantom[:20])
     if in_flight < 0 or not line['identity_vault'] or not line['identity_books']:
         emit(2, **line, status='deficit', reason='the vault owes less than the L2 supply plus unpaid burns')
+    if stalled:
+        emit(4, **line, status='stalled', reason='finalized burns payable at the current fee rate are unpaid longer than '
+             'max_wait_seconds (no rule is broken: page the operators)')
     if in_flight > int(cfg.get('tolerance_units', 0)):
         emit(3, **line, status='surplus', reason='swept deposits not minted yet (in flight)')
     emit(0, **line, status='ok')

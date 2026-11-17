@@ -132,32 +132,62 @@ class OptionShapedInputs(unittest.TestCase):
             self.assertNotIn("'verify', '--", src)
         # the one subprocess of the route: the signer's own `cast wallet sign --no-hash` over a digest it computed, whose
         # output is then verified in process against the operator's own public key
-        self.assertEqual({k: v for k, v in calls.items() if v}, {'btc_signer.py': 1})
+        # Restated (review 342's relayer allow-list): the relayer now signs its proposal with its own key, one
+        # `cast wallet sign` over a text the tool computed (btc_core.proposal_text), whose output is verified in
+        # process against the configured relayer address. Two subprocesses in the route, each signing, none deciding.
+        self.assertEqual({k: v for k, v in calls.items() if v}, {'btc_signer.py': 1, 'btc_relay.py': 1})
         src = (here / 'btc_signer.py').read_text()
         self.assertIn("'0x' + digest.hex()], capture_output=True, text=True)", src)
         self.assertIn("if c.recover(digest, r, s, v) != own_key:", src)
+        relay = (here / 'btc_relay.py').read_text()
+        self.assertIn("subprocess.run([cast, 'wallet', 'sign', *wallet, text], capture_output=True, text=True)", relay)
+        self.assertIn("text = c.proposal_text(vault.vault_id, signed)", relay)
+        self.assertIn("ok = c.signer_of(text, signed['relayer_signature']) == want", relay)
+        self.assertNotIn('returncode', relay)                 # its exit code decides nothing
 
 
 class FakeRouterRpc:
-    """Stands for the L2 RPC a btc_l2.Router reads: maxFeeRateOf(bytes32) and claimOf(address,uint64)."""
+    """Stands for the L2 RPC a btc_l2.Router reads (router of review 342's fixes): exitTermsOf(bytes32),
+    claimOf(address,uint64), claimTermsOf(address,uint64,bytes20), and eth_getCode of a burner.
 
-    def __init__(self, rates=None, claims=None):
-        self.rates, self.claims, self.asked = rates or {}, claims or {}, []
+    rates   {burn id hex: (burner hex, ceiling, block)}            terms of router burns
+    claims  {(burner hex, nonce): [(key hash, ceiling, block), ...]} claims in the order they were made (first = claimOf)
+    code    {burner hex}                                          burners that have code"""
+
+    def __init__(self, rates=None, claims=None, code=()):
+        self.rates, self.claims, self.code, self.asked = rates or {}, claims or {}, set(code), []
+
+    @staticmethod
+    def terms(burner, rate, block):
+        return '0x' + (bytes(12) + bytes.fromhex(burner) + rate.to_bytes(32, 'big') + block.to_bytes(32, 'big')).hex()
 
     def rpc(self, method, params):
+        if method == 'eth_getCode':
+            self.asked.append(('code', params[1]))
+            return '0x6000' if params[0].removeprefix('0x') in self.code else '0x'
         assert method == 'eth_call'
         data = bytes.fromhex(params[0]['data'][2:])
         self.asked.append((data[:4].hex(), params[1]))
-        if data[:4] == c.keccak256(b'maxFeeRateOf(bytes32)')[:4]:
-            return '0x' + self.rates.get(data[4:36].hex(), 0).to_bytes(32, 'big').hex()
+        if data[:4] == c.keccak256(b'exitTermsOf(bytes32)')[:4]:
+            got = self.rates.get(data[4:36].hex())
+            return self.terms(*got) if got else '0x' + bytes(96).hex()
         if data[:4] == c.keccak256(b'claimOf(address,uint64)')[:4]:
-            key, rate = self.claims.get((data[16:36].hex(), int.from_bytes(data[36:68], 'big')), (bytes(20), 0))
+            made = self.claims.get((data[16:36].hex(), int.from_bytes(data[36:68], 'big')), [])
+            key, rate = (made[0][0], made[0][1]) if made else (bytes(20), 0)
             return '0x' + (key.ljust(32, b'\0') + rate.to_bytes(32, 'big')).hex()
+        if data[:4] == c.keccak256(b'claimTermsOf(address,uint64,bytes20)')[:4]:
+            burner, nonce, key = data[16:36].hex(), int.from_bytes(data[36:68], 'big'), data[68:88]
+            for k, rate, block in self.claims.get((burner, nonce), []):
+                if k == key:
+                    return self.terms(burner, rate, block)
+            return '0x' + bytes(96).hex()
         raise AssertionError('unexpected call')
 
 
 class BurnTerms(unittest.TestCase):
-    """R325-BTC-2P-1 and -2P-2: where a burn is paid and the highest fee rate its burner accepts."""
+    """R325-BTC-2P-1, -2P-2 and R342-BTC-3: where a burn is paid, the highest fee rate its burner accepts, and who owns
+    the claim of a direct burn. Restated for the router of review 342's fixes (terms carry the burner and the block of
+    its latest call; a contract burner is paid only to the 20 bytes its burn named); every earlier property is kept."""
     ROUTER, ALICE, BOB = '0x' + 'aa' * 20, '0x' + '0a' * 20, '0x' + '0b' * 20
     NAMED = bytes.fromhex('0a' * 20)   # a direct burner named its own Ethereum address
 
@@ -166,10 +196,11 @@ class BurnTerms(unittest.TestCase):
         return btc_l2.burn_terms(btc_l2.Router(rpc, self.ROUTER), self.ROUTER, burner, '0x' + burn_id, nonce, self.NAMED, '0x10')
 
     def test_a_router_burn_is_paid_as_named_under_its_own_ceiling(self):
-        rpc = FakeRouterRpc(rates={'11' * 32: 37})
+        rpc = FakeRouterRpc(rates={'11' * 32: ('0b' * 20, 37, 9)})
         t = self.terms(rpc, self.ROUTER.upper().replace('0X', '0x'))
-        self.assertEqual(t, {'through_router': True, 'destination': self.NAMED, 'max_fee_rate': 37, 'state': 'payable'})
-        self.assertEqual(rpc.asked[0][1], '0x10')   # read at the block the caller verified, not at the latest
+        self.assertEqual(t, {'through_router': True, 'destination': self.NAMED, 'max_fee_rate': 37, 'updated_block': 9,
+                             'state': 'payable', 'contract_burner': False})
+        self.assertTrue(all(block == '0x10' for _, block in rpc.asked))   # read at the block the caller verified
 
     def test_a_direct_burn_without_a_claim_is_never_payable_whatever_it_names_and_whoever_burned(self):
         import btc_l2
@@ -178,17 +209,34 @@ class BurnTerms(unittest.TestCase):
             self.assertEqual((t['state'], t['destination'], t['max_fee_rate']), ('unclaimed', None, None))
         # a claim by ANOTHER account for the same nonce does not make it payable
         key = bytes.fromhex('cc' * 20)
-        rpc = FakeRouterRpc(claims={(self.BOB[2:], 5): (key, 20)})
+        rpc = FakeRouterRpc(claims={(self.BOB[2:], 5): [(key, 20, 12)]})
         self.assertEqual(self.terms(rpc, self.ALICE)['state'], 'unclaimed')
         # the burner's own claim does, and the 20 bytes the burn named are not the destination
         t = self.terms(rpc, self.BOB)
-        self.assertEqual(t, {'through_router': False, 'destination': key, 'max_fee_rate': 20, 'state': 'payable'})
+        self.assertEqual(t, {'through_router': False, 'destination': key, 'max_fee_rate': 20, 'updated_block': 12,
+                             'state': 'payable', 'contract_burner': False})
         self.assertNotEqual(t['destination'], self.NAMED)
         # a claim for another nonce is not this burn's
         self.assertEqual(self.terms(rpc, self.BOB, nonce=6)['state'], 'unclaimed')
-        # a router that records no ceiling for a burn it supposedly made is not the pinned router
+        # a router that records no terms for a burn it supposedly made is not the pinned router
         with self.assertRaises(btc_l2.L2Error):
             self.terms(FakeRouterRpc(), self.ROUTER)
+        # only the FIRST claim of a burner without code counts; a later claim for another address changes nothing
+        rpc = FakeRouterRpc(claims={(self.BOB[2:], 5): [(key, 20, 12), (bytes.fromhex('dd' * 20), 50, 13)]})
+        self.assertEqual(self.terms(rpc, self.BOB)['destination'], key)
+
+    def test_a_contract_burner_is_paid_only_to_the_bytes_its_burn_named(self):
+        # R342-BTC-3: whoever can make a contract call the router (Multicall3, an executor) cannot re-point its burn
+        stranger_key = bytes.fromhex('ee' * 20)
+        rpc = FakeRouterRpc(claims={(self.BOB[2:], 5): [(stranger_key, 30, 12)]}, code={self.BOB[2:]})
+        t = self.terms(rpc, self.BOB)
+        self.assertEqual((t['state'], t['destination'], t['contract_burner']), ('unclaimed', None, True))
+        # a claim for the very 20 bytes the burn named, even made later, is the one that counts
+        rpc = FakeRouterRpc(claims={(self.BOB[2:], 5): [(stranger_key, 30, 12), (self.NAMED, 25, 14)]}, code={self.BOB[2:]})
+        t = self.terms(rpc, self.BOB)
+        self.assertEqual((t['state'], t['destination'], t['max_fee_rate'], t['updated_block']), ('payable', self.NAMED, 25, 14))
+        # the code is read at the verified block too
+        self.assertIn(('code', '0x10'), rpc.asked)
 
     def test_the_signer_has_no_timeout_and_no_claim_by_signature_left(self):
         import inspect

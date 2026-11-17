@@ -21,7 +21,7 @@
   "anchor": null,
   "owner_address": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
   "policy": {
-    "version": 1,
+    "version": 3,
     "unitSats": 100,
     "depositFeeBps": 10,
     "releaseFeeBps": 10,
@@ -41,6 +41,8 @@
     "windowLimitSats": 10000000,
     "largeReleaseSats": 5000000,
     "largeReleaseDelaySeconds": 43200,
+    "setAsideAgeSeconds": 259200,
+    "burnFeerateFloor": 2,
     "maxDepositsPerTx": 20,
     "maxReleasesPerTx": 40
   }

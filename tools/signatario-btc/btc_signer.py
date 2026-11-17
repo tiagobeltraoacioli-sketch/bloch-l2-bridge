@@ -15,7 +15,8 @@ verifies it in process and counts it against that relayer's hourly limit BEFORE 
 else is dropped: a keyless stranger cannot make a signer work, and cannot propose a replacement or a set-aside.
 
 Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 1):
-  0. The relayer: on the allow-list (`relayers`), signature valid, under its rate limit (`max_proposals_per_hour`).
+  0. The relayer: on the allow-list (`relayers`), signature valid, the proposal issued within 10 minutes, under its
+     rate limit (`max_proposals_per_hour`; a proposal handed in again counts once).
   1. Bitcoin node on the configured network; the vault thread replays from the anchor through the rules (else HOLD);
      the proposal spends the confirmed thread tip of this node.
   2. Guardian pause: the L2 token is not paused (a pause stops sweeps and releases here, as it stops deposits and
@@ -37,11 +38,14 @@ Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 
      The pause is read again on the verified L2.
   4c. Burns set aside (`aside_through`, at most 4, judged at the finalized L2 block `aside_block`): each is a finalized
      burn that `btc_policy.may_set_aside` allows: unclaimed for `setAsideAgeSeconds`; a ceiling below the policy
-     floor; or, only in a transaction that pays a burn the marker window would otherwise stop, unclaimed or under a
-     ceiling below this transaction's fee rate. Never because a relayer named a fee rate. Setting aside pays nobody
+     floor; or, only in a transaction that pays a burn the marker window would otherwise stop, unclaimed, or claimed
+     with a ceiling below both this transaction's fee rate and this signer's OWN fee estimate. Never because a relayer
+     named a fee rate. Setting aside pays nobody
      and travels only with a paid burn, a swept deposit or a refund.
   4d. Late payments: a burn that was set aside is paid only after a call of its burner on the router (the claim, or
      a raise of its ceiling) in an L2 block after the one its set-aside was judged at.
+  4e. The thread so far (confirmed transactions once each) against the finalized L2 (btc_audit.audit_thread,
+     review R342-BTC-2): a thread in which five keys already signed outside the L2-side rules is HELD.
   5b. A replacement of a pending vault transaction must keep every payout, sweep and refund of it: it may add items
      and raise the fee rate, it cannot cancel a payment that is already in the mempool.
   5. Fee rate at most 1.5 times this signer's own node's estimate (`estimatesmartfee 2 economical`, the mode pinned
@@ -71,6 +75,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / 'signatario-stable'))
 import btc_core as c  # noqa: E402
+import btc_audit  # noqa: E402
 import btc_l2  # noqa: E402
 import btc_policy as pol  # noqa: E402
 import btc_vault  # noqa: E402
@@ -139,6 +144,10 @@ def refund_destination(vault, txid, vout, recipient, request):
     return dest
 
 
+PROPOSAL_MAX_AGE = 600       # seconds: a proposal names a thread tip and a fee rate that are minutes old at most
+PROPOSAL_CLOCK_SKEW = 120    # seconds a relayer's clock may run ahead of this signer's
+
+
 def authenticated_relayer(cfg, vault_id, proposal, now):
     """The relayer that sent this proposal, if it is on this signer's allow-list, signed it and is under its hourly
     limit; refuses otherwise. Runs before any node or L2 is read: a stranger costs this signer one hash and one
@@ -155,13 +164,22 @@ def authenticated_relayer(cfg, vault_id, proposal, now):
         refuse('dropped: the relayer signature on the proposal is malformed')
     if signer != who:
         refuse('dropped: the proposal is not signed by the relayer it names')
+    # Freshness: a signed proposal is a file; anyone who sees it can hand it to a signer again. It counts once (by its
+    # hash) against its relayer's limit, and it is refused once it is older than PROPOSAL_MAX_AGE, so a replay can
+    # neither spend the honest relayer's hourly budget nor bring back an old fee rate or an old set-aside.
+    issued = proposal.get('issued')
+    if type(issued) is not int or not now - PROPOSAL_MAX_AGE <= issued <= now + PROPOSAL_CLOCK_SKEW:
+        refuse('dropped: the proposal is not fresh (issued more than 10 minutes ago, or in the future)', issued=issued)
+    digest = c.proposal_text(vault_id, proposal).rsplit(' ', 1)[-1]
     limit = int(cfg.get('max_proposals_per_hour', 120))
     path = Path(str(cfg['journal']) + '.relayers.json')
     seen = json.loads(path.read_text()) if path.exists() else {}
-    recent = [t for t in seen.get(who, []) if t > now - 3600]
-    if len(recent) >= limit:
-        refuse('dropped: this relayer is over its hourly limit of proposals', limit=limit)
-    seen[who] = recent + [int(now)]
+    recent = [x for x in seen.get(who, []) if type(x) is list and x[0] > now - 3600]
+    if not any(x[1] == digest for x in recent):
+        if len(recent) >= limit:
+            refuse('dropped: this relayer is over its hourly limit of proposals', limit=limit)
+        recent.append([int(now), digest])
+    seen[who] = recent
     journal_save(path, seen)
     return who
 
@@ -407,6 +425,17 @@ def cmd_sign(cfg, args):
                     refuse('this burn may not be set aside: it is not unclaimed for the stated age, its fee ceiling is not '
                            'below the policy floor, and this transaction pays no burn that the marker window would stop',
                            nonce=release['nonce'])
+                if why == 'blocked' and t['state'] != 'unclaimed':
+                    # A claimed burn that blocks the window is set aside only if it cannot be paid at the MARKET, as this
+                    # signer's own node reads it, not merely below the rate the relayer proposed: a relayer that names
+                    # a rate at the top of the band cannot turn a ceiling near the market into a set-aside (R342-BTC-1).
+                    market = own_estimate(node)
+                    if market is None and vault.network != 'bitcoin-mainnet':
+                        market = float(cfg.get('feerate_without_estimate', 1))
+                    if market is None or t['max_fee_rate'] >= int(market):
+                        refuse('a claimed burn is set aside only when its fee ceiling is below this signer\'s own fee '
+                               'estimate: it can be paid at the market, so it waits in order', nonce=release['nonce'],
+                               max_fee_rate=t['max_fee_rate'], estimate=market)
                 seen[release['nonce']] = why
             if sorted(seen) != to_set_aside or len(seen) != len(verified_aside):
                 refuse('the burns named for setting aside are not exactly the unsettled burns up to the mark',
@@ -414,6 +443,29 @@ def cmd_sign(cfg, args):
             ok, used = pol.window_allows(p, view.releases(), gross_total, now)
             if not ok:
                 refuse('the release window is full; retry later', used=used, limit=p['windowLimitSats'])
+            # 4e. The thread so far against the finalized L2 (review R342-BTC-2): this signer does not add a transaction to
+            # a thread in which five keys already signed outside the L2-side rules (a set-aside the rule did not allow,
+            # a late payment without its burner's call, a payout above its burner's ceiling). Judged at this signer's
+            # finalized block only, so it never holds on a false alarm (btc_audit: historical=False); the reserves
+            # monitor judges every set-aside at its own block. Confirmed transactions are audited once.
+            l2_view, fin = final_token[0], int(final_token[1], 16)
+            log = {b['nonce']: b for b in l2_view.burns(int(cfg.get('token_from_block', 0)), fin)}
+
+            def at_final(b, block):
+                return terms({'nativeBurn': b['burn_id'], 'nonce': b['nonce'], 'recipient': '0x' + b['recipient'].hex()},
+                             {'from': b['from']})
+            journal_now = journal_load(cfg['journal'])
+            audited = set(journal_now.get('audited', []))
+            try:
+                bad = btc_audit.audit_thread(vault, view.entries, log, at_final, lambda b: l2_view.block_time(b['block']),
+                                             historical=False, skip=audited)
+            except btc_l2.L2Error as e:
+                refuse(f'hold: {e}')
+            if bad:
+                refuse('hold: the vault thread breaks a rule that needs the L2 (five keys signed outside the rules); '
+                       'page the operators and the guardians', violations=bad[:10])
+            journal_now['audited'] = sorted(audited | {e['txid'] for e in view.entries[1:] if e['confirmations'] > 0})
+            journal_save(cfg['journal'], journal_now)
     finally:
         if proc is not None:
             proc.kill()
