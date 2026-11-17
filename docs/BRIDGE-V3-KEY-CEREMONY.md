@@ -8,6 +8,10 @@ This runbook comes before `docs/BUSDC-MAINNET-V2.md` section 4.1. The public res
 inventory (`deployments/mainnet/busdc-keys.inventory.json`) that `tools/deploy-pontes/key_inventory.py check`
 accepts. Every address in both deploy configs comes from that inventory.
 
+The executable, rehearsed form of this runbook (every command block run end to end on loopback stand-ins, the vault
+and token deployment, the handover, the first round trip and the pause drills) is `docs/BRIDGE-OWNER-CEREMONY.md`
+(round 18); this file keeps the rules, the attack table, the backup and the loss policy it relies on.
+
 Nothing here has run with a real key. The generation, attestation, backup and intake commands were rehearsed with
 throwaway keys in a temporary directory, which was then deleted (section 9).
 
