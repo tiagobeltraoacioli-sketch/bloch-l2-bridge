@@ -89,6 +89,37 @@ class Credentials(unittest.TestCase):
         with mock.patch('os.lstat', as_root):
             self.assertEqual(vigia.private_file(str(p), 'x'), str(p))
 
+    def _as(self, path_set, uid=None, gid=None):
+        real = os.lstat
+
+        def fake(path, *a, **k):
+            st = real(path, *a, **k)
+            if Path(path) in path_set:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                       st.st_uid if uid is None else uid, st.st_gid if gid is None else gid,
+                                       st.st_size, st.st_atime, st.st_mtime, st.st_ctime))
+            return st
+        return mock.patch('os.lstat', fake)
+
+    # ── R329-SHARED-2 (379): a group-readable credential's group is root or the service's own group ──
+    def test_a_group_readable_credential_of_another_group_is_refused(self):
+        p = self.credential_file('l2-gas.password', 0o440)
+        other = os.getgid() + 4242
+        with self._as({p}, gid=other):
+            with self.assertRaises(SystemExit):
+                vigia.private_file(str(p), 'x')
+
+    def test_a_group_readable_credential_of_root_or_own_group_is_accepted(self):
+        p = self.credential_file('l2-gas.password', 0o440)
+        for gid in (0, os.getgid()):
+            with self.subTest(gid=gid), self._as({p}, gid=gid):
+                self.assertEqual(vigia.private_file(str(p), 'x'), str(p))
+
+    def test_without_a_group_bit_the_group_does_not_matter(self):
+        p = self.credential_file('l2-gas.password', 0o400)
+        with self._as({p}, gid=os.getgid() + 4242):
+            self.assertEqual(vigia.private_file(str(p), 'x'), str(p))
+
     # ── what stays refused inside the credentials directory ──
     def test_weaker_modes_inside_the_credentials_directory_are_refused(self):
         for mode in (0o640, 0o444, 0o460, 0o442, 0o404, 0o540, 0o450):

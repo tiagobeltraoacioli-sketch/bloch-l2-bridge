@@ -181,6 +181,11 @@ def private_file(path, what):
         if mode & ~0o440 and (mode & 0o077 or st.st_uid != uid):
             raise SystemExit(f'{what} {p} has mode {mode:04o}: a credential may be 0440 or stricter, or private to '
                              f'this user (0600)')
+        if mode & 0o040 and st.st_gid not in (0, os.getgid()):
+            # R329-SHARED-2 (agent 379): a group read bit is acceptable only for root's group (systemd) or the
+            # service's own primary group; any other group's members could read the key.
+            raise SystemExit(f'{what} {p}: group-readable by group {st.st_gid}, which is neither root nor this '
+                             f'service\'s own group {os.getgid()}')
         return str(p)
     st = p.stat()
     mode = stat.S_IMODE(st.st_mode)
