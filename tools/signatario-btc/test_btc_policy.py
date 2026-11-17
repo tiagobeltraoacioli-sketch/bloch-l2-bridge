@@ -102,7 +102,7 @@ class Core(unittest.TestCase):
             late = sorted(rnd.sample(range(c.LATE_RANKS), rnd.randrange(0, 5)))
             through = rnd.choice([0, base, max(1, base - rnd.randrange(0, 60_000))])
             block = rnd.randrange(1 << 40) if through else 0
-            room = 8 * (c.MARKER_PAYLOAD - c.MARKER_FIXED - (c.ASIDE_BYTES if through else 0) - len(late))
+            room = 8 * (c.MARKER_PAYLOAD - c.MARKER_FIXED - (c.ASIDE_BYTES if through else 0) - c.LATE_BYTES * len(late))
             paid = {base + 2 + rnd.randrange(0, max(1, room - 1)) for _ in range(rnd.randrange(0, 12))} if room > 1 else set()
             m = c.Marker(rnd.randrange(1 << 40), base, rnd.randrange(1 << 50), rnd.randrange(1 << 30), rnd.randrange(1, 500),
                          paid, through, late, block)
@@ -113,16 +113,17 @@ class Core(unittest.TestCase):
             seen += bool(through) and bool(late)
         self.assertGreater(seen, 50)
         self.assertEqual(len(c.Marker().encode()), 2 + c.MARKER_FIXED)
-        # the window: 320 nonces with no operation, 264 with a set-aside, 312..288 with late payments, 232 with everything
+        # the window (format 4): 320 nonces with no operation, 264 with a set-aside, 304..256 with late payments, 200 with everything
         self.assertEqual(8 * c.MAX_BITMAP, 320)
         c.Marker(0, 0, 0, 0, 1, {320}).encode()
         with self.assertRaises(ValueError):
             c.Marker(0, 0, 0, 0, 1, {321}).encode()
-        for through, late, room in ((10, (), 264), (0, (0,), 312), (0, (0, 1, 2, 3), 288), (10, (0, 1, 2, 3), 232)):
+        for through, late, room in ((10, (), 264), (0, (0,), 304), (0, (0, 1, 2, 3), 256), (10, (0, 1, 2, 3), 200),
+                                    (0, (65_535,), 304)):
             c.Marker(0, 10, 0, 0, 1, {10 + room}, through, late, 7 if through else 0).encode()
             with self.assertRaises(ValueError):
                 c.Marker(0, 10, 0, 0, 1, {11 + room}, through, late, 7 if through else 0).encode()
-        for bad in ((3, 2), (2, 2), (256,), (-1,), (0, 1, 2, 3, 4)):
+        for bad in ((3, 2), (2, 2), (65_536,), (-1,), (0, 1, 2, 3, 4)):
             with self.assertRaises(ValueError):
                 c.Marker(0, 9, 0, 0, 1, (), 0, bad).encode()
         with self.assertRaises(ValueError):          # a mark above the burn base is no set-aside
@@ -142,28 +143,33 @@ class Core(unittest.TestCase):
             c.Marker.decode(zero_mark)
 
     def test_formats_1_and_2_are_refused_and_the_policy_version_names_the_format(self):
-        # format 1 (round 16): no operations byte; format 2 (round 17, first form): 8-byte mark, 8-byte late nonces
+        # format 1 (round 16): no operations byte; format 2 (round 17, first form): 8-byte mark, 8-byte late nonces;
+        # format 3 (round 17 WIP): 1-byte late ranks (round 18 extends this test: format 3 is refused too)
         fixed = (3).to_bytes(8, 'big') + (7).to_bytes(8, 'big') + (10**6).to_bytes(8, 'big') + (55).to_bytes(8, 'big') + (9).to_bytes(2, 'big')
         v1 = b'BBTC\x01' + fixed + bytes([0b101])                       # a bitmap byte
         v2 = b'BBTC\x02' + fixed + bytes([0x81]) + (6).to_bytes(8, 'big') + (2).to_bytes(8, 'big') + bytes([0b101])
-        v3 = c.Marker(3, 7, 10**6, 55, 9, {9, 11}, 6, (2,), 77).encode()
+        v4 = c.Marker(3, 7, 10**6, 55, 9, {9, 11}, 6, (2,), 77).encode()
+        v3 = bytes([v4[0], v4[1] - 1]) + b'BBTC\x03' + v4[7:47] + v4[47:48] + v4[49:]   # the same content, 1-byte rank
         for payload in (v1, v2):
             with self.assertRaises(ValueError):
                 c.Marker.decode(bytes([c.OP_RETURN, len(payload)]) + payload)
-        self.assertEqual(c.Marker.decode(v3).as_dict()['aside_block'], 77)
-        self.assertEqual(c.MARKER_TAG, b'BBTC\x03')
+        with self.assertRaises(ValueError):
+            c.Marker.decode(v3)
+        self.assertEqual(c.Marker.decode(v4).as_dict()['aside_block'], 77)
+        self.assertEqual(c.Marker.decode(v4).late, (2,))
+        self.assertEqual(c.MARKER_TAG, b'BBTC\x04')
         # a thread transaction carrying a format-1 or format-2 marker does not replay: every tool holds on it
         v = vault()
         s0 = {**tip(200_000), 'aside': frozenset()}
         b = pol.build_vault_tx(v, s0, [dep(0, 10**7)], [], [], 1)
-        for payload in (v1, v2):
+        for payload in (v1, v2, v3[2:]):
             with self.assertRaises(pol.PolicyError):
                 pol.replay_tx(v, s0, b['inputs'], [b['tx'].outputs[0], (0, bytes([c.OP_RETURN, len(payload)]) + payload)] + b['tx'].outputs[2:])
         self.assertEqual(pol.replay_tx(v, s0, b['inputs'], b['tx'].outputs)['tx'].txid(), b['tx'].txid())
         # the policy version is inside the route: a policy of the earlier formats is not a policy, so no token can be
         # bound to a vault that would write another marker format
-        self.assertEqual(pol.DEFAULT_POLICY['version'], 3)
-        for old in (1, 2):
+        self.assertEqual(pol.DEFAULT_POLICY['version'], 4)
+        for old in (1, 2, 3):
             with self.assertRaises(pol.PolicyError):
                 vault(version=old)
 

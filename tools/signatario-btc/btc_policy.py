@@ -43,7 +43,7 @@ import json
 import btc_core as c
 
 DEFAULT_POLICY = {
-    'version': 3,                 # the marker format and the set-aside rules; inside the route
+    'version': 4,                 # the marker format and the set-aside rules; inside the route
     'unitSats': 100,              # one token unit (BridgedStablecoinV3 has 6 decimals) = 100 sat
     'depositFeeBps': 10,          # bridge fee, to the owner's address (coordinator decision of round 17: 10 + 10 bps)
     'releaseFeeBps': 10,
@@ -84,7 +84,7 @@ class PolicyError(Exception):
 def policy_hash(policy):
     if set(policy) != set(DEFAULT_POLICY) or any(type(v) is not int or v < 0 for v in policy.values()):
         raise PolicyError('the policy must hold exactly the known integer fields')
-    if policy['version'] != 3 or policy['unitSats'] != 100:
+    if policy['version'] != 4 or policy['unitSats'] != 100:
         raise PolicyError('unknown policy version or unit')
     if not (0 < policy['depositFeeBps'] <= 30 and 0 < policy['releaseFeeBps'] <= 30):
         raise PolicyError('bridge fee outside (0, 30] bps')  # the Ethereum vault's hard maximum
@@ -344,7 +344,7 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
         raise PolicyError('at most 4 late payments (burns set aside earlier) per vault transaction', wait=True)
     ranks = sorted(before.index(n) for n in late)
     if ranks and ranks[-1] >= c.LATE_RANKS:
-        raise PolicyError('a late payment must be among the 256 oldest burns set aside; pay the older ones first', wait=True)
+        raise PolicyError('a late payment must be among the 65,536 oldest burns set aside; pay the older ones first', wait=True)
     for d in refunds:
         if len(d['dest']) != 20 or not any(d['dest']) or len(d['recipient']) != 20:
             raise PolicyError('a refund names no Bitcoin key hash')

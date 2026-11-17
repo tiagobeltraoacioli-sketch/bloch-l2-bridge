@@ -130,22 +130,58 @@ free, permanent stop of every exit. So the rules can **set a burn aside**:
   whole thread (`aside_through` adds, `late` removes), exactly as the deposit ledger is. `btc_policy.burn_paid`
   answers "was this burn paid" from the marker and that set; no tool reads the marker alone for it.
 - A burn set aside is paid later like any burn, as a **late payment**: the same checks, the same charge, an output
-  in the same position rule (ascending nonce), and its nonce in the marker's `late` list (at most four per
-  transaction, because each takes 8 of the marker's 80 bytes). It is single-use by consensus like every payment:
-  two transactions paying it spend the same thread output, and after the first the replayed set no longer holds it.
-- What a signer requires before it signs a set-aside (`btc_signer.py` 4c): T is above this signer's own burn base;
-  the proposal names exactly the unsettled burns up to T; each is a burn finalized on the L2 the signer verified;
-  and each **cannot be paid in this transaction**: it is a direct burn without a claim on the router, or the fee
-  rate of this transaction is above the ceiling its burner named. A burn that can be paid may not be set aside
-  (rehearsal K7, L3). A transaction that only sets aside pays no miner charge and is refused by the pool rule, so a
-  set-aside always rides with a paying item.
-- Who can cause it and what it costs: a relayer could set aside a burn whose ceiling lies between the market and
-  the top of the signers' band by proposing a rate above it; that burn is not harmed (it is paid as soon as a
-  transaction at or below its ceiling is made), it only moves from the 40-per-transaction queue to the
-  4-per-transaction one. Nothing a burner or a relayer does can make another burn wait for it.
+  in the same position rule (ascending nonce), and its RANK among the burns set aside (two bytes, oldest first) in
+  the marker's `late` list (at most four per transaction). It is single-use by consensus like every payment: two
+  transactions paying it spend the same thread output, and after the first the replayed set no longer holds it.
+  Marker format 4 (`BBTC\x04`; formats 1 to 3 are refused, so a thread carrying one holds every tool; policy
+  version 4 is inside the route). Why two bytes (review R342-BTC-2P-1): with one, 256 abandoned set-aside burns
+  (direct burns nobody ever claims) made every later set-aside burn unpayable; now that needs 65,536 of them, which
+  at the 0.001 BTC minimum is 65.5 BTC locked by the attacker and at least 16,384 vault transactions.
 
-Rehearsal K7, K8, L3, L4; unit tests `SetAside` (including a 400-step property test: books, conservation, replay
-equality, no burn paid twice).
+**When a burn may be set aside: the rule, never the relayer's choice (review R342-BTC-1, round 18).** Round 17's two
+sentences "a set-aside always rides with a paying item" and "that burn is not harmed" were wrong (a stray output paid
+the fee; a burn could be kept unpaid block after block, and a pending payout could be replaced by one that paid
+nobody). `btc_policy.may_set_aside` is now the whole rule; every signer applies it (`btc_signer.py` 4c) and the
+reserves monitor applies it again afterwards (section 8):
+
+| Reason | Condition, from finalized L2 data, the thread and the transaction itself |
+|---|---|
+| `age` | a burn made directly on the token, not claimed, at least `setAsideAgeSeconds` (3 days) old, measured with the Bitcoin median time past (the monitor: the confirming block's time) against the burn's L2 time |
+| `floor` | a claimed burn whose ceiling is below the policy's `burnFeerateFloor` (2 sat/vB); the pinned router refuses such a ceiling, so this cannot happen through it |
+| `blocked` | only when this transaction pays a burn beyond the marker window of the oldest unsettled burn (it could not be paid otherwise), and the burn set aside is unclaimed, or claimed with a ceiling below BOTH this transaction's fee rate and each signer's OWN fee estimate (`estimatesmartfee 2 economical`; a relayer naming a rate at the top of the band cannot turn a ceiling near the market into a set-aside) |
+
+- **A burn whose ceiling is merely below today's market WAITS IN ORDER** and is not set aside: later burns are paid
+  past it through the bitmap, up to 320 nonces later (264 when the transaction also sets something aside); only a
+  burn that would stop a payment beyond that window may be set aside, under `blocked`. Rehearsal L3, L4, X1.
+- **At most four burns per transaction** (`MAX_ASIDE`: no more than one transaction can pay late), and **only in a
+  transaction that pays a burn, sweeps a deposit or refunds one**: a stray output can pay a miner, it is not a reason
+  to move anybody's exit (`build_vault_tx` refuses it; rehearsal X1).
+- **Exactly once per call**: a burn set aside returns to payable only by a call of its burner on the router in a LATER
+  L2 block than the one the set-aside was judged at (`aside_block`, carried in the marker): `claimDirectBurn` for a
+  direct burn, `raiseMaxFeeRate` / `raiseClaimMaxFeeRate` (raise or confirm, never lower) for a router burn or a
+  claim. Each call makes it payable once; set aside again after it (which needs the rule again), it needs another
+  call (`btc_signer.py` 4d; rehearsal K8, X3b). Pages must say this: a router exit that was set aside needs its user's
+  one L2 call to be paid (`btc_relay.py burn status` prints `set-aside` with the block).
+- **A replacement keeps the pending payments** (`btc_signer.py` 5b): a replacement of a pending vault transaction may
+  add items and must pay a higher rate; it may leave a pending payout out only when that burn's ceiling is below both
+  the new rate and the signer's own estimate (the market really moved above it: review R342-BTC-2P-2, else a fee
+  spike freezes the whole thread behind a payout at its burner's exact ceiling); that burn waits in order. Sweeps and
+  refunds are never left out. Rehearsal X2, Y1, Y1b.
+- **Who may propose** (`btc_signer.py` 0): only a relayer on each signer's allow-list (`relayers`), with its
+  personal-message signature over `btc_core.proposal_text` (vault id, sha256 of the canonical proposal), issued at
+  most 10 minutes before, under an hourly limit per relayer (a proposal handed in again counts once). A keyless
+  stranger cannot make a signer work, nor propose a replacement or a set-aside. Rehearsal R1.
+- **Five keys inside the rules are detected again** (review R342-BTC-2): `btc_audit.audit_thread` judges every
+  set-aside at its own L2 block, every late payment against its burner's call, every payout against its burner's
+  ceiling (ceilings only rise, so the finalized one bounds every earlier one). The reserves monitor reports a
+  violation as `held` (exit 2, pause); every honest signer HOLDS before extending such a thread (4e), judging each
+  set-aside at its block where its own L2 view serves it and skipping (never a false alarm) where it does not. The
+  hold is released only by an operator naming the investigated transaction in `acknowledged_violations` (per txid,
+  still listed by the monitor). The part of `blocked` that is a signer's own market reading is not re-judged by the
+  monitor. Rehearsal X3, X3b; unit `test_btc_r18`.
+
+Rehearsal K7, K8, L3, L4, R1, X1 to X3b, Y1, Y1b; unit tests `SetAside` (including a 400-step property test: books,
+conservation, replay equality, no burn paid twice), `test_review_r17_342`, `test_review_r18_378`, `test_btc_r18`.
 
 ## 5. Confirmation depth and reorganisations
 
