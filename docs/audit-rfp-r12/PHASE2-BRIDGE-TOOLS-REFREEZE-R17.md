@@ -61,7 +61,8 @@ Unchanged from the round 15 freeze unless marked. Full run at `0f07e10`; the sui
 - `forge test --offline`: 588 passed, 0 failed, 1 skipped (49 suites); `A239Metamorphic --isolate` shanghai and
   cancun 2/2 each.
 - Offline Python: the 26 modules of round 15 with the same counts, `test_ops_templates` 13/13; **new:
-  `tools/signatario-stable/test_sigverify_r17` 25** (at `cc2511a` its 22 first tests give 95 failures and 16 errors).
+  `tools/signatario-stable/test_sigverify_r17` 25** (at `cc2511a` with only the new module and tests added, the 25
+  tests give 96 failures and 34 errors: agent 374, round 18; 341's figure of 95 and 16 was for the first 22 tests).
 - Anvil 1: `test_relay_nonce` 26, `test_vigia` 26, `test_signatario` 23, `test_bridge_review` 21, `test_hf1_finality`
   57, `rehearse_feed` 34, `test_verifier_review` 15, `test_a239_switch_review` 5; **new:
   `python3 tools/signatario-stable/test_signer_verify_r17.py .` 23/23** (15 of 28 at `cc2511a`: the stranger's high-s
@@ -74,3 +75,20 @@ Unchanged from the round 15 freeze unless marked. Full run at `0f07e10`; the sui
   cancel 4 / remint 4 / reorg 3 / zero 1, a129 control 1, both gas scripts (vault 4,540,886, token 4,822,592).
 - Controls that fail by design: `d6_provenance_daemons` 18/19; `audit_v3_daemons` 13/15, 13/15, 12/15.
 - `scripts/tests`: 419 OK.
+
+## 5. Round 18 verification at `ec79cf8` (agent 374, 2026-11-17, Mac, loaded)
+
+At `ec79cf8` itself: anvil 1 (`rehearse_feed` 34, `test_verifier_review` 15, `test_a239_switch_review` 5,
+`test_signer_verify_r17` 23/23), anvil 2 (every count of section 4, `rehearse_anvil` 95/95), `forge test --offline`
+588 passed / 1 skipped, metamorphic 2/2 and 2/2, `settle_quorum` 30/30, the by-design controls 18/19, 13/15, 13/15,
+12/15 (identical at `cc2511a`). With 341's run of the other suites at this commit, every suite of section 4 has been
+run at `ec79cf8` with the stated counts. `test_signer_verify_r17` at `cc2511a` (old callers): 15/28.
+
+One flake, not a regression: `settle_quorum` "mint hold: the token and the vault both pause" failed once at
+`ec79cf8` (341) and once at the unfixed `cc2511a` (374), and passed at `ec79cf8` on rerun. The guardian pauses the
+vault only when the Ethereum head is at least as recent as the L2 mint block (`guardiao.py` `vault_hold_evidence`);
+the two on-demand anvils can leave the Ethereum head older under load. The test, not the rule, should mine an
+Ethereum block first (left to the guardian suites' owner; no check was changed).
+
+Not done / not proven: the suites were run on the Mac only (not on 45.77.142.123); `scripts/tests` (419) was run at
+`0f07e10`, not at `ec79cf8` (no file under `scripts/` changed after it).
