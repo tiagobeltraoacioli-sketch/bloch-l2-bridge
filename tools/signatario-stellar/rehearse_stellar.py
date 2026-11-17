@@ -1087,6 +1087,16 @@ def main_flow(r):
           and r.balance(payee) == balp + 40 * S - 200_000 and views_h == [0, 0, 0] and late and rc_late
           and 'already recorded' in json.dumps(out_late), [chr_, sent_r, views_h, out_late])
     notes['held_redirect'] = {'burn_tx': txh, 'nonce': bh['nonce'], 'held_address': held, 'redirect': payee}
+    # The late redirect makes the paid address no longer the burner's latest naming: the guardian asks a person
+    # (alert, exit 4, no finding). The burner then names the paid address again so later checks start clean.
+    rc_hl, out_hl = r.guard_check(0)
+    back_h = r.redirect(ANVIL_KEYS[1], bh['nonce'], payee)
+    r.mine()
+    check('held exit: after the late redirect the guardian finds nothing and asks a person about that exit (exit 4, '
+          '"paid-not-latest-naming"); once the burner names the paid address again, no alert',
+          rc_hl == 4 and not out_hl.get('findings') and back_h
+          and [a['nonce'] for a in out_hl.get('alerts', []) if a['kind'] == 'paid-not-latest-naming'] == [bh['nonce']]
+          and r.guard_check(0)[0] == 0, out_hl)
 
     # 12b. a burn made directly on the token towards 20 bytes that are no commitment (the user's own L2 address, as
     #      on bUSDC): never paid to those bytes; paid only to the address its burner claims on the L2 router, a
@@ -1140,7 +1150,8 @@ def main_flow(r):
     check('direct burn: after the later claim the guardian finds nothing and pauses for nothing, but asks a person '
           '(exit 4, "paid-not-latest-naming": the paid address is not the burner\'s latest naming)',
           rc_late_g == 4 and not out_late_g.get('findings')
-          and [a['kind'] for a in out_late_g.get('alerts', [])] == ['paid-not-latest-naming'], out_late_g)
+          and [a['nonce'] for a in out_late_g.get('alerts', []) if a['kind'] == 'paid-not-latest-naming'] == [nonce_d],
+          out_late_g)
     check('direct burn: the guardian check judges that release against the burner\'s claims on the router (ok once the '
           'paid address is again the latest); on a final view from before the paid claim it cannot judge (exit 3: '
           'page, no pause; the claim is in its newest blocks, not yet final there)',
