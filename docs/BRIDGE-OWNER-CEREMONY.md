@@ -305,7 +305,7 @@ blind-sign (enable "blind signing" on the Ethereum app for that one transaction 
 the fallback is an air-gapped keystore generated on an offline machine and carried to the broadcasting machine only
 for the one broadcast (custody `air-gapped-keystore`); write `--keystore FILE` instead of `--ledger ...` below.
 
-<!-- step owner wallets -->
+<!-- step owner wallet-params -->
 ```
 export VAULT_WALLET="--ledger --mnemonic-derivation-path m/44'/60'/41'/0/0" TOKEN_WALLET="--ledger --mnemonic-derivation-path m/44'/60'/42'/0/0"
 ```
