@@ -593,10 +593,10 @@
       ],
       "launch": {
         "v1": false,
-        "state": "undeclared",
-        "sourceState": "undeclared",
-        "source": "none",
-        "reason": "the route's bridge.network.json carries no `launch` block",
+        "state": "held",
+        "sourceState": "held",
+        "source": "route-file",
+        "reason": "NOT LAUNCHABLE until: (1) an external audit of the route (vault, StellarBurnRouter, Stellar tools); (2) the owner's fee-account ceremony: GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA created and holding an authorized USDC trustline before the vault is deployed; (3) the owner's decision on the release delay (7,200 s proposed); (4) the 7 signer and 3 guardian addresses of the committee; (5) the authenticated feed adapted to this route (vigia_stellar.py runs only in the shared-directory mode and cannot run on chain 700770). Open finding: R331-XLM-4P-7 (Low) fixed in the tools (guardiao_stellar.py ack), pending a rehearsal run. Reviewer 377 cleared the route at b43cc08 for external audit only.",
         "openFindings": []
       },
       "sourceDomain": "0xb3b1412aaf716368dd5aacf749d8347fd3d40bf579ed136293e3f2b80e7b13de",
