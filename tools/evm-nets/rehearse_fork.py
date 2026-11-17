@@ -384,10 +384,11 @@ class Rig:
                                         'vault_code_keccak': vault_code, 'vault_from_block': self.from_block, 'keystore': ks,
                                         'password_file': str(work / 'pw'), 'cast': CAST, 'provenance': True,
                                         'db': str(work / f'ethdb{i}.json'), **policy}))
-            half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
+            half = plain_half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
             if OPTS['join_delay']:
-                # Stands in for the work a production signer does before its source half runs (the L2 rebuild from
-                # L1, `l2_source: rebuild`): the same wait before every signature, the opener's included.
+                # Stands in for the work a production signer does before its source half runs for a RELEASE (the L2
+                # rebuild from L1, `l2_source: rebuild`): the same wait before every release signature, the opener's
+                # included. A deposit attestation has no rebuild before it.
                 (work / 'slow_half.py').write_text('import os, sys, time\ntime.sleep(float(sys.argv[1]))\n'
                                                    'os.execv(sys.executable, [sys.executable] + sys.argv[2:])\n')
                 half = [sys.executable, str(work / 'slow_half.py'), str(OPTS['join_delay'])] + half[1:]
@@ -397,7 +398,7 @@ class Rig:
                 'source_chain_id': self.chain, 'source_vault': self.vault, 'source_route': self.route, 'threshold': 5,
                 'vault_threshold': 5, 'keystore': ks, 'password_file': str(work / 'pw'), 'eth_signer': addr, 'cast': CAST,
                 'db': str(work / f'db{i}.json'), 'l2_source': 'rpc', 'work_dir': str(work), 'provenance': True,
-                'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
+                'eth_half_deposit': plain_half + ['deposit', '--deposit-id', '{deposit_id}'],
                 'eth_half_release': half + ['release', '--intent', '{intent}'],
                 'shared_dir': str(work / 'shared'), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
                 'vault_from_block': self.from_block,
