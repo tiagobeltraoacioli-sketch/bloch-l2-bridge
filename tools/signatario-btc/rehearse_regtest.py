@@ -1306,6 +1306,36 @@ def run(rig):
           and received(hidden['address']) == 300_000 - 300 - 402 and rc == 0 and res['status'] == 'ok'
           and res['set_aside_count'] == 0 and [v['txid'] for v in res['acknowledged_violations']] == [xtx.txid()], (r, res))
 
+    # ── Y. review 378 (round 18): R342-BTC-2P-2. FAIL = the finding is demonstrated ────────────────────────────────
+    who_k = alice_k if rig.balance(alice) >= rig.balance(bob) else bob_k
+    # An exit whose burner named exactly the rate the honest relayer then pays (10 sat/vB), and an ordinary one.
+    tight = burn(who_k, 3_000, max_rate=10)
+    loose = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    honest = rig.vault_tx(10, burns=[tight], tag='y-honest')                  # broadcast, not mined
+    pending = honest['propose'][1].get('txid', '00')
+    in_pool = rig.bcli('getmempoolentry', pending, ok=False).returncode == 0
+    # The fee market rises: the relayer tries to replace it at 11, keeping the tight burn (check 4 refuses: ceiling 10)
+    keep = rig.vault_tx(11, burns=[tight, loose], tag='y-keep')
+    # ... or dropping it (check 5b refuses: a replacement keeps every pending payout)
+    drop = rig.vault_tx(11, burns=[loose], tag='y-drop')
+    still = rig.bcli('getmempoolentry', pending, ok=False).returncode == 0
+    note(f"Y1: pending {pending} in mempool {in_pool}; replacement keeping the tight burn: propose {keep['propose'][0]} "
+         f"signed {sum(1 for c0, _ in keep['signs'] if c0 == 0)} of 7 ({reasons(keep['signs'])[:1]}); replacement dropping it: "
+         f"propose {drop['propose'][0]} signed {sum(1 for c0, _ in drop['signs'] if c0 == 0)} of 7 ({reasons(drop['signs'])[:1]}); "
+         f"pending still in mempool {still}")
+    check('Y1 (R342-BTC-2P-2) after a fee rise, a pending vault transaction that pays a burn at exactly its ceiling can still '
+          'be replaced at a higher rate (otherwise every later exit, sweep and refund waits for it)',
+          in_pool and ((keep['combine'] and keep['combine'][0] == 0) or (drop['combine'] and drop['combine'][0] == 0)),
+          (reasons(keep['signs']), reasons(drop['signs']), keep['propose'][1], drop['propose'][1]))
+    rig.mine(1)
+    rig.l2_mine(3)
+    r = rig.vault_tx(10, burns=[loose], tag='y-after')
+    rig.mine(1)
+    rig.l2_mine(3)
+    check('Y1b once the pending transaction confirms the thread moves again (the state is not damaged)',
+          r['combine'] and r['combine'][0] == 0 and received(tight['address']) > 0 and received(loose['address']) > 0, r)
+
     # ── G. the limit an auditor must accept ──────────────────────────────────
     st = rig.status()
     tip_tx, *_ = c.parse_tx(bytes.fromhex(rig.b('getrawtransaction', st['tip'])))
