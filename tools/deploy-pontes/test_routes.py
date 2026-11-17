@@ -7,6 +7,7 @@ What the single lines could not test: deploy_pontes.py, as merged from the Ether
 EVM networks, Stellar and the data rule for TRON, validates the committed token config of EVERY route it deploys
 natively (filled with throwaway values), keeps one token per source chain, and opens no chain by a flag or a file.
 """
+import contextlib
 import copy
 import json
 from pathlib import Path
@@ -48,11 +49,42 @@ def verdict(cfg, rehearsal=False):
         return str(e)
 
 
+@contextlib.contextmanager
+def tron_launchable():
+    """deployments/ copied, with the TRON route's `launch` block set to launchable, for the ACCEPT path of the data
+    rule. Since 12ec904 the committed TRON file says `held`, so the committed tree refuses TRON (asserted separately
+    in test_the_committed_tron_route_is_held_and_refused); the accept path is exercised on this copy only."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        shutil.copytree(ROOT / 'deployments', tmp / 'deployments')
+        path = tmp / 'deployments/tron/bridge.network.json'
+        doc = json.loads(path.read_text())
+        doc['launch'] = {'v1': True, 'state': 'launchable', 'reason': 'test copy: the accept path of the data rule'}
+        path.write_text(json.dumps(doc))
+        real = routes.DEPLOYMENTS, routes.ROOT
+        routes.DEPLOYMENTS, routes.ROOT = tmp / 'deployments', tmp
+        try:
+            yield tmp
+        finally:
+            routes.DEPLOYMENTS, routes.ROOT = real
+
+
 class OneTool(unittest.TestCase):
     def test_every_native_route_config_validates(self):
-        for net in NATIVE_ETH_SECTION:
-            with self.subTest(net):
-                self.assertIsNone(verdict(filled(net)))
+        with tron_launchable():
+            for net in NATIVE_ETH_SECTION:
+                with self.subTest(net):
+                    self.assertIsNone(verdict(filled(net)))
+
+    def test_the_committed_tron_route_is_held_and_refused(self):
+        """Round 18: 370's launch block (12ec904) says held; the deploy tool must then refuse the TRON token, by the
+        data rule, with the route's own reason."""
+        doc = json.loads((ROOT / 'deployments/tron/bridge.network.json').read_text())
+        self.assertIs(doc['launch']['v1'], False)
+        why = verdict(filled('tron'))
+        self.assertIsNotNone(why)
+        self.assertIn('not launchable in v1', why)
+        self.assertIn('deployments/tron/bridge.network.json', why)
 
     def test_the_table_names_every_route_directory_and_nothing_else(self):
         rows, extra = routes.table()
@@ -85,6 +117,10 @@ class OneTool(unittest.TestCase):
                     self.assertIsNotNone(verdict(cfg))
 
     def test_tron_is_accepted_only_under_its_own_token(self):
+        with tron_launchable():
+            self._tron_own_token()
+
+    def _tron_own_token(self):
         cfg = filled('tron')
         self.assertEqual(cfg['ethereum']['chainId'], 728126428)
         self.assertIsNone(verdict(cfg))
@@ -134,6 +170,9 @@ class OneTool(unittest.TestCase):
                 # (2) the TRON route once its own file says it is held
                 path = tmp / 'deployments/tron/bridge.network.json'
                 tron = json.loads(path.read_text())
+                # the committed file says held since 12ec904; start this copy from launchable to see the switch
+                tron['launch'] = {'v1': True, 'state': 'launchable', 'reason': 'test copy: the accept path of the data rule'}
+                path.write_text(json.dumps(tron))
                 self.assertIsNone(routes.source_refusal(728126428, tron['l2']['name'], tron['l2']['symbol']))
                 tron['launch'] = {'v1': False, 'state': 'held', 'reason': 'a reason of at least twenty characters'}
                 path.write_text(json.dumps(tron))
