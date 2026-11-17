@@ -1,0 +1,15 @@
+#!/bin/sh
+# Example alert hook for the Bloch bridge operator bundles (installed as /etc/bloch-bridge/alert-hook.example).
+# bridgectl.py health --alert runs /etc/bloch-bridge/alert-hook LEVEL INSTANCE SUMMARY_JSON, as the instance's own
+# user, with no access to its keys, at most once per change of state and once an hour while a CRIT stays open.
+# LEVEL is OK, RESOLVED, WARN, CRIT or UNKNOWN. Replace the body with the operator's pager or chat call (owner input);
+# keep it quick (30 s timeout) and never print a secret. This example only writes to the journal and syslog.
+level="$1"
+inst="$2"
+summary="$3"
+case "$level" in
+  CRIT) prio=crit ;;
+  WARN|UNKNOWN) prio=warning ;;
+  *) prio=notice ;;
+esac
+exec /usr/bin/logger -t bloch-bridge-alert -p "user.$prio" -- "$level $inst $summary"
