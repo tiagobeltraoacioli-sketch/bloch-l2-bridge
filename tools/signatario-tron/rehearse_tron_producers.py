@@ -47,7 +47,7 @@ U = R.U
 # The launch values of deployments/tron/busdt-trx-vault.config.json (the main rehearsal keeps its own smaller amounts):
 # a fixed release fee of 13 USDT, a minimum burn of 65 and a minimum deposit of 66.
 R.FLAT, R.MIN_DEPOSIT, R.MIN_BURN = 13 * U, 66 * U, 65 * U
-DEPOSITS, BURN = (100 * U, 150 * U), 70 * U
+DEPOSITS, BURN = (100 * U, 230 * U), 70 * U   # review 342: 80 USDT more, for one more release
 check, out = R.check, R.out
 record = {'samples': [], 'energy': [], 'notes': {}}
 
@@ -301,6 +301,29 @@ def energies(net, amounts):
     record['notes']['release_calls_into_the_token'] = 'one transfer and four balanceOf (vault before and after, recipient before and after)'
 
 
+def review_342_worst_case(net):
+    """Review 342 (R342-TRX-1). The fee rule is computed from 'the worst-case cost of one release': 143,973 energy, a
+    release to an address that never held USDT. `feesAccrued` has a storage slot of its own, and `sweepFees()` (anyone
+    may call it) sets it to zero: the next release writes it from zero again. Demonstration only."""
+    swept = net.ttx('mallory', net.vault, 'sweepFees()', label='review 342: vault.sweepFees', fee_limit=200_000_000)
+    left = net.vint('feesAccrued()')
+    to = '0x' + 'f5' * 20
+    before = net.usdt_bal(to)
+    burn = net.burn(net.key['alice'], BURN, to)
+    net.sign_all()
+    d = net.settle_release(burn, timeout=120)
+    e = (d or {}).get('receipt') or {}
+    energy = (e.get('energy_total') or 0) - (e.get('energy_penalty') or 0)
+    record['energy'].append({'label': 'review 342: vault.release to a fresh address right after sweepFees()',
+                             **{k: e.get(k) for k in ('energy_total', 'energy_penalty', 'bandwidth', 'bandwidth_burned_sun', 'fee_sun', 'result')}})
+    record['notes']['review_342'] = {'sweep': swept, 'feesAccrued_after_sweep': left, 'release_energy': energy}
+    print(f'     review 342: sweepFees ok {swept["ok"]} energy {swept.get("energy_total")}; feesAccrued after it {left}; '
+          f'release energy {energy}; paid {net.usdt_bal(to) - before}', flush=True)
+    check('R342-TRX-1 the release the fixed fee is computed from (143,973 energy, deployments/tron/busdt-trx-vault.config.json '
+          'fees.basis.measured.releaseEnergyBase) is the worst case: a release to an address that never held USDT made right '
+          'after sweepFees() costs no more', swept['ok'] and left == 0 and 0 < energy <= 143_973, (swept, left, energy))
+
+
 def main():
     if len(sys.argv) < 4:
         raise SystemExit(__doc__)
@@ -308,6 +331,7 @@ def main():
     try:
         amounts = producers(net)
         energies(net, amounts)
+        review_342_worst_case(net)
     finally:
         net.stop()
         failed = [n for n, ok in R.results if not ok]
