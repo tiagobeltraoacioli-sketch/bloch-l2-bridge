@@ -175,8 +175,8 @@ def main():
     if mode == '--status':
         for line, tip, merged in moved():
             taken = lock()['lines'].get(line['id'], {}).get('commit', '')[:7] or '-'
-            local = git('rev-parse', line['branch'])
-            note = '' if local == tip else f' (local branch {local[:7]} differs from the published tip)'
+            local = git('rev-parse', '--verify', '--quiet', line['branch'], check=False)  # a clean clone has none
+            note = '' if local in (tip, '') else f' (local branch {local[:7]} differs from the published tip)'
             print(f'{line["id"]:13} {ref(line):55} tip {tip[:7]} taken {taken:7} {"merged" if merged else "MOVED"}{note}')
         return 0
     if mode == '--record':
