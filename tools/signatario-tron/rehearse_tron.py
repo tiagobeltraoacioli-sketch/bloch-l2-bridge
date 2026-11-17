@@ -211,6 +211,13 @@ class Net:
         # Strict by default here: every query checks the index against the node first (`--fresh-s 0`) and every round
         # reads the vault's recent receipts again (`--recheck-s 0`), so that a block the rig "loses" is seen by the very
         # next daemon call. SHIM_PRODUCTION=1 keeps the production defaults (1 s and 30 s), for cost measurements.
+        if SOLIDITY_URL:
+            # With real producers the vault's creation block is not solidified yet: the shim (rightly) serves no code
+            # for it at `finalized` until it is.
+            for _ in range(240):
+                if self.node.solidified()['number'] >= self.vault_block:
+                    break
+                time.sleep(0.5)
         strict = not os.environ.get('SHIM_PRODUCTION')
         self.start_shim(SHIM_PORT, self.work / 'shim-index', os.environ.get('SHIM_LOGS_RPC'),
                         recheck_s=0 if strict else 30, fresh_s=0 if strict else 1)

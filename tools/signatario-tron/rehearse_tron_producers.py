@@ -177,15 +177,16 @@ def producers(net):
         one = sample(net, blocks, 'producer stopped')
         if one is not None:
             readings.append(one)
-            if one['count_solidified'] != 1 or one['count_head'] != 2 or one['solidified'] != s1:
+            if one['count_solidified'] != 1 or one['count_head'] != 2 or one['solidified'] >= d1['block']:
                 wrong.append(one)
         time.sleep(0.7)
+    held = sorted({r['solidified'] for r in readings})   # the stopped producer's last block, give or take the one in flight
     info_solid = net.node.tx_info(d1['txid'], solid=True)
     info_head = net.node.tx_info(d1['txid'], solid=False)
     receipts_solid = [i['id'] for n in range(d1['block'], d1['block'] + 1) for i in net.node.block_infos(n, solid=True)]
     check('P5 a deposit made meanwhile (block above the solidified one) is in the head state and NOT in the solidified state, for '
           'as long as the producer is down: depositCount 2 at the head and 1 solidified in every reading, depositMatches 1 / 0',
-          d1['ok'] and d1['block'] > s1 and len(readings) >= 20 and not wrong
+          d1['ok'] and d1['block'] > s1 and len(readings) >= 20 and not wrong and len(held) == 1 and held[0] - s1 <= 1
           and matches(net, False, 1, amounts[1]) == 1 and matches(net, True, 1, amounts[1]) == 0
           and matches(net, True, 0, amounts[0]) == 1, (d1, wrong[:2], len(readings)))
     check('P6 its receipt is not in the solidified API either (by id: nothing; by block: nothing), while the head API has it',
@@ -196,7 +197,7 @@ def producers(net):
     logs = shim_deposit_logs(net)
     check('P7 the shim serves the same split: eth_call at `finalized` reads 1 deposit, at `latest` 2; eth_getLogs up to `finalized` '
           'holds deposit 0 only; the index is verified at the solidified block with no rescan, rollback, wait or error',
-          (fin, lat) == (1, 2) and logs == [0] and st['deposits'] == 1 and st['verified'] == s1
+          (fin, lat) == (1, 2) and logs == [0] and st['deposits'] == 1 and st['verified'] == held[0]
           and st['rescans'] == before['rescans'] and st['rollbacks'] == before['rollbacks'] and st['last_error'] is None, (fin, lat, logs, st))
     dep1 = deposit_id(net, 1, amounts[1])
     half = R.sh(sys.executable, HERE.parent / 'signatario-stable' / 'eth_half.py', '--config', net.eth_cfgs[0], 'deposit',
