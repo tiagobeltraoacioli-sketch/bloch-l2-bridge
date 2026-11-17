@@ -60,6 +60,16 @@ class Token:
             raise L2Error(f'the L2 has no {tag} block')
         return {'number': int(b['number'], 16), 'hash': b['hash'].lower(), 'time': int(b['timestamp'], 16)}
 
+    def block_time(self, number):
+        """The timestamp of an L2 block by number (kept for the life of this object)."""
+        cache = self.__dict__.setdefault('_times', {})
+        if number not in cache:
+            b = self.rpc('eth_getBlockByNumber', [hex(number), False])
+            if b is None:
+                raise L2Error(f'the L2 has no block {number}')
+            cache[number] = int(b['timestamp'], 16)
+        return cache[number]
+
     def burns(self, from_block, to_block, chunk=10_000):
         """Every Burned log up to `to_block`: [{'nonce', 'units', 'recipient': 20 bytes, 'tx', 'burn_id', 'block', ...}]."""
         out, t0 = [], topic(BURNED_V3)
@@ -97,51 +107,82 @@ class Router:
         code = self.token.rpc('eth_getCode', [self.router, block])
         return None if code in ('0x', '') else '0x' + c.keccak256(bytes.fromhex(code[2:])).hex()
 
+    def has_code(self, account, block='latest'):
+        """True when `account` has any code at that block (a contract, or an account that delegates to one)."""
+        return self.token.rpc('eth_getCode', [str(account).lower(), block]) not in ('0x', '')
+
     def numbers(self, block='latest'):
         """The immutables a payout is computed from, plus the token and prefix the router serves."""
         out = {k: int.from_bytes(self._call(k + '()', block=block)[:32], 'big')
-               for k in ('unitSats', 'releaseFeeBps', 'chargeVbytes', 'dustSats', 'feeRateCeiling')}
+               for k in ('unitSats', 'releaseFeeBps', 'chargeVbytes', 'dustSats', 'feeRateCeiling', 'feeRateFloor')}
         out['token'] = '0x' + self._call('token()', block=block)[12:32].hex()
         raw = self._call('hrp()', block=block)
         out['hrp'] = raw[64:64 + int.from_bytes(raw[32:64], 'big')].decode('ascii', 'replace')
         return out
 
-    def max_fee_rate(self, burn_id, block='latest'):
-        """Highest fee rate the burner of a router burn accepts (sat/vB); 0 when the router did not make this burn."""
-        return int.from_bytes(self._call('maxFeeRateOf(bytes32)', bytes.fromhex(str(burn_id).removeprefix('0x')), block=block)[:32], 'big')
+    @staticmethod
+    def _terms(raw, what):
+        """(burner, fee ceiling, L2 block of the burner's latest call) from a `Terms` struct, or None when empty."""
+        if len(raw) != 96 or any(raw[:12]):
+            raise L2Error(f'router {what}: malformed answer')
+        rate, block = int.from_bytes(raw[32:64], 'big'), int.from_bytes(raw[64:96], 'big')
+        if rate == 0:
+            return None
+        if not 0 < rate < 1 << 16 or not 0 < block < 1 << 40:
+            raise L2Error(f'router {what}: values out of range')
+        return '0x' + raw[12:32].hex(), rate, block
 
-    def claim(self, burner, nonce, block='latest'):
-        """(key hash, fee ceiling) the burner of a direct burn claimed on the router, or None when it made no claim."""
+    def exit_terms(self, burn_id, block='latest'):
+        """Terms of a burn made through the router, or None when the router did not make this burn."""
+        return self._terms(self._call('exitTermsOf(bytes32)', bytes.fromhex(str(burn_id).removeprefix('0x')), block=block), 'exitTermsOf')
+
+    def first_claim(self, burner, nonce, block='latest'):
+        """The key hash of the FIRST claim `burner` made for this burn nonce, or None."""
         raw = self._call('claimOf(address,uint64)', bytes.fromhex(str(burner).removeprefix('0x')), int(nonce), block=block)
         if len(raw) != 64 or any(raw[20:32]):
             raise L2Error('router claimOf: malformed answer')
-        rate = int.from_bytes(raw[32:64], 'big')
-        if rate == 0 or not any(raw[:20]):
-            return None
-        return raw[:20], rate
+        return raw[:20] if int.from_bytes(raw[32:64], 'big') and any(raw[:20]) else None
+
+    def claim_terms(self, burner, nonce, key_hash, block='latest'):
+        """Terms of the claim (burner, nonce, key hash), or None when there is none."""
+        return self._terms(self._call('claimTermsOf(address,uint64,bytes20)', bytes.fromhex(str(burner).removeprefix('0x')), int(nonce),
+                                      bytes(key_hash), block=block), 'claimTermsOf')
 
 
 def burn_terms(router, router_address, burn_from, burn_id, nonce, named, block='latest'):
-    """Where a burn is paid and the highest fee rate its burner accepts: {'through_router', 'destination': 20 bytes or
-    None, 'max_fee_rate': int or None, 'state': 'payable' | 'unclaimed'}.
+    """Where a burn is paid, the highest fee rate its burner accepts and the L2 block of the burner's latest call:
+    {'through_router', 'destination': 20 bytes or None, 'max_fee_rate', 'updated_block', 'state': 'payable' |
+    'unclaimed', 'contract_burner'}.
 
-    A burn made through the router is paid to the key hash the router checked and burned with (`named`). A burn made
-    directly on the token is NEVER paid to the 20 bytes it names (they may be an Ethereum address): it is paid to the
-    address the burning account claimed on the router, and until it claims it is not paid at all. There is no timeout.
+    A burn made through the router is paid to the key hash the router checked and burned with (`named`).
+    A burn made directly on the token is not paid until its burner claims it on the router; there is no timeout.
+      * burner WITHOUT code: paid to the address of its FIRST claim, never to the 20 bytes the burn named (they may be
+        an Ethereum address);
+      * burner WITH code (a contract, which others may be able to drive: review R342-BTC-3): only a claim for the
+        very 20 bytes the burn named counts, so nobody who can make the contract call can re-point the payout. Such a
+        burn must name its Bitcoin key hash when it is made; a contract that named something else is never paid.
     """
     if str(burn_from).lower() == str(router_address).lower():
-        rate = router.max_fee_rate(burn_id, block)
-        if rate < 1:
-            raise L2Error('a burn made by the router has no fee ceiling recorded: not the pinned router')
-        return {'through_router': True, 'destination': named, 'max_fee_rate': rate, 'state': 'payable'}
-    got = router.claim(burn_from, nonce, block)
+        got = router.exit_terms(burn_id, block)
+        if got is None:
+            raise L2Error('a burn made by the router has no terms recorded: not the pinned router')
+        return {'through_router': True, 'destination': named, 'max_fee_rate': got[1], 'updated_block': got[2], 'state': 'payable',
+                'contract_burner': False}
+    contract = router.has_code(burn_from, block)
+    key = named if contract else router.first_claim(burn_from, nonce, block)
+    got = router.claim_terms(burn_from, nonce, key, block) if key is not None else None
     if got is None:
-        return {'through_router': False, 'destination': None, 'max_fee_rate': None, 'state': 'unclaimed'}
-    return {'through_router': False, 'destination': got[0], 'max_fee_rate': got[1], 'state': 'payable'}
+        return {'through_router': False, 'destination': None, 'max_fee_rate': None, 'updated_block': 0, 'state': 'unclaimed',
+                'contract_burner': contract}
+    return {'through_router': False, 'destination': key, 'max_fee_rate': got[1], 'updated_block': got[2], 'state': 'payable',
+            'contract_burner': contract}
 
 
 UNCLAIMED = ('made directly on the token and not claimed: never paid to the 20 bytes it names; paid when the account '
              'that burned calls BitcoinBurnRouter.claimDirectBurn (no timeout). Its coins stay in the vault')
+UNCLAIMED_CONTRACT = ('made directly on the token by a contract and not claimed for the 20 bytes the burn named: a '
+                      'contract burner is paid only to those bytes, after it calls BitcoinBurnRouter.claimDirectBurn '
+                      'with the address they encode (no timeout). Its coins stay in the vault')
 
 
 def ledger_prefix_problem(token, vault, credits, block='latest'):

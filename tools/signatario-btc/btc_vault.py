@@ -163,7 +163,7 @@ class VaultView:
             if len(chain) > 1_000_000:
                 raise Held('thread too long')
         state = {'txid': v.anchor[0], 'vout': v.anchor[1], 'value': anchor['tx'].outputs[v.anchor[1]][0],
-                 'marker': v.genesis_marker(), 'aside': frozenset()}
+                 'marker': v.genesis_marker(), 'aside': frozenset(), 'aside_at': {}}
         self.entries = [{'txid': v.anchor[0], 'confirmations': anchor['confirmations'], 'height': anchor['height'],
                          'time': anchor['time'], 'blockhash': anchor['blockhash'], 'value': state['value'],
                          'marker': state['marker'], 'build': None, 'state': state}]
@@ -249,7 +249,8 @@ class VaultView:
             build = pol.replay_tx(v, state, inputs, tx.outputs)
         except pol.PolicyError as e:
             raise Held(f'thread transaction {tx.txid()} is outside the rules: {e.reason}')
-        new = {'txid': tx.txid(), 'vout': 0, 'value': tx.outputs[0][0], 'marker': build['marker'], 'aside': build['aside']}
+        new = {'txid': tx.txid(), 'vout': 0, 'value': tx.outputs[0][0], 'marker': build['marker'], 'aside': build['aside'],
+               'aside_at': build['aside_at']}
         self.entries.append({'txid': new['txid'], 'confirmations': got['confirmations'], 'height': got['height'],
                              'time': got['time'], 'blockhash': got['blockhash'], 'value': new['value'],
                              'marker': build['marker'], 'build': build, 'state': new, 'raw': got['raw']})

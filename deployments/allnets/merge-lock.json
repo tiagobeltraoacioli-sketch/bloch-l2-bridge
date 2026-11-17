@@ -38,15 +38,16 @@
     },
     "bitcoin": {
       "branch": "codex/bridge-btc-r17-20261117",
-      "commit": "c3febdd1e987990659dc9dd1d15f54dbb827ca36",
-      "agent": 332,
+      "commit": "91bb6cad3d0856f0526db14afe3f3de0b09d7e75",
+      "agent": 370,
       "routes": [
         "bitcoin"
       ],
-      "conflicts": [
+      "conflicts": [],
+      "history": [
         {
-          "path": "deployments/schema/bridge.network.schema.json",
-          "resolution": "schema owner's version (ours)"
+          "branch": "codex/bridge-btc-r17-20261117",
+          "commit": "c3febdd1e987990659dc9dd1d15f54dbb827ca36"
         }
       ]
     },

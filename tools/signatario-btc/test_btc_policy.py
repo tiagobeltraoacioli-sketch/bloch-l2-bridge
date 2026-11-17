@@ -98,13 +98,14 @@ class Core(unittest.TestCase):
         rnd = random.Random(2)
         seen = 0
         for _ in range(600):
-            base = rnd.randrange(0, 1 << 40)
-            late = sorted(rnd.sample(range(1, base + 2), min(base + 1, rnd.randrange(0, 5))))
-            through = rnd.choice([0, base, base + 1, 1 << 63])
-            room = 8 * (c.MARKER_PAYLOAD - c.MARKER_FIXED - (8 if through else 0) - 8 * len(late))
+            base = rnd.randrange(1, 1 << 40)
+            late = sorted(rnd.sample(range(c.LATE_RANKS), rnd.randrange(0, 5)))
+            through = rnd.choice([0, base, max(1, base - rnd.randrange(0, 60_000))])
+            block = rnd.randrange(1 << 40) if through else 0
+            room = 8 * (c.MARKER_PAYLOAD - c.MARKER_FIXED - (c.ASIDE_BYTES if through else 0) - len(late))
             paid = {base + 2 + rnd.randrange(0, max(1, room - 1)) for _ in range(rnd.randrange(0, 12))} if room > 1 else set()
             m = c.Marker(rnd.randrange(1 << 40), base, rnd.randrange(1 << 50), rnd.randrange(1 << 30), rnd.randrange(1, 500),
-                         paid, through, late)
+                         paid, through, late, block)
             spk = m.encode()
             self.assertLessEqual(len(spk), 83)   # 80 bytes of payload: standard under every relay policy deployed
             back = c.Marker.decode(spk)
@@ -112,28 +113,59 @@ class Core(unittest.TestCase):
             seen += bool(through) and bool(late)
         self.assertGreater(seen, 50)
         self.assertEqual(len(c.Marker().encode()), 2 + c.MARKER_FIXED)
-        # the window: 320 nonces with no operation, fewer with each one; never a longer payload
+        # the window: 320 nonces with no operation, 264 with a set-aside, 312..288 with late payments, 232 with everything
         self.assertEqual(8 * c.MAX_BITMAP, 320)
         c.Marker(0, 0, 0, 0, 1, {320}).encode()
         with self.assertRaises(ValueError):
             c.Marker(0, 0, 0, 0, 1, {321}).encode()
-        c.Marker(0, 10, 0, 0, 1, {11 + 255}, 10, ()).encode()
-        with self.assertRaises(ValueError):
-            c.Marker(0, 10, 0, 0, 1, {11 + 256}, 10, ()).encode()
-        for bad in ((3, 2), (2, 2), (0,), (1, 2, 3, 4, 5)):
+        for through, late, room in ((10, (), 264), (0, (0,), 312), (0, (0, 1, 2, 3), 288), (10, (0, 1, 2, 3), 232)):
+            c.Marker(0, 10, 0, 0, 1, {10 + room}, through, late, 7 if through else 0).encode()
+            with self.assertRaises(ValueError):
+                c.Marker(0, 10, 0, 0, 1, {11 + room}, through, late, 7 if through else 0).encode()
+        for bad in ((3, 2), (2, 2), (256,), (-1,), (0, 1, 2, 3, 4)):
             with self.assertRaises(ValueError):
                 c.Marker(0, 9, 0, 0, 1, (), 0, bad).encode()
-        # non-canonical encodings are not markers: unknown operation bits, a zero set-aside mark behind its flag
+        with self.assertRaises(ValueError):          # a mark above the burn base is no set-aside
+            c.Marker(0, 9, 0, 0, 1, (), 11, ()).encode()
+        with self.assertRaises(ValueError):          # an L2 block needs a mark
+            c.Marker(0, 9, 0, 0, 1, (), 0, (), 5).encode()
+        # non-canonical encodings are not markers: unknown operation bits, a zero mark behind its flag
         good = c.Marker(1, 4, 5, 0, 1, {6}, 0, (2,)).encode()
         at = 2 + 39
         self.assertEqual(good[at], 1)
         for ops in (0x11, 0x41, 0x05):
             with self.assertRaises(ValueError):
                 c.Marker.decode(good[:at] + bytes([ops]) + good[at + 1:])
-        zero_mark = c.Marker(1, 4, 5, 0, 1, (), 0, ()).encode()
-        forged = zero_mark[:1] + bytes([zero_mark[1] + 8]) + zero_mark[2:at] + b'\x80' + bytes(8)
+        plain = c.Marker(1, 4, 5, 0, 1, (), 0, ()).encode()
+        zero_mark = plain[:1] + bytes([plain[1] + 7]) + plain[2:at] + b'\x80' + (4).to_bytes(2, 'big') + bytes(5)   # mark 4 - 4 = 0
         with self.assertRaises(ValueError):
-            c.Marker.decode(forged)
+            c.Marker.decode(zero_mark)
+
+    def test_formats_1_and_2_are_refused_and_the_policy_version_names_the_format(self):
+        # format 1 (round 16): no operations byte; format 2 (round 17, first form): 8-byte mark, 8-byte late nonces
+        fixed = (3).to_bytes(8, 'big') + (7).to_bytes(8, 'big') + (10**6).to_bytes(8, 'big') + (55).to_bytes(8, 'big') + (9).to_bytes(2, 'big')
+        v1 = b'BBTC\x01' + fixed + bytes([0b101])                       # a bitmap byte
+        v2 = b'BBTC\x02' + fixed + bytes([0x81]) + (6).to_bytes(8, 'big') + (2).to_bytes(8, 'big') + bytes([0b101])
+        v3 = c.Marker(3, 7, 10**6, 55, 9, {9, 11}, 6, (2,), 77).encode()
+        for payload in (v1, v2):
+            with self.assertRaises(ValueError):
+                c.Marker.decode(bytes([c.OP_RETURN, len(payload)]) + payload)
+        self.assertEqual(c.Marker.decode(v3).as_dict()['aside_block'], 77)
+        self.assertEqual(c.MARKER_TAG, b'BBTC\x03')
+        # a thread transaction carrying a format-1 or format-2 marker does not replay: every tool holds on it
+        v = vault()
+        s0 = {**tip(200_000), 'aside': frozenset()}
+        b = pol.build_vault_tx(v, s0, [dep(0, 10**7)], [], [], 1)
+        for payload in (v1, v2):
+            with self.assertRaises(pol.PolicyError):
+                pol.replay_tx(v, s0, b['inputs'], [b['tx'].outputs[0], (0, bytes([c.OP_RETURN, len(payload)]) + payload)] + b['tx'].outputs[2:])
+        self.assertEqual(pol.replay_tx(v, s0, b['inputs'], b['tx'].outputs)['tx'].txid(), b['tx'].txid())
+        # the policy version is inside the route: a policy of the earlier formats is not a policy, so no token can be
+        # bound to a vault that would write another marker format
+        self.assertEqual(pol.DEFAULT_POLICY['version'], 3)
+        for old in (1, 2):
+            with self.assertRaises(pol.PolicyError):
+                vault(version=old)
 
 
 class Addresses(unittest.TestCase):
@@ -357,7 +389,8 @@ class Rules(unittest.TestCase):
 
 def after(b):
     """The thread state a build leaves, as btc_vault.VaultView keeps it."""
-    return {'txid': b['tx'].txid(), 'vout': 0, 'value': b['tx'].outputs[0][0], 'marker': b['marker'], 'aside': b['aside']}
+    return {'txid': b['tx'].txid(), 'vout': 0, 'value': b['tx'].outputs[0][0], 'marker': b['marker'], 'aside': b['aside'],
+            'aside_at': b['aside_at']}
 
 
 def burn(n, units=1_000):
@@ -390,7 +423,7 @@ class SetAside(unittest.TestCase):
         self.assertEqual((again['tx'].txid(), again['aside'], again['set_aside']), (b['tx'].txid(), b['aside'], [1, 2]))
         # later burn 2 is claimed: a late payment, charged like any release
         late = pol.build_vault_tx(v, s1, [], [], [burn(2, 5_000)], 3)
-        self.assertEqual((late['late'], sorted(late['aside']), late['marker'].late), ([2], [1], (2,)))
+        self.assertEqual((late['late'], sorted(late['aside']), late['marker'].late), ([2], [1], (1,)))   # burn 2 is rank 1 of {1, 2}
         self.assertEqual(late['payouts'][0]['sats'], 500_000 - 500 - 3 * v.release_vb)
         self.assertEqual(late['marker'].liabilities, owed - 100_000 - 500_000)
         s2 = after(late)
@@ -431,10 +464,19 @@ class SetAside(unittest.TestCase):
             with self.assertRaises(pol.PolicyError) as e:
                 pol.build_vault_tx(v, s0, [], [], kw['burns'], 1, aside_through=kw['aside_through'])
             self.assertIn(word, e.exception.reason, kw)
-        # setting aside alone pays no miner charge, so it would spend the fee pool: refused like every such transaction
+        # a set-aside travels only with a paid burn, a swept deposit or a refund; a stray that pays the miner is not one
+        for donations in ([], [{'txid': 'cd' * 32, 'vout': 0, 'value': 20_000}]):
+            with self.assertRaises(pol.PolicyError) as e:
+                pol.build_vault_tx(v, s0, [], donations, [], 1, aside_through=2)
+            self.assertIn('travels only with', e.exception.reason)
+        pol.build_vault_tx(v, s0, [dep(5, 10**6)], [], [], 1, aside_through=2)            # with a sweep
+        # at most four in one transaction: never more than one transaction can pay late
         with self.assertRaises(pol.PolicyError) as e:
-            pol.build_vault_tx(v, s0, [], [], [], 1, aside_through=2)
-        self.assertIn('fee pool', e.exception.reason)
+            pol.build_vault_tx(v, s0, [], [], [burn(6)], 1, aside_through=5)
+        self.assertTrue(e.exception.wait and 'at most 4' in e.exception.reason)
+        self.assertEqual(pol.build_vault_tx(v, s0, [], [], [burn(5)], 1, aside_through=4, aside_block=9)['aside_at'], {1: 9, 2: 9, 3: 9, 4: 9})
+        with self.assertRaises(pol.PolicyError):
+            pol.build_vault_tx(v, s0, [], [], [burn(5)], 1, aside_block=9)                 # an L2 block without a mark
         s1 = after(pol.build_vault_tx(v, s0, [], [], [burn(4)], 1, aside_through=2))   # 1, 2 aside; 3 open; 4 paid
         for mark in (1, 2, 4):  # already settled: the mark must be an unsettled burn
             with self.assertRaises(pol.PolicyError) as e:
@@ -472,8 +514,12 @@ class SetAside(unittest.TestCase):
             c.Marker(good.next_deposit, 10**9, good.liabilities, good.owner_due, good.feerate, (), 2, ()),                       # a base no transaction reaches
         ]
         for m in lies:
+            try:
+                outputs = with_marker(m)
+            except ValueError:
+                continue                     # a lie that format 3 cannot even write (a mark far below the base)
             with self.assertRaises(pol.PolicyError):
-                pol.replay_tx(v, s0, b['inputs'], with_marker(m))
+                pol.replay_tx(v, s0, b['inputs'], outputs)
         # a late payment of a burn that was never set aside, or was already paid late
         late = pol.build_vault_tx(v, s1, [], [], [burn(2)], 2)
         louts = list(late['tx'].outputs)
@@ -516,13 +562,18 @@ class SetAside(unittest.TestCase):
                     mark = n
                 else:
                     break
+            run = [n for n in unsettled if n <= mark]
+            mark = run[min(len(run), 4) - 1] if run else 0           # at most four per transaction
             if mark and rnd.random() < 0.3:
                 mark = 0
             payable = [n for n in unsettled if n > mark and n not in waiting][:rnd.randrange(0, 5)]
             late = [n for n in sorted(aside) if n not in waiting][:rnd.randrange(0, 5)]
             burns = [{'nonce': n, 'units': units_of[n], 'recipient': bytes([1 + n % 250]) * 20} for n in payable + late]
+            if not (burns or deposits):
+                mark = 0                                              # a set-aside travels with a paying item
+            l2_block = 1000 + step if mark else 0
             try:
-                b = pol.build_vault_tx(v, state, deposits, [], burns, rnd.choice([1, 2, 7, 60]), aside_through=mark)
+                b = pol.build_vault_tx(v, state, deposits, [], burns, rnd.choice([1, 2, 7, 60]), aside_through=mark, aside_block=l2_block)
             except pol.PolicyError as e:
                 self.assertTrue(e.wait or 'empty' in e.reason, e.reason)
                 continue
@@ -540,8 +591,9 @@ class SetAside(unittest.TestCase):
             self.assertGreaterEqual(tx.outputs[0][0], new.liabilities + new.owner_due)
             self.assertEqual(state['value'] + sum(d['value'] for d in deposits), sum(o[0] for o in tx.outputs) + b['fee'])
             again = pol.replay_tx(v, state, b['inputs'], tx.outputs)
-            self.assertEqual((again['tx'].txid(), again['aside'], again['late'], again['set_aside']),
-                             (tx.txid(), b['aside'], b['late'], b['set_aside']))
+            self.assertEqual((again['tx'].txid(), again['aside'], again['late'], again['set_aside'], again['aside_at']),
+                             (tx.txid(), b['aside'], b['late'], b['set_aside'], b['aside_at']))
+            self.assertTrue(all(b['aside_at'][n] == l2_block for n in b['set_aside']) and set(b['aside_at']) == set(b['aside']))
             state = after(b)
             for n in paid_once:
                 self.assertTrue(pol.burn_paid(state, n))
@@ -549,6 +601,29 @@ class SetAside(unittest.TestCase):
                 self.assertFalse(pol.burn_paid(state, n))
             pays, asides, lates = pays + len(payable), asides + len(b['set_aside']), lates + len(b['late'])
         self.assertTrue(pays > 100 and asides > 40 and lates > 20, (pays, asides, lates))
+
+    def test_the_rule_that_allows_a_set_aside(self):
+        # review R342-BTC-1: a function of finalized L2 data, the thread and the transaction; never the relayer's choice
+        p = pol.DEFAULT_POLICY
+        old = c.Marker(burn_base=10)
+        day = 86_400
+        direct = lambda age: {'nonce': 11, 'time': 1_000_000 - age, 'claimed': False, 'max_fee_rate': None}   # noqa: E731
+        router = lambda rate: {'nonce': 11, 'time': 1_000_000 - 30 * day, 'claimed': True, 'max_fee_rate': rate}   # noqa: E731
+        rule = lambda b, feerate, paid: pol.may_set_aside(p, old, b, feerate, paid, 1_000_000)   # noqa: E731
+        self.assertEqual((p['setAsideAgeSeconds'], p['burnFeerateFloor']), (3 * day, 2))
+        # age: an unclaimed direct burn, three days after it was made, not before
+        self.assertEqual((rule(direct(3 * day), 1, [12]), rule(direct(3 * day - 1), 1, [12])), ('age', None))
+        # floor: a ceiling below the policy floor
+        self.assertEqual((rule(router(1), 1, [12]), rule(router(2), 1, [12])), ('floor', None))
+        # a ceiling merely below this transaction's fee rate, however old the burn and whatever the rate: it WAITS
+        for feerate in (11, 50, 200):
+            self.assertIsNone(rule(router(10), feerate, [12, 13, 330]))
+        # blocked: only when the transaction pays a burn the window would otherwise stop (beyond base + 320)
+        self.assertEqual(rule(router(10), 11, [331]), 'blocked')
+        self.assertIsNone(rule(router(10), 10, [331]))               # payable at this rate: paid, not set aside
+        self.assertIsNone(rule(router(200), 200, [331]))
+        self.assertEqual(rule(direct(0), 1, [331]), 'blocked')       # an unclaimed burn of any age, when it blocks
+        self.assertTrue(pol.beyond_window(old, 331) and not pol.beyond_window(old, 330))
 
 
 class ReviewR16(unittest.TestCase):

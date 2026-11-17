@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 interface IBridgedBitcoin {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
     function burn(uint64 amount, address recipient) external returns (bytes32 burnId);
+    function burnNonce() external view returns (uint64);
 }
 
 /// @title BitcoinBurnRouter — the exit door of bBTC: a burn that names a checked Bitcoin address
@@ -19,9 +20,15 @@ interface IBridgedBitcoin {
 ///         bounded by `maxFeeRate x chargeVbytes`, known before the burn. A burn whose payout would be dust at the
 ///         rate it names is refused.
 ///
-///         A burn made directly on the token is NEVER paid to the 20 bytes it names. It is paid only after the
-///         account that burned calls `claimDirectBurn` here, naming a checked Bitcoin address and a fee ceiling. There
-///         is no timeout: until that call the coins stay in the vault (tools/signatario-btc/btc_signer.py).
+///         A burn made directly on the token is not paid until the account that burned calls `claimDirectBurn` here,
+///         for a burn that already exists, naming a checked Bitcoin address and a fee ceiling. There is no timeout:
+///         until that call the coins stay in the vault (tools/signatario-btc/btc_signer.py). The signers honour the
+///         first claim of an account WITHOUT code; for a burner that has code (a contract, which others may be able
+///         to drive) they honour only a claim for the very 20 bytes the burn named, so nobody can re-point it.
+///
+///         A burn that the vault set aside (it was not claimed, or its ceiling was unpayable) returns to payable by
+///         its burner's next call here in a later block: the claim, or `raiseMaxFeeRate` / `raiseClaimMaxFeeRate`
+///         (a ceiling can only be raised or confirmed, never lowered).
 ///         No owner, no setter, no upgrade, holds no balance between calls. The token is not changed.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
 contract BitcoinBurnRouter {
@@ -37,6 +44,7 @@ contract BitcoinBurnRouter {
     uint256 public immutable chargeVbytes; // vbytes a released burn is charged for (402 for 5 of 7)
     uint256 public immutable dustSats; // the smallest payout the vault makes
     uint16 public immutable feeRateCeiling; // the policy's `maxFeerate`: no vault transaction pays more
+    uint16 public immutable feeRateFloor; // the policy's `burnFeerateFloor`: a lower ceiling could never be paid
 
     bytes private constant CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
@@ -45,10 +53,21 @@ contract BitcoinBurnRouter {
         uint16 maxFeeRate;
     }
 
-    /// Highest fee rate (sat/vB) the burner of a router burn accepts; 0 for a burn id this router did not make.
-    mapping(bytes32 burnId => uint16 maxFeeRate) public maxFeeRateOf;
-    /// The claim of `burner` for the burn with nonce `burnNonce` made directly on the token; set once.
+    /// The terms of one exit: who may raise the ceiling, the ceiling, and the L2 block of the burner's latest call.
+    struct Terms {
+        address burner;
+        uint16 maxFeeRate;
+        uint64 updatedBlock;
+    }
+
+    /// Terms of a burn made through `burnTo`, by burn id (`maxFeeRate` 0 for a burn id this router did not make).
+    mapping(bytes32 burnId => Terms) public exitTermsOf;
+    /// The FIRST claim of `burner` for the burn with nonce `burnNonce` made directly on the token (key hash and the
+    /// ceiling named then). What the signers honour for a burner without code.
     mapping(address burner => mapping(uint64 burnNonce => DirectClaim)) public claimOf;
+    /// Terms of a claim by (burner, burn nonce, key hash). For a burner WITH code the signers read only the entry for
+    /// the 20 bytes the burn itself named.
+    mapping(address burner => mapping(uint64 burnNonce => mapping(bytes20 keyHash => Terms))) public claimTermsOf;
 
     event BitcoinExit(
         bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 keyHash, string bitcoinAddress, uint16 maxFeeRate
@@ -56,6 +75,8 @@ contract BitcoinBurnRouter {
     event DirectBurnClaimed(
         address indexed burner, uint64 indexed burnNonce, bytes20 keyHash, string bitcoinAddress, uint16 maxFeeRate
     );
+    event MaxFeeRateRaised(bytes32 indexed burnId, address indexed burner, uint16 maxFeeRate);
+    event ClaimMaxFeeRateRaised(address indexed burner, uint64 indexed burnNonce, bytes20 keyHash, uint16 maxFeeRate);
 
     error BadConfig();
     error NotAP2wpkhAddress();
@@ -63,6 +84,8 @@ contract BitcoinBurnRouter {
     error BadFeeRate();
     error PayoutBelowDustAtFeeRate();
     error AlreadyClaimed();
+    error NoSuchBurn();
+    error NotTheBurner();
 
     constructor(
         address token_,
@@ -71,7 +94,8 @@ contract BitcoinBurnRouter {
         uint256 releaseFeeBps_,
         uint256 chargeVbytes_,
         uint256 dustSats_,
-        uint16 feeRateCeiling_
+        uint16 feeRateCeiling_,
+        uint16 feeRateFloor_
     ) {
         bytes memory h = bytes(hrp_);
         if (token_ == address(0) || h.length == 0 || h.length > 31) revert BadConfig();
@@ -80,7 +104,8 @@ contract BitcoinBurnRouter {
         }
         if (
             unitSats_ == 0 || unitSats_ > 1e8 || releaseFeeBps_ >= 10_000 || chargeVbytes_ == 0 || chargeVbytes_ > 100_000
-                || dustSats_ == 0 || dustSats_ > 1e8 || feeRateCeiling_ == 0
+                || dustSats_ == 0 || dustSats_ > 1e8 || feeRateCeiling_ == 0 || feeRateFloor_ == 0
+                || feeRateFloor_ > feeRateCeiling_
         ) revert BadConfig();
         token = IBridgedBitcoin(token_);
         HRP = bytes32(h);
@@ -90,6 +115,12 @@ contract BitcoinBurnRouter {
         chargeVbytes = chargeVbytes_;
         dustSats = dustSats_;
         feeRateCeiling = feeRateCeiling_;
+        feeRateFloor = feeRateFloor_;
+    }
+
+    /// Highest fee rate (sat/vB) the burner of a router burn accepts; 0 for a burn id this router did not make.
+    function maxFeeRateOf(bytes32 burnId) external view returns (uint16) {
+        return exitTermsOf[burnId].maxFeeRate;
     }
 
     function hrp() external view returns (string memory) {
@@ -143,33 +174,61 @@ contract BitcoinBurnRouter {
     }
 
     /// @notice Burn `amount` of the caller's bBTC (after `approve`) for a payout to `bitcoinAddress`, in a Bitcoin
-    ///         transaction charged at most `maxFeeRate` sat/vB. The payout is at least `quote(amount, maxFeeRate)`;
-    ///         while the fee market is above `maxFeeRate` the burn waits. Reverts if that payout would be dust.
+    ///         transaction charged at most `maxFeeRate` sat/vB (between the policy's floor and ceiling). The payout is
+    ///         at least `quote(amount, maxFeeRate)`; while the fee market is above `maxFeeRate` the burn waits.
+    ///         Reverts if that payout would be dust.
     function burnTo(uint64 amount, string calldata bitcoinAddress, uint16 maxFeeRate) external returns (bytes32 burnId) {
         bytes20 keyHash = keyHashOf(bitcoinAddress);
-        if (maxFeeRate == 0 || maxFeeRate > feeRateCeiling) revert BadFeeRate();
+        if (maxFeeRate < feeRateFloor || maxFeeRate > feeRateCeiling) revert BadFeeRate();
         (uint256 payout,,) = quote(amount, maxFeeRate);
         if (payout < dustSats) revert PayoutBelowDustAtFeeRate();
         if (!token.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         burnId = token.burn(amount, address(keyHash));
-        maxFeeRateOf[burnId] = maxFeeRate;
+        exitTermsOf[burnId] = Terms(msg.sender, maxFeeRate, uint64(block.number));
         emit BitcoinExit(burnId, msg.sender, amount, keyHash, bitcoinAddress, maxFeeRate);
     }
 
+    /// @notice The burner of a router burn raises (or confirms: the same value) its fee ceiling. A burn the vault set
+    ///         aside returns to payable by this call. A ceiling is never lowered: a payout already made at a rate the
+    ///         burner accepted stays within what the burner accepted.
+    function raiseMaxFeeRate(bytes32 burnId, uint16 maxFeeRate) external {
+        Terms storage t = exitTermsOf[burnId];
+        if (t.burner != msg.sender) revert NotTheBurner();
+        if (maxFeeRate < t.maxFeeRate || maxFeeRate > feeRateCeiling) revert BadFeeRate();
+        t.maxFeeRate = maxFeeRate;
+        t.updatedBlock = uint64(block.number);
+        emit MaxFeeRateRaised(burnId, msg.sender, maxFeeRate);
+    }
+
     /// @notice Name where a burn the caller made DIRECTLY on the token (not through `burnTo`) is paid, and the highest
-    ///         fee rate accepted. Only the account that burned can make a claim the signers honour (they compare
-    ///         `msg.sender` here with the `from` of the token's `Burned` log); a claim by anyone else, or for a burn
-    ///         made through this router, is ignored. Set once per (caller, burn nonce). Without this call a direct
-    ///         burn is never paid.
+    ///         fee rate accepted. The burn must already exist (its nonce is at most the token's `burnNonce()`): a
+    ///         claim cannot be taken in advance. Only the account that burned can make a claim the signers honour
+    ///         (they compare `msg.sender` here with the `from` of the token's `Burned` log); for a burner without
+    ///         code they honour its FIRST claim; for a burner with code only a claim for the 20 bytes the burn named.
+    ///         One claim per (caller, burn nonce, address). Without a claim a direct burn is never paid.
     function claimDirectBurn(uint64 burnNonce, string calldata bitcoinAddress, uint16 maxFeeRate) external {
         bytes20 keyHash = keyHashOf(bitcoinAddress);
-        if (maxFeeRate == 0 || maxFeeRate > feeRateCeiling) revert BadFeeRate();
-        if (burnNonce == 0) revert BadConfig();
-        DirectClaim storage claim = claimOf[msg.sender][burnNonce];
-        if (claim.maxFeeRate != 0) revert AlreadyClaimed();
-        claim.keyHash = keyHash;
-        claim.maxFeeRate = maxFeeRate;
+        if (maxFeeRate < feeRateFloor || maxFeeRate > feeRateCeiling) revert BadFeeRate();
+        if (burnNonce == 0 || burnNonce > token.burnNonce()) revert NoSuchBurn();
+        Terms storage t = claimTermsOf[msg.sender][burnNonce][keyHash];
+        if (t.maxFeeRate != 0) revert AlreadyClaimed();
+        claimTermsOf[msg.sender][burnNonce][keyHash] = Terms(msg.sender, maxFeeRate, uint64(block.number));
+        DirectClaim storage first = claimOf[msg.sender][burnNonce];
+        if (first.maxFeeRate == 0) {
+            first.keyHash = keyHash;
+            first.maxFeeRate = maxFeeRate;
+        }
         emit DirectBurnClaimed(msg.sender, burnNonce, keyHash, bitcoinAddress, maxFeeRate);
+    }
+
+    /// @notice The claimant raises (or confirms) the fee ceiling of its claim; see `raiseMaxFeeRate`.
+    function raiseClaimMaxFeeRate(uint64 burnNonce, bytes20 keyHash, uint16 maxFeeRate) external {
+        Terms storage t = claimTermsOf[msg.sender][burnNonce][keyHash];
+        if (t.maxFeeRate == 0) revert NotTheBurner();
+        if (maxFeeRate < t.maxFeeRate || maxFeeRate > feeRateCeiling) revert BadFeeRate();
+        t.maxFeeRate = maxFeeRate;
+        t.updatedBlock = uint64(block.number);
+        emit ClaimMaxFeeRateRaised(msg.sender, burnNonce, keyHash, maxFeeRate);
     }
 
     function _value(bytes1 ch) private pure returns (uint256) {

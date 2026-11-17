@@ -9,7 +9,13 @@
 The proposal comes from anyone (the relayer). Nothing in it is trusted: this signer reads every fact on its own nodes,
 REBUILDS the transaction with btc_policy.build_vault_tx and signs only if the proposal's bytes are identical.
 
+Who may send a proposal (review 342, decided): only a relayer on this signer's allow-list. A proposal carries the
+relayer's address and its personal-message signature over the proposal's hash (btc_core.proposal_text); the signer
+verifies it in process and counts it against that relayer's hourly limit BEFORE it reads a node or the L2. Anything
+else is dropped: a keyless stranger cannot make a signer work, and cannot propose a replacement or a set-aside.
+
 Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 1):
+  0. The relayer: on the allow-list (`relayers`), signature valid, under its rate limit (`max_proposals_per_hour`).
   1. Bitcoin node on the configured network; the vault thread replays from the anchor through the rules (else HOLD);
      the proposal spends the confirmed thread tip of this node.
   2. Guardian pause: the L2 token is not paused (a pause stops sweeps and releases here, as it stops deposits and
@@ -29,8 +35,15 @@ Checks, in order (any failure prints {"signed": false, "reason": ...} and exits 
      is paid ONLY to the address its burner claimed on the router (`claimDirectBurn`), never to the 20 bytes it names,
      and there is no timeout. No burn is paid in a transaction whose fee rate is above the rate its burner named.
      The pause is read again on the verified L2.
-  4c. Burns set aside (`aside_through`): each is a finalized burn that cannot be paid in this transaction (not
-     claimed, or its burner's fee ceiling is below this transaction's fee rate). Setting aside pays nobody.
+  4c. Burns set aside (`aside_through`, at most 4, judged at the finalized L2 block `aside_block`): each is a finalized
+     burn that `btc_policy.may_set_aside` allows: unclaimed for `setAsideAgeSeconds`; a ceiling below the policy
+     floor; or, only in a transaction that pays a burn the marker window would otherwise stop, unclaimed or under a
+     ceiling below this transaction's fee rate. Never because a relayer named a fee rate. Setting aside pays nobody
+     and travels only with a paid burn, a swept deposit or a refund.
+  4d. Late payments: a burn that was set aside is paid only after a call of its burner on the router (the claim, or
+     a raise of its ceiling) in an L2 block after the one its set-aside was judged at.
+  5b. A replacement of a pending vault transaction must keep every payout, sweep and refund of it: it may add items
+     and raise the fee rate, it cannot cancel a payment that is already in the mempool.
   5. Fee rate at most 1.5 times this signer's own node's estimate (`estimatesmartfee 2 economical`, the mode pinned
      here, not the node's default) and the policy ceiling (a mainnet signer without an estimate signs nothing); a
      replacement of a pending vault transaction must pay a higher fee rate than it.
@@ -42,13 +55,15 @@ every signature is verified against this operator's public key in the vault scri
 Config: {"vault": path, "btc_rpc", "btc_cookie", "signatario_config": path of this operator's signatario.py config for
 the bBTC token (provenance true), "keystore", "password_file" (the operator's Bitcoin vault key, a key of its own),
 "pubkey": that key, compressed (hex), "burn_router": address, "burn_router_code_keccak": hex, "journal": path,
-"cast": path, "feerate_without_estimate": sat/vB ceiling on a private test network whose node has no estimate}
+"cast": path, "feerate_without_estimate": sat/vB ceiling on a private test network whose node has no estimate,
+"relayers": [addresses of the relayer keys this signer works for], "max_proposals_per_hour": per relayer, default 120}
 """
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 
@@ -124,6 +139,33 @@ def refund_destination(vault, txid, vout, recipient, request):
     return dest
 
 
+def authenticated_relayer(cfg, vault_id, proposal, now):
+    """The relayer that sent this proposal, if it is on this signer's allow-list, signed it and is under its hourly
+    limit; refuses otherwise. Runs before any node or L2 is read: a stranger costs this signer one hash and one
+    signature recovery. The count is kept beside the journal and includes refused proposals of a listed relayer."""
+    allowed = [str(a).lower() for a in cfg.get('relayers', [])]
+    if not allowed:
+        refuse('this signer has no relayer allow-list (`relayers`): it works for nobody')
+    who = str(proposal.get('relayer', '')).lower()
+    if who not in allowed:
+        refuse('dropped: the proposal does not come from a relayer on this signer\'s allow-list')
+    try:
+        signer = c.signer_of(c.proposal_text(vault_id, proposal), proposal.get('relayer_signature', ''))
+    except (c.BadKey, ValueError, TypeError):
+        refuse('dropped: the relayer signature on the proposal is malformed')
+    if signer != who:
+        refuse('dropped: the proposal is not signed by the relayer it names')
+    limit = int(cfg.get('max_proposals_per_hour', 120))
+    path = Path(str(cfg['journal']) + '.relayers.json')
+    seen = json.loads(path.read_text()) if path.exists() else {}
+    recent = [t for t in seen.get(who, []) if t > now - 3600]
+    if len(recent) >= limit:
+        refuse('dropped: this relayer is over its hourly limit of proposals', limit=limit)
+    seen[who] = recent + [int(now)]
+    journal_save(path, seen)
+    return who
+
+
 def journal_load(path):
     return json.loads(Path(path).read_text()) if Path(path).exists() else {'tips': {}}
 
@@ -193,9 +235,11 @@ def cmd_fee_status(cfg):
 def cmd_sign(cfg, args):
     proposal = json.loads(Path(signatario.option(args, '--proposal')).read_text())
     out_path = Path(signatario.option(args, '--out'))
-    if proposal.get('kind') != 'btc-vault-proposal' or proposal.get('version') != 2:
+    if type(proposal) is not dict or proposal.get('kind') != 'btc-vault-proposal' or proposal.get('version') != 3:
         refuse('not a bBTC vault proposal')
     vault = btc_vault.load_vault(cfg['vault'])
+    # 0. who sent it: before any node, any L2, any work
+    authenticated_relayer(cfg, vault.vault_id, proposal, time.time())
     node = btc_vault.Node(cfg['btc_rpc'], cfg['btc_cookie'], vault.network)
     own_key = hex_bytes(cfg['pubkey'], 33, 'pubkey')
     if own_key not in vault.keys:
@@ -268,18 +312,20 @@ def cmd_sign(cfg, args):
     # 4. burns paid, and burns set aside
     burns, proc, work = [], None, None
     refs, aside_refs = proposal.get('burns', []), proposal.get('asides', [])
-    aside_through = proposal.get('aside_through', 0)
+    aside_through, aside_block = proposal.get('aside_through', 0), proposal.get('aside_block', 0)
     if type(refs) is not list or len(refs) > p['maxReleasesPerTx'] + c.MAX_LATE:
         refuse('malformed burn list')
-    if type(aside_through) is not int or aside_through < 0 or type(aside_refs) is not list \
-            or len(aside_refs) > pol.MAX_ASIDE_PER_TX or bool(aside_refs) != bool(aside_through):
+    if type(aside_through) is not int or aside_through < 0 or type(aside_refs) is not list or type(aside_block) is not int \
+            or len(aside_refs) > pol.MAX_ASIDE_PER_TX or bool(aside_refs) != bool(aside_through) or bool(aside_block) != bool(aside_through):
         refuse('malformed set-aside list')
     # what `aside_through` sets aside is decided by this signer's own thread, not by the proposal
     old = tip['marker'].normalised()
     to_set_aside = [n for n in range(old.burn_base + 1, aside_through + 1) if n not in old.paid] \
         if old.burn_base < aside_through <= old.burn_base + 8 * c.MAX_BITMAP + pol.MAX_ASIDE_PER_TX else []
     if aside_through and (not to_set_aside or len(to_set_aside) > pol.MAX_ASIDE_PER_TX):
-        refuse('the set-aside mark is not above the oldest unsettled burn of this thread, or too far above it')
+        refuse('the set-aside mark is not above the oldest unsettled burn of this thread, or names more than 4 burns')
+    was_aside = pol.aside_at(tip)
+    paid_nonces = []
     try:
         if refs or aside_refs:
             verified, final_token, proc, work = verified_burns(ctx, list(refs) + list(aside_refs))
@@ -301,7 +347,7 @@ def cmd_sign(cfg, args):
                 refuse(f'hold: {e}')
 
             def terms(release, l2):
-                """Destination and fee ceiling of a burn, from the pinned router at the finalized block."""
+                """Destination, fee ceiling and latest call of a burn, from the pinned router at the finalized block."""
                 try:
                     return btc_l2.burn_terms(exits, router, l2['from'], release['nativeBurn'], release['nonce'],
                                              bytes.fromhex(release['recipient'][2:]), final_token[1])
@@ -323,25 +369,45 @@ def cmd_sign(cfg, args):
                 gross_total += release['amount'] * p['unitSats']
                 # Where the coins go. Through the router the destination was checked as a Bitcoin address before the
                 # burn. A burn made directly on the token names 20 unchecked bytes (possibly an Ethereum address): it
-                # is never paid to them. It is paid to the address the burning account claimed on the router; without
-                # a claim it is not paid, however long it waits.
+                # is paid only on its burner's claim on the router (for a contract burner: a claim for those very
+                # bytes); without a claim it is not paid, however long it waits.
                 t = terms(release, l2)
                 if t['state'] == 'unclaimed':
                     refuse('a burn made directly on the token (not through the router) is never paid to the 20 bytes it '
-                           'names: it is paid when the account that burned calls BitcoinBurnRouter.claimDirectBurn',
+                           'names: it is paid when the account that burned calls BitcoinBurnRouter.claimDirectBurn'
+                           + (' for the address those bytes encode (a contract burner is paid nowhere else)' if t['contract_burner'] else ''),
                            nonce=release['nonce'], burner=l2['from'])
                 if feerate > t['max_fee_rate']:
                     refuse('the fee rate is above the highest rate the burner of this burn accepts; the burn waits',
                            nonce=release['nonce'], max_fee_rate=t['max_fee_rate'], feerate=feerate)
+                # 4d. a burn that was set aside is paid again only after its burner's call in a later L2 block
+                if release['nonce'] in was_aside:
+                    if t['updated_block'] <= was_aside[release['nonce']]:
+                        refuse('a burn that was set aside is paid only after a call of its burner on the router (the claim, or '
+                               'a raise or confirmation of its fee ceiling) in an L2 block after its set-aside',
+                               nonce=release['nonce'], set_aside_at_l2_block=was_aside[release['nonce']], burner_call=t['updated_block'])
+                else:
+                    paid_nonces.append(release['nonce'])
                 burns.append({'nonce': release['nonce'], 'units': release['amount'], 'recipient': t['destination']})
             # 4c. burns set aside: exactly the unsettled burns up to the mark, each one finalized on the verified L2 and
-            # not payable in this transaction. Setting aside pays nobody and removes nothing from what the vault owes.
+            # allowed by the rule (btc_policy.may_set_aside), judged at an L2 block this signer has as final. The rule
+            # reads finalized L2 data, the thread and this transaction; no relayer's and no signer's view of the market.
             seen = {}
-            for release, l2, _ in verified_aside:
+            if aside_through and not 0 < aside_block <= int(final_token[1], 16):
+                refuse('the set-aside names an L2 block that is not final on this signer\'s L2', aside_block=aside_block,
+                       finalized=int(final_token[1], 16))
+            for release, l2, burn_time in verified_aside:
                 t = terms(release, l2)
-                if t['state'] != 'unclaimed' and feerate <= t['max_fee_rate']:
-                    refuse('a burn that can be paid in this transaction may not be set aside', nonce=release['nonce'])
-                seen[release['nonce']] = True
+                if t['updated_block'] > aside_block:
+                    refuse('a burn whose burner called the router after the L2 block the set-aside names may not be set aside',
+                           nonce=release['nonce'])
+                why = pol.may_set_aside(p, old, {'nonce': release['nonce'], 'time': burn_time, 'claimed': t['state'] != 'unclaimed',
+                                                 'max_fee_rate': t['max_fee_rate']}, feerate, paid_nonces, now)
+                if why is None:
+                    refuse('this burn may not be set aside: it is not unclaimed for the stated age, its fee ceiling is not '
+                           'below the policy floor, and this transaction pays no burn that the marker window would stop',
+                           nonce=release['nonce'])
+                seen[release['nonce']] = why
             if sorted(seen) != to_set_aside or len(seen) != len(verified_aside):
                 refuse('the burns named for setting aside are not exactly the unsettled burns up to the mark',
                        named=sorted(seen)[:20], unsettled=to_set_aside[:20])
@@ -365,10 +431,19 @@ def cmd_sign(cfg, args):
         if view.pending['txid'] != str(proposal.get('txid', '')):
             refuse('a replacement must pay a higher fee rate than the pending vault transaction',
                    pending=view.pending['marker'].feerate)
+    if view.pending is not None and view.pending['txid'] != str(proposal.get('txid', '')):
+        # 5b. A replacement keeps every payment of the pending transaction (review R342-BTC-1): it may add items and
+        # pay miners more; it cannot cancel a payout, a sweep or a refund that is already in the mempool.
+        was = view.pending['build']
+        dropped = {'payouts': sorted({x['nonce'] for x in was['payouts']} - {b['nonce'] for b in burns}),
+                   'sweeps': sorted({f"{x['txid']}:{x['vout']}" for x in was['credits']} - {f"{d['txid']}:{d['vout']}" for d in deposits}),
+                   'refunds': sorted({f"{x['txid']}:{x['vout']}" for x in was['refunds']} - {f"{d['txid']}:{d['vout']}" for d in refunds})}
+        if any(dropped.values()):
+            refuse('a replacement must keep every payout, sweep and refund of the pending vault transaction', **dropped)
 
     # 6. rebuild and compare
     try:
-        built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds, aside_through)
+        built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds, aside_through, aside_block)
     except pol.PolicyError as e:
         refuse(f'the rules refuse this transaction: {e.reason}', wait=e.wait, **e.detail)
     tx = built['tx']

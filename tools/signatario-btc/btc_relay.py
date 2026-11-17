@@ -7,25 +7,31 @@
                         [--refund TXID:VOUT:0xRECIPIENT:ADDRESS:0xSIG ...] --out PROPOSAL.json
   python3 btc_relay.py --config RELAY.json refund-text --outpoint TXID:VOUT --to ADDRESS      what the L2 recipient signs
   python3 btc_relay.py --config RELAY.json burns [--feerate N]         unpaid finalized burns, for `propose`: which are
-                                                                       payable (at that fee rate), which wait and why
+                                                                       payable (at that fee rate; without it, at this
+                                                                       node's own fee estimate), which wait and why
   python3 btc_relay.py --config RELAY.json burn status [--nonce N]     every finalized burn (or one): paid (and where),
                                                                        payable, waiting, or never paid until claimed
   python3 btc_relay.py --config RELAY.json combine --proposal P.json --partial A.json [...] --out TX.json [--broadcast]
 
 A relayer cannot move funds or choose amounts: signers rebuild every transaction themselves (btc_signer.py). What it
 does choose: which final items go into a transaction, and the fee rate, inside the signers' ceilings and never above
-the rate the burner of a burn named. A burn that cannot be paid now and may never be (a direct burn nobody claimed, a
-burn under a fee ceiling below the market) is set aside with `--aside-through`, so later burns are not held behind it;
-it is paid later by naming it in `--burn` like any other. `combine`
+the rate the burner of a burn named. It does NOT choose what is set aside: `--aside-through` is accepted by the
+signers only where the rule allows it (btc_policy.may_set_aside: a direct burn unclaimed for the stated age, a
+ceiling below the policy floor, or a burn that stops the marker window while this transaction pays a burn beyond
+it), at most 4 per transaction and only with a paying item; a burn that was set aside is named in `--burn` again
+after its burner's next call on the router. Every proposal is signed with the relayer's own key
+(`relayer_keystore` + `relayer_password_file`); signers work only for relayers on their allow-list. `combine`
 verifies every signature against the vault script before it assembles the witness, and asks the node to accept the
 transaction (`testmempoolaccept`) before any broadcast. A higher `--feerate` on the same tip is a replacement (BIP125):
 it conflicts with the earlier transaction by construction. UNAUDITED.
 
 Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "l2_chain_id": n,
-         "burn_router": address}
+         "burn_router": address, "relayer_keystore", "relayer_password_file" (this relayer's key: it signs proposals,
+         it can move no coin), "cast": path}
 """
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -64,7 +70,7 @@ def burn_table(cfg, view, only_unpaid=True):
     at = hex(final['number'])
     router_address = str(cfg.get('burn_router', '')).lower()
     router = btc_l2.Router(token, router_address)
-    tip, paid_in, aside_in = view.tip_state(), view.payments(), view.set_aside_in()
+    tip, paid_in, aside_in, aside_at = view.tip_state(), view.payments(), view.set_aside_in(), pol.aside_at(view.tip_state())
     out = []
     for b in token.burns(int(cfg.get('token_from_block', 0)), final['number']):
         if pol.burn_paid(tip, b['nonce']):
@@ -72,8 +78,39 @@ def burn_table(cfg, view, only_unpaid=True):
                 out.append({**b, 'state': 'paid', 'paid_in': paid_in.get(b['nonce']), 'through_router': b['from'] == router_address})
             continue
         t = btc_l2.burn_terms(router, router_address, b['from'], b['burn_id'], b['nonce'], b['recipient'], at)
-        out.append({**b, **t, 'set_aside': aside_in.get(b['nonce'])})
+        row = {**b, **t, 'set_aside': aside_in.get(b['nonce']), 'time': token.block_time(b['block'])}
+        if b['nonce'] in aside_at:
+            # a burn that was set aside returns to payable only by its burner's call in a later L2 block
+            row['aside_block'] = aside_at[b['nonce']]
+            if row['state'] == 'payable' and t['updated_block'] <= aside_at[b['nonce']]:
+                row['state'] = 'set-aside'
+        out.append(row)
     return out, final['number']
+
+
+def node_estimate(node):
+    """This node's own fee estimate in whole sat/vB (the signers' question: target 2, economical), or None."""
+    est = node.call('estimatesmartfee', 2, 'economical')
+    return None if not est or est.get('feerate') is None else max(1, int(float(est['feerate']) * 100_000 + 0.999999))
+
+
+def sign_proposal(cfg, vault, proposal):
+    """The relayer's own signature over the proposal (personal message), with the key signers have on their list."""
+    cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
+    if cfg.get('relayer_keystore'):
+        wallet = ['--keystore', cfg['relayer_keystore'], '--password-file', cfg['relayer_password_file']]
+    elif cfg.get('relayer_private_key_file') and vault.network != 'bitcoin-mainnet':
+        wallet = ['--private-key', Path(cfg['relayer_private_key_file']).read_text().strip()]   # throwaway rehearsal keys only
+    else:
+        fail('no relayer key: set relayer_keystore and relayer_password_file (signers drop unsigned proposals)')
+    who = subprocess.run([cast, 'wallet', 'address', *wallet], capture_output=True, text=True)
+    sig = subprocess.run([cast, 'wallet', 'sign', *wallet, c.proposal_text(vault.vault_id, proposal)], capture_output=True, text=True)
+    if who.returncode or sig.returncode:
+        fail('the relayer key could not sign the proposal', stderr=(who.stderr + sig.stderr).strip()[-300:])
+    signed = {**proposal, 'relayer': who.stdout.strip().lower(), 'relayer_signature': sig.stdout.strip()}
+    if c.signer_of(c.proposal_text(vault.vault_id, signed), signed['relayer_signature']) != signed['relayer']:   # checked here, in process
+        fail('the relayer signature does not verify')
+    return signed
 
 
 def describe(b, feerate=None):
@@ -86,12 +123,17 @@ def describe(b, feerate=None):
     line['destination'] = None if b['destination'] is None else '0x' + b['destination'].hex()
     line['set_aside_in'] = b['set_aside']
     if b['state'] == 'unclaimed':
-        line['why'] = btc_l2.UNCLAIMED
-        line['named_20_bytes_not_paid'] = '0x' + b['recipient'].hex()
+        line['why'] = btc_l2.UNCLAIMED_CONTRACT if b['contract_burner'] else btc_l2.UNCLAIMED
+        line['named_20_bytes'] = '0x' + b['recipient'].hex()
+        line['contract_burner'] = b['contract_burner']
+    elif b['state'] == 'set-aside':
+        line['why'] = (f"set aside by the vault at L2 block {b['aside_block']}: it is paid after its burner calls the router "
+                       'again (raiseMaxFeeRate / raiseClaimMaxFeeRate with the same or a higher fee rate) in a later block')
     elif feerate is not None and feerate > b['max_fee_rate']:
         line['state'] = 'waiting-fee-rate'
-        line['why'] = (f"its burner accepts at most {b['max_fee_rate']} sat/vB and this fee rate is {feerate}: it waits "
-                       'until a vault transaction at or below its ceiling can be made')
+        line['fee_rate_now'] = feerate
+        line['why'] = (f"its burner accepts at most {b['max_fee_rate']} sat/vB and the fee rate is {feerate}: it waits "
+                       'in order until a vault transaction at or below its ceiling can be made')
     return line
 
 
@@ -120,13 +162,13 @@ def main():
 
     if 'burn' in args and 'status' in args:
         table, final = burn_table(cfg, view, only_unpaid=False)
-        rate = int(option(args, '--feerate', '0')) or None
+        rate = int(option(args, '--feerate', '0')) or node_estimate(node)   # no rate given: this node's own estimate (R342-BTC-6)
         want = option(args, '--nonce', '')
         rows = [describe(b, rate) for b in table if not want or b['nonce'] == int(want)]
         if want and not rows:
             fail('no finalized burn has this nonce', nonce=int(want), l2_finalized=final)
         never = [r for r in rows if r['state'] == 'unclaimed']
-        print(json.dumps({'ok': True, 'l2_finalized': final, 'thread_tip': tip['txid'], 'burns': rows,
+        print(json.dumps({'ok': True, 'l2_finalized': final, 'thread_tip': tip['txid'], 'fee_rate_compared': rate, 'burns': rows,
                           'never_paid_until_claimed': {'count': len(never), 'units': sum(r['units'] for r in never),
                                                        'nonces': [r['nonce'] for r in never], 'why': btc_l2.UNCLAIMED}},
                          indent=2))
@@ -134,8 +176,8 @@ def main():
 
     if 'burns' in args:
         table, final = burn_table(cfg, view)
-        rate = int(option(args, '--feerate', '0')) or None
-        print(json.dumps({'ok': True, 'l2_finalized': final, 'unpaid': [describe(b, rate) for b in table]}, indent=2))
+        rate = int(option(args, '--feerate', '0')) or node_estimate(node)
+        print(json.dumps({'ok': True, 'l2_finalized': final, 'fee_rate_compared': rate, 'unpaid': [describe(b, rate) for b in table]}, indent=2))
         return
 
     if 'propose' in args:
@@ -163,9 +205,10 @@ def main():
                 fail('stray outpoint not found unspent', outpoint=d)
             donations.append({'txid': txid, 'vout': int(vout), 'value': got[0]})
         wanted = options(args, '--burn')
-        aside_through, aside_refs = int(option(args, '--aside-through', '0')), []
+        aside_through, aside_refs, aside_block = int(option(args, '--aside-through', '0')), [], 0
         if wanted or aside_through:
-            table, _ = burn_table(cfg, view)
+            table, aside_block = burn_table(cfg, view)
+            aside_block = aside_block if aside_through else 0
             known = {(b['tx'], b['burn_id']): b for b in table}
             for w in wanted:
                 burn_tx, burn_id = w.lower().split(':')
@@ -175,6 +218,9 @@ def main():
                 if b['state'] == 'unclaimed':
                     fail('this burn was made directly on the token and is not claimed: it is never paid to the 20 bytes '
                          'it names; its burner must call BitcoinBurnRouter.claimDirectBurn', nonce=b['nonce'], burner=b['from'])
+                if b['state'] == 'set-aside':
+                    fail('this burn was set aside: it is paid after its burner calls the router again in a later L2 block',
+                         nonce=b['nonce'], set_aside_at_l2_block=b['aside_block'])
                 if feerate > b['max_fee_rate']:
                     fail('the fee rate is above the highest rate the burner of this burn accepts; the burn waits',
                          wait=True, nonce=b['nonce'], max_fee_rate=b['max_fee_rate'])
@@ -189,15 +235,20 @@ def main():
                     b = by_nonce.get(n)
                     if b is None:
                         fail('a burn up to the set-aside mark is not a finalized unpaid burn', nonce=n)
-                    if b['state'] != 'unclaimed' and feerate <= b['max_fee_rate']:
-                        fail('a burn up to the set-aside mark can be paid at this fee rate: pay it instead', nonce=n)
+                    paid = [x['nonce'] for x in burns if x['nonce'] not in pol.set_aside(tip)]
+                    why = pol.may_set_aside(vault.policy, old, {'nonce': n, 'time': b['time'], 'claimed': b['state'] != 'unclaimed',
+                                                                'max_fee_rate': b['max_fee_rate']}, feerate, paid, view.at['mtp'])
+                    if why is None:
+                        fail('the rules do not allow this burn to be set aside: it is not unclaimed for the stated age, its fee '
+                             'ceiling is not below the policy floor, and this transaction pays no burn beyond the marker window. '
+                             'It waits in order; later burns are paid past it', nonce=n, state=b['state'], max_fee_rate=b['max_fee_rate'])
                     aside_refs.append({'burn_tx': b['tx'], 'burn_id': b['burn_id'], 'nonce': n})
         try:
-            built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds, aside_through)
+            built = pol.build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds, aside_through, aside_block)
         except pol.PolicyError as e:
             fail(f'the rules refuse this transaction: {e.reason}', wait=e.wait, **e.detail)
-        proposal = {'kind': 'btc-vault-proposal', 'version': 2, 'tip': tip['txid'], 'feerate': feerate,
-                    'aside_through': aside_through, 'asides': aside_refs,
+        proposal = {'kind': 'btc-vault-proposal', 'version': 3, 'tip': tip['txid'], 'feerate': feerate,
+                    'aside_through': aside_through, 'aside_block': aside_block, 'asides': aside_refs,
                     'deposits': [{'txid': d['txid'], 'vout': d['vout'], 'recipient': '0x' + d['recipient'].hex()}
                                  for d in sorted(deposits, key=lambda d: (d['txid'], d['vout']))],
                     'donations': [{'txid': d['txid'], 'vout': d['vout']} for d in donations],
@@ -205,6 +256,7 @@ def main():
                     'burns': sorted(refs, key=lambda r: r['nonce']), 'tx': built['tx'].stripped().hex(),
                     'txid': built['tx'].txid(), 'fee': built['fee'], 'owner_paid': built['owner_paid'],
                     'replaces': view.pending['txid'] if view.pending else None}
+        proposal = sign_proposal(cfg, vault, proposal)
         Path(option(args, '--out')).write_text(json.dumps(proposal, indent=2) + '\n')
         print(json.dumps({'ok': True, **{k: proposal[k] for k in ('txid', 'tip', 'feerate', 'fee', 'owner_paid', 'replaces')},
                           'credits': [{'nonce': x['nonce'], 'units': x['units'], 'deposit_id': '0x' + x['deposit_id'].hex()} for x in built['credits']],

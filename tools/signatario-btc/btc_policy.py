@@ -16,10 +16,23 @@ The vault is one chain of transactions (the thread). Every vault transaction:
                  come first: their nonces are the lowest)
            [last] the owner's fee output, when at least `ownerPayoutMinSats` is due
 
-A burn that cannot be paid now and may never be (made directly on the token and not claimed, or under a fee ceiling its
-burner set below the market) is SET ASIDE: the marker counts it as settled so that later burns are not held behind it,
-its coins stay in the vault and inside `liabilities`, and it is paid by a later transaction (a late payment) as soon
-as it can be. The set of burns set aside and unpaid is part of the thread state rebuilt by replay (`tip['aside']`).
+A burn that the rules allow to SET ASIDE (below) is counted as settled in the marker so that later burns are not held
+behind it; its coins stay in the vault and inside `liabilities`; it is paid by a later transaction (a late payment)
+after its burner's next call on the router. The set of burns set aside and unpaid, with the L2 block each was judged
+at, is part of the thread state rebuilt by replay (`tip['aside']`, `tip['aside_at']`).
+
+Setting aside is never the relayer's choice (review R342-BTC-1). `may_set_aside` is the whole rule, a function of
+finalized L2 data, the thread and the transaction's own content; every signer applies it before signing and the
+reserves monitor applies it again afterwards to every set-aside in the thread:
+  age       a burn made directly on the token, not claimed, `setAsideAgeSeconds` after it was made;
+  floor     a burn whose burner named a fee ceiling below the policy's `burnFeerateFloor` (the pinned router refuses
+            such a ceiling, so this cannot happen through it);
+  blocked   only when the transaction pays a burn that lies beyond the marker window of the oldest unsettled burn
+            (it could not be paid otherwise): an unclaimed direct burn of any age, or a burn whose ceiling is below
+            this transaction's fee rate.
+A burn whose ceiling is merely below the market WAITS in order; later burns are paid past it through the bitmap, and
+only when the window would stop a payment is it set aside. A transaction sets aside at most 4 burns (as many as one
+transaction can pay late) and must pay a burn, sweep a deposit or refund one; a stray output does not count.
 
 Two transactions that pay the same burn, or sweep the same deposit, always conflict on Bitcoin: both spend, directly
 or through an ancestor, the same thread output. Replay protection is therefore a consensus fact, not a signer memory.
@@ -30,7 +43,7 @@ import json
 import btc_core as c
 
 DEFAULT_POLICY = {
-    'version': 1,
+    'version': 3,                 # the marker format and the set-aside rules; inside the route
     'unitSats': 100,              # one token unit (BridgedStablecoinV3 has 6 decimals) = 100 sat
     'depositFeeBps': 10,          # bridge fee, to the owner's address (coordinator decision of round 17: 10 + 10 bps)
     'releaseFeeBps': 10,
@@ -50,12 +63,14 @@ DEFAULT_POLICY = {
     'windowLimitSats': 200_000_000,
     'largeReleaseSats': 50_000_000,
     'largeReleaseDelaySeconds': 43_200,
+    'setAsideAgeSeconds': 259_200,  # an unclaimed direct burn may be set aside this long after it was made (3 days)
+    'burnFeerateFloor': 2,          # sat/vB: the lowest fee ceiling a burner may name; a lower one is "unpayable"
     'maxDepositsPerTx': 20,
     'maxReleasesPerTx': 40,
 }
 
 
-MAX_ASIDE_PER_TX = 512  # burns one vault transaction may set aside (each is verified on the L2 by every signer)
+MAX_ASIDE_PER_TX = c.MAX_ASIDE  # burns one vault transaction may set aside: as many as one transaction can pay late
 
 
 class PolicyError(Exception):
@@ -69,7 +84,7 @@ class PolicyError(Exception):
 def policy_hash(policy):
     if set(policy) != set(DEFAULT_POLICY) or any(type(v) is not int or v < 0 for v in policy.values()):
         raise PolicyError('the policy must hold exactly the known integer fields')
-    if policy['version'] != 1 or policy['unitSats'] != 100:
+    if policy['version'] != 3 or policy['unitSats'] != 100:
         raise PolicyError('unknown policy version or unit')
     if not (0 < policy['depositFeeBps'] <= 30 and 0 < policy['releaseFeeBps'] <= 30):
         raise PolicyError('bridge fee outside (0, 30] bps')  # the Ethereum vault's hard maximum
@@ -78,7 +93,8 @@ def policy_hash(policy):
             and policy['satsPerExtraConfirmation'] > 0 and policy['dustSats'] >= 546
             and policy['ownerPayoutMinSats'] >= policy['dustSats'] and policy['windowSeconds'] > 0
             and policy['minDepositSats'] <= policy['maxDepositSats'] <= policy['capSats']
-            and 0 < policy['maxDepositsPerTx'] <= 50 and 0 < policy['maxReleasesPerTx'] <= 100):
+            and 0 < policy['maxDepositsPerTx'] <= 50 and 0 < policy['maxReleasesPerTx'] <= 100
+            and 0 < policy['burnFeerateFloor'] <= policy['maxFeerate'] and policy['setAsideAgeSeconds'] > 0):
         raise PolicyError('policy value out of range')
     return hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).digest()
 
@@ -208,7 +224,38 @@ def burn_paid(tip, nonce):
     return tip['marker'].is_paid(nonce) and nonce not in set_aside(tip)
 
 
-def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), aside_through=0):
+def aside_at(tip):
+    """{burn nonce set aside and unpaid: the finalized L2 block its set-aside was judged at}."""
+    known = dict(tip.get('aside_at', {}))
+    return {n: known.get(n, 0) for n in set_aside(tip)}
+
+
+def beyond_window(old_marker, nonce):
+    """True when a burn cannot be paid on this state because the oldest unsettled burn holds the marker window."""
+    return nonce - old_marker.normalised().burn_base > 8 * c.MAX_BITMAP
+
+
+def may_set_aside(policy, old_marker, burn, feerate, paid_nonces, now):
+    """The reason a burn may be set aside by a transaction at `feerate` that pays `paid_nonces`, or None.
+
+    burn  {'nonce', 'time': L2 timestamp of the burn, 'claimed': bool, 'max_fee_rate': int or None}: its terms on the
+          pinned router as of the L2 block the transaction names (`aside_block`)
+    now   the clock the age is measured with: the signer's Bitcoin tip median time past; the monitor uses the time of
+          the block that confirmed the transaction (never earlier than that median time)
+    Every input is finalized L2 data, the thread, or the transaction itself: nothing here is a relayer's or a
+    signer's opinion of the market."""
+    if not burn['claimed']:
+        if now - burn['time'] >= policy['setAsideAgeSeconds']:
+            return 'age'
+    elif burn['max_fee_rate'] < policy['burnFeerateFloor']:
+        return 'floor'
+    if any(beyond_window(old_marker, n) for n in paid_nonces):
+        if not burn['claimed'] or burn['max_fee_rate'] < feerate:
+            return 'blocked'
+    return None
+
+
+def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), aside_through=0, aside_block=0):
     """The one transaction the rules allow for these items at this fee rate.
 
     tip        {'txid', 'vout', 'value', 'marker': Marker, 'aside': set}   the unspent thread output and the state it
@@ -219,12 +266,15 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
     refunds    [{'txid', 'vout', 'value', 'recipient': 20 bytes, 'dest': 20 bytes}]  unswept deposits sent back to the
                P2WPKH key hash their L2 recipient signed for (the signature is the signer's check, not this function's)
     aside_through  0, or a burn nonce T: every burn in (burn_base, T] the marker has not settled is set aside (not
-               paid). That each of them is a finalized burn that cannot be paid now is the signer's check
-    A burn whose nonce is in `tip['aside']` is paid as a late payment (at most 4 per transaction).
+               paid), at most 4, and only in a transaction that pays a burn, sweeps a deposit or refunds one. That
+               `may_set_aside` allows each of them is the signer's check (it needs the L2)
+    aside_block    the finalized L2 block that check was made at (carried in the marker; 0 only in tests of the rules)
+    A burn whose nonce is in `tip['aside']` is paid as a late payment (at most 4 per transaction, among the 256
+    oldest burns set aside). That its burner called the router after its `aside_at` block is the signer's check.
     Inputs: tip, deposits, refunds, strays (each group sorted by outpoint). Outputs: thread, marker, payouts by burn
     nonce, refunds in input order, owner fee.
     Returns {'tx', 'marker', 'credits', 'payouts', 'refunds', 'fee', 'pool', 'owner_paid', 'inputs', 'aside': the set
-    after this transaction, 'set_aside': nonces newly set aside, 'late': nonces paid late}.
+    after this transaction, 'aside_at': {nonce: L2 block}, 'set_aside': nonces newly set aside, 'late': nonces paid late}.
     """
     p = vault.policy
     if type(feerate) is not int or not 1 <= feerate <= p['maxFeerate']:
@@ -252,8 +302,11 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
         liabilities += units * p['unitSats']
         owner_due += fee
     paid, aside, newly_aside, late = set(old.paid), set(set_aside(tip)), [], []
-    if type(aside_through) is not int or aside_through < 0:
+    before, at = sorted(aside), aside_at(tip)
+    if type(aside_through) is not int or aside_through < 0 or type(aside_block) is not int or not 0 <= aside_block < 1 << 40:
         raise PolicyError('malformed set-aside mark')
+    if aside_block and not aside_through:
+        raise PolicyError('an L2 block is named without a set-aside mark')
     if aside_through:
         # canonical: the mark is itself a burn being set aside, and lies above everything already settled in order
         if aside_through <= old.burn_base or aside_through in old.paid:
@@ -262,7 +315,12 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
             raise PolicyError('the set-aside mark is too far above the oldest unsettled burn', mark=aside_through)
         newly_aside = [n for n in range(old.burn_base + 1, aside_through + 1) if n not in old.paid]
         if len(newly_aside) > MAX_ASIDE_PER_TX:
-            raise PolicyError('too many burns set aside in one vault transaction')
+            raise PolicyError('too many burns set aside in one vault transaction (at most 4: what one transaction can pay late)',
+                              wait=True)
+        if not (deposits or burns or refunds):
+            # a stray output can pay the miner; it is not a reason to move anybody's exit (review R342-BTC-1)
+            raise PolicyError('a set-aside travels only with a paid burn, a swept deposit or a refund')
+        at.update({n: aside_block for n in newly_aside})
         aside.update(newly_aside)
         paid.update(newly_aside)  # settled in the marker (the window moves on); not paid
     for b in burns:
@@ -281,8 +339,12 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
         owner_due += fee
         paid.add(b['nonce'])
         aside.discard(b['nonce'])
+        at.pop(b['nonce'], None)
     if len(late) > c.MAX_LATE:
         raise PolicyError('at most 4 late payments (burns set aside earlier) per vault transaction', wait=True)
+    ranks = sorted(before.index(n) for n in late)
+    if ranks and ranks[-1] >= c.LATE_RANKS:
+        raise PolicyError('a late payment must be among the 256 oldest burns set aside; pay the older ones first', wait=True)
     for d in refunds:
         if len(d['dest']) != 20 or not any(d['dest']) or len(d['recipient']) != 20:
             raise PolicyError('a refund names no Bitcoin key hash')
@@ -329,7 +391,7 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
     if thread_value < liabilities + carried or thread_value < p['dustSats']:
         raise PolicyError('the thread output would not cover what the vault owes')
     marker = c.Marker(old.next_deposit + len(deposits), old.burn_base, liabilities, carried, feerate,
-                      {n for n in paid if n > old.burn_base}, aside_through, sorted(late)).normalised()
+                      {n for n in paid if n > old.burn_base}, aside_through, ranks, aside_block).normalised()
     try:
         marker_spk = marker.encode()
     except ValueError as e:
@@ -344,7 +406,7 @@ def build_vault_tx(vault, tip, deposits, donations, burns, feerate, refunds=(), 
                for d in donations]
     return {'tx': c.Tx(points, outputs), 'marker': marker, 'credits': credits, 'payouts': payouts, 'refunds': returned,
             'fee': fee, 'pool': thread_value - liabilities - carried, 'owner_paid': owner_paid, 'inputs': inputs,
-            'aside': frozenset(aside), 'set_aside': newly_aside, 'late': sorted(late)}
+            'aside': frozenset(aside), 'aside_at': at, 'set_aside': newly_aside, 'late': sorted(late)}
 
 
 def replay_tx(vault, tip, inputs, outputs):
@@ -382,9 +444,13 @@ def replay_tx(vault, tip, inputs, outputs):
     # Burns this transaction pays: the late ones it names (set aside earlier, the lowest nonces), then every nonce it
     # newly settles above its set-aside mark. Nonces newly settled at or below the mark are set aside, not paid.
     through = new.aside_through
+    was_aside = sorted(set_aside(tip))
+    if any(r >= len(was_aside) for r in new.late):
+        raise PolicyError('the marker pays a late burn that is not among the burns set aside')
+    late_nonces = [was_aside[r] for r in new.late]
     if new.burn_base < old.burn_base or new.burn_base - old.burn_base > 16 * c.MAX_BITMAP + MAX_ASIDE_PER_TX:
         raise PolicyError('the marker moves the burn base further than one transaction can')
-    newly = list(new.late) + sorted(n for n in set(range(old.burn_base + 1, new.burn_base + 1)) | set(new.paid)
+    newly = late_nonces + sorted(n for n in set(range(old.burn_base + 1, new.burn_base + 1)) | set(new.paid)
                                     if n > through and not old.is_paid(n))
     rest = list(outputs[2:])
     if rest and rest[-1][1] == vault.owner_spk and len(rest) == len(newly) + len(refunds) + 1:
@@ -409,7 +475,7 @@ def replay_tx(vault, tip, inputs, outputs):
         if not c.is_standard_payout(spk):
             raise PolicyError('a refund is not P2WPKH')
         d['dest'] = spk[2:]
-    built = build_vault_tx(vault, tip, deposits, donations, burns, new.feerate, refunds, through)
+    built = build_vault_tx(vault, tip, deposits, donations, burns, new.feerate, refunds, through, new.aside_block)
     if built['tx'].inputs != [(i['txid'], i['vout']) for i in inputs] or built['tx'].outputs != [(s, bytes(k)) for s, k in outputs]:
         raise PolicyError('the transaction is not the one the rules build from its own items')
     return built
