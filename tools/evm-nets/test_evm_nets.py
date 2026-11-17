@@ -122,6 +122,16 @@ class SignerRules(unittest.TestCase):
         self.assertTrue(any('unwrap' in n for n in doc['release']['notes']))
 
 
+class OutsideValues(unittest.TestCase):
+    def test_code_read_from_a_node_cannot_become_a_cast_option(self):
+        # Agent 374's class (R332 / review 331 High): `cast keccak -h...` exits 0 with the help text. `verify-unit`
+        # hashes the code a node returns; anything but 0x-hex is refused before `cast` runs (round 18, agent 372).
+        for bad in ('-h' + 'a' * 130, '--help', '0x12zz', '', 'deadbeef', '0x' + 'ab' * 3 + ' --help'):
+            with self.assertRaises(SystemExit, msg=bad) as e:
+                evm_nets.keccak(bad)
+            self.assertIn('not 0x-prefixed hex', str(e.exception))
+
+
 class Generated(unittest.TestCase):
     def test_committed_files_are_what_the_generator_derives(self):
         files, absent = evm_nets.derive()
