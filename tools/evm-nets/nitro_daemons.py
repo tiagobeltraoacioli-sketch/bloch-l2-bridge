@@ -46,7 +46,14 @@ class NitroRig(rf.Rig):
         self.salt = os.urandom(16).hex()
         self.epoch, self.margin = 0, 0
         self.funded = funded_key
-        self.l2 = self.anvil(port, '--chain-id', rf.L2_CHAIN)
+        for attempt in range(12):  # the port range lies in the host's ephemeral range: a bind can fail for a moment
+            try:
+                self.l2 = self.anvil(port + attempt % 4, '--chain-id', rf.L2_CHAIN)
+                break
+            except SystemExit as e:
+                if 'in use' not in str(e) or attempt == 11:
+                    raise
+                time.sleep(1)
         self.from_block = int(out(CAST, 'block-number', '--rpc-url', url))
         self.fork_block = self.from_block
         self.key = {n: self.new_key(n) for n in ['deployer', 'alice', 'mallory', 'relayer', 'bob', 'carol']
