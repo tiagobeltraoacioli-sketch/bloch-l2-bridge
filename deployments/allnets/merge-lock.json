@@ -142,21 +142,12 @@
     },
     "stellar": {
       "branch": "codex/bridge-stellar-r17-20261117",
-      "commit": "349bae6500700a7ffa95c8d4b423c9f685c0126b",
+      "commit": "f216fb1d6859a482802fce22e50665dbec818233",
       "agent": 373,
       "routes": [
         "stellar"
       ],
-      "conflicts": [
-        {
-          "path": "tools/deploy-pontes/vault_pontes.py",
-          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.978aabf77f39cafd"
-        },
-        {
-          "path": "tools/signatario-stable/signatario.py",
-          "resolution": "recorded resolution tools__signatario-stable__signatario.py.e5f7cd8c03106d33"
-        }
-      ],
+      "conflicts": [],
       "history": [
         {
           "branch": "codex/bridge-stellar-r17-20261117",
@@ -169,6 +160,10 @@
         {
           "branch": "codex/bridge-stellar-r17-20261117",
           "commit": "495797e931589d0880ba3759f89e01b80d51dd0c"
+        },
+        {
+          "branch": "codex/bridge-stellar-r17-20261117",
+          "commit": "349bae6500700a7ffa95c8d4b423c9f685c0126b"
         }
       ]
     }
