@@ -276,7 +276,7 @@ def address_from_spk(network, spk):
 # ── scripts ──────────────────────────────────────────────────────────────────
 OP_DROP, OP_CHECKMULTISIG, OP_RETURN = 0x75, 0xae, 0x6a
 THREAD_TAG = b'bloch.bbtc.vault.v1'
-MARKER_TAG = b'BBTC\x02'  # version 2: the operations byte (burns set aside, late payments)
+MARKER_TAG = b'BBTC\x03'  # format 3: set-aside mark with its L2 block, late payments by rank (formats 1 and 2 are refused)
 MAX_KEYS = 15
 
 
@@ -404,10 +404,13 @@ MARKER_PAYLOAD = 80  # bytes; the OP_RETURN payload limit of the oldest relay po
 MARKER_FIXED = 40    # tag, four 8-byte fields, the fee rate, the operations byte
 MAX_BITMAP = MARKER_PAYLOAD - MARKER_FIXED  # bytes of bitmap when the transaction sets nothing aside and pays no late burn
 MAX_LATE = 4         # late payments (burns set aside earlier) one vault transaction may carry
+MAX_ASIDE = 4        # burns one vault transaction may set aside: never more than one transaction can pay late
+LATE_RANKS = 256     # a late payment names the burn by its rank among the burns set aside (oldest first), one byte
+ASIDE_BYTES = 7      # the set-aside mark as a distance below the burn base (2 bytes) and the L2 block it was judged at (5)
 
 
 class Marker:
-    """State after a vault transaction, and what the transaction did to the burns that were set aside.
+    """State after a vault transaction, and what the transaction did to the burns that were set aside. Format 3.
 
     next_deposit  nonce the next swept deposit takes (deposit nonces are 0, 1, 2, ...)
     burn_base     every burn nonce <= burn_base is SETTLED: paid, or set aside (burn nonces start at 1)
@@ -417,51 +420,68 @@ class Marker:
     feerate       sat/vB this transaction charged its items (lets anyone recompute every credit and payout)
     paid          burn nonces > burn_base already settled (a set; encoded as a bitmap)
 
-    Two fields describe THIS transaction only (they are not state; the set of burns set aside and still unpaid is
+    Three fields describe THIS transaction only (they are not state; the set of burns set aside and still unpaid is
     rebuilt by replaying the thread, btc_policy.replay_tx):
     aside_through 0, or a burn nonce T: every nonce in (parent's burn_base, T] that the parent had not settled is set
                   aside by this transaction: counted as settled so the window moves on, NOT paid, payable later
-    late          burn nonces set aside by an earlier transaction that this transaction pays (ascending, at most 4)
+    aside_block   the finalized L2 block the set-aside was judged at (0 without a mark). A burn set aside returns to
+                  payable only by a call of its burner on the router in a LATER L2 block
+    late          the burns set aside earlier that this transaction pays, each as its RANK among the burns set aside
+                  and unpaid in the parent state, oldest first (ascending, at most 4, below 256)
+
+    Sizes: 40 fixed bytes; a set-aside costs 7 (the mark as a 2-byte distance below the burn base, the L2 block in 5);
+    a late payment 1; the rest of the 80 bytes is the bitmap: 320 nonces with no operation, 264 with a set-aside,
+    312 down to 288 with one to four late payments, 232 with everything.
+    Formats 1 (round 16, no operations byte) and 2 (round 17 first form: an 8-byte mark, 8-byte late nonces, no L2
+    block) are NOT read: their tags are refused, so a thread that carries one holds every tool. Nothing was deployed
+    with them, and the policy version (inside the route) is 3 with this format.
     """
 
-    def __init__(self, next_deposit=0, burn_base=0, liabilities=0, owner_due=0, feerate=0, paid=(), aside_through=0, late=()):
+    def __init__(self, next_deposit=0, burn_base=0, liabilities=0, owner_due=0, feerate=0, paid=(), aside_through=0, late=(),
+                 aside_block=0):
         self.next_deposit, self.burn_base = next_deposit, burn_base
         self.liabilities, self.owner_due, self.feerate = liabilities, owner_due, feerate
         self.paid = frozenset(paid)
-        self.aside_through, self.late = aside_through, tuple(late)
+        self.aside_through, self.late, self.aside_block = aside_through, tuple(late), aside_block
 
     def normalised(self):
         base, paid = self.burn_base, set(self.paid)
         while base + 1 in paid:
             base += 1
             paid.discard(base)
-        return Marker(self.next_deposit, base, self.liabilities, self.owner_due, self.feerate, paid, self.aside_through, self.late)
+        return Marker(self.next_deposit, base, self.liabilities, self.owner_due, self.feerate, paid, self.aside_through,
+                      self.late, self.aside_block)
 
     def is_paid(self, nonce):
         """Settled in the marker: paid, or set aside. Whether a settled burn was PAID needs the replayed set of
-        burns set aside (`settled_unpaid` of the thread state): see btc_policy.burn_paid."""
+        burns set aside: see btc_policy.burn_paid."""
         return nonce <= self.burn_base or nonce in self.paid
 
     def encode(self):
         m = self.normalised()
         for v, bits in ((m.next_deposit, 64), (m.burn_base, 64), (m.liabilities, 64), (m.owner_due, 64), (m.feerate, 16),
-                        (m.aside_through, 64)):
+                        (m.aside_block, 40)):
             if not 0 <= v < 1 << bits:
                 raise ValueError('marker field out of range')
         late = list(m.late)
-        if len(late) > MAX_LATE or late != sorted(set(late)) or any(not 0 < n < 1 << 64 for n in late):
-            raise ValueError('at most 4 late payments per vault transaction, ascending')
+        if len(late) > MAX_LATE or late != sorted(set(late)) or any(type(n) is not int or not 0 <= n < LATE_RANKS for n in late):
+            raise ValueError('at most 4 late payments per vault transaction, by ascending rank below 256')
         ops = bytes([(0x80 if m.aside_through else 0) | len(late)])
         if m.aside_through:
-            ops += m.aside_through.to_bytes(8, 'big')
-        ops += b''.join(n.to_bytes(8, 'big') for n in late)
+            below = m.burn_base - m.aside_through   # a mark is itself set aside, so it lies at or below the new base
+            if not 0 <= below < 1 << 16 or m.aside_through < 1:
+                raise ValueError('the set-aside mark is not within 65,535 nonces below the burn base')
+            ops += below.to_bytes(2, 'big') + m.aside_block.to_bytes(5, 'big')
+        elif m.aside_block:
+            raise ValueError('an L2 block without a set-aside mark')
+        ops += bytes(late)
         room = MARKER_PAYLOAD - (MARKER_FIXED - 1) - len(ops)
         bitmap = bytearray(room)
         for n in m.paid:
             i = n - m.burn_base - 1
             if not 0 <= i < 8 * room:
                 raise ValueError('a paid burn lies outside the marker window; pay the older burns first, or set aside '
-                                 'the ones that cannot be paid now')
+                                 'the ones the rules allow to set aside')
             bitmap[i // 8] |= 1 << (i % 8)
         payload = (MARKER_TAG + m.next_deposit.to_bytes(8, 'big') + m.burn_base.to_bytes(8, 'big')
                    + m.liabilities.to_bytes(8, 'big') + m.owner_due.to_bytes(8, 'big') + m.feerate.to_bytes(2, 'big')
@@ -475,22 +495,22 @@ class Marker:
         body = spk[2:] if spk[1] < 76 else spk[3:]
         declared = spk[1] if spk[1] < 76 else (spk[2] if spk[1] == 0x4c and len(spk) > 2 else -1)
         if declared != len(body) or not MARKER_FIXED <= len(body) <= MARKER_PAYLOAD or body[:5] != MARKER_TAG:
-            raise ValueError('not a marker')
+            raise ValueError('not a marker of format 3')
         f = lambda o, n: int.from_bytes(body[o:o + n], 'big')
         base, ops, at = f(13, 8), body[39], MARKER_FIXED
         if ops & 0x70 or (ops & 0x0f) > MAX_LATE:
             raise ValueError('non-canonical marker')
-        through = 0
+        through = block = 0
         if ops & 0x80:
-            through, at = f(at, 8), at + 8
-        late = []
-        for _ in range(ops & 0x0f):
-            late.append(f(at, 8))
-            at += 8
-        if at > len(body):
+            if at + ASIDE_BYTES > len(body):
+                raise ValueError('non-canonical marker')
+            through, block, at = base - f(at, 2), f(at + 2, 5), at + ASIDE_BYTES
+        if at + (ops & 0x0f) > len(body):
             raise ValueError('non-canonical marker')
+        late = list(body[at:at + (ops & 0x0f)])
+        at += ops & 0x0f
         paid = {base + 1 + i for i in range(8 * (len(body) - at)) if body[at + i // 8] >> (i % 8) & 1}
-        m = Marker(f(5, 8), base, f(21, 8), f(29, 8), f(37, 2), paid, through, late)
+        m = Marker(f(5, 8), base, f(21, 8), f(29, 8), f(37, 2), paid, through, late, block)
         try:
             same = m.encode() == spk
         except ValueError:
@@ -502,7 +522,7 @@ class Marker:
     def as_dict(self):
         return {'next_deposit': self.next_deposit, 'burn_base': self.burn_base, 'liabilities': self.liabilities,
                 'owner_due': self.owner_due, 'feerate': self.feerate, 'paid': sorted(self.paid),
-                'aside_through': self.aside_through, 'late': list(self.late)}
+                'aside_through': self.aside_through, 'aside_block': self.aside_block, 'late': list(self.late)}
 
 
 # ── L2 identities (what BridgedStablecoinV3 binds) ───────────────────────────
