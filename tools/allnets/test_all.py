@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The single test entry point of the all-networks bridge tree (agent 375, round 18).
 
-  python3 tools/allnets/test_all.py OUTDIR [STAGE ...] [--tools TOOLS.json] [--port-base N]
+  python3 tools/allnets/test_all.py OUTDIR [STAGE ...] [--tools TOOLS.json] [--port-base N] [--umask OCTAL]
 
 Stages (default: every stage; a stage whose toolchain is not named in TOOLS.json is recorded NOT RUN with the reason,
 never silently skipped and never counted as a pass):
@@ -20,7 +20,12 @@ never silently skipped and never counted as a pass):
   tron          the private-TVM rehearsal (needs `tronUrl` and `tronUsdtGetcontract`: a private java-tron the caller runs)
   stellar       the local-network rehearsal (needs `stellarRpc`, `stellarCli`, `stellarWasm`)
   scripts       scripts/tests (Rust verifiers of the custody line; needs `cargoTargetDir`)
-TOOLS.json keys: foundryBin (default ~/.foundry/bin), and the ones named above. Output: OUTDIR/summary.txt (one line per
+TOOLS.json keys: foundryBin (default ~/.foundry/bin), and the ones named above; optional `cargoHome` (a CARGO_HOME
+whose registry holds every crate of Cargo.lock: the custody verifiers of scripts/tests build with `--offline`, so on a
+host whose registry lacks them three test classes stop in setUpClass; fill one, on an online host, with
+`CARGO_HOME=<dir> cargo +1.94.1 fetch --locked` at the repository root; nothing is vendored).
+`--umask OCTAL` runs every suite under that file-mode mask (round 19: no suite may depend on the caller's umask; the
+table is run under 002, 022 and 077); the mask in force is written into the first line of summary.txt. Output: OUTDIR/summary.txt (one line per
 suite), OUTDIR/table.json (machine-readable: stage, suite, status PASS / FAIL / NOT RUN, counts, log), one log per
 suite. Exit 0 only when no suite FAILED; NOT RUN suites are listed in the table and in the report, not hidden.
 Loopback only, throwaway keys only (each suite's own); nothing is sent to a public network.
@@ -303,7 +308,8 @@ def stage_scripts(r):
     if not r.need('scripts', 'cargoTargetDir'):
         return
     r.suite('scripts', 'scripts-tests', py('-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_*.py'), cwd=ROOT / 'scripts',
-            env={'CARGO_TARGET_DIR': r.tools['cargoTargetDir'], 'CARGO_BUILD_JOBS': '4'}, retry_busy=False)
+            env={'CARGO_TARGET_DIR': r.tools['cargoTargetDir'], 'CARGO_BUILD_JOBS': '4',
+                 **({'CARGO_HOME': r.tools['cargoHome']} if r.tools.get('cargoHome') else {})}, retry_busy=False)
 
 
 def main(argv):
@@ -316,6 +322,8 @@ def main(argv):
             tools = json.loads(Path(next(it)).read_text())
         elif a == '--port-base':
             base = int(next(it))
+        elif a == '--umask':
+            os.umask(int(next(it), 8))
         else:
             args.append(a)
     if not args:
@@ -327,11 +335,14 @@ def main(argv):
     r = Run(out, tools, base)
     head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     clean = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT, capture_output=True, text=True).stdout
+    mask = os.umask(0)
+    os.umask(mask)
     with open(r.out / 'summary.txt', 'a') as fh:
-        fh.write(f'tip {head} clean={not clean.strip()} stages={" ".join(stages)} {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}\n')
+        fh.write(f'tip {head} clean={not clean.strip()} stages={" ".join(stages)} umask={mask:04o} '
+                 f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}\n')
     for s in stages:
         globals()[f'stage_{s}'](r)
-    table = {'tip': head, 'clean': not clean.strip(), 'rows': r.rows,
+    table = {'tip': head, 'clean': not clean.strip(), 'umask': f'{mask:04o}', 'rows': r.rows,
              'pass': sum(x['status'] == 'PASS' for x in r.rows), 'fail': sum(x['status'] == 'FAIL' for x in r.rows),
              'notRun': sum(x['status'] == 'NOT RUN' for x in r.rows)}
     (r.out / 'table.json').write_text(json.dumps(table, indent=1) + '\n')

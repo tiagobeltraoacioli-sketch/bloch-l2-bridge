@@ -71,6 +71,22 @@ offline, ethereum, evmnets, forks, bitcoin, solana, tron, stellar, scripts. A st
 `TOOLS.json` is recorded NOT RUN with the reason; it never counts as a pass. The table of each run is
 `OUTDIR/table.json`; the integrator's report lists each run with its tip.
 
+Two conditions of the environment are part of the entry point since round 19, so that a run on another host means
+the same thing:
+
+- **File-mode mask.** `--umask OCTAL` runs every suite under that umask and writes it into the first line of
+  `summary.txt`. No suite may depend on the caller's umask: the product rules refuse a credentials directory, a key
+  file or a verifier binary that group or others can write, and a fixture that leaves the mode to the umask passes on
+  one host and fails on another (it did: `test_relayer_key` and the four `scripts/tests/test_custody_deployment_*`
+  classes under umask 002). The fixtures set explicit modes; the rules are pinned by
+  `test_a_credentials_directory_made_under_umask_002_is_refused` and
+  `test_a_group_or_other_writable_verifier_is_refused`.
+- **Crates of the custody verifiers.** `scripts/tests` builds the Rust verifiers with `cargo build --offline`
+  (`--locked`, toolchain 1.94.1). On a host whose cargo registry does not hold every crate of `Cargo.lock`, three
+  test classes stop in `setUpClass` ("failed to download"). Nothing is vendored. On an online host, once:
+  `CARGO_HOME=<dir> ~/.cargo/bin/cargo +1.94.1 fetch --locked` at the repository root, then name `<dir>` as
+  `cargoHome` in `TOOLS.json` (or leave both out to use the default `~/.cargo`).
+
 ## 6. Not done / not proven
 
 - No route is audited except as an audit candidate (Ethereum); none is deployed.
