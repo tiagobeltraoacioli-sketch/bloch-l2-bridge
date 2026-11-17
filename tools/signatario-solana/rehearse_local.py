@@ -1127,6 +1127,10 @@ class Rehearsal:
         # later (an empty classic token account can be closed by its owner). The swept fees must never go elsewhere.
         fee_ata = self.a.fee_account
         dep = self.deposit(20 * U)  # a deposit: its fee accrues in the vault
+        m = self.attest_and_mint(dep, 'r330-sweep')  # minted and credited in order, as every deposit (the mint chain)
+        r = self.credit(dep)
+        check('the deposit behind those fees is attested, minted and credited in order',
+              m.get('receipt', {}).get('status') == '0x1' and r['status'] == '0x1', mint=m, credit=r)
         balance = self.sol.balance(fee_ata)
         if balance:
             dump = S.associated_token_address(self.thief.public, self.mint)  # created at setup
