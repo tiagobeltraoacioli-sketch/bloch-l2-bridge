@@ -70,16 +70,19 @@ python3 tools/signatario-btc/btc_deploy.py thread --config deployments/bitcoin/b
 ```
 
 A second reviewer repeats both commands on another machine and compares the address. Then send the fee-pool seed
-(0.002 BTC covers `poolTargetSats`) to `thread_address`, once, from any wallet. That output is the anchor. After 6
-confirmations write its txid and output index into `anchor` of the vault config and check it against a Bitcoin Core
-node with `txindex=1`:
+to `thread_address`, once, as one output of **exactly 0.00200000 BTC** (`poolTargetSats`, the `anchor_sats` the
+command prints): not more, not less, and with the wallet's "subtract fee from amount" switched off. That output is
+the anchor. An anchor of any other amount is refused by the next command and by every tool; if it happens, send a
+new one of the exact amount and name that one (the first stays at the thread address as a stray and joins the fee
+pool later). After 6 confirmations write its txid and output index into `anchor` of the vault config and check it
+against a Bitcoin Core node with `txindex=1`:
 
 ```
 python3 tools/signatario-btc/btc_deploy.py vault --config deployments/bitcoin/bbtc-vault-mainnet.config.json --btc-rpc http://127.0.0.1:8332 --btc-cookie /var/lib/bitcoind/.cookie
 ```
 
-It must print `"unspent": true`. Its `source_chain_id`, `source_vault` and `source_route` are the token's
-arguments. Check one deposit address by hand:
+It must print `"sats": 200000` and `"unspent": true`. Its `source_chain_id`, `source_vault` and `source_route` are
+the token's arguments. Check one deposit address by hand:
 
 ```
 python3 tools/signatario-btc/btc_deploy.py address --config deployments/bitcoin/bbtc-vault-mainnet.config.json --recipient 0xYOUR_L2_ADDRESS
@@ -109,27 +112,34 @@ Read it back; every immutable must equal the plan and the mint chain must start 
 python3 tools/signatario-btc/btc_deploy.py verify --config deployments/bitcoin/bbtc-vault-mainnet.config.json --token-config deployments/bitcoin/bbtc-token-mainnet.config.json --l2-rpc "$L2_RPC" --token 0xBBTC_ADDRESS
 ```
 
-Deploy the exit router over the token (any funded account; it has no owner and holds nothing), then read its
-address prefix and token back:
+Deploy the exit router over the token (any funded account; it has no owner and holds nothing). Its constructor
+takes the token, the address prefix and the five numbers of the vault policy a payout is computed from; the tool
+derives them from the vault config, so nobody types them:
 
 ```
 forge build --offline contracts/btc/BitcoinBurnRouter.sol
 ```
 ```
-forge create --rpc-url "$L2_RPC" --ledger --mnemonic-derivation-path "$BBTC_ROUTER_PATH" --legacy --broadcast contracts/btc/BitcoinBurnRouter.sol:BitcoinBurnRouter --constructor-args 0xBBTC_ADDRESS bc
+python3 tools/signatario-btc/btc_deploy.py router --config deployments/bitcoin/bbtc-vault-mainnet.config.json --token 0xBBTC_ADDRESS --artifact out/BitcoinBurnRouter.sol/BitcoinBurnRouter.json --out bbtc-router.initcode
 ```
 ```
-cast call 0xROUTER_ADDRESS "hrp()(string)" --rpc-url "$L2_RPC"
+cast send --rpc-url "$L2_RPC" --ledger --mnemonic-derivation-path "$BBTC_ROUTER_PATH" --legacy --create "$(cat bbtc-router.initcode)"
 ```
+
+Read it back; every number must equal the vault's (`unitSats` 100, `releaseFeeBps` 5, `chargeVbytes` 402, `dustSats`
+546, `feeRateCeiling` 200, prefix `bc`, the token):
+
 ```
-cast call 0xROUTER_ADDRESS "token()(address)" --rpc-url "$L2_RPC"
+python3 tools/signatario-btc/btc_deploy.py router-verify --config deployments/bitcoin/bbtc-vault-mainnet.config.json --token 0xBBTC_ADDRESS --l2-rpc "$L2_RPC" --router 0xROUTER_ADDRESS
 ```
 ```
 cast call 0xROUTER_ADDRESS "keyHashOf(string)(bytes20)" bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk --rpc-url "$L2_RPC"
 ```
 
-The last must print `0x906600553abcaea9c4ab138875ac72adfc72194a`. Every signer pins the router's address and the
-keccak of its runtime code (`burn_router`, `burn_router_code_keccak`).
+The last must print `0x906600553abcaea9c4ab138875ac72adfc72194a`. `router-verify` prints `runtimeCodeKeccak`: every
+signer pins the router's address and that hash (`burn_router`, `burn_router_code_keccak`), and both go into the
+ceremony record and into `release.notes` of `bridge.network.json`. The hash depends on the constructor values (they
+are immutables), so it is known only after this step.
 
 Fill `deployments/bitcoin/bridge.network.json` (`custody.address` = thread address, `custody.route`,
 `custody.codeHash` = policy hash, `l2.token`, `l2.codeHash`, signers, guardians) and check it:
@@ -140,7 +150,7 @@ python3 tools/evm-nets/network_json.py check deployments/bitcoin/bridge.network.
 
 The anchor must still be unspent when the token is deployed: a vault that has already moved is never given a token.
 
-Not rehearsed: the `--ledger` creations and `forge create` (the rehearsal sent both creations with `cast send --create`
+Not rehearsed: the `--ledger` creations (the rehearsal sent both creations with `cast send --create`
 and a raw throwaway key), and the bUSDC deploy tool's plan
 and record files, which this path does not produce (`btc_deploy.py token` and `verify` stand in for them).
 
@@ -155,10 +165,14 @@ user only. Templates: `deployments/bitcoin/bbtc-ops/`.
 | Attest a deposit (mint side) | `python3 tools/signatario-stable/signatario.py --config mint-signer.json mint --deposit-id 0xID --out SIG.json` | Unchanged tool; its source half is `btc_half.py`. Refuses until the sweep has the required confirmations; answers `hold` if the token carries a mint the Bitcoin ledger does not back |
 | Sign a vault transaction | `python3 tools/signatario-btc/btc_signer.py --config vault-signer.json sign --proposal P.json --out PARTIAL.json` | Rebuilds the transaction; signs with the operator's Bitcoin vault keystore through `cast wallet sign --no-hash` |
 | What the vault holds | `python3 tools/signatario-btc/btc_half.py --config btc-half.json status` | Thread tip, marker, every deposit with its confirmations |
-| Relayer: propose | `python3 tools/signatario-btc/btc_relay.py --config relay.json propose --feerate N --deposit TXID:VOUT:0xRECIPIENT --burn 0xTX:0xBURNID --out P.json` | Any number of `--deposit`, `--burn`, `--donation` |
+| Relayer: propose | `python3 tools/signatario-btc/btc_relay.py --config relay.json propose --feerate N --deposit TXID:VOUT:0xRECIPIENT --burn 0xTX:0xBURNID --out P.json` | Any number of `--deposit`, `--burn`, `--donation`. A burn is refused above its burner's fee ceiling |
+| Relayer: what can be paid | `python3 tools/signatario-btc/btc_relay.py --config relay.json burns --feerate N` | Unpaid finalized burns: `payable`, `waiting-fee-rate` (ceiling below N) or `unclaimed` |
+| Relayer: set burns aside | add `--aside-through NONCE` to `propose`, together with at least one paying item | Every unsettled burn up to NONCE must be unclaimed or under a ceiling below N; they are not paid and no longer hold later burns. Paid later with `--burn` like any other (at most 4 such late payments per transaction) |
+| One burn, or all | `python3 tools/signatario-btc/btc_relay.py --config relay.json burn status --nonce N` | `paid` (and where), `payable`, `waiting-fee-rate`, `unclaimed`; totals what is never paid until claimed |
+| Signer: fee estimate alert | `python3 tools/signatario-btc/btc_signer.py --config vault-signer.json fee-status` | Run from the operator's monitor every few minutes. Exit 0 with the ceiling this signer accepts now; exit 2 with an alert line when its node has no estimate (it then signs nothing) |
 | Relayer: combine and send | `python3 tools/signatario-btc/btc_relay.py --config relay.json combine --proposal P.json --partial A.json --partial B.json --partial C.json --partial D.json --partial E.json --out TX.json --broadcast` | Verifies the five signatures and asks the node to accept before sending |
 | Refund an unswept deposit | The L2 recipient signs the text printed by `python3 tools/signatario-btc/btc_relay.py --config relay.json refund-text --outpoint TXID:VOUT --to bc1q...` with any wallet's personal-sign; the relayer adds `--refund TXID:VOUT:0xRECIPIENT:bc1q...:0xSIGNATURE` to `propose` | Any unswept deposit; pays the amount less 0.05% and fee rate x 605 vbytes |
-| Pay a burn made directly on the token | The burner signs the text of `btc_relay.py claim-text --nonce N --to bc1q...`; the relayer adds `--claim 0xBURNID:bc1q...:0xSIGNATURE` to `propose` | Without a claim such a burn is paid to the 20 bytes it names after 3 days |
+| Pay a burn made directly on the token | The account that burned sends `claimDirectBurn(uint64 burnNonce, string bc1q..., uint16 maxFeeRate)` to the router (`cast send 0xROUTER "claimDirectBurn(uint64,string,uint16)" N bc1q... 50`, or the same call from a Safe); once that is final on the L2 the relayer names the burn in `--burn` | Without a claim such a burn is never paid: no timeout. The claim is set once |
 | Reserves | `python3 tools/signatario-btc/btc_reservas.py --config relay.json check` | Exit 0 ok, 2 deficit or held, 3 surplus, 1 unverifiable |
 | Guardian view | `python3 tools/signatario-btc/btc_reservas.py --config relay.json guard` | Lists queued mints without a ledger deposit with the `voteCancelMint` arguments |
 
@@ -169,7 +183,9 @@ Situations:
 | A release is not confirming | The relayer proposes the same burns again with a higher `--feerate`. Signers accept a replacement only above the pending fee rate and at most 1.5 times their own node's estimate, never above `maxFeerate` (200 sat/vB). The payout shrinks by the stated rule |
 | `the miner charge exceeds the cap` | A deposit whose sweep would cost more than 10% of it. It waits for lower fees; its L2 recipient can have it refunded |
 | `hold: this node has no fee estimate` | A mainnet signer signs nothing until its node can estimate fees (a freshly started node needs some hours) |
-| `a burn made directly on the token ...` | Not an error: the burn waits for its burner's claim, or 3 days |
+| `a burn made directly on the token ... is never paid to the 20 bytes it names` | Not an error: the burn waits for its burner's claim on the router, without limit. If it is the oldest unsettled burn and later exits are waiting behind the window, set it aside (`--aside-through`) |
+| `the fee rate is above the highest rate the burner of this burn accepts` | Not an error: the burn waits for a transaction at or below its ceiling. Propose the others, and set it aside if it holds them |
+| `fee-status` exits 2 on a signer | That signer's Bitcoin Core has no estimate yet (restarted, or too few blocks seen). It signs nothing until it has. With three signers in this state nothing leaves the vault: do not restart nodes together |
 | `hold: slot N is held by a mint that is not the Bitcoin ledger deposit` | A reorganisation removed an attested sweep, or a mint was forged. Two guardians cancel the mint named by `btc_reservas.py guard`. Signing resumes by itself |
 | Reserves `held` with `outside the rules` | The committee's keys signed a transaction the rules do not produce. Pause the token, stop every signer, treat five keys as exposed, call the owner. Bitcoin cannot be paused |
 | A guardian paused the token | No vault transaction is signed until the pause ends (72 h, or 6 of 7 `unpause`). Burns still happen on the L2 and are paid afterwards |

@@ -80,7 +80,7 @@
     "recipient": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
     "paidOn": "source",
     "collection": "an output to the recipient in the vault's own transactions, whenever at least 10,000 sat is due (the amount due is carried in the vault marker until then)",
-    "networkFee": "taken from the user's amount at a fee rate the signers check against their own nodes (at most 1.5 times the node's estimate, never above 200 sat/vB): a swept deposit pays fee rate x 574 vbytes (not swept while that exceeds 10% of it; refundable meanwhile), a release fee rate x 402 vbytes, a refund fee rate x 605 vbytes. The smallest burn (0.001 BTC) still pays out at 200 sat/vB."
+    "networkFee": "taken from the user's amount at a fee rate the signers check against their own nodes (at most 1.5 times the node's estimate, never above 200 sat/vB): a swept deposit pays fee rate x 574 vbytes (not swept while that exceeds 10% of it; refundable meanwhile), a release fee rate x 402 vbytes, a refund fee rate x 605 vbytes. On an exit the burner names the highest fee rate it accepts (1 to 200 sat/vB): the release is never charged above it, so the miner charge is at most that rate x 402 sat and is known before the burn (router.quote); the exit waits while the market is above it. The smallest burn (0.001 BTC) still pays out at 200 sat/vB."
   },
   "finality": {
     "rule": "A deposit is credited after the vault has swept it (2 confirmations) and the sweep has 6 confirmations, plus one more confirmation for every BTC swept since, up to 144.",
@@ -105,12 +105,13 @@
     ]
   },
   "release": {
-    "l2Function": "BitcoinBurnRouter.burnTo(uint64 amount, string bitcoinAddress), after approve(router, amount) on the token",
-    "recipientEncoding": "a lowercase P2WPKH address string (bc1q..., 42 characters); the router checks prefix, checksum and witness version before it burns",
+    "l2Function": "BitcoinBurnRouter.burnTo(uint64 amount, string bitcoinAddress, uint16 maxFeeRate), after approve(router, amount) on the token; router address TBD-deploy, runtime code keccak TBD-deploy (pinned by every signer)",
+    "recipientEncoding": "a lowercase P2WPKH address string (bc1q..., 42 characters); the router checks prefix, checksum and witness version before it burns. maxFeeRate is the highest fee rate in sat/vB (1 to 200) the payout may be charged; the router refuses a burn whose payout would be dust at that rate",
     "typicalSeconds": 3600,
     "paysAsset": "BTC to that P2WPKH address: the burned amount less 0.05% and the miner charge",
     "notes": [
-      "burn through the router. A burn made directly on the token (burn(uint64,address)) is not paid blind: its burner signs a claim naming a bc1q address, or it waits 3 days and the 20 bytes it names are paid",
+      "burn through the router. A burn made directly on the token (burn(uint64,address)) is NEVER paid to the 20 bytes it names and there is no timeout: it is paid only after the account that burned sends claimDirectBurn(uint64 burnNonce, string bitcoinAddress, uint16 maxFeeRate) to the router (a contract account can make that call). Until then its coins stay in the vault and the reserves report lists it as an unclaimed direct burn",
+      "an exit waits while the Bitcoin fee market is above the maxFeeRate its burner named; the page should propose the current estimate with a margin and show router.quote(amount, maxFeeRate) as the least the user receives",
       "a burn above 0.05 BTC waits 12 hours",
       "at most 0.1 BTC leaves the vault in any 24 hours",
       "a release stuck at a low fee rate is replaced by one with a higher fee rate; the higher miner charge comes out of the payout",

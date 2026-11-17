@@ -86,9 +86,10 @@ inputs   [0] thread tip   [1..] deposits swept   [..] deposits refunded   [..] s
 outputs  [0] new thread   [1] OP_RETURN marker   [2..] one P2WPKH payout per burn, by nonce   [..] refunds   [last] owner fee
 ```
 
-The marker (at most 80 bytes) is the vault's state after the transaction: next deposit nonce, the set of paid burn
-nonces (a base plus a bitmap of the next 328), sats owed to L2 holders, fee sats due to the owner, and the fee rate
-the transaction charged.
+The marker (at most 80 bytes) is the vault's state after the transaction: next deposit nonce, the set of settled burn
+nonces (a base plus a bitmap of the next 320), sats owed for L2 value, fee sats due to the owner, the fee rate the
+transaction charged, and one operations byte: whether the transaction **sets burns aside** (and up to which nonce)
+and which burns set aside earlier it pays now (**late payments**, at most four). Section 4a.
 
 - **Deposit nonces are the sweep order.** The L2 token credits mints in nonce order and binds the nonce into the
   deposit id; on Ethereum the vault contract assigns the nonce. Here the Bitcoin chain does: input position in the
@@ -106,6 +107,38 @@ the transaction charged.
   (the swept scripts reveal the recipients) and requires it to be the builder's output. The reserves monitor and
   every tool do this from the anchor on every run; a transaction outside the rules stops them all (`Held`).
 - Burns are paid in any order (the bitmap), so a delayed large release does not block later small ones (rehearsal C4).
+
+## 4a. Burns that are not paid now: set aside, never lost, never blocking
+
+Two kinds of burn can wait without any bound: a burn made directly on the token that its burner never claims
+(section 9: it is **never** paid without a claim), and a burn whose burner named a fee ceiling the market stays above
+(section 6). In round 16 the marker's window made every such burn a brake: burns more than 328 nonces later waited
+with it. With no timeout left, one unclaimed minimum burn (which its maker can always claim back) would have been a
+free, permanent stop of every exit. So the rules can **set a burn aside**:
+
+- A vault transaction may name a mark T (`aside_through`): every burn nonce up to T that the thread has not settled
+  is set aside. In the marker those nonces now count as settled, so the base and the window move on. **Nobody is
+  paid**, no output is created for them, and `liabilities` does not fall: the coins stay in the vault, owed.
+- The set of burns set aside and still unpaid is thread state: it is rebuilt by `replay_tx` from the markers of the
+  whole thread (`aside_through` adds, `late` removes), exactly as the deposit ledger is. `btc_policy.burn_paid`
+  answers "was this burn paid" from the marker and that set; no tool reads the marker alone for it.
+- A burn set aside is paid later like any burn, as a **late payment**: the same checks, the same charge, an output
+  in the same position rule (ascending nonce), and its nonce in the marker's `late` list (at most four per
+  transaction, because each takes 8 of the marker's 80 bytes). It is single-use by consensus like every payment:
+  two transactions paying it spend the same thread output, and after the first the replayed set no longer holds it.
+- What a signer requires before it signs a set-aside (`btc_signer.py` 4c): T is above this signer's own burn base;
+  the proposal names exactly the unsettled burns up to T; each is a burn finalized on the L2 the signer verified;
+  and each **cannot be paid in this transaction**: it is a direct burn without a claim on the router, or the fee
+  rate of this transaction is above the ceiling its burner named. A burn that can be paid may not be set aside
+  (rehearsal K7, L3). A transaction that only sets aside pays no miner charge and is refused by the pool rule, so a
+  set-aside always rides with a paying item.
+- Who can cause it and what it costs: a relayer could set aside a burn whose ceiling lies between the market and
+  the top of the signers' band by proposing a rate above it; that burn is not harmed (it is paid as soon as a
+  transaction at or below its ceiling is made), it only moves from the 40-per-transaction queue to the
+  4-per-transaction one. Nothing a burner or a relayer does can make another burn wait for it.
+
+Rehearsal K7, K8, L3, L4; unit tests `SetAside` (including a 400-step property test: books, conservation, replay
+equality, no burn paid twice).
 
 ## 5. Confirmation depth and reorganisations
 
@@ -142,17 +175,33 @@ credited forgery, and needs the owner's settlement.
   (`build_vault_tx` refuses one that would), a stray must pay for its own input, and the owner's fees due are never
   part of the pool. Whoever relays cannot spend the pool on miners (rehearsal S2 to S4).
 - **Who sets the fee rate.** The relayer proposes it; every signer refuses a rate above 1.5 times its own node's
-  estimate for two blocks, and above the policy ceiling `maxFeerate` (200 sat/vB). A mainnet signer whose node has no
-  estimate signs nothing. So a relayer cannot make users overpay the market (rehearsal I2).
-- **Exits always land.** A burn has no percentage cap: it is paid at whatever rate the signers accept. The token's
-  `minBurn` (0.001 BTC) is checked at deployment against the ceiling: at 200 sat/vB the smallest burn still pays out
-  `100,000 - 50 - 200 x 402 = 19,550 sat`. By arithmetic it would clear dust up to 247 sat/vB; above the 200 ceiling
-  no vault transaction is signed at a higher rate, it is signed at 200 and waits in the mempool. Cost at ordinary
-  rates: 5 sat/vB takes 2,010 sat of a release, 20 sat/vB 8,040, 50 sat/vB 20,100.
+  estimate, and above the policy ceiling `maxFeerate` (200 sat/vB). The estimate is `estimatesmartfee 2 economical`:
+  target and mode are pinned in `btc_signer.py` (`ESTIMATE_TARGET`, `ESTIMATE_MODE`), not left to the node's default,
+  which changed between Bitcoin Core releases and can be changed by a start-up option; `economical` follows a falling
+  market sooner, and since the band is a ceiling on what users pay, the tighter estimate is the safe side. A mainnet
+  signer whose node has no estimate signs nothing, and `btc_signer.py fee-status` reports it (exit 2, an alert line)
+  so the operator's monitor sees each such signer before three of them stop the vault. So a relayer cannot make users
+  overpay the market (rehearsal I2, N3).
+- **The burner bounds its own miner charge.** `BitcoinBurnRouter.burnTo(amount, address, maxFeeRate)` records the
+  highest fee rate (sat/vB, 1 to 200) the burner accepts; a direct burn's claim names one too. Every signer reads it
+  from the pinned router at the finalized L2 block and refuses to pay the burn in a transaction above it: the burn
+  waits (and is set aside if it would hold others, section 4a). The charge of a release is `fee rate x 402`, so a
+  burner who names 10 sat/vB pays at most 4,020 sat and knows it before burning; `router.quote(amount, rate)` is the
+  vault's own formula. The router refuses a burn whose payout would be dust at the rate it names, so every burn it
+  accepts is payable at every rate up to its ceiling. Whoever relays still chooses the moment, but only inside the
+  burner's bound (rehearsal L1 to L4).
+- **Exits land at any rate up to the ceiling the burner accepts.** A burn has no percentage cap. The token's
+  `minBurn` (0.001 BTC) is checked at deployment against the policy ceiling: at 200 sat/vB the smallest burn still
+  pays out `100,000 - 50 - 200 x 402 = 19,550 sat` (a burner who does not want that names a lower ceiling and waits).
+  Above the 200 ceiling no vault transaction is signed at a higher rate, it is signed at 200 and waits in the
+  mempool. Cost at ordinary rates: 5 sat/vB takes 2,010 sat of a release, 20 sat/vB 8,040, 50 sat/vB 20,100.
 - **Deposits keep a cap.** A deposit is not swept while its charge exceeds 10% of it (the minimum deposit sweeps up
   to 17 sat/vB); it waits and is refundable meanwhile.
-- **Fee pool.** Seeded by the anchor; charges above the fee paid stay in the thread up to `poolTargetSats`; anything
-  above is added to the owner's fees due (revenue flows; nothing is burned).
+- **Fee pool.** Seeded by the anchor with **exactly** `poolTargetSats` (200,000 sat): `btc_deploy.py vault` refuses
+  any other amount and every tool holds on such a vault (`VaultView.load`), because the pool rule only forbids
+  falling below `min(pool before, target)`: an anchor above the target could lose the difference to miners once
+  (review 325, 2P-6). Charges above the fee paid stay in the thread up to the target; anything above is added to the
+  owner's fees due (revenue flows; nothing is burned).
 - **Bridge fee**: 5 bps of every deposit and every release, accrued in the marker and paid as an output to the
   owner's address in the next vault transaction once at least `ownerPayoutMinSats` (10,000, far above dust) is due.
 - **Stuck release: replace-by-fee.** Every vault transaction signals BIP125. The relayer proposes the same items on
@@ -177,14 +226,15 @@ credited forgery, and needs the owner's settlement.
 | Release delay (`releaseDelay`, 0 at launch) | `largeReleaseSats` / `largeReleaseDelaySeconds`: a large burn waits 12 h from its L2 timestamp | **Signers** |
 | Vault guardians pause deposits and releases for 72 h | The token's guardian pause: while `paused()` no signer signs any vault transaction (rehearsal C1). One guardian set, not two | L2 token for mints; **signers** for the vault |
 | `minDeposit`, deposit and release fee, immutable `feeRecipient`, `sweepFees()` | `minDepositSats`, `maxDepositSats`, 5 + 5 bps, the owner's address inside the route, paid as an output | **Signers** (and the route binds the values) |
-| A release pays the recipient the burn names | Burns go through `BitcoinBurnRouter` (section 9): the destination is a checked P2WPKH address. A burn made directly on the token is paid to the address its burner signs a claim for, or after 3 days to the 20 bytes it names | L2 contract for the check; **signers** for the rule |
+| A release pays the recipient the burn names | Burns go through `BitcoinBurnRouter` (section 9): the destination is a checked P2WPKH address. A burn made directly on the token is paid only to the address its burner claims on the router, never to the 20 bytes it names; there is no timeout | L2 contract for the check and the claim; **signers** for the rule |
+| No fee choice for the recipient (gas is the relayer's) | The burner names the highest fee rate its payout may be charged; the burn waits above it | L2 contract records it; **signers** honour it |
 | No refund of a deposit (a deposit is credited or reverts) | Refund of any unswept deposit at its L2 recipient's signed request (section 3a) | **Signers** |
 | Verifier switch to a light client; `RecoverableReleaseVerifier` | None on the Bitcoin side. The token's mint switch exists in the bytecode and stays unused: there is no Bitcoin mint verifier | - |
 | No owner, no setter, no upgrade | The policy hash, keys, anchor and fee address are inside the token's `sourceRoute`; a change is a new vault and a new token | L2 token binding |
 
 What an auditor must accept as signer-enforced: the release window, the large-release delay, the pause on the
-Bitcoin side, the mint-chain check, the fee split, the fee-rate band, the authorisation of refunds and the
-destination of direct burns. Each is a deterministic function of the
+Bitcoin side, the mint-chain check, the fee split, the fee-rate band, the burner's fee ceiling, the authorisation of
+refunds, the destination of direct burns and which burns are set aside. Each is a deterministic function of the
 two chains, so any party can recompute what the signers should have done, and a violation needs five signers. But a
 violation is not prevented by any script, and unlike on Ethereum the guardians cannot stop a five-key spend.
 
@@ -197,9 +247,21 @@ vault (the thread output)  ==  owed to holders + fees due + fee pool            
 owed to holders            ==  (L2 supply + finalized unpaid burns + swept-not-yet-minted) x 100 sat
 ```
 
-Both hold exactly, to the sat, at every point of the rehearsal (A17, E9, F4). `deficit` if the vault owes less than
-supply plus unpaid burns or paid a burn the L2 does not have; `held` if the token's mint chain is not the ledger's or
-the thread left the rules. `guard` lists queued mints without a ledger deposit, with the cancel call.
+Both hold exactly, to the sat, at every point of the rehearsal (A17, E9, F4, K6 to K8, L3, L4). `deficit` if the
+vault owes less than supply plus unpaid burns, paid a burn the L2 does not have, or paid a burn anywhere but the key
+hash the router burned with (router burn) or the key hash its burner claimed on the router (direct burn): both are L2
+state at the finalized block, so every payout's destination is now compared exactly. `held` if the token's mint
+chain is not the ledger's, the thread left the rules, or the thread set aside a burn the L2 does not have. `guard`
+lists queued mints without a ledger deposit, with the cancel call.
+
+**What is never paid, and where it shows.** A direct burn nobody claims is never paid. Its bBTC has left the L2
+supply; its coins stay in the vault. The books still balance because an unpaid burn is still owed: it is inside
+`unpaid_burn_units` and `owed_sats`, and the line names it: `unclaimed_direct_burns` (count, units, sats, nonces, and
+the sentence why), `set_aside_burns` (every burn set aside and unpaid, with its reason: unclaimed, or the fee ceiling
+its burner set) and `set_aside_count`. `btc_relay.py burn status [--nonce N]` shows every finalized burn as `paid`
+(with the transaction), `payable`, `waiting-fee-rate` or `unclaimed` (with the 20 bytes that are not paid and the
+reason), and totals what is never paid until claimed. The vault therefore holds, by rule and visibly, more than the
+L2 supply needs by exactly the unclaimed amount; nobody can take it but its burner, by claiming (rehearsal K6).
 
 ## 9. bBTC on the L2: does `BridgedStablecoinV3` fit byte-identical?
 
@@ -208,7 +270,7 @@ Yes, with two consequences that constructor arguments do not cover.
 | Point | Finding |
 |---|---|
 | Decimals | **Not an argument.** `BridgedStablecoinV2`'s constructor passes the literal 6. The byte-identical token therefore has 6 decimals: one unit is 100 sat, 1 bBTC = 1 BTC, smallest amount 0.000001 BTC. Chosen over a copy of the contract with 8 decimals because a copy is new bytecode: a new audit identity, a new DEX gate pin, and a second token line to keep in step. Cost: credits round down to 100 sat (the remainder joins the fee pool) and integrators must read `decimals()`. An 8-decimal variant is one changed literal in a copied V2/V3 pair if the owner prefers it |
-| Burn recipient | `burn(uint64, address)` carries any 20 bytes; on bUSDC they are the user's Ethereum address, and here they would be paid as a Bitcoin key hash nobody may hold. So exits go through **`contracts/btc/BitcoinBurnRouter.sol`** (new periphery, no owner, holds nothing): `burnTo(amount, "bc1q…")` checks prefix, bech32 checksum, witness version 0 and the 20-byte program, then burns with exactly that program; an Ethereum address string reverts and burns nothing. Signers pin the router's code hash and pay a router burn as named. A burn made **directly** on the token is not paid blind: its burner signs a claim naming a Bitcoin address (which rescues a mistaken burn), or, unclaimed for `directBurnClaimSeconds` (3 days), the 20 bytes it names are paid (so a contract that burned on purpose is not stuck, and one unclaimed burn cannot hold the marker window for longer). Only P2WPKH can be named |
+| Burn recipient | `burn(uint64, address)` carries any 20 bytes; on bUSDC they are the user's Ethereum address, and here they would be paid as a Bitcoin key hash nobody may hold. So exits go through **`contracts/btc/BitcoinBurnRouter.sol`** (new periphery, no owner, holds nothing): `burnTo(amount, "bc1q…", maxFeeRate)` checks prefix, bech32 checksum, witness version 0 and the 20-byte program, then burns with exactly that program and records the burner's fee ceiling; an Ethereum address string reverts and burns nothing. Signers pin the router's code hash and pay a router burn as named. A burn made **directly** on the token is **never paid to the 20 bytes it names, and there is no timeout** (section 9a): it is paid only after the account that burned calls `claimDirectBurn(nonce, "bc1q…", maxFeeRate)` on the router. Only P2WPKH can be named |
 | Issuer blacklist | The token has none (USDC's is on the issuer's own contract). Nothing differs |
 | Name, symbol, caps, committee, guardians, delays | Constructor arguments |
 | `sourceChainId` | The Bitcoin genesis block hash as an integer (no EVM chain id can collide) |
@@ -217,13 +279,51 @@ Yes, with two consequences that constructor arguments do not cover.
 | EIP-712 domain name | The literal "Bloch Bridged Stablecoin". Only the signer daemons sign under it; cosmetic |
 | `refillPerSecond` | An integer of units: the slowest refill is 0.0864 BTC a day |
 
+## 9a. Direct burns: claim required, no timeout (review 325, R325-BTC-2P-1)
+
+Round 16 paid an unclaimed direct burn to the 20 bytes it named after three days. Those bytes are unchecked; a
+script or contract written for bUSDC passes an Ethereum address there, and the coins would go to a key hash nobody
+holds. The rule now:
+
+| Burner | Rule | Why |
+|---|---|---|
+| An account with a key (no code) | Never paid without a claim. No timeout | It can always claim. Decided by the coordinator |
+| A contract | The same: never paid without a claim. No timeout | Decided here; reasons below |
+
+The claim is **a transaction on the L2, not a signature**: `BitcoinBurnRouter.claimDirectBurn(burnNonce, address,
+maxFeeRate)`, stored under `msg.sender`, set once. Signers read `claimOf(from, nonce)` on the pinned router at the
+finalized block of the L2 they verified, where `from` is the burner in the token's own `Burned` log; a claim made by
+anyone else sits under another address and is never read for that burn (rehearsal K3).
+
+Why a transaction and not the signed message of round 16: (1) a contract account (a Safe, a smart account) cannot
+sign a personal message but can make a call, so one rule covers both kinds of burner; (2) the claim becomes L2 state
+at a finalized block, so all signers see the same claim or none, and the reserves monitor verifies every direct
+burn's destination exactly (round 16: "not on either chain"); (3) no off-line intake of signatures by the relayer.
+The signed-claim path is removed.
+
+Why no timeout for contracts either (the alternative was to keep the three days for them):
+- A timeout pays unchecked bytes. For a contract that passed its own or another Ethereum address, that turns a
+  recoverable mistake into a final loss; without a timeout the coins stay in the vault, on the books, and the
+  contract (or its owners, through it) can claim at any time.
+- The realistic contract burners are accounts that can make arbitrary calls (Safes, smart accounts): they can
+  claim. A fixed-logic integration that burns must call the router anyway (cross-area rule of round 16); if one
+  calls `token.burn` and cannot call the router, its burn is stuck in the vault, visibly, instead of being paid to
+  bytes that are only right if the integration happened to pass a key hash. That case is the cost of this choice.
+- "Has code" is not a stable property (a counterfactual account has none until deployed; code can be read at
+  different blocks), so a rule that depends on it gives two signers two answers. One rule needs no such test.
+- The reason given in round 16 for the timeout, that an unclaimed burn must not hold the marker window, is solved
+  where it belongs: such a burn is set aside (section 4a).
+
+What is never paid: a direct burn whose burner never claims. Stated in `burn status`, in the reserves line and in
+`bridge.network.json`.
+
 ## 10. Rehearsal and tests
 
 `tools/signatario-btc/rehearse_regtest.py`: Bitcoin Core 31.2 regtest with `-acceptnonstdtxn=0` (mainnet relay
 policy; release tarball sha256 `2f38996afaa74dfa469a23bf4727887133dfc09784df1f21ddf1c74d0dc82300`, `SHA256SUMS` with
 two builders' PGP signatures) and anvil 1.7.1 with the token deployed from the frozen creation code and the router
 over it. Seven operators with two throwaway keys each, in separate `cast` keystores (L2 mint key, Bitcoin vault key);
-the mint side is the unchanged `signatario.py`. 73 checks:
+the mint side is the unchanged `signatario.py`. 85 checks:
 
 - S: dust at the thread address from legacy, nested-segwit, segwit and taproot inputs, a fake marker and a coinbase,
   sent first and left there for the whole run; pool-drain attempts.
@@ -232,19 +332,32 @@ the mint side is the unchanged `signatario.py`. 73 checks:
   larger amount, a burn that does not exist, four signatures, an outsider's signature refused by Bitcoin itself).
 - C: guardian pause; large-release delay; window. D: a deposit double-spent before confirmation.
 - E: a reorganisation after attestation. F: a mint forged by five stolen mint keys; strays; proof of reserves.
-- I: the fee band and the smallest burn at the highest accepted rate. J: refunds. K: router, direct burn, claims.
+- I: the fee band and the smallest burn at the highest accepted rate. J: refunds.
+- K: the router; a direct burn naming an Ethereum address is not paid, by the relayer or by a hand-made proposal;
+  a claim by another account changes nothing; the burner's claim is honoured only once final on the L2; an unclaimed
+  direct burn is not paid after four days; `burn status` and the reserves state it; it is set aside by the next
+  exit; three weeks later it is claimed and paid late, once; a contract account burns directly, is not paid, claims
+  by a call and is paid.
+- L: the router refuses a burn that would be dust at its own ceiling; a burn capped at 2 sat/vB is not paid at 5 by
+  relayer or signers, is set aside while another exit is paid at 5, cannot be set aside at a rate where it is
+  payable, and is paid at 2.
+- N: an anchor that is not exactly the target is refused; the router's deployed numbers equal the vault's; the
+  fee-status line.
 - G: the known limit (five stolen vault keys spend the vault: detected, not prevented).
 
 Unit and property tests: `python3 -m unittest test_btc_policy test_btc_deploy test_btc_signer` in
 `tools/signatario-btc/` (parser fuzz, pool invariant, refunds, reviewer 325's demonstrations turned around).
-Contract tests: `forge test --offline --match-path solidity-tests/BitcoinBurnRouter.t.sol`.
+Contract tests: `forge test --offline --match-path solidity-tests/BitcoinBurnRouter.t.sol` (12, one of them a fuzz:
+every burn the router accepts pays at least dust at its own ceiling).
 
 ## 11. Audit scope note
 
 New Python, standard library only: `btc_core.py` (primitives, 603 lines), `btc_policy.py` (the rules, 404),
-`btc_vault.py` (node view and replay, 278), `btc_signer.py` (349), `btc_half.py` (114), `btc_l2.py` (101),
-`btc_relay.py` (205), `btc_reservas.py` (158), `btc_deploy.py` (278): 2,490 lines. Tests 600, rehearsal 962.
-New Solidity: `contracts/btc/BitcoinBurnRouter.sol` (104 lines), its test (104).
+`btc_vault.py` (node view and replay), `btc_signer.py`, `btc_half.py`, `btc_l2.py`, `btc_relay.py`,
+`btc_reservas.py`, `btc_deploy.py`; tests and the rehearsal beside them. New Solidity:
+`contracts/btc/BitcoinBurnRouter.sol`, its test, and a rehearsal helper `solidity-tests/BitcoinRehearsalAccount.sol`
+(a contract account; never deployed). Line counts: `wc -l` at the audited commit (the report of each round records
+them).
 
 Reused byte-identical: `BridgedStablecoinV3` and its parents (the token); `tools/signatario-stable/signatario.py`
 (mint attestation, combine, and the L2 finality and burn decoding that `btc_signer.py` imports: `own_l2`,
@@ -259,15 +372,16 @@ pool invariant, the marker; (2) `btc_signer.py` checks and that nothing from the
 including refund requests and burn claims; (3) the pure-Python secp256k1, DER and BIP143 code (verification and
 recovery are in the trust path; signing is test-only); (4) `ledger_prefix_problem` and the reorganisation argument of
 section 5; (5) `VaultView._confirmed_tip` and `parse_tx` on hostile input; (6) the charge sizes and their rounding;
-(7) `BitcoinBurnRouter.keyHashOf`.
+(7) `BitcoinBurnRouter.keyHashOf`, `quote` against `release_payout`, and the two mappings the signers read; (8) the
+marker's operations byte and the set-aside state in `build_vault_tx` / `replay_tx` (section 4a): that a burn set aside
+is never counted as paid, is payable exactly once, and that no encoding of the marker has two readings.
 
 ## 12. Known gaps and known issues
 
 1. Five keys move the vault and every unswept deposit (section 1). Not solvable by script on today's Bitcoin.
 2. Releases only to P2WPKH.
-3. Refund requests and burn claims are checked by the signers and are not on either chain; the reserves monitor
-   lists direct burns paid to a claimed address but cannot verify the claim (review 325, BTC-6: router burns are
-   compared exactly).
+3. Refund requests are checked by the signers and are not on either chain. Burn claims are now L2 state: the
+   reserves monitor compares every payout's destination exactly (router burns and claimed direct burns).
 4. Transaction pinning: a recipient can attach a large low-fee child to an unconfirmed payout and make the
    replacement expensive (BIP125 rule 3). It delays one batch; it cannot redirect coins. Version-3 (TRUC)
    transactions would close it and were not tried.
@@ -282,11 +396,30 @@ section 5; (5) `VaultView._confirmed_tip` and `parse_tx` on hostile input; (6) t
 9. The sweep takes deposits up to the cap at once while the token mints at most its bucket per refill period, so
    swept coins can wait days for their credit, and one party can fill the cap and the queue for about 0.1% in fees
    (BTC-9). A swept deposit is no longer refundable. The bridge page should show the queue.
-10. The marker holds 328 burn nonces above the oldest unpaid one. Burns never wait for fees now, but a burn can
-    still wait up to 12 h (large), a day (window) or 3 days (an unclaimed direct burn); burns more than 328 nonces
-    later wait with it.
+10. The marker holds 320 burn nonces above the oldest unsettled one (fewer in a transaction that sets aside or pays
+    late). A burn can wait up to 12 h (large) or a day (window) and cannot be set aside for that; burns more than
+    320 nonces later wait with it. Burns that wait without bound (unclaimed, under a fee ceiling) are set aside.
 11. The fee band was exercised with the regtest node's estimate; a mainnet fee market was not.
-12. No independent review of the changes made after review 325.
+12. Round 17 (set-aside, on-chain claim, fee ceiling) has had no independent review yet. Its limits: a
+    fixed-logic contract that burns directly and cannot call the router is never paid (section 9a); late payments
+    are four per transaction, so a large backlog of burns that were set aside and became payable drains at four per
+    vault transaction; a burner who names a fee ceiling the market never returns to waits until it does (the page
+    must say so and suggest the current estimate); the claim is set once, so a burner who claims a wrong but
+    well-formed address has no second try; every signer verifies each burn it sets aside on its rebuilt L2 (up to
+    512 per transaction), not measured at that size.
+13. The router is periphery: it can be replaced by a new one (new address, new code hash in every signer config)
+    without touching the token or the vault. Claims and fee ceilings recorded in the old router are then not read:
+    a replacement needs a migration rule that this line does not have.
+
+## 14. Review 325 (second pass) and what changed in round 17
+
+| Finding | Change |
+|---|---|
+| R325-BTC-2P-1 Low: an unclaimed direct burn was paid blind after 3 days | Never paid without a claim, for any burner; the claim is a router transaction; no timeout; set aside so it holds nobody (sections 4a, 9a). Rehearsal K2 to K9 |
+| R325-BTC-2P-2 Low: a burner could not bound the miner charge | `burnTo` and `claimDirectBurn` take the highest fee rate; signers honour it; the router checks the amount against it (section 6). Rehearsal L1 to L4 |
+| R325-BTC-2P-3 Info: estimate mode, signer without an estimate | Mode and target pinned in the signer; `fee-status` alert line (section 6). Rehearsal N3 |
+| R325-BTC-2P-5 Info: floating pragma | `pragma solidity 0.8.24;` |
+| R325-BTC-2P-6 Info: an anchor above the target | Enforced: deploy tool and every tool require exactly `poolTargetSats` (section 6). Rehearsal N1, N2 |
 
 ## 13. Review 325 (first pass) and what changed
 
