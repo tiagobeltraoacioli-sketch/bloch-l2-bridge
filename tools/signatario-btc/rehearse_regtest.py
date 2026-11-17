@@ -916,6 +916,13 @@ def run(rig):
     r = rig.vault_tx(1, refunds=[forged_request], tag='j-forged')
     check('J1 a refund not signed by the L2 address the deposit names is refused by every signer',
           all_refuse(r['signs'], 'not signed by the L2 address'), reasons(r['signs']) or r['propose'])
+    # option-shaped "signatures" (the defect class of R331-XLM-1): never an argument of a command, refused in process
+    shaped = []
+    for sig in ('--help', '-h' + 'a' * 130, forged_request[4][2:], forged_request[4] + '00'):
+        r = rig.vault_tx(1, refunds=[(d_huge[0], d_huge[1], bob, forged_request[3], sig)], tag='j-shaped')
+        shaped.append(all_refuse(r['signs'], 'refund request is malformed'))
+    check('J1b a refund request whose signature is `--help`, `-h` plus 130 characters, hex without 0x or one byte too long is '
+          'refused by every signer as malformed', all(shaped), shaped)
     req_small, to_small = refund_request(d_small, bob, bob_k)
     req_huge, to_huge = refund_request(d_huge, bob, bob_k)
     before = rig.status()

@@ -617,9 +617,19 @@ def personal_digest(text):
 
 
 def signer_of(text, signature_hex):
-    """The Ethereum address that signed `text` as a personal message (`cast wallet sign TEXT`, any wallet's personal_sign)."""
-    sig = bytes.fromhex(str(signature_hex).removeprefix('0x'))
-    return eth_address(recover(personal_digest(text), *parse_rsv(sig)))
+    """The Ethereum address that signed `text` as a personal message (`cast wallet sign TEXT`, any wallet's personal_sign).
+
+    Verified HERE, in process, never through a command-line tool: a request's signature is text from a stranger, and a
+    tool's exit code can be made 0 by text that is an option (`--help`, `-h...`) instead of a signature. The parsing
+    is strict: exactly `0x` and 130 hex characters (nothing else, no spaces), v 27 or 28, 0 < r < n, and s in the
+    lower half (EIP-2): one signature has one encoding. Anything else raises BadKey."""
+    if not isinstance(signature_hex, str) or len(signature_hex) != 132 or signature_hex[:2] != '0x' \
+            or any(ch not in '0123456789abcdefABCDEF' for ch in signature_hex[2:]):
+        raise BadKey('a signature is 0x and 130 hex characters (r || s || v)')
+    r, s, v = parse_rsv(bytes.fromhex(signature_hex[2:]))
+    if v not in (27, 28) or not 0 < r < N or not 0 < s <= N // 2:
+        raise BadKey('a signature needs v 27 or 28 and a low s')
+    return eth_address(recover(personal_digest(text), r, s, v))
 
 
 def refund_text(vault_id, txid, vout, bitcoin_address):

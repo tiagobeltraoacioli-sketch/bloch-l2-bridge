@@ -107,6 +107,23 @@ def verified_burns(ctx, refs):
         raise
 
 
+def refund_destination(vault, txid, vout, recipient, request):
+    """The 20-byte key hash an unswept deposit is refunded to, if `request` (untrusted: it reaches the relayer from
+    anyone) is a refund request signed by the L2 address the deposit names; refuses otherwise. Everything is checked
+    in process (btc_core.signer_of, btc_core.p2wpkh_hash): no field of the request is ever a command-line argument."""
+    try:
+        to = request.get('to', '')
+        if not isinstance(to, str):
+            raise ValueError('address')
+        dest = c.p2wpkh_hash(vault.network, to)
+        signer = c.signer_of(c.refund_text(vault.vault_id, txid, vout, to), request.get('signature', ''))
+    except (c.BadAddress, c.BadKey, ValueError, KeyError, TypeError, AttributeError):
+        refuse('a refund request is malformed: it needs a P2WPKH address of this network and a signature')
+    if signer != '0x' + recipient.hex():
+        refuse('a refund is not signed by the L2 address the deposit names', outpoint=f'{txid}:{vout}', signer=signer)
+    return dest
+
+
 def journal_load(path):
     return json.loads(Path(path).read_text()) if Path(path).exists() else {'tips': {}}
 
@@ -245,13 +262,7 @@ def cmd_sign(cfg, args):
             refuse('a refund outpoint is not a confirmed unspent output of this chain', outpoint=f'{txid}:{vout}')
         if got[2] != c.p2wsh(vault.deposit_script(recipient)):
             refuse('a refund outpoint is not the deposit address of the recipient named', outpoint=f'{txid}:{vout}')
-        try:
-            dest = c.p2wpkh_hash(vault.network, d.get('to', ''))
-            signer = c.signer_of(c.refund_text(vault.vault_id, txid, vout, d['to']), d.get('signature', ''))
-        except (c.BadAddress, c.BadKey, ValueError, KeyError):
-            refuse('a refund request is malformed: it needs a P2WPKH address of this network and a signature')
-        if signer != '0x' + recipient.hex():
-            refuse('a refund is not signed by the L2 address the deposit names', outpoint=f'{txid}:{vout}', signer=signer)
+        dest = refund_destination(vault, txid, vout, recipient, d)
         refunds.append({'txid': txid, 'vout': vout, 'value': got[0], 'recipient': recipient, 'dest': dest})
 
     # 4. burns paid, and burns set aside

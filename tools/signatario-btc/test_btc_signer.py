@@ -59,6 +59,85 @@ class Requests(unittest.TestCase):
                 c.p2wpkh_hash('bitcoin-mainnet', bad)
 
 
+class OptionShapedInputs(unittest.TestCase):
+    """Round 17, the defect class of R331-XLM-1 (a claim "signed" with `--help` passed a CLI verifier's exit code):
+    every signature a stranger can hand to the Bitcoin tools is verified in process, with strict parsing."""
+    TXID, TO = 'ab' * 32, 'bcrt1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22tkfggv'
+
+    def setUp(self):
+        self.v = t.vault()
+        self.priv = t.PRIVS[0]
+        self.who = bytes.fromhex(c.eth_address(c.pubkey(self.priv))[2:])
+        self.text = c.refund_text(self.v.vault_id, self.TXID, 1, self.TO)
+        r, s, v = c.sign(c.personal_digest(self.text), self.priv)
+        self.r, self.s, self.vv = r, s, v
+        self.good = '0x' + (r.to_bytes(32, 'big') + s.to_bytes(32, 'big') + bytes([27 + v])).hex()
+
+    def refused(self, request, word='malformed'):
+        import contextlib
+        import io
+        import json
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            btc_signer.refund_destination(self.v, self.TXID, 1, self.who, request)
+        self.assertIn(word, json.loads(out.getvalue())['reason'], request)
+
+    def test_the_honest_request_passes_and_names_the_signed_address(self):
+        dest = btc_signer.refund_destination(self.v, self.TXID, 1, self.who, {'to': self.TO, 'signature': self.good})
+        self.assertEqual(dest, c.p2wpkh_hash('bitcoin-regtest', self.TO))
+
+    def test_option_shaped_and_malformed_signatures_are_refused(self):
+        high_s = '0x' + (self.r.to_bytes(32, 'big') + (c.N - self.s).to_bytes(32, 'big') + bytes([28 - self.vv])).hex()
+        self.assertEqual(c.eth_address(c.recover(c.personal_digest(self.text), self.r, c.N - self.s, 1 - self.vv)),
+                         '0x' + self.who.hex())      # the high-s twin is a valid ECDSA signature of the same key ...
+        attacks = ['--help', '-h', '-h' + 'a' * 130, '-V' + 'a' * 130, '--no-hash', '--address', '--version', '', '0x', None, 0,
+                   ['--help'], {'x': 1}, self.good[2:], self.good + '00', self.good[:-2], ' ' + self.good, self.good + ' ',
+                   self.good[:10] + ' ' + self.good[11:], '0X' + self.good[2:], self.good[:-2] + '00', self.good[:-2] + '01',
+                   self.good[:-2] + '1d', '0x' + 'zz' * 65, '0x' + '00' * 65, '0x' + 'ff' * 65,
+                   '0x' + '00' * 32 + self.good[66:], self.good[:66] + '00' * 32 + self.good[-2:], high_s,   # ... and refused
+                   '$(touch /tmp/x)', '; id', '../../etc/passwd', 'a' * 132, '-' * 132]
+        for sig in attacks:
+            self.refused({'to': self.TO, 'signature': sig})
+        self.refused({'to': self.TO})                                   # no signature at all
+
+    def test_option_shaped_and_malformed_addresses_are_refused(self):
+        for to in ('--help', '-h', '', None, 0, ['x'], '0x' + self.who.hex(), 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+                   self.TO + ' ', '--to', 'bcrt1' + 'q' * 59):
+            self.refused({'to': to, 'signature': self.good})
+        # BIP173 allows an all-upper-case address; it is another text than the one signed, so it is not the recipient's request
+        self.refused({'to': self.TO.upper(), 'signature': self.good}, 'not signed by the L2 address')
+        for request in (None, [], 'x', 5):                              # not even an object
+            with self.assertRaises((SystemExit, AttributeError)):
+                import contextlib
+                import io
+                with contextlib.redirect_stdout(io.StringIO()):
+                    btc_signer.refund_destination(self.v, self.TXID, 1, self.who, request)
+
+    def test_a_valid_signature_of_another_key_or_another_text_is_not_the_recipient(self):
+        r, s, v = c.sign(c.personal_digest(self.text), t.PRIVS[1])
+        other = '0x' + (r.to_bytes(32, 'big') + s.to_bytes(32, 'big') + bytes([27 + v])).hex()
+        self.refused({'to': self.TO, 'signature': other}, 'not signed by the L2 address')
+        elsewhere = c.address_from_spk('bitcoin-regtest', c.p2wpkh(b'\x07' * 20))
+        self.refused({'to': elsewhere, 'signature': self.good}, 'not signed by the L2 address')   # the address is inside the text
+
+    def test_no_tool_of_the_route_decides_from_a_subprocess_exit_code_or_passes_request_text_to_a_command(self):
+        import re
+        from pathlib import Path
+        here = Path(btc_signer.__file__).resolve().parent
+        calls = {}
+        for f in sorted(here.glob('btc_*.py')):
+            src = f.read_text()
+            calls[f.name] = len(re.findall(r'subprocess\.(?:run|Popen|call|check_output)|os\.system|os\.popen', src))
+            self.assertNotIn('wallet\', \'verify', src)
+            self.assertNotIn("'verify', '--", src)
+        # the one subprocess of the route: the signer's own `cast wallet sign --no-hash` over a digest it computed, whose
+        # output is then verified in process against the operator's own public key
+        self.assertEqual({k: v for k, v in calls.items() if v}, {'btc_signer.py': 1})
+        src = (here / 'btc_signer.py').read_text()
+        self.assertIn("'0x' + digest.hex()], capture_output=True, text=True)", src)
+        self.assertIn("if c.recover(digest, r, s, v) != own_key:", src)
+
+
 class FakeRouterRpc:
     """Stands for the L2 RPC a btc_l2.Router reads: maxFeeRateOf(bytes32) and claimOf(address,uint64)."""
 
