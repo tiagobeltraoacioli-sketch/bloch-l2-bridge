@@ -108,11 +108,11 @@
         "basis": {
           "rule": "tools/signatario-tron/tron_deploy.py release_fee_rule; docs/BRIDGE-TRON-USDT.md section 5. Recompute with `tron_deploy.py fee --config THIS --node http://127.0.0.1:8090 --trx-usdt PRICE` at the ceremony",
           "measured": {
-            "releaseEnergyBase": 143793,
+            "releaseEnergyBase": 143973,
             "tokenTransferFreshBase": 29650,
             "tokenBalanceOfBase": 935,
             "releaseBytes": 1563,
-            "source": "rehearse_tron_producers.py on a private network of three stock java-tron 4.8.2.4 producers with the real TetherToken bytecode (agents/332-evidence/tron-producers-*.json): vault.release, 5-of-7 certificate, recipient that never held USDT: 164,977 energy of which 21,184 dynamic-energy penalty of the private chain; the token alone: transfer to a fresh address 29,650, balanceOf 935 (penalties excluded). The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
+            "source": "rehearse_tron_producers.py on a private network of three stock java-tron 4.8.2.4 producers, the vault built by TRON's own compiler (deployments/tron/vault-build.pin.json), the real TetherToken bytecode (agents/332-evidence/tron-producers-p*.json): vault.release with a 5-of-7 certificate to a recipient that never held USDT: 143,973 energy (143,905 for a second such recipient, 128,905 to a holder), 1,563 bytes; the token alone: transfer to a fresh address 29,650, balanceOf 935. A release calls the token five times: one transfer and four balanceOf. The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
           },
           "chain": {
             "energyFeeSun": 100,
@@ -122,7 +122,7 @@
           },
           "trxUsdtMicro": 305400,
           "priceSource": "TRXUSDT 0.3054 (api.binance.com ticker) and 0.305091 USD (api.coingecko.com), both read 2026-11-17 00:35 UTC",
-          "result": "257,319 energy x 100 sun + 1,563 bytes x 1,000 sun = 27.2949 TRX = 8.3359 USDT; x 1.5 = 12.504; rounded up: 13 USDT. l2MinBurn 65 USDT (the fee is 20% of it), minDeposit 66 USDT"
+          "result": "143,973 - 33,390 + 33,390 x 4.4 = 257,499 energy; x 100 sun + 1,563 bytes x 1,000 sun = 27.3129 TRX = 8.3414 USDT at 0.3054; x 1.5 = 12.512; rounded up: 13 USDT. l2MinBurn 65 USDT (the fee is 20% of it), minDeposit 66 USDT"
         }
       }
     }

@@ -280,7 +280,9 @@ def energies(net, amounts):
     check('E2b a deposit of 65 USDT (below the minimum of 66) is refused by the vault', low[0] is False, low)
     fresh, holder, fresh_again = (e[k]['energy_total'] if e[k] else 0 for k in done)
     check('E3 a release to an address that never held USDT costs more energy than one to a holder (a new storage slot in the '
-          'token), and two fresh recipients cost the same', fresh > holder > 0 and abs(fresh - fresh_again) <= 64, (fresh, holder, fresh_again))
+          'token: 15,000), and two fresh recipients cost the same within 0.1% (the very first release writes the vault\'s '
+          'own slots for the first time)', fresh > holder > 0 and 14_000 <= fresh_again - holder <= 16_000
+          and abs(fresh - fresh_again) * 1000 <= fresh, (fresh, holder, fresh_again))
     # the token's own calls alone (constant calls, head state): what the dynamic-energy penalty of mainnet multiplies
     alice = net.a['alice']
     token = {}

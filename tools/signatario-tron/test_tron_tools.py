@@ -962,10 +962,10 @@ def test_fee_rule():
     """Round 17 (coordinator decision): the fixed release fee is computed, not estimated, and the tool recomputes it."""
     basis = filled()['vault']['provenance']['fees']['basis']
     r = tron_deploy.release_fee_rule(basis)
-    check('fee rule: 143,793 measured - 33,390 in the token + 33,390 x 4.4 on mainnet = 257,319 energy; x 100 sun + 1,563 bytes x '
-          '1,000 sun = 27.2949 TRX; at 0.3054 = 8.335863 USDT; x 1.5 rounded up = 13 USDT; smallest exit 65 USDT',
+    check('fee rule: 143,973 measured - 33,390 in the token + 33,390 x 4.4 on mainnet = 257,499 energy; x 100 sun + 1,563 bytes x '
+          '1,000 sun = 27.3129 TRX; at 0.3054 = 8.341360 USDT; x 1.5 rounded up = 13 USDT; smallest exit 65 USDT',
           (r['energy'], r['energyInVault'], r['energyInToken'], r['costSun'], r['costUsdtUnits'], r['requiredFlatUnits'], r['minL2MinBurnUnits'])
-          == (257_319, 110_403, 146_916, 27_294_900, 8_335_863, 13_000_000, 65_000_000), r)
+          == (257_499, 110_583, 146_916, 27_312_900, 8_341_360, 13_000_000, 65_000_000), r)
     check('fee rule: it moves with each input: energy price 210 sun -> 26 USDT; TRX at 0.50 -> 21 USDT; the token factor at 0 -> 8 USDT; '
           'a cheaper chain never rounds below one whole USDT',
           [tron_deploy.release_fee_rule(basis, c, p)['requiredFlatUnits'] // 10**6 for c, p in (

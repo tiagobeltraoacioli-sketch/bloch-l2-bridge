@@ -54,7 +54,7 @@ DEFAULT_FEE_LIMIT = 150_000_000
 ENERGY_MARGIN = (3, 2)  # the simulated energy times 3/2 must fit the fee limit
 MIN_FEE_LIMIT = 1_000_000
 BACKOFF_S, BACKOFF_MAX_S = 60, 3600  # after a transaction that landed and failed: 60 s, doubling, at most an hour
-RELEASE_COST_SUN = 28_000_000        # 257,319 energy x 100 sun + 1,563 bytes x 1,000 sun = 27.3 TRX (docs section 5), rounded up
+RELEASE_COST_SUN = 28_000_000        # 257,499 energy x 100 sun + 1,563 bytes x 1,000 sun = 27.3 TRX (docs section 5), rounded up
 FLOAT_HARD_RELEASES = 10             # below this many releases of float: hard alert
 
 

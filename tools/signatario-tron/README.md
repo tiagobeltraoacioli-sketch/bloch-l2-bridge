@@ -162,3 +162,23 @@ compiler (TRON's own solc).
   cap the burn.
 - Multi-signature TRON accounts (account permissions) are not used and a transaction naming a permission id is
   refused.
+
+## Round 17 additions
+
+- **One shim per index directory.** `tron_log_index.py` takes an exclusive lock on `<index>/LOCK` for the life of
+  the process; a second process on the same directory exits at start and names the holder's pid. On load nothing on
+  disk is believed: the deposits are recounted from the logs (nonces 0..n-1, in block order, below the cursor) and
+  an index that fails is rebuilt from the vault's first block with the alert `tron-log-index-rebuilt`. Tests:
+  `python3 -m unittest test_review_r16_tron_2p test_tron_index_r17`.
+- **Relayer float.** `python3 tron_send.py --config SEND.json float` prints the sender's TRX balance against the cost
+  of releases and exits 2 on an alert (`tron-relayer-float`, soft or hard); the relayer daemon logs the same every
+  five minutes. `release_cost_sun` (sender) / `tron_release_cost_sun` (relayer config) is the operator's real cost
+  per release: 28 TRX by default (nothing staked), less with staked or rented energy.
+- **The fixed release fee is computed.** `python3 tron_deploy.py fee --config CFG [--node URL] [--trx-usdt PRICE]`;
+  `validate` and `create` refuse a mainnet config whose fee is below the rule (docs/BRIDGE-TRON-USDT.md section 5).
+- **The vault is built by TRON's compiler.** `python3 scripts/tron/build_vault_tron_solc.py --solc PATH` reproduces
+  the pinned build (`deployments/tron/vault-build.pin.json`); on TRON mainnet `tron_deploy.py` accepts no other
+  creation code.
+- **Three producers.** `rehearse_tron_producers.py` runs the rig against a node's real `/walletsolidity` (stock
+  java-tron, three witnesses); `rehearse_tron.py` accepts `TRON_SOLIDITY_URL` and `TRON_ACCOUNTS_JSON` for it.
+  A stock java-tron serves `/walletsolidity` on its solidity HTTP port: name it in `--solidity` / `tron_solidity`.
