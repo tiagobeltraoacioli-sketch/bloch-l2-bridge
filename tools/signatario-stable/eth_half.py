@@ -130,11 +130,21 @@ class Eth:
             refuse(f'{what} failed', stderr=done.stderr.strip()[-1500:])
         return done.stdout.strip()
 
+    @staticmethod
+    def values(*values):
+        """Positional values for a `cast` command line: one that starts with `-` would be read as an option (`--help`
+        exits 0 with the help text as its output), so it is refused before the command runs (agent 341, round 17)."""
+        out = [str(v) for v in values]
+        for v in out:
+            if v.startswith('-'):
+                refuse('a value that would be read as a command-line option was refused', value=v[:80])
+        return out
+
     def keccak(self, hexdata):
-        return self.run([self.cast, 'keccak', hexdata], 'cast keccak').lower()
+        return self.run([self.cast, 'keccak', *self.values(hexdata)], 'cast keccak').lower()
 
     def abi_encode(self, sig, *values):
-        return self.run([self.cast, 'abi-encode', sig, *[str(v) for v in values]], 'cast abi-encode').lower()
+        return self.run([self.cast, 'abi-encode', sig, *self.values(*values)], 'cast abi-encode').lower()
 
     def sha256_abi(self, sig, *values):
         return '0x' + hashlib.sha256(bytes.fromhex(self.abi_encode(sig, *values)[2:])).hexdigest()
@@ -159,7 +169,7 @@ class Eth:
         return b
 
     def call(self, sig, *args, block='latest'):
-        data = self.run([self.cast, 'calldata', sig, *[str(a) for a in args]], 'cast calldata')
+        data = self.run([self.cast, 'calldata', sig, *self.values(*args)], 'cast calldata')
         ref = hex(block) if isinstance(block, int) else block
         return self.rpc('eth_call', [{'to': self.vault, 'data': data}, ref])
 
