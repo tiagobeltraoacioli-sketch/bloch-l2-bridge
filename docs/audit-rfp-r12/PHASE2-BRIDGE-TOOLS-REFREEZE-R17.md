@@ -107,3 +107,7 @@ service user. `credential:NAME` must be a plain file name. `preflight_signer.py`
 New offline suite `tools/signatario-stable/test_credentials_r18` 11 tests (before the fix: 7 failures, 2 errors).
 Phase 2 manifest regenerated: only the `vigia.py` row changed (1,801 lines, nSLOC 1,336); contracts and the Phase 2B
 manifest unchanged.
+
+Round 18, R329-SHARED-2 (Low, reviewer 379; `807478f`): a group-readable credential must belong to gid 0 or the
+service's own primary group. `test_credentials_r18` 14 tests (1 failure before). Phase 2 manifest regenerated
+(the `vigia.py` row only).

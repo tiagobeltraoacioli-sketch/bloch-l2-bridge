@@ -5,7 +5,7 @@ A1	861	667	527	271fd445c73f4160151ba1647c0291816cade6dc10916d64dfbbb2fa2df74915	
 A1	288	212	197	02fe9fb0ce928a2f186ce9be94150b2e99c4409b6dd6a3090fcd43ed4d0adc91	contracts/usdt/RecoverableReleaseVerifier.sol
 A1	60	36	33	ea5839368bc079a63647e4a0e9d29104afd318364e43e667869ae639491b27c9	contracts/usdt/SP1ReleaseVerifier.sol
 A2	1398	1129	1049	fbd1cb58649d0ca515d2e019b61ed3ebde9e16ea13ceebc7d290d510979bb511	tools/guardiao/guardiao.py
-A2	1801	1406	1336	41d8014742549d6e8cc41e48982f94c01395eae2585e91b65f6bd147e927383d	tools/signatario-stable/vigia.py
+A2	1806	1409	1338	26e1cac01cb0d0cde94391d3a973d30eec79cbd0ade6741b0b67b7d1f9b57abe	tools/signatario-stable/vigia.py
 A2	915	729	651	05f579d4e16fe2bf630ebd79c69827a8fc1ee91db44e468c51cef53cab8476f8	tools/signatario-stable/signatario.py
 A2	494	408	366	c7e9804663a3c1ab582d3c4829f65989da64489062dde3f8ad91328708ce245c	tools/signatario-stable/release_submission.py
 A2	849	686	584	72eae85abc6c58550aa96c618270a39f833c8b088cff92f36598da35603865c3	tools/deploy-pontes/deploy_pontes.py
@@ -32,6 +32,6 @@ A-cfg	19	-	-	4ef22fb2d9894091811dd74be8214ff0b2e2901806a2b5249f56991f922dd421	de
 A-cfg	17	-	-	c67b74d0f470513b7aa0c4a1cdd75edbe3aaeee4d9ce2d5665d864841aa6ce22	deployments/mainnet/busdc-ops/reservas.template.json
 A-cfg	34	-	-	f4aaef5e83a8d4d8b17bdcbb9d586ec992570e1ec6cda20c205f8cc8f956d85c	deployments/mainnet/lc-verifier.review.json
 # total A1	2289	1715	1500
-# total A2	8417	6608	5994
+# total A2	8422	6611	5996
 # total A2opt	1562	1196	994
 # total A-cfg	808	0	0
