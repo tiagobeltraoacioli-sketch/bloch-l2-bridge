@@ -318,6 +318,10 @@ def cmd_install(args):
     for d in man.get('extra_dirs', []):
         owner = user if d.get('owner') == 'service' else 'root'
         mkdir(d['path'], int(d['mode'], 8), owner, owner)
+        if d.get('default_acl') and not NO_SYSTEMD:
+            if not shutil.which('setfacl'):
+                raise Refused(f'{d["path"]} needs a default ACL and setfacl is missing: apt-get install acl')
+            sh('setfacl', '-d', '-m', d['default_acl'], P(d['path']))
     hook_example = P('/etc/bloch-bridge/alert-hook.example')
     shutil.copyfile(rel / 'ops/alert-hook.example', hook_example)
     os.chmod(hook_example, 0o755)
@@ -421,8 +425,21 @@ def needs_cast(man):
     return False
 
 
-def host_problems(man):
+def acl_problems(man):
     probs = []
+    for d in man.get('extra_dirs', []):
+        if not d.get('default_acl') or NO_SYSTEMD:
+            continue
+        got = {l.replace('default:', '', 1) for l in sh('getfacl', '-p', '-d', '-c', P(d['path']), check=False).stdout.split()}
+        long = {'u': 'user', 'g': 'group', 'o': 'other', 'm': 'mask'}
+        want = [long.get(e.split(':', 1)[0], e.split(':', 1)[0]) + ':' + e.split(':', 1)[1] for e in d['default_acl'].split(',')]
+        if not all(w in got for w in want):
+            probs.append(f'{d["path"]}: default ACL {d["default_acl"]} missing (got {got}): `setfacl -d -m {d["default_acl"]} {d["path"]}`')
+    return probs
+
+
+def host_problems(man):
+    probs = acl_problems(man)
     if needs_cast(man):
         pin, cast = P(CAST_PIN), P('/opt/foundry/bin/cast')
         if not pin.is_file():

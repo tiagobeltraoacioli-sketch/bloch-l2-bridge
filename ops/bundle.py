@@ -90,7 +90,43 @@ def load_manifest(ops_rev):
     m = json.loads(read_at(ops_rev, 'ops/routes.json'))
     if m.get('format') != FORMAT:
         raise BuildError(f'ops/routes.json format {m.get("format")} != {FORMAT}')
+    for name, r in list(m['routes'].items()):
+        if 'inherit' in r:
+            m['routes'][name] = inherit(m['routes'], name, r)
     return m
+
+
+def inherit(routes, name, r):
+    """A route whose roles are another route's with literal substitutions (applied in order to the roles' JSON text),
+    units / configs / credentials dropped, extra config keys set and JSON-path patches. The result is what gets checked."""
+    base = routes[r['inherit']]
+    if 'inherit' in base:
+        raise BuildError(f'{name}: inherits from {r["inherit"]}, which inherits itself (one level only)')
+    text = json.dumps(base['roles'])
+    for old, new in r.get('substitute', []):
+        if old not in text:
+            raise BuildError(f'{name}: substitution {old!r} matches nothing in {r["inherit"]}')
+        text = text.replace(old, new)
+    roles = json.loads(text)
+    drop = r.get('drop', {})
+    for role, spec in roles.items():
+        spec['units'] = [u for u in spec['units'] if u['name'] not in drop.get('units', [])]
+        spec['configs'] = {k: v for k, v in spec.get('configs', {}).items() if k not in drop.get('configs', [])}
+        spec['credentials'] = [c for c in spec.get('credentials', []) if c['id'] not in drop.get('credentials', [])]
+    for role, by_cfg in r.get('set_extra', {}).items():
+        for cfg, kv in by_cfg.items():
+            roles[role]['configs'][cfg].setdefault('set', {}).update(kv)
+    for patch in r.get('patch', []):
+        cur = roles
+        parts = patch['path'].split('.')
+        for part in parts[:-1]:
+            cur = cur[int(part)] if isinstance(cur, list) else cur[part]
+        last = parts[-1]
+        if isinstance(cur, list):
+            cur[int(last)] = patch['value']
+        else:
+            cur[last] = patch['value']
+    return {**{k: v for k, v in r.items() if k not in ('substitute', 'drop', 'set_extra', 'patch')}, 'roles': roles}
 
 
 def layout(route, role):

@@ -20,7 +20,11 @@
       "{deposit_id}": "argv placeholder filled by signatario.py",
       "release": "argv token",
       "--intent": "argv token",
-      "{intent}": "argv placeholder filled by signatario.py"
+      "{intent}": "argv placeholder filled by signatario.py",
+      "busdc-arbitrum-one": "bridge name of the Arbitrum One route in the guardian and reserves configs (agent 381; route owner to confirm)",
+      "busdc-op-mainnet": "bridge name of the OP Mainnet route in the guardian and reserves configs (agent 381; route owner to confirm)",
+      "busdc-linea": "bridge name of the Linea route in the guardian and reserves configs (agent 381; route owner to confirm)",
+      "probe": "anchor_policy of the EVM networks, decided per chain id in tools/evm-nets/networks.json (agent 337/372); vigia.py refuses a file that contradicts it"
     }
   },
   "hardening": {
@@ -65,13 +69,32 @@
       "roles": {
         "signer": {
           "summary": "One of the 7 automatic signers: vigia.py sign (signatario.py + eth_half.py) and its read-only signature feed.",
-          "payload": ["tools/signatario-stable"],
-          "exclude": ["test_*", "*_fake.py", "devnet4_*", "rehearse_*"],
+          "payload": [
+            "tools/signatario-stable"
+          ],
+          "exclude": [
+            "test_*",
+            "*_fake.py",
+            "devnet4_*",
+            "rehearse_*"
+          ],
           "credentials": [
-            {"id": "l2-mint.keystore", "what": "encrypted keystore of this operator's L2 mint key (one of the token's 7 signers)"},
-            {"id": "l2-mint.password", "what": "its password"},
-            {"id": "eth-release.keystore", "what": "encrypted keystore of this operator's Ethereum release key (one of the vault's 7 signers)"},
-            {"id": "eth-release.password", "what": "its password"}
+            {
+              "id": "l2-mint.keystore",
+              "what": "encrypted keystore of this operator's L2 mint key (one of the token's 7 signers)"
+            },
+            {
+              "id": "l2-mint.password",
+              "what": "its password"
+            },
+            {
+              "id": "eth-release.keystore",
+              "what": "encrypted keystore of this operator's Ethereum release key (one of the vault's 7 signers)"
+            },
+            {
+              "id": "eth-release.password",
+              "what": "its password"
+            }
           ],
           "configs": {
             "signer.json": {
@@ -86,8 +109,24 @@
                 "eth_rpc": "TBD-owner (this operator's own Ethereum node: loopback or private address, never a provider; runbook 2.1)",
                 "feed.publish_dir": "/var/lib/bloch-bridge/ethereum-feed/publish",
                 "feed.status_file": "{state}/feed-status.json",
-                "eth_half_deposit": ["python3", "{release}/tools/signatario-stable/eth_half.py", "--config", "{etc}/eth-half.json", "deposit", "--deposit-id", "{deposit_id}"],
-                "eth_half_release": ["python3", "{release}/tools/signatario-stable/eth_half.py", "--config", "{etc}/eth-half.json", "release", "--intent", "{intent}"]
+                "eth_half_deposit": [
+                  "python3",
+                  "{release}/tools/signatario-stable/eth_half.py",
+                  "--config",
+                  "{etc}/eth-half.json",
+                  "deposit",
+                  "--deposit-id",
+                  "{deposit_id}"
+                ],
+                "eth_half_release": [
+                  "python3",
+                  "{release}/tools/signatario-stable/eth_half.py",
+                  "--config",
+                  "{etc}/eth-half.json",
+                  "release",
+                  "--intent",
+                  "{intent}"
+                ]
               }
             },
             "eth-half.json": {
@@ -101,58 +140,163 @@
               }
             }
           },
-          "external_paths": ["/var/lib/bloch-l2-mainnet-follower", "/opt/bloch/l2-mainnet/bloch-l2-native-follower", "/opt/bloch/l2-mainnet/bloch-l2-produce-dev", "/opt/bloch/l2-mainnet/bloch-l2-settled-rpc"],
-          "extra_dirs": [{"path": "/var/lib/bloch-bridge/ethereum-feed/publish", "owner": "service", "mode": "0755", "why": "what the feed serves: signatures only, world-readable by design (docs/SIG-TRANSPORT.md)"}],
+          "external_paths": [
+            "/var/lib/bloch-l2-mainnet-follower",
+            "/opt/bloch/l2-mainnet/bloch-l2-native-follower",
+            "/opt/bloch/l2-mainnet/bloch-l2-produce-dev",
+            "/opt/bloch/l2-mainnet/bloch-l2-settled-rpc"
+          ],
+          "extra_dirs": [
+            {
+              "path": "/var/lib/bloch-bridge/ethereum-feed/publish",
+              "owner": "service",
+              "mode": "0755",
+              "why": "what the feed serves: signatures only, world-readable by design (docs/SIG-TRANSPORT.md). A default ACL makes the subdirectories the signer creates 0755 although its unit runs with UMask=0077 (found by the container rehearsal, F381-2: without it every subdirectory is 0700, the feed answers 404 and no partial signature leaves the operator); sigfeed.py already writes the files 0644",
+              "default_acl": "u::rwx,g::r-x,o::r-x"
+            }
+          ],
           "units": [
             {
               "name": "signer",
               "description": "Bloch bridge ethereum signer: sign only what this machine verified",
-              "exec": ["{py}", "{release}/tools/signatario-stable/vigia.py", "--config", "{etc}/signer.json", "sign", "--interval", "60"],
-              "credentials": ["l2-mint.keystore", "l2-mint.password", "eth-release.keystore", "eth-release.password"],
-              "read_write": ["/var/lib/bloch-bridge/ethereum-feed/publish"],
-              "read_only": ["/var/lib/bloch-l2-mainnet-follower", "/opt/bloch/l2-mainnet"],
-              "after": ["network-online.target"],
-              "resources": {"MemoryMax": "4G", "TasksMax": "256"},
+              "exec": [
+                "{py}",
+                "{release}/tools/signatario-stable/vigia.py",
+                "--config",
+                "{etc}/signer.json",
+                "sign",
+                "--interval",
+                "60"
+              ],
+              "credentials": [
+                "l2-mint.keystore",
+                "l2-mint.password",
+                "eth-release.keystore",
+                "eth-release.password"
+              ],
+              "read_write": [
+                "/var/lib/bloch-bridge/ethereum-feed/publish"
+              ],
+              "read_only": [
+                "/var/lib/bloch-l2-mainnet-follower",
+                "/opt/bloch/l2-mainnet"
+              ],
+              "after": [
+                "network-online.target"
+              ],
+              "resources": {
+                "MemoryMax": "4G",
+                "TasksMax": "256"
+              },
               "timeout_stop_s": 120
             },
             {
               "name": "feed",
               "kind": "feed",
               "description": "Bloch bridge ethereum signer: read-only signature feed (TCP 8787)",
-              "exec": ["/usr/bin/python3", "-I", "{release}/tools/signatario-stable/sigfeed.py", "serve", "--root", "/var/lib/bloch-bridge/ethereum-feed/publish", "--bind", "0.0.0.0", "--port", "8787"],
+              "exec": [
+                "/usr/bin/python3",
+                "-I",
+                "{release}/tools/signatario-stable/sigfeed.py",
+                "serve",
+                "--root",
+                "/var/lib/bloch-bridge/ethereum-feed/publish",
+                "--bind",
+                "0.0.0.0",
+                "--port",
+                "8787"
+              ],
               "serve_dir": "/var/lib/bloch-bridge/ethereum-feed/publish",
-              "resources": {"MemoryMax": "128M", "TasksMax": "128", "CPUQuota": "50%"}
+              "resources": {
+                "MemoryMax": "128M",
+                "TasksMax": "128",
+                "CPUQuota": "50%"
+              }
             }
           ],
           "heartbeats": [
-            {"file": "{state}/feed-status.json", "max_age_s": 600, "why": "bridge_feed.py writes it on every sign pass (interval 60 s)"}
+            {
+              "file": "{state}/feed-status.json",
+              "max_age_s": 600,
+              "why": "bridge_feed.py writes it on every sign pass (interval 60 s)"
+            }
           ],
-          "preflight": ["{py}", "{release}/tools/signatario-stable/preflight_signer.py", "--config", "{etc}/signer.json", "--eth-half-config", "{etc}/eth-half.json"],
+          "preflight": [
+            "{py}",
+            "{release}/tools/signatario-stable/preflight_signer.py",
+            "--config",
+            "{etc}/signer.json",
+            "--eth-half-config",
+            "{etc}/eth-half.json"
+          ],
           "requires": [
             "cast at /opt/foundry/bin/cast with the SHA-256 recorded at the key ceremony (docs/BRIDGE-V3-KEY-CEREMONY.md line 1), written to /etc/bloch-bridge/cast.sha256",
             "the L2 follower package of the pinned launch build (bloch-l2-evm deployment/mainnet follower-rpc): /var/lib/bloch-l2-mainnet-follower and /opt/bloch/l2-mainnet/{bloch-l2-native-follower,bloch-l2-produce-dev,bloch-l2-settled-rpc}",
             "this operator's own Ethereum node (execution + consensus client), loopback or private address"
           ],
           "ports": {
-            "inbound": [{"port": 8787, "proto": "tcp", "from": "the other six signer operators and every relayer (fixed IPs)", "what": "sigfeed (GET/HEAD only, static signatures)"}],
+            "inbound": [
+              {
+                "port": 8787,
+                "proto": "tcp",
+                "from": "the other six signer operators and every relayer (fixed IPs)",
+                "what": "sigfeed (GET/HEAD only, static signatures)"
+              }
+            ],
             "outbound": [
-              {"to": "80.240.16.185:8080, 199.247.22.8:8080", "what": "Bloch L1 RPC (follower and rebuild)"},
-              {"to": "the other six operators' feeds, TCP 8787", "what": "partial signatures"},
-              {"to": "an L2 RPC (l2_rpc), HTTPS 443 or the operator's own", "what": "mint pre-checks at latest (release never trusts it)"},
-              {"to": "own Ethereum node, loopback", "what": "deposits and release anchors"}
+              {
+                "to": "80.240.16.185:8080, 199.247.22.8:8080",
+                "what": "Bloch L1 RPC (follower and rebuild)"
+              },
+              {
+                "to": "the other six operators' feeds, TCP 8787",
+                "what": "partial signatures"
+              },
+              {
+                "to": "an L2 RPC (l2_rpc), HTTPS 443 or the operator's own",
+                "what": "mint pre-checks at latest (release never trusts it)"
+              },
+              {
+                "to": "own Ethereum node, loopback",
+                "what": "deposits and release anchors"
+              }
             ]
           },
-          "host": {"cores": 8, "ram_gib": 32, "disk_gb": 2500, "why": "own Ethereum full node 16 to 32 GB RAM and 1.2 to 2 TB NVMe (agents/347-fee-economics-r17.md N1: ethereum.org run-a-node, reth.rs system requirements) + L2 follower 4 vCPU / 8 GiB / 80 GB (bloch-l2-evm docs/L2-MAINNET-GO-LIVE.md D3) + the signer daemons (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6)"}
+          "host": {
+            "cores": 8,
+            "ram_gib": 32,
+            "disk_gb": 2500,
+            "why": "own Ethereum full node 16 to 32 GB RAM and 1.2 to 2 TB NVMe (agents/347-fee-economics-r17.md N1: ethereum.org run-a-node, reth.rs system requirements) + L2 follower 4 vCPU / 8 GiB / 80 GB (bloch-l2-evm docs/L2-MAINNET-GO-LIVE.md D3) + the signer daemons (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6)"
+          }
         },
         "relayer": {
           "summary": "vigia.py relay: submits what k signers already signed. Gas keys only, no bridge authority. One primary, six staggered backups.",
-          "payload": ["tools/signatario-stable"],
-          "exclude": ["test_*", "*_fake.py", "devnet4_*", "rehearse_*"],
+          "payload": [
+            "tools/signatario-stable"
+          ],
+          "exclude": [
+            "test_*",
+            "*_fake.py",
+            "devnet4_*",
+            "rehearse_*"
+          ],
           "credentials": [
-            {"id": "l2-gas.keystore", "what": "encrypted keystore of this relayer's L2 gas key"},
-            {"id": "l2-gas.password", "what": "its password"},
-            {"id": "eth-gas.keystore", "what": "encrypted keystore of this relayer's Ethereum gas key"},
-            {"id": "eth-gas.password", "what": "its password"}
+            {
+              "id": "l2-gas.keystore",
+              "what": "encrypted keystore of this relayer's L2 gas key"
+            },
+            {
+              "id": "l2-gas.password",
+              "what": "its password"
+            },
+            {
+              "id": "eth-gas.keystore",
+              "what": "encrypted keystore of this relayer's Ethereum gas key"
+            },
+            {
+              "id": "eth-gas.password",
+              "what": "its password"
+            }
           ],
           "configs": {
             "relayer.json": {
@@ -169,24 +313,53 @@
                 "eth_relayer_password_file": "{run}/eth-gas.password",
                 "cast": "{cast}"
               },
-              "add": ["relayer_submission_dir"]
+              "add": [
+                "relayer_submission_dir"
+              ]
             }
           },
           "units": [
             {
               "name": "relayer",
               "description": "Bloch bridge ethereum relayer: submit what k signers already signed",
-              "exec": ["{py}", "{release}/tools/signatario-stable/vigia.py", "--config", "{etc}/relayer.json", "relay", "--interval", "60"],
-              "credentials": ["l2-gas.keystore", "l2-gas.password", "eth-gas.keystore", "eth-gas.password"],
-              "after": ["network-online.target"],
-              "resources": {"MemoryMax": "1G", "TasksMax": "128"},
+              "exec": [
+                "{py}",
+                "{release}/tools/signatario-stable/vigia.py",
+                "--config",
+                "{etc}/relayer.json",
+                "relay",
+                "--interval",
+                "60"
+              ],
+              "credentials": [
+                "l2-gas.keystore",
+                "l2-gas.password",
+                "eth-gas.keystore",
+                "eth-gas.password"
+              ],
+              "after": [
+                "network-online.target"
+              ],
+              "resources": {
+                "MemoryMax": "1G",
+                "TasksMax": "128"
+              },
               "timeout_stop_s": 120
             }
           ],
           "heartbeats": [
-            {"file": "{state}/feed-status.json", "max_age_s": 600, "why": "bridge_feed.py writes it on every relay pass (interval 60 s)"}
+            {
+              "file": "{state}/feed-status.json",
+              "max_age_s": 600,
+              "why": "bridge_feed.py writes it on every relay pass (interval 60 s)"
+            }
           ],
-          "preflight": ["{py}", "{release}/tools/signatario-stable/preflight_signer.py", "--relayer-config", "{etc}/relayer.json"],
+          "preflight": [
+            "{py}",
+            "{release}/tools/signatario-stable/preflight_signer.py",
+            "--relayer-config",
+            "{etc}/relayer.json"
+          ],
           "requires": [
             "cast at /opt/foundry/bin/cast (ceremony line 1), its SHA-256 in /etc/bloch-bridge/cast.sha256",
             "an Ethereum RPC and an L2 RPC (eth_rpc, l2_rpc): reads; the public gateway https://l2rpc.blochl1.com for L2 sends"
@@ -194,24 +367,67 @@
           "ports": {
             "inbound": [],
             "outbound": [
-              {"to": "the seven operators' feeds, TCP 8787", "what": "signatures to combine"},
-              {"to": "https://l2rpc.blochl1.com:443", "what": "L2 sends"},
-              {"to": "eth_rpc, l2_rpc", "what": "reads and Ethereum sends"}
+              {
+                "to": "the seven operators' feeds, TCP 8787",
+                "what": "signatures to combine"
+              },
+              {
+                "to": "https://l2rpc.blochl1.com:443",
+                "what": "L2 sends"
+              },
+              {
+                "to": "eth_rpc, l2_rpc",
+                "what": "reads and Ethereum sends"
+              }
             ]
           },
-          "host": {"cores": 2, "ram_gib": 4, "disk_gb": 40, "why": "no node of its own; the relayer daemon (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6) plus cast processes; may share the signer host under its own user"}
+          "host": {
+            "cores": 2,
+            "ram_gib": 4,
+            "disk_gb": 40,
+            "why": "no node of its own; the relayer daemon (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6) plus cast processes; may share the signer host under its own user"
+          }
         },
         "guardian": {
           "summary": "guardiao.py watch (fast-path guardian, pause-only) and sombra.py watch (proof-path guardian, optional until the light client is re-anchored).",
-          "payload": ["tools/guardiao"],
-          "exclude": ["test_*", "*_fake.py", "a1*_daemon*.py", "audit_*", "d6_*", "a111_*"],
+          "payload": [
+            "tools/guardiao"
+          ],
+          "exclude": [
+            "test_*",
+            "*_fake.py",
+            "a1*_daemon*.py",
+            "audit_*",
+            "d6_*",
+            "a111_*"
+          ],
           "credentials": [
-            {"id": "l2-guardian.keystore", "what": "encrypted keystore of the L2 token guardian key (pause only)"},
-            {"id": "l2-guardian.password", "what": "its password"},
-            {"id": "eth-guardian.keystore", "what": "encrypted keystore of the Ethereum vault guardian key (pause only)"},
-            {"id": "eth-guardian.password", "what": "its password"},
-            {"id": "sombra.keystore", "what": "encrypted keystore of the proof-path guardian's Ethereum key (sombra unit only)", "optional": true},
-            {"id": "sombra.password", "what": "its password", "optional": true}
+            {
+              "id": "l2-guardian.keystore",
+              "what": "encrypted keystore of the L2 token guardian key (pause only)"
+            },
+            {
+              "id": "l2-guardian.password",
+              "what": "its password"
+            },
+            {
+              "id": "eth-guardian.keystore",
+              "what": "encrypted keystore of the Ethereum vault guardian key (pause only)"
+            },
+            {
+              "id": "eth-guardian.password",
+              "what": "its password"
+            },
+            {
+              "id": "sombra.keystore",
+              "what": "encrypted keystore of the proof-path guardian's Ethereum key (sombra unit only)",
+              "optional": true
+            },
+            {
+              "id": "sombra.password",
+              "what": "its password",
+              "optional": true
+            }
           ],
           "configs": {
             "guardiao.json": {
@@ -244,10 +460,28 @@
             {
               "name": "guardian",
               "description": "Bloch bridge ethereum guardian: independent check, may only pause",
-              "exec": ["{py}", "{release}/tools/guardiao/guardiao.py", "--config", "{etc}/guardiao.json", "watch", "--interval", "60"],
-              "credentials": ["l2-guardian.keystore", "l2-guardian.password", "eth-guardian.keystore", "eth-guardian.password"],
-              "after": ["network-online.target"],
-              "resources": {"MemoryMax": "1G", "TasksMax": "128"},
+              "exec": [
+                "{py}",
+                "{release}/tools/guardiao/guardiao.py",
+                "--config",
+                "{etc}/guardiao.json",
+                "watch",
+                "--interval",
+                "60"
+              ],
+              "credentials": [
+                "l2-guardian.keystore",
+                "l2-guardian.password",
+                "eth-guardian.keystore",
+                "eth-guardian.password"
+              ],
+              "after": [
+                "network-online.target"
+              ],
+              "resources": {
+                "MemoryMax": "1G",
+                "TasksMax": "128"
+              },
               "timeout_stop_s": 60,
               "group_readable_state": true
             },
@@ -255,17 +489,47 @@
               "name": "sombra",
               "optional": true,
               "description": "Bloch bridge ethereum proof-path guardian (sombra): pauses only on a release the light client cannot prove",
-              "exec": ["{py}", "{release}/tools/guardiao/sombra.py", "--config", "{etc}/sombra.json", "watch", "--interval", "60"],
-              "credentials": ["sombra.keystore", "sombra.password"],
-              "after": ["network-online.target"],
-              "resources": {"MemoryMax": "1G", "TasksMax": "128"},
+              "exec": [
+                "{py}",
+                "{release}/tools/guardiao/sombra.py",
+                "--config",
+                "{etc}/sombra.json",
+                "watch",
+                "--interval",
+                "60"
+              ],
+              "credentials": [
+                "sombra.keystore",
+                "sombra.password"
+              ],
+              "after": [
+                "network-online.target"
+              ],
+              "resources": {
+                "MemoryMax": "1G",
+                "TasksMax": "128"
+              },
               "timeout_stop_s": 60
             }
           ],
           "heartbeats": [
-            {"file": "{state}/guardiao-health.json", "max_age_s": 300, "healthy_field": "healthy", "verified_field": "verified_t", "verified_max_age_s": 1800, "why": "guardiao.py writes it every round (60 s); verified_t is the last round that read everything (tools/guardiao/guardiao.py write_health)"}
+            {
+              "file": "{state}/guardiao-health.json",
+              "max_age_s": 300,
+              "healthy_field": "healthy",
+              "verified_field": "verified_t",
+              "verified_max_age_s": 1800,
+              "why": "guardiao.py writes it every round (60 s); verified_t is the last round that read everything (tools/guardiao/guardiao.py write_health)"
+            }
           ],
-          "preflight": ["{py}", "{release}/tools/guardiao/guardiao.py", "--config", "{etc}/guardiao.json", "check", "--dry-run"],
+          "preflight": [
+            "{py}",
+            "{release}/tools/guardiao/guardiao.py",
+            "--config",
+            "{etc}/guardiao.json",
+            "check",
+            "--dry-run"
+          ],
           "requires": [
             "cast at /opt/foundry/bin/cast (ceremony line 1), its SHA-256 in /etc/bloch-bridge/cast.sha256",
             "this guardian's own L2 settled RPC (follower + settled RPC of the launch build) and its own Ethereum node"
@@ -273,16 +537,31 @@
           "ports": {
             "inbound": [],
             "outbound": [
-              {"to": "own L2 settled RPC and own Ethereum node", "what": "every read that decides"},
-              {"to": "https://l2rpc.blochl1.com:443", "what": "pause and cancel-vote sends (second L2 view, runbook 2.4)"}
+              {
+                "to": "own L2 settled RPC and own Ethereum node",
+                "what": "every read that decides"
+              },
+              {
+                "to": "https://l2rpc.blochl1.com:443",
+                "what": "pause and cancel-vote sends (second L2 view, runbook 2.4)"
+              }
             ]
           },
-          "host": {"cores": 8, "ram_gib": 32, "disk_gb": 2500, "why": "own Ethereum full node (N1, as the signer) + own L2 follower and settled RPC (D3: 4 vCPU / 8 GiB / 80 GB) + the guardian daemons; size the Ethereum node for 2.3 million eth_getLogs a day while a finding is open (runbook 2.5)"}
+          "host": {
+            "cores": 8,
+            "ram_gib": 32,
+            "disk_gb": 2500,
+            "why": "own Ethereum full node (N1, as the signer) + own L2 follower and settled RPC (D3: 4 vCPU / 8 GiB / 80 GB) + the guardian daemons; size the Ethereum node for 2.3 million eth_getLogs a day while a finding is open (runbook 2.5)"
+          }
         },
         "reserves": {
           "summary": "reservas.py watch: read-only reserves monitor (no key). Backing on Ethereum against liabilities on the L2.",
-          "payload": ["tools/reservas"],
-          "exclude": ["test_*"],
+          "payload": [
+            "tools/reservas"
+          ],
+          "exclude": [
+            "test_*"
+          ],
           "credentials": [],
           "configs": {
             "reservas.json": {
@@ -294,31 +573,415 @@
                 "health_file": "{state}/reservas-health.json",
                 "alert_command": "TBD-owner (argv list with {id} and {detail}; or [] to rely on the bundle's health timer)"
               },
-              "add": ["health_file", "alert_command"]
+              "add": [
+                "health_file",
+                "alert_command"
+              ]
             }
           },
           "units": [
             {
               "name": "reserves",
               "description": "Bloch bridge ethereum reserves monitor (read-only)",
-              "exec": ["{py}", "{release}/tools/reservas/reservas.py", "--config", "{etc}/reservas.json", "watch", "--interval", "300"],
+              "exec": [
+                "{py}",
+                "{release}/tools/reservas/reservas.py",
+                "--config",
+                "{etc}/reservas.json",
+                "watch",
+                "--interval",
+                "300"
+              ],
               "credentials": [],
-              "after": ["network-online.target"],
-              "resources": {"MemoryMax": "512M", "TasksMax": "64"},
+              "after": [
+                "network-online.target"
+              ],
+              "resources": {
+                "MemoryMax": "512M",
+                "TasksMax": "64"
+              },
               "timeout_stop_s": 30,
               "group_readable_state": true
             }
           ],
           "heartbeats": [
-            {"file": "{state}/reservas-health.json", "max_age_s": 900, "healthy_field": "healthy", "verified_field": "verified_t", "verified_max_age_s": 1800, "why": "reservas.py writes it every round (300 s)"}
+            {
+              "file": "{state}/reservas-health.json",
+              "max_age_s": 900,
+              "healthy_field": "healthy",
+              "verified_field": "verified_t",
+              "verified_max_age_s": 1800,
+              "why": "reservas.py writes it every round (300 s)"
+            }
           ],
-          "preflight": ["{py}", "{release}/tools/reservas/reservas.py", "--config", "{etc}/reservas.json", "check"],
-          "preflight_ok_codes": [0, 3],
-          "requires": ["cast at /opt/foundry/bin/cast, its SHA-256 in /etc/bloch-bridge/cast.sha256", "read access to an L2 settled RPC and an Ethereum node"],
-          "ports": {"inbound": [], "outbound": [{"to": "l2_rpc and eth_rpc of reservas.json", "what": "reads only"}]},
-          "host": {"cores": 1, "ram_gib": 1, "disk_gb": 10, "why": "read-only daemon (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6); usually on the guardian host under its own user"}
+          "preflight": [
+            "{py}",
+            "{release}/tools/reservas/reservas.py",
+            "--config",
+            "{etc}/reservas.json",
+            "check"
+          ],
+          "preflight_ok_codes": [
+            0,
+            3
+          ],
+          "requires": [
+            "cast at /opt/foundry/bin/cast, its SHA-256 in /etc/bloch-bridge/cast.sha256",
+            "read access to an L2 settled RPC and an Ethereum node"
+          ],
+          "ports": {
+            "inbound": [],
+            "outbound": [
+              {
+                "to": "l2_rpc and eth_rpc of reservas.json",
+                "what": "reads only"
+              }
+            ]
+          },
+          "host": {
+            "cores": 1,
+            "ram_gib": 1,
+            "disk_gb": 10,
+            "why": "read-only daemon (measured peak RSS in docs/OPERATOR-PACKAGES.md section 6); usually on the guardian host under its own user"
+          }
         }
       }
+    },
+    "arbitrum-one": {
+      "asset": "bUSDC.arb (Arbitrum One USDC vault -> BridgedStablecoinV3 on the L2 700770)",
+      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
+      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "inherit": "ethereum",
+      "substitute": [
+        [
+          "deployments/mainnet/busdc-ops/signer.template.json",
+          "deployments/arbitrum-one/ops/signer.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/eth-half.template.json",
+          "deployments/arbitrum-one/ops/eth-half.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/relayer.template.json",
+          "deployments/arbitrum-one/ops/relayer.template.json"
+        ],
+        [
+          "ethereum-feed",
+          "arbitrum-one-feed"
+        ],
+        [
+          "Bloch bridge ethereum ",
+          "Bloch bridge arbitrum-one "
+        ],
+        [
+          "\"8787\"",
+          "\"8788\""
+        ],
+        [
+          "\"port\": 8787",
+          "\"port\": 8788"
+        ],
+        [
+          "TCP 8787",
+          "TCP 8788"
+        ],
+        [
+          "this operator's own Ethereum node",
+          "this operator's own Arbitrum One node"
+        ],
+        [
+          "this guardian's own Ethereum node",
+          "this guardian's own Arbitrum One node"
+        ],
+        [
+          "an Ethereum node this operator trusts",
+          "a Arbitrum One node this operator trusts"
+        ]
+      ],
+      "drop": {
+        "units": [
+          "sombra"
+        ],
+        "configs": [
+          "sombra.json"
+        ],
+        "credentials": [
+          "sombra.keystore",
+          "sombra.password"
+        ]
+      },
+      "set_extra": {
+        "signer": {
+          "signer.json": {
+            "timing_state": "{state}/timing.json"
+          }
+        },
+        "guardian": {
+          "guardiao.json": {
+            "eth_chain_id": 42161,
+            "name": "busdc-arbitrum-one"
+          }
+        },
+        "reserves": {
+          "reservas.json": {
+            "bridges.0.name": "busdc-arbitrum-one"
+          }
+        }
+      },
+      "patch": [
+        {
+          "path": "signer.units.0.exec",
+          "value": [
+            "{py}",
+            "{release}/tools/signatario-stable/vigia.py",
+            "--config",
+            "{etc}/signer.json",
+            "sign"
+          ]
+        },
+        {
+          "path": "signer.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "own Arbitrum One node (it needs its own Ethereum L1 node as parent chain: N1 16 to 32 GB) + L2 follower (D3: 4 vCPU / 8 GiB) + daemons; Arbitrum Nitro 64 GB minimum (agents/347-fee-economics-r17.md N2: docs.arbitrum.io/run-arbitrum-node)"
+          }
+        },
+        {
+          "path": "guardian.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "as the signer: own Arbitrum One node and its Ethereum parent node, own L2 follower and settled RPC"
+          }
+        }
+      ]
+    },
+    "op-mainnet": {
+      "asset": "bUSDC.op (OP Mainnet USDC vault -> BridgedStablecoinV3 on the L2 700770)",
+      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
+      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "inherit": "ethereum",
+      "substitute": [
+        [
+          "deployments/mainnet/busdc-ops/signer.template.json",
+          "deployments/op-mainnet/ops/signer.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/eth-half.template.json",
+          "deployments/op-mainnet/ops/eth-half.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/relayer.template.json",
+          "deployments/op-mainnet/ops/relayer.template.json"
+        ],
+        [
+          "ethereum-feed",
+          "op-mainnet-feed"
+        ],
+        [
+          "Bloch bridge ethereum ",
+          "Bloch bridge op-mainnet "
+        ],
+        [
+          "\"8787\"",
+          "\"8789\""
+        ],
+        [
+          "\"port\": 8787",
+          "\"port\": 8789"
+        ],
+        [
+          "TCP 8787",
+          "TCP 8789"
+        ],
+        [
+          "this operator's own Ethereum node",
+          "this operator's own OP Mainnet node"
+        ],
+        [
+          "this guardian's own Ethereum node",
+          "this guardian's own OP Mainnet node"
+        ],
+        [
+          "an Ethereum node this operator trusts",
+          "a OP Mainnet node this operator trusts"
+        ]
+      ],
+      "drop": {
+        "units": [
+          "sombra"
+        ],
+        "configs": [
+          "sombra.json"
+        ],
+        "credentials": [
+          "sombra.keystore",
+          "sombra.password"
+        ]
+      },
+      "set_extra": {
+        "signer": {
+          "signer.json": {
+            "timing_state": "{state}/timing.json"
+          }
+        },
+        "guardian": {
+          "guardiao.json": {
+            "eth_chain_id": 10,
+            "name": "busdc-op-mainnet"
+          }
+        },
+        "reserves": {
+          "reservas.json": {
+            "bridges.0.name": "busdc-op-mainnet"
+          }
+        }
+      },
+      "patch": [
+        {
+          "path": "signer.units.0.exec",
+          "value": [
+            "{py}",
+            "{release}/tools/signatario-stable/vigia.py",
+            "--config",
+            "{etc}/signer.json",
+            "sign"
+          ]
+        },
+        {
+          "path": "signer.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "own OP Mainnet node (it needs its own Ethereum L1 node as parent chain: N1 16 to 32 GB) + L2 follower (D3: 4 vCPU / 8 GiB) + daemons; official node figure not retrieved by agent 381: size from the client documentation before renting"
+          }
+        },
+        {
+          "path": "guardian.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "as the signer: own OP Mainnet node and its Ethereum parent node, own L2 follower and settled RPC"
+          }
+        }
+      ]
+    },
+    "linea": {
+      "asset": "bUSDC.linea (Linea USDC vault -> BridgedStablecoinV3 on the L2 700770)",
+      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
+      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "inherit": "ethereum",
+      "substitute": [
+        [
+          "deployments/mainnet/busdc-ops/signer.template.json",
+          "deployments/linea/ops/signer.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/eth-half.template.json",
+          "deployments/linea/ops/eth-half.template.json"
+        ],
+        [
+          "deployments/mainnet/busdc-ops/relayer.template.json",
+          "deployments/linea/ops/relayer.template.json"
+        ],
+        [
+          "ethereum-feed",
+          "linea-feed"
+        ],
+        [
+          "Bloch bridge ethereum ",
+          "Bloch bridge linea "
+        ],
+        [
+          "\"8787\"",
+          "\"8790\""
+        ],
+        [
+          "\"port\": 8787",
+          "\"port\": 8790"
+        ],
+        [
+          "TCP 8787",
+          "TCP 8790"
+        ],
+        [
+          "this operator's own Ethereum node",
+          "this operator's own Linea node"
+        ],
+        [
+          "this guardian's own Ethereum node",
+          "this guardian's own Linea node"
+        ],
+        [
+          "an Ethereum node this operator trusts",
+          "a Linea node this operator trusts"
+        ]
+      ],
+      "drop": {
+        "units": [
+          "sombra"
+        ],
+        "configs": [
+          "sombra.json"
+        ],
+        "credentials": [
+          "sombra.keystore",
+          "sombra.password"
+        ]
+      },
+      "set_extra": {
+        "signer": {
+          "signer.json": {
+            "timing_state": "{state}/timing.json"
+          }
+        },
+        "guardian": {
+          "guardiao.json": {
+            "eth_chain_id": 59144,
+            "name": "busdc-linea"
+          }
+        },
+        "reserves": {
+          "reservas.json": {
+            "bridges.0.name": "busdc-linea"
+          }
+        }
+      },
+      "patch": [
+        {
+          "path": "signer.units.0.exec",
+          "value": [
+            "{py}",
+            "{release}/tools/signatario-stable/vigia.py",
+            "--config",
+            "{etc}/signer.json",
+            "sign"
+          ]
+        },
+        {
+          "path": "signer.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "own Linea node (it needs its own Ethereum L1 node as parent chain: N1 16 to 32 GB) + L2 follower (D3: 4 vCPU / 8 GiB) + daemons; official node figure not retrieved by agent 381: size from the client documentation before renting"
+          }
+        },
+        {
+          "path": "guardian.host",
+          "value": {
+            "cores": 16,
+            "ram_gib": 96,
+            "disk_gb": "TBD-measure",
+            "why": "as the signer: own Linea node and its Ethereum parent node, own L2 follower and settled RPC"
+          }
+        }
+      ]
     }
   }
 }

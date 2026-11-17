@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bundle  # noqa: E402
 
-MAN = json.loads((HERE / 'routes.json').read_text())
+MAN = bundle.load_manifest('worktree')  # inherited routes resolved, as the builder sees them
 PAIRS = [(r, x) for r, route in MAN['routes'].items() for x in route['roles']]
 
 
@@ -175,6 +175,35 @@ class Bundles(unittest.TestCase):
         with self.assertRaises(bundle.BuildError):
             bundle.unit_text('daemon', bundle.layout('ethereum', 'reserves'), 'reserves', bad['routes']['ethereum']['roles']['reserves'],
                              u, src, MAN['hardening']['lines'])
+
+    def test_routes_on_one_host_do_not_collide(self):
+        """An operator may run several routes on one host: users, paths, units and feed ports must all differ."""
+        ports, units, users = {}, {}, {}
+        for (route, role), (files, man) in self.built.items():
+            users.setdefault(man['layout']['user'], []).append(man['inst'])
+            for u in man['units']:
+                units.setdefault(u['unit'], []).append(man['inst'])
+            for p in man['ports'].get('inbound', []):
+                ports.setdefault(p['port'], []).append(man['inst'])
+            for u in man['units']:
+                if u['kind'] == 'feed':
+                    port = files[f'units/{u["unit"]}'][0].decode().split('--port ')[1].split()[0]
+                    self.assertEqual(int(port), man['ports']['inbound'][0]['port'], u['unit'])
+        for d in (ports, units, users):
+            self.assertTrue(all(len(v) == 1 for v in d.values()), {k: v for k, v in d.items() if len(v) > 1})
+
+    def test_evm_networks_inherit_without_sombra_and_without_interval(self):
+        for net in ('arbitrum-one', 'op-mainnet', 'linea'):
+            files, man = self.built[(net, 'guardian')]
+            self.assertEqual([u['name'] for u in man['units']], ['guardian'])
+            self.assertNotIn('sombra.json', man['configs'])
+            files, man = self.built[(net, 'signer')]
+            text = files[f'units/bloch-bridge-{net}-signer.service'][0].decode()
+            exec_line = next(l for l in text.splitlines() if l.startswith('ExecStart='))
+            self.assertNotIn('--interval', exec_line, 'the EVM networks refuse a sign interval longer than their default')
+            cfg = json.loads(files['etc/templates/signer.json'][0])
+            self.assertEqual(cfg['timing_state'], f'/var/lib/bloch-bridge/{net}-signer/timing.json')
+            self.assertEqual(cfg['source_chain_id'], {'arbitrum-one': 42161, 'op-mainnet': 10, 'linea': 59144}[net])
 
     def test_unknown_set_key_is_refused(self):
         doc = {'a': 1}

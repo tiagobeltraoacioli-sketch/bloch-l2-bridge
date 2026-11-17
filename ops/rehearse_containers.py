@@ -183,15 +183,18 @@ def forge_create(target, *ctor):
         code += enc[2:]
     port = L2_PORT if 'BridgedStablecoinV3' in name else ETH_PORT
     (WORK / 'create.hex').write_text(code)
-    r = json.loads(ex('a381-chain', f'/opt/foundry/bin/cast send --create "$(cat /dev/stdin)" --rpc-url http://127.0.0.1:{port} '
-                                    f'--private-key {DEPLOYER} --json', input=code).stdout)
+    r = json.loads(ex('a381-chain', f'/opt/foundry/bin/cast send --rpc-url http://127.0.0.1:{port} --private-key {DEPLOYER} --json '
+                                    f'--create "$(cat /dev/stdin)"', input=code).stdout)
     if r.get('status') != '0x1':
         raise SystemExit(f'create {target} failed: {r}')
     return r['contractAddress'].lower()
 
 
 def send(url_port, key, to, *call):
-    return json.loads(chain_cast('send', to, *call, '--rpc-url', f'http://127.0.0.1:{url_port}', '--private-key', key, '--json', '--gas-limit', '1500000'))
+    r = json.loads(chain_cast('send', to, *call, '--rpc-url', f'http://127.0.0.1:{url_port}', '--private-key', key, '--json', '--gas-limit', '1500000'))
+    if r.get('status') != '0x1':
+        raise SystemExit(f'transaction reverted: {call[:1]} {r.get("transactionHash")}')
+    return r
 
 
 def view(port, to, sig, *args):
@@ -296,8 +299,14 @@ def journal(c, unit, since='-30min'):
     return ex(c, f'journalctl -u {unit} --since {shlex.quote(since)} -o cat --no-pager', ok=False).stdout
 
 
+def _term(signum, frame):
+    raise KeyboardInterrupt(f'signal {signum}')
+
+
 def main():
     global WORK
+    import signal
+    signal.signal(signal.SIGTERM, _term)  # a detached run ignores SIGINT; TERM still cleans the containers up
     args = sys.argv[1:]
     if '--work' not in args:
         raise SystemExit(__doc__)
@@ -309,6 +318,9 @@ def main():
     t_start = time.time()
     try:
         run(args)
+        check('the rehearsal ran to its end', True)
+    except BaseException as e:  # an abort is a failure, never a silent partial pass
+        check('the rehearsal ran to its end', False, f'{type(e).__name__}: {e}')
     finally:
         if '--keep' not in args:
             cleanup()
@@ -362,7 +374,7 @@ def run(args):
     offline = [chain_key() for _ in range(4)]  # signers 3 and 4 (mint, release), offline: the forger of the alert drill
     addrs['mint'] += [offline[0][0], offline[1][0]]
     addrs['release'] += [offline[2][0], offline[3][0]]
-    addrs['offline_release_keys'] = [offline[2][1], offline[3][1]]
+    addrs['offline_release_keys'] = [k for _, k in sorted(offline[2:4])]  # a certificate lists its signers in ascending order
     per['a381-relayer'] = {'l2': new_key('a381-relayer', 'ethereum-relayer', 'l2-gas'), 'eth': new_key('a381-relayer', 'ethereum-relayer', 'eth-gas')}
     per['a381-guardian'] = {'l2': new_key('a381-guardian', 'ethereum-guardian', 'l2-guardian'),
                             'eth': new_key('a381-guardian', 'ethereum-guardian', 'eth-guardian')}
@@ -521,7 +533,7 @@ def run(args):
     nonce = int(view(L2_PORT, dep['token'], 'nextSlot()(uint64)'))
     forged = '0x%016x' % nonce + 'fe' * 24
     d = view(L2_PORT, dep['token'], 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', forged, str(nonce), str(20 * U), alice)
-    blob = '0x' + ''.join(chain_cast('wallet', 'sign', '--no-hash', '--private-key', k, d)[2:] for k in (offline[0][1], offline[1][1]))
+    blob = '0x' + ''.join(chain_cast('wallet', 'sign', '--no-hash', '--private-key', k, d)[2:] for _, k in sorted(offline[0:2]))
     send(L2_PORT, DEPLOYER, dep['token'], 'mint(bytes32,uint64,uint64,address,bytes)', forged, str(nonce), str(20 * U), alice, blob)
     mine(L2_PORT)
     got, took = wait_for('guardian CRIT', lambda: 'CRIT ethereum-guardian' in ex('a381-guardian', 'journalctl -t bloch-bridge-alert --since -10min -o cat --no-pager', ok=False).stdout, 400)
