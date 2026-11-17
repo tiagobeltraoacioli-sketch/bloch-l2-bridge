@@ -38,13 +38,25 @@ claim    A burn made directly on the token names 20 bytes that may commit to no 
          address, as on bUSDC). It is paid by this stated rule only: the account that burned signs, as an Ethereum
          personal message, the text printed by `claim-text` (it names the L2 chain, the token, the burn id and one
          Stellar address), and the signed claim is placed in `recipient_claims/<burn id>.json` as
-         {"stellar_address": "G...", "signature": "0x..."}. The burner is taken from the L2 burn that signatario.py
+         {"stellar_address": "G...", "signature": "0x..."}: exactly these two fields, the signature exactly 65 bytes
+         of hex with v 27 or 28 and a low s. The signature is recovered IN THIS PROCESS (stellar_net.verify_claim:
+         the repository's own secp256k1 and Keccak code) and the address it gives must be the burner; no part of a
+         claim is ever handed to another program. The burner is taken from the L2 burn that signatario.py
          read from its own L2, never from the claim. A burn made through the router has the router as its burner,
          and a contract cannot sign: router burns are paid only to the address the router committed to. A burner
          that is a contract cannot claim.
+         One claim per burn. This half remembers the release it signed for a burn and refuses another, with one
+         stated exception: for a direct burn paid on a claim, once the signature it gave is dead (its `validUntil`
+         has passed on the ledger clock, or the vault's pause count moved) and the vault still shows the burn open,
+         it may sign for the address of another claim of the same burner. A signer therefore never has two live
+         signatures for one burn, so two addresses can never both reach the threshold, and operators who were
+         handed different claim files converge on one file without editing a database.
+asset    `asset_contract` (the Stellar Asset Contract the vault must hold; on the public network Circle's USDC,
+         stellar_net.CIRCLE_USDC) is REQUIRED: the route this half signs for is recomputed from that pinned asset,
+         never from the asset the deployed vault reports.
 
 Config (one JSON per signer): `stellar_rpc`, `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account`,
-`keystore`, `password_file`, `db`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
+`keystore`, `password_file`, `db`, `asset_contract`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
 `vault_from_ledger`, `finality_ledgers` (12), `max_ledger_age` (60), `valid_seconds` (1800), `max_valid_seconds`
 (3600), `recipient_hints` (directory of files named by the commitment hex), `l2_rpc` + `router` (StellarBurnRouter),
 `recipient_claims` (directory of signed claims, see above) with `l2_chain_id` and `l2_token`.
@@ -85,6 +97,14 @@ class Half:
         self.net = sn.Net(c)
         self.others = [sn.Net({**c, 'stellar_rpc': u}) for u in c.get('stellar_rpc_others', [])]
         self.cast = c.get('cast', str(Path.home() / '.foundry/bin/cast'))
+        try:
+            if sn.strkey_decode(c.get('asset_contract'))[0] != 'contract':
+                raise sn.StellarError('not a contract address')
+        except sn.StellarError as e:
+            refuse('config: `asset_contract` (the asset contract the vault must hold) is missing or invalid', error=str(e))
+        if self.net.passphrase == sn.PUBLIC_PASSPHRASE and c['asset_contract'] != sn.CIRCLE_USDC['contract']:
+            refuse('on the public network the asset contract is Circle\'s USDC', pinned=sn.CIRCLE_USDC['contract'],
+                   config=c['asset_contract'])
         self.finality = int(c.get('finality_ledgers', 12))
         self.max_age = int(c.get('max_ledger_age', 60))
         self.db_path = Path(c['db'])
@@ -109,10 +129,14 @@ class Half:
         nid = sn.network_id(self.net.passphrase)
         if bytes.fromhex(d['network_id']) != nid or bytes.fromhex(d['vault_id']) != sn.strkey_decode(self.net.vault)[1]:
             refuse('the vault reports another network or contract id than this node and config', derived=d)
-        route = sn.route_id(self.net.passphrase, c['source_domain'], c['native_domain'], c['asset'], c['token'],
-                            self.net.vault, c['cap'])
+        if c['token'] != self.cfg['asset_contract']:
+            refuse('the vault holds another asset contract than the pinned one: nothing is signed for it',
+                   vault=c['token'], pinned=self.cfg['asset_contract'])
+        route = sn.route_id(self.net.passphrase, c['source_domain'], c['native_domain'], c['asset'],
+                            self.cfg['asset_contract'], self.net.vault, c['cap'])
         if route.hex() != d['route'] or bytes.fromhex(d['vault20']) != sn.vault20(self.net.vault):
-            refuse('the route recomputed from the vault configuration differs from the stored one', derived=d)
+            refuse('the route recomputed from the pinned asset and the vault configuration differs from the stored one',
+                   derived=d)
         return d, c
 
     def same_ledger_everywhere(self, sequence, own_hash):
@@ -199,6 +223,21 @@ class Half:
                tx_hash=fields.get('tx'), log_index=0, block_number=ledger, block_hash='0x' + own['hash'],
                finalized=True, finalized_number=final_number)
 
+    def sign(self, digest, members):
+        """This signer's signature over `digest` as an Ethereum personal message. The key stays in the keystore and
+        `cast` signs; what it printed is accepted only if it is a well-formed signature that recovers, in this
+        process, to one of the vault's signers. Returns (signature, address without 0x)."""
+        done = subprocess.run([self.cast, 'wallet', 'sign', '--keystore', str(self.cfg['keystore']),
+                               '--password-file', str(self.cfg['password_file']), '--', hx(sn.b32(digest))],
+                              capture_output=True, text=True)
+        signature = done.stdout.strip().lower()
+        who = sn.recover_personal(digest, signature)
+        if done.returncode or who is None:
+            refuse('signing failed', stderr=done.stderr.strip()[-500:])
+        if who[2:] not in members:
+            refuse('this keystore is not one of the vault\'s signers', signer=who)
+        return signature, who[2:]
+
     # ── release ──────────────────────────────────────────────────────────────
     def stellar_recipient(self, intent, commitment):
         candidates = []
@@ -227,43 +266,43 @@ class Half:
         return sn.claim_text(c['l2_chain_id'], c['l2_token'], burn_id, to)
 
     def claim(self, intent):
-        """A claim signed by the account that burned, for a burn whose 20 bytes commit to no known address."""
+        """A claim signed by the account that burned, for a burn whose 20 bytes commit to no known address.
+        Verified in this process; see stellar_net.verify_claim."""
         claims = self.cfg.get('recipient_claims')
-        burn = unhex(intent['release']['nativeBurn']).lower()
-        path = Path(claims) / f'{burn}.json' if claims else None
-        if path is None or not path.exists():
+        burn = sn.b32(intent['release']['nativeBurn']).hex()
+        if not claims:
             return None
-        burner = str((intent.get('l2') or {}).get('from', '')).lower()
-        if len(burner) != 42 or burner == str(self.cfg.get('router', '')).lower():
-            refuse('a claim is accepted only from the account that burned, and never for a router burn', burner=burner)
+        l2 = intent.get('l2') or {}
+        burner = str(l2.get('from', '')).lower()
+        router = str(self.cfg.get('router') or '').lower()
         try:
-            claim = json.loads(path.read_text())
-            to, sig = claim['stellar_address'], claim['signature']
-            l2 = intent['l2']
+            claim = sn.load_claim(Path(claims) / f'{burn}.json')
+            if claim is None:
+                return None
+            if not sn.ADDRESS_RE.fullmatch(burner) or burner == router:
+                refuse('a claim is accepted only from the account that burned, and never for a router burn', burner=burner)
+            to = sn.verify_claim(claim, burner, l2['chain_id'], l2['token'], burn)
             text = sn.claim_text(l2['chain_id'], l2['token'], burn, to)
-        except (OSError, ValueError, KeyError, TypeError, sn.StellarError) as e:
-            refuse('the claim file for this burn is not readable or names no Stellar address', error=str(e))
-        done = subprocess.run([self.cast, 'wallet', 'verify', '--address', burner, text, sig], capture_output=True, text=True)
-        if done.returncode:
-            refuse('the claim is not signed by the account that burned', burner=burner, text=text)
-        return {'stellar_address': to, 'signature': sig, 'burner': burner, 'text': text}
+        except (KeyError, TypeError, ValueError, sn.StellarError) as e:
+            refuse('the claim for this burn is refused: ' + str(e), burner=burner)
+        return {'stellar_address': to, 'signature': claim['signature'].lower(), 'burner': burner, 'text': text}
 
     def router_recipients(self, intent):
-        """Strings the L2 router logged for this burn id. Untrusted: only the commitment decides."""
-        burn = intent['release']['nativeBurn']
-        done = subprocess.run([self.cast, 'logs', '--rpc-url', self.cfg['l2_rpc'], '--address', self.cfg['router'],
-                               '--from-block', str(self.cfg.get('router_from_block', 0)), '--json',
-                               'StellarExit(bytes32 indexed,address indexed,uint64,bytes20,string)', burn],
-                              capture_output=True, text=True)
+        """Strings the L2 router logged for this burn id, read over JSON-RPC in this process. Untrusted: only the
+        commitment decides."""
         out = []
-        if done.returncode:
-            return out
-        for log in json.loads(done.stdout or '[]'):
-            dec = subprocess.run([self.cast, 'abi-decode', '--input', 'f(uint64,bytes20,string)', log['data']],
-                                 capture_output=True, text=True)
-            lines = dec.stdout.strip().splitlines()
-            if dec.returncode == 0 and len(lines) == 3:
-                out.append(lines[2].strip().strip('"'))
+        try:
+            burn = '0x' + sn.b32(intent['release']['nativeBurn']).hex()
+            l2 = sn.L2(self.cfg['l2_rpc'])
+            head = l2.block('latest')
+            logs = l2.logs(self.cfg['router'], [sn.STELLAR_EXIT_TOPIC, burn], int(self.cfg.get('router_from_block', 0)),
+                           head['number'])
+            for log in logs:
+                text = sn.abi_string(log['data'], 2)   # data: (uint64 amount, bytes20 commitment, string address)
+                if text:
+                    out.append(text)
+        except (sn.StellarError, KeyError, TypeError, ValueError):
+            return []
         return out
 
     def release(self, args):
@@ -351,36 +390,49 @@ class Half:
         # Equivocation guard, under a lock: one release per nonce and per burn, whatever the vault would accept later.
         core = {'nonce': nonce, 'recipient': recipient, 'amount': amount, 'burn': burn.hex(),
                 'mint_count': mint_count, 'mint_head': item['mint_head']}
+        live = {'valid_until': valid_until, 'pause_count': ctx['pause_count'], 'claimed': claim is not None}
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with open(str(self.db_path) + '.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             db = json.loads(self.db_path.read_text()) if self.db_path.exists() else {'nonces': {}, 'burns': {}}
+            db.setdefault('live', {})
             for table, key in (('nonces', str(nonce)), ('burns', burn.hex())):
                 prior = db[table].get(key)
-                if prior is not None and prior != core:
+                if prior is not None and prior != core \
+                        and not repin_allowed(prior, core, db['live'].get(burn.hex()), live, now):
                     refuse('this signer already signed another release for this nonce or burn', prior=prior, now=core)
             db['nonces'][str(nonce)] = core
             db['burns'][burn.hex()] = core
+            db['live'][burn.hex()] = live
             tmp = self.db_path.with_suffix('.tmp')
             tmp.write_text(json.dumps(db, indent=2) + '\n')
             os.replace(tmp, self.db_path)
 
         # An Ethereum personal message over the vault's 32-byte digest (no `--no-hash`: cast applies EIP-191).
-        done = subprocess.run([self.cast, 'wallet', 'sign', '--keystore', self.cfg['keystore'],
-                               '--password-file', self.cfg['password_file'], hx(digest)], capture_output=True, text=True)
-        if done.returncode:
-            refuse('signing failed', stderr=done.stderr.strip()[-500:])
-        signer = subprocess.run([self.cast, 'wallet', 'address', '--keystore', self.cfg['keystore'],
-                                 '--password-file', self.cfg['password_file']], capture_output=True, text=True)
-        signer = signer.stdout.strip().lower()
-        if unhex(signer) not in config['signers']:
-            refuse('this keystore is not one of the vault\'s signers', signer=signer)
+        signature = self.sign(digest, config['signers'])
+        signer = '0x' + signature[1]
+        signature = signature[0]
         answer(True, signer=signer, release=rel, stellar_recipient=recipient, vault_contract=self.net.vault,
                pause_count=ctx['pause_count'], claim=claim, vault_digest=hx(digest),
                context={'validUntil': valid_until, 'sourceAnchorNumber': anchor, 'sourceAnchorHash': '0x' + own['hash'],
                         'nativeFinalizedNumber': ctx['native_finalized_number'],
                         'nativeFinalizedHash': native['nativeFinalizedHash']},
-               digest=hx(sn.personal(digest)), signature=done.stdout.strip().lower())
+               digest=hx(sn.personal(digest)), signature=signature)
+
+
+def repin_allowed(prior, core, prior_live, live, now):
+    """May a signer that pinned `prior` for a burn now sign `core`? Only for a direct burn paid on a claim, only when
+    nothing but the Stellar recipient differs, and only once the signature it gave for `prior` is dead: its
+    `valid_until` has passed on the ledger clock (`now`), or the vault's pause count has moved since. The caller has
+    already read the vault's `burn_status` as open."""
+    if not isinstance(prior_live, dict) or not prior_live.get('claimed') or not live.get('claimed'):
+        return False
+    if {k: v for k, v in prior.items() if k != 'recipient'} != {k: v for k, v in core.items() if k != 'recipient'}:
+        return False
+    try:
+        return int(prior_live['valid_until']) < int(now) or int(prior_live['pause_count']) < int(live['pause_count'])
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def main():

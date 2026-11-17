@@ -41,7 +41,10 @@ def sign(cfg, argv, args):
     if wasm != cfg['vault_wasm_hash'].replace('0x', '').lower():
         fail('the vault runs another Wasm than the pinned one', got=wasm)
     d, c, st, latest = net.view('derived'), net.view('config'), net.view('state'), net.latest()
-    valid_until = int(args.get('--valid-until') or latest['close_time'] + int(cfg.get('valid_seconds', 1800)))
+    given = args.get('--valid-until')
+    if given is not None and not str(given).isdigit():
+        fail('--valid-until is a ledger time in seconds')
+    valid_until = int(given or latest['close_time'] + int(cfg.get('valid_seconds', 1800)))
     if not latest['close_time'] < valid_until <= latest['close_time'] + sn.MAX_VALIDITY:
         fail('valid_until is outside (ledger time, ledger time + 1 day]', valid_until=valid_until)
     if 'controls' in argv:
@@ -65,12 +68,15 @@ def sign(cfg, argv, args):
         fail('the digest computed here differs from the vault\'s', local=digest.hex(), vault=view)
     ks = ['--keystore', cfg['keystore'], '--password-file', cfg['password_file']]
     # An Ethereum personal message over the vault's digest (EIP-191; no `--no-hash`).
-    done = subprocess.run([cast, 'wallet', 'sign'] + ks + ['0x' + digest.hex()], capture_output=True, text=True)
-    who = subprocess.run([cast, 'wallet', 'address'] + ks, capture_output=True, text=True).stdout.strip().lower()
-    if done.returncode or who[2:] not in c['signers']:
+    # The key stays in the keystore and `cast` signs; what it printed counts only if it is a well-formed signature
+    # that recovers, in this process, to one of the vault's signers.
+    done = subprocess.run([cast, 'wallet', 'sign'] + ks + ['--', '0x' + digest.hex()], capture_output=True, text=True)
+    signature = done.stdout.strip().lower()
+    who = sn.recover_personal(digest, signature)
+    if done.returncode or who is None or who[2:] not in c['signers']:
         fail('signing failed, or this keystore is not one of the vault\'s signers', signer=who)
     part = {'kind': 'stellar-committee', 'vault': net.vault, **body, 'valid_until': valid_until, 'required': required,
-            'digest': digest.hex(), 'signer': who, 'signature': done.stdout.strip().lower()}
+            'digest': digest.hex(), 'signer': who, 'signature': signature}
     Path(args['--out']).write_text(json.dumps(part, indent=2) + '\n')
     print(json.dumps(part, indent=2))
 
@@ -81,7 +87,18 @@ def combine(argv, args):
     if not parts or any({k: p.get(k) for k in same} != {k: parts[0].get(k) for k in same} for p in parts):
         fail('the partials are for different messages')
     first = parts[0]
-    by = {p['signer']: p['signature'] for p in parts}
+    try:
+        if first['kind'] != 'stellar-committee' or first['action'] not in ('controls', 'unpause'):
+            fail('not partials of a committee act')
+        by = {}
+        for part in parts:   # every signature is recovered here; a partial that does not recover to its signer is out
+            who = sn.recover_personal(bytes.fromhex(part['digest']), part['signature'])
+            if who is None or who != str(part['signer']).lower():
+                fail('a partial signature does not recover to the signer it names', signer=part.get('signer'))
+            by[who] = part['signature'].lower()
+        sn.strkey_decode(first['vault'])
+    except (KeyError, TypeError, ValueError, sn.StellarError) as e:
+        fail('malformed partial', error=str(e))
     if len(by) < first['required']:
         fail(f"need {first['required']} distinct signers, have {len(by)}")
     chosen = sorted(by, key=lambda a: int(a, 16))[:first['required']]

@@ -4,7 +4,15 @@ hashes). Standard library only; transactions and XDR go through the pinned `stel
 go through `cast`.
 
 Everything here reads one Stellar RPC (the operator's own). Nothing here holds a key: signing a certificate is done by
-the caller with `cast wallet sign --no-hash` over a digest computed here and compared with the vault's own view.
+the caller with `cast wallet sign 0x<digest>` (an Ethereum personal message, EIP-191) over a digest computed here and
+compared with the vault's own view; the signature that comes back is recovered here, in process, before it is used.
+
+Rule for every tool of this route (review 331, R331-XLM-1): no decision is taken from the exit code of an external
+program, and no value that came from outside this operator (a claim file, a certificate, a call file, an RPC answer)
+is placed on a command line unless it passed a strict format check first. Signatures are verified in process
+(`recover_personal`, `verify_claim`), the L2 is read over JSON-RPC in process (`L2`), and the arguments of the
+`stellar` CLI are restricted to the vault's function names, plain argument names, and values that are numbers,
+booleans, hexadecimal strings or Stellar addresses (`Net._fn_args`): none can start with `-`.
 
 The hashes mirror stellar/vault/src/lib.rs (32-byte words as Solidity's abi.encode):
   route      sha256(tag ROUTE, network id, source domain, native domain, asset, token id, vault id, 6, cap)
@@ -22,12 +30,14 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'signatario-stable'))
-from bridge_feed import keccak256  # noqa: E402  (pure Python Keccak-256, already in the audited tool set)
+# Pure Python Keccak-256 and secp256k1 recovery (low-s, v in {27, 28}), already in the audited tool set.
+from bridge_feed import SECP_N, keccak256, recover  # noqa: E402
 
 STROOPS_PER_UNIT = 10
 MAX_VALIDITY = 86400
@@ -39,8 +49,44 @@ TAGS = {k: v.encode() for k, v in {
 }.items()}
 
 
+# Circle's USDC on the public Stellar network. Issuer account from Circle's own list of USDC contract addresses
+# (https://developers.circle.com/stablecoins/usdc-contract-addresses, row "Stellar", read 2026-11-17) and from the
+# issuer account itself (home domain circle.com, whose https://www.circle.com/.well-known/stellar.toml lists USDC with
+# this issuer; Horizon and that file read 2026-11-17). The contract id is not
+# taken from anywhere: it is the Stellar Asset Contract id that the protocol derives from (network id, asset code,
+# issuer), computed by `asset_contract_id` below and equal to the id Horizon reports for the asset.
+PUBLIC_PASSPHRASE = 'Public Global Stellar Network ; September 2015'
+CIRCLE_USDC = {'code': 'USDC', 'issuer': 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+               'contract': 'CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75'}
+
+ADDRESS_RE = re.compile(r'0x[0-9a-fA-F]{40}')
+WORD_RE = re.compile(r'0x[0-9a-fA-F]{64}')
+SIGNATURE_RE = re.compile(r'0x[0-9a-fA-F]{130}')
+HEX_RE = re.compile(r'[0-9a-fA-F]+')
+NAME_RE = re.compile(r'[a-z][a-z0-9_]{0,40}')
+# Every function the vault exports (stellar/vault/src/lib.rs). Nothing else is ever passed to the CLI as a function.
+VAULT_FUNCTIONS = frozenset((
+    'config', 'derived', 'state', 'paused', 'available_to_release', 'backing', 'chain_head_at', 'burn_record',
+    'released_burn', 'burn_status', 'pending', 'recipient_commitment', 'deposit_id', 'release_id', 'release_digest',
+    'control_digest', 'pause_digest', 'unpause_digest', 'deposit', 'sweep_fees', 'set_controls', 'release',
+    'execute_release', 'guardian_can_pause', 'guardian_pause', 'unpause'))
+# What a relayer may be handed in a call file, with the exact argument names of each (relay_stellar.py).
+RELAYABLE = {'release': {'item', 'context', 'signatures'}, 'execute_release': {'id'}, 'sweep_fees': set(),
+             'set_controls': {'deposits', 'releases', 'nonce', 'valid_until', 'signatures'},
+             'guardian_pause': {'valid_until', 'signature'}, 'unpause': {'pause_count', 'valid_until', 'signatures'}}
+# The constructor's fields, in the order of the contract's `Config`.
+CONFIG_FIELDS = ('token', 'source_domain', 'native_domain', 'asset', 'cap', 'window_limit', 'window_seconds',
+                 'min_deposit', 'l2_min_burn', 'signers', 'threshold', 'switch_threshold', 'guardians',
+                 'pause_duration', 'pause_cooldown', 'large_release_threshold', 'release_delay', 'fee_recipient',
+                 'deposit_fee_bps', 'release_fee_bps')
+
+
 class StellarError(Exception):
     """The network could not be read, or answered something this tool does not accept. Never a reason to sign."""
+
+
+class ClaimError(StellarError):
+    """A burner's claim that is malformed or not signed by the account that burned."""
 
 
 # ── strkeys ─────────────────────────────────────────────────────────────────
@@ -253,30 +299,67 @@ class Net:
 
     @staticmethod
     def _fn_args(args):
+        """Arguments of a vault function for the CLI. Names are plain identifiers; values are numbers, booleans,
+        hexadecimal strings or Stellar addresses, or objects and lists of those (passed as JSON, which starts with
+        `{` or `[`). Nothing here can be read by the CLI as an option."""
         out = []
         for k, v in args.items():
-            out += ['--' + k, v if isinstance(v, str) else json.dumps(v)]
+            if not isinstance(k, str) or not NAME_RE.fullmatch(k):
+                raise StellarError(f'not an argument name: {k!r}')
+            out += ['--' + k, cli_value(v)]
         return out
+
+    @staticmethod
+    def _fn(fn):
+        if not isinstance(fn, str) or fn not in VAULT_FUNCTIONS:
+            raise StellarError(f'not a function of the vault: {fn!r}')
+        return fn
 
     def view(self, fn, **args):
         """A read-only call, simulated against the last closed ledger."""
         if not self.view_account:
             raise StellarError('config has no view_account')
+        strkey_decode(self.view_account)
         out = self._cli(['contract', 'invoke', '--id', self.vault, '--source-account', self.view_account, '--send=no']
-                        + self._net_args() + ['--', fn] + self._fn_args(args), f'view {fn}')
-        return json.loads(out.splitlines()[-1]) if out else None
+                        + self._net_args() + ['--', self._fn(fn)] + self._fn_args(args), f'view {fn}')
+        try:
+            return json.loads(out.splitlines()[-1]) if out else None
+        except ValueError:
+            raise StellarError(f'view {fn}: the CLI printed no JSON value')
 
     def build(self, source, fn, **args):
         """An unsigned, simulated transaction envelope (base64) calling `fn` from `source` (a G... address)."""
+        strkey_decode(source)
         tx = self._cli(['contract', 'invoke', '--id', self.vault, '--source-account', source, '--build-only']
-                       + self._net_args() + ['--', fn] + self._fn_args(args), f'build {fn}')
-        return self._cli(['tx', 'simulate', '--source-account', source] + self._net_args(), f'simulate {fn}', stdin=tx)
+                       + self._net_args() + ['--', self._fn(fn)] + self._fn_args(args), f'build {fn}')
+        return self.simulate(source, self._envelope(tx, f'build {fn}'), fn)
+
+    def simulate(self, source, tx, what):
+        strkey_decode(source)
+        return self._envelope(self._cli(['tx', 'simulate', '--source-account', source] + self._net_args(),
+                                        f'simulate {what}', stdin=tx), f'simulate {what}')
+
+    @staticmethod
+    def _envelope(text, what):
+        """What the CLI printed must be one base64 transaction envelope, nothing else (not a help text)."""
+        try:
+            if not text or len(text) > 200_000 or not base64.b64decode(text, validate=True):
+                raise ValueError
+        except ValueError:
+            raise StellarError(f'{what}: the CLI did not print a transaction envelope')
+        return text
 
     def sign(self, envelope, identity):
-        return self._cli(['tx', 'sign', '--sign-with-key', identity] + self._net_args(), 'tx sign', stdin=envelope)
+        if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}', identity):
+            raise StellarError('relayer_identity is not a plain CLI identity name')
+        return self._envelope(self._cli(['tx', 'sign', '--sign-with-key', identity] + self._net_args(), 'tx sign',
+                                        stdin=envelope), 'tx sign')
 
     def tx_hash(self, envelope):
-        return self._cli(['tx', 'hash', '--network-passphrase', self.passphrase], 'tx hash', stdin=envelope)
+        out = self._cli(['tx', 'hash', '--network-passphrase', self.passphrase], 'tx hash', stdin=envelope)
+        if not re.fullmatch(r'[0-9a-f]{64}', out):
+            raise StellarError('tx hash: the CLI did not print a transaction hash')
+        return out
 
     def send(self, envelope):
         return self._cli(['tx', 'send'] + self._net_args(), 'tx send', stdin=envelope)
@@ -285,6 +368,45 @@ class Net:
         """Status of a transaction by hash: SUCCESS, FAILED or NOT_FOUND, with its ledger."""
         r = self.rpc('getTransaction', {'hash': tx_hash})
         return {'status': r.get('status'), 'ledger': r.get('ledger'), 'latest': r.get('latestLedger')}
+
+    def invocation(self, tx_hash):
+        """The contract call a SUCCESSFUL transaction made, from this RPC's retained history:
+        {'contract', 'function', 'args': [plain values]} or None when the RPC no longer holds the transaction, the
+        transaction failed, or it is not one direct contract call (a call made from inside another contract shows
+        the outer call here: the caller must then treat the inner arguments as unknown)."""
+        if not isinstance(tx_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', tx_hash):
+            return None
+        r = self.rpc('getTransaction', {'hash': tx_hash, 'xdrFormat': 'json'})
+        if r.get('status') != 'SUCCESS':
+            return None
+        try:
+            env = r['envelopeJson']
+            tx = (env.get('tx') or env.get('tx_fee_bump', {}).get('tx', {}).get('inner_tx', {}).get('tx'))['tx']
+            ops = tx['operations']
+            if len(ops) != 1:
+                return None
+            call = ops[0]['body']['invoke_host_function']['host_function']['invoke_contract']
+            return {'contract': call['contract_address'], 'function': call['function_name'],
+                    'args': [scval(a) for a in call['args']]}
+        except (KeyError, TypeError, AttributeError):
+            return None
+
+    # classic ledger entries (the fee account and its trustline)
+    def account(self, g):
+        """A classic account's ledger entry, or None when the account does not exist."""
+        kind, _ = strkey_decode(g)
+        if kind != 'account':
+            raise StellarError(f'not an account address: {g}')
+        _, (e,) = self.entries([{'account': {'account_id': g}}])
+        return None if e is None else e['dataJson']['account']
+
+    def trustline(self, g, code, issuer):
+        """The trustline of account `g` for the classic asset `code:issuer`, or None when there is none."""
+        strkey_decode(g), strkey_decode(issuer)
+        key = 'credit_alphanum4' if len(code) <= 4 else 'credit_alphanum12'
+        asset = {key: {'asset_code': code, 'issuer': issuer}}
+        _, (e,) = self.entries([{'trustline': {'account_id': g, 'asset': asset}}])
+        return None if e is None else e['dataJson']['trustline']
 
     # ledger entries
     def _key(self, obj):
@@ -380,3 +502,354 @@ def scval(v):
     if k == 'map':
         return {scval(i['key']): scval(i['val']) for i in x}
     return x
+
+
+# ── strict values ───────────────────────────────────────────────────────────
+def cli_value(v, top=True):
+    """One argument value for the `stellar` CLI (see Net._fn_args). Raises on anything else."""
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if isinstance(v, int):
+        if v < 0:
+            raise StellarError('a negative number is not an argument of the vault')
+        return str(v)
+    if isinstance(v, str):
+        if not HEX_RE.fullmatch(v):
+            strkey_decode(v)  # raises unless it is a Stellar address (base32: it cannot start with `-`)
+        return v
+    if isinstance(v, (dict, list)) and top:
+        _plain(v)
+        return json.dumps(v)
+    raise StellarError(f'not an argument value: {type(v).__name__}')
+
+
+def _plain(v):
+    if isinstance(v, dict):
+        for k, x in v.items():
+            if not isinstance(k, str) or not NAME_RE.fullmatch(k):
+                raise StellarError(f'not a field name: {k!r}')
+            _plain(x)
+    elif isinstance(v, list):
+        for x in v:
+            _plain(x)
+    else:
+        cli_value(v, top=False)
+
+
+def address20(v, what='address'):
+    """A 0x-prefixed 20-byte address, lower case. Raises on anything else."""
+    if not isinstance(v, str) or not ADDRESS_RE.fullmatch(v):
+        raise StellarError(f'{what} is not a 0x address of 20 bytes')
+    return v.lower()
+
+
+# ── signatures, verified in process ─────────────────────────────────────────
+def signature_bytes(sig):
+    """A signature exactly as `cast wallet sign` prints it: 0x and 130 hex characters (r, s, v), v 27 or 28, low s.
+    Returns the 65 bytes, or raises ClaimError. A value that is not a string of that exact shape never goes further."""
+    if not isinstance(sig, str) or not SIGNATURE_RE.fullmatch(sig):
+        raise ClaimError('the signature is not 0x followed by exactly 130 hexadecimal characters')
+    raw = bytes.fromhex(sig[2:])
+    r, s_ = int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:64], 'big')
+    if raw[64] not in (27, 28):
+        raise ClaimError('the signature\'s v is not 27 or 28')
+    if not 0 < r < SECP_N or not 0 < s_ <= SECP_N // 2:
+        raise ClaimError('the signature\'s r or s is out of range (s must be in the lower half)')
+    return raw
+
+
+def recover_hash(hash32, sig):
+    """The address that signed the 32-byte hash, or None. No external program."""
+    try:
+        return recover(b32(hash32), signature_bytes(sig))
+    except StellarError:
+        return None
+
+
+def recover_personal(digest, sig):
+    """The address whose key signed `digest` (32 bytes) as an Ethereum personal message, or None."""
+    return recover_hash(personal(digest), sig)
+
+
+def personal_text(text):
+    """The EIP-191 hash of a text message, as `cast wallet sign "<text>"` and every wallet's personal_sign hash it."""
+    data = text.encode()
+    return keccak256(b'\x19Ethereum Signed Message:\n' + str(len(data)).encode() + data)
+
+
+def load_claim(path):
+    """A claim file as an object, or None when there is no such file. Raises ClaimError when it is unreadable."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_bytes()
+        if len(raw) > 4096:
+            raise ValueError('larger than 4096 bytes')
+        return json.loads(raw)
+    except (OSError, ValueError) as e:
+        raise ClaimError(f'the claim file is not readable JSON: {e}')
+
+
+def verify_claim(claim, burner, l2_chain_id, token, burn_id):
+    """The one check of a burner's claim for a direct burn, shared by the Stellar half, the signer, the watcher and
+    the guardian. `burner` is the account in the FINAL `Burned` log, read by the caller from its own L2; `token` and
+    `l2_chain_id` are the caller's own. Returns the Stellar address the claim names, or raises ClaimError.
+
+    The claim is exactly {"stellar_address": "G...", "signature": "0x" + 130 hex}: no other field, no other type. The
+    signature is recovered here (secp256k1, low s, v 27 or 28) over the EIP-191 hash of `claim_text` and must give
+    the burner. Nothing of the claim reaches a command line."""
+    if not isinstance(claim, dict) or set(claim) != {'stellar_address', 'signature'}:
+        raise ClaimError('a claim is an object with exactly the fields stellar_address and signature')
+    to = claim['stellar_address']
+    kind, _ = strkey_decode(to) if isinstance(to, str) else (None, None)
+    if kind is None:
+        raise ClaimError('the claim names no Stellar address')
+    if not isinstance(burner, str) or not ADDRESS_RE.fullmatch(burner) or int(burner, 16) == 0:
+        raise ClaimError('the burner is not known as a 20-byte address')
+    raw = signature_bytes(claim['signature'])
+    text = claim_text(l2_chain_id, address20(token, 'token'), burn_id, to)
+    if recover(personal_text(text), raw) != burner.lower():
+        raise ClaimError('the claim is not signed by the account that burned')
+    return to
+
+
+# ── Stellar Asset Contract ids ──────────────────────────────────────────────
+def asset_contract_id(passphrase, code, issuer):
+    """The `C...` address of the Stellar Asset Contract of the classic asset `code:issuer` on a network: sha256 of
+    the XDR HashIDPreimage (ENVELOPE_TYPE_CONTRACT_ID = 8, network id, CONTRACT_ID_PREIMAGE_FROM_ASSET = 1, Asset)."""
+    kind, key = strkey_decode(issuer)
+    if kind != 'account':
+        raise StellarError('an asset issuer is an account (G...)')
+    if not isinstance(code, str) or not re.fullmatch(r'[A-Za-z0-9]{1,12}', code):
+        raise StellarError('not an asset code')
+    width = 4 if len(code) <= 4 else 12
+    asset = (1 if width == 4 else 2).to_bytes(4, 'big') + code.encode().ljust(width, b'\0') + (0).to_bytes(4, 'big') + key
+    pre = (8).to_bytes(4, 'big') + network_id(passphrase) + (1).to_bytes(4, 'big') + asset
+    return strkey_encode('contract', hashlib.sha256(pre).digest())
+
+
+def config_differences(expected, onchain):
+    """Every constructor field of the vault, compared one by one: [(field, expected, deployed)] for each that differs.
+    `expected` is the `vault.config` object of the committed deployment file, `onchain` the vault's `config()`."""
+    def norm(k, v):
+        if k in ('signers', 'guardians'):
+            return [str(x).lower().replace('0x', '') for x in v] if isinstance(v, list) else v
+        if k in ('source_domain', 'native_domain', 'asset'):
+            return str(v).lower().replace('0x', '')
+        if k in ('token', 'fee_recipient'):
+            return v
+        return int(v) if isinstance(v, (int, str)) and not isinstance(v, bool) and str(v).isdigit() else v
+    out = []
+    for k in sorted(set(expected) | set(onchain) | set(CONFIG_FIELDS)):
+        a = norm(k, expected.get(k)) if k in expected else '<absent>'
+        b = norm(k, onchain.get(k)) if k in onchain else '<absent>'
+        if a != b:
+            out.append((k, a, b))
+    return out
+
+
+def fee_account_problems(net, fee_recipient, code, issuer):
+    """What is missing for the fee address to receive the asset: [] when the account exists and holds an authorized
+    trustline for `code:issuer`. A trustline can only be created by a transaction the account's own signers signed,
+    so its existence also shows that somebody controls the key."""
+    acct = net.account(fee_recipient)
+    if acct is None:
+        return [f'the fee account {fee_recipient} does not exist on this network']
+    line = net.trustline(fee_recipient, code, issuer)
+    if line is None:
+        return [f'the fee account {fee_recipient} has no trustline for {code}:{issuer}']
+    if not int(line.get('flags', 0)) & 1:
+        return [f'the fee account\'s trustline for {code}:{issuer} is not authorized by the issuer']
+    return []
+
+
+# ── the L2, read in process ─────────────────────────────────────────────────
+BURNED_TOPIC = '0x' + keccak256(b'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)').hex()
+STELLAR_EXIT_TOPIC = '0x' + keccak256(b'StellarExit(bytes32,address,uint64,bytes20,string)').hex()
+
+
+def selector(signature):
+    return '0x' + keccak256(signature.encode())[:4].hex()
+
+
+class L2:
+    """One Ethereum-style JSON-RPC endpoint of the Bloch L2, read with the standard library. Every answer is checked
+    for its shape before it is used; anything else raises StellarError ("could not be read": never a decision)."""
+
+    def __init__(self, url, timeout=30):
+        self.url, self.timeout = url, timeout
+
+    def rpc(self, method, params):
+        req = urllib.request.Request(self.url, json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method,
+                                                           'params': params}).encode(),
+                                     {'content-type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                out = json.loads(r.read())
+        except (OSError, ValueError) as e:
+            raise StellarError(f'L2 RPC {method} failed: {e}')
+        if not isinstance(out, dict) or 'error' in out or 'result' not in out:
+            raise StellarError(f'L2 RPC {method}: {out.get("error") if isinstance(out, dict) else "no object"}')
+        return out['result']
+
+    @staticmethod
+    def _int(v, what):
+        if not isinstance(v, str) or not re.fullmatch(r'0x[0-9a-fA-F]{1,64}', v):
+            raise StellarError(f'L2 RPC: {what} is not a hex quantity')
+        return int(v, 16)
+
+    @staticmethod
+    def _word(v, what):
+        if not isinstance(v, str) or not WORD_RE.fullmatch(v):
+            raise StellarError(f'L2 RPC: {what} is not 32 bytes')
+        return v.lower()
+
+    def chain_id(self):
+        return self._int(self.rpc('eth_chainId', []), 'chain id')
+
+    def block(self, tag):
+        """{'number', 'hash', 'timestamp'} of a block by tag (`latest`, `finalized`, `safe`) or number; None if the
+        endpoint has no such block."""
+        if isinstance(tag, str) and tag.isdigit():
+            tag = int(tag)
+        if isinstance(tag, int):
+            tag = hex(tag)
+        elif tag not in ('latest', 'finalized', 'safe'):
+            raise StellarError(f'not a block tag: {tag!r}')
+        b = self.rpc('eth_getBlockByNumber', [tag, False])
+        if b is None:
+            return None
+        if not isinstance(b, dict):
+            raise StellarError('L2 RPC: a block is not an object')
+        return {'number': self._int(b.get('number'), 'block number'), 'hash': self._word(b.get('hash'), 'block hash'),
+                'timestamp': self._int(b.get('timestamp'), 'block timestamp')}
+
+    def call(self, to, data, number):
+        out = self.rpc('eth_call', [{'to': address20(to), 'data': data}, hex(int(number))])
+        if not isinstance(out, str) or not re.fullmatch(r'0x([0-9a-fA-F]{2})*', out):
+            raise StellarError('L2 RPC: eth_call returned no bytes')
+        return out.lower()
+
+    def call_word(self, to, data, number):
+        return int(self._word(self.call(to, data, number), 'the returned word'), 16)
+
+    def code_keccak(self, address, number):
+        code = self.rpc('eth_getCode', [address20(address), hex(int(number))])
+        if not isinstance(code, str) or not re.fullmatch(r'0x([0-9a-fA-F]{2})*', code):
+            raise StellarError('L2 RPC: eth_getCode returned no bytes')
+        return '0x' + keccak256(bytes.fromhex(code[2:])).hex()
+
+    def logs(self, address, topics, from_block, to_block):
+        """Logs of one contract, each checked for shape: [{'topics': [..], 'data', 'block', 'block_hash'}]."""
+        got = self.rpc('eth_getLogs', [{'address': address20(address), 'topics': topics,
+                                        'fromBlock': hex(int(from_block)), 'toBlock': hex(int(to_block))}])
+        if not isinstance(got, list):
+            raise StellarError('L2 RPC: eth_getLogs returned no list')
+        out = []
+        for l in got:
+            if not isinstance(l, dict) or str(l.get('address', '')).lower() != address.lower() or l.get('removed'):
+                raise StellarError('L2 RPC: a log of another contract, or a removed log')
+            data = l.get('data')
+            if not isinstance(data, str) or not re.fullmatch(r'0x([0-9a-fA-F]{64})*', data):
+                raise StellarError('L2 RPC: log data is not a sequence of 32-byte words')
+            out.append({'topics': [self._word(t, 'a topic') for t in l.get('topics') or []], 'data': data.lower(),
+                        'block': self._int(l.get('blockNumber'), 'log block'),
+                        'block_hash': self._word(l.get('blockHash'), 'log block hash')})
+        return out
+
+
+def burned_log(log):
+    """A `Burned` log of BridgedStablecoinV3, decoded: burn id, nonce, the account that burned, amount, the 20-byte
+    recipient, mint count, minted total, mint head, and its block. None when the shape is not that event's."""
+    t, d = log['topics'], log['data'][2:]
+    if len(t) != 4 or t[0] != BURNED_TOPIC or len(d) != 320 or t[3][2:26] != '0' * 24 or d[64:88] != '0' * 24:
+        return None
+    return {'burn_id': t[1], 'nonce': int(t[2], 16), 'from': '0x' + t[3][26:], 'amount': int(d[:64], 16),
+            'recipient': '0x' + d[88:128], 'mint_count': int(d[128:192], 16), 'minted_total': int(d[192:256], 16),
+            'mint_head': '0x' + d[256:320], 'block': log['block'], 'block_hash': log['block_hash']}
+
+
+def abi_string(data, head_index):
+    """The dynamic `string` whose offset is word `head_index` of ABI-encoded `data` (hex, 0x), or None."""
+    d = bytes.fromhex(data[2:])
+    try:
+        off = int.from_bytes(d[32 * head_index:32 * head_index + 32], 'big')
+        n = int.from_bytes(d[off:off + 32], 'big')
+        if off + 32 + n > len(d) or n > 256:
+            return None
+        return d[off + 32:off + 32 + n].decode('ascii')
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+# ── the committed vault deployment file ─────────────────────────────────────
+def vault_file_problems(doc):
+    """deployments/stellar/busdc-xlm-vault.config.json (or a rehearsal copy), checked by itself: [] when it is
+    complete and consistent. The asset contract must be the one derived from the file's `asset` and network; on the
+    public network that asset must be Circle's USDC."""
+    out = []
+    try:
+        net, asset, cfg = doc['network'], doc['asset'], doc['vault']['config']
+        passphrase = net['passphrase']
+        if network_id(passphrase).hex() != str(net.get('networkId')):
+            out.append('network.networkId is not sha256 of network.passphrase')
+        public = passphrase == PUBLIC_PASSPHRASE
+        if public == bool(net.get('rehearsal')):
+            out.append('network.rehearsal must be false on the public network and true elsewhere')
+        derived = asset_contract_id(passphrase, asset['code'], asset['issuer'])
+        if asset.get('contract') != derived:
+            out.append(f'asset.contract is not the Stellar Asset Contract of {asset["code"]}:{asset["issuer"]} ({derived})')
+        if public and {k: asset.get(k) for k in ('code', 'issuer', 'contract')} != CIRCLE_USDC:
+            out.append('on the public network the asset must be Circle\'s USDC (stellar_net.CIRCLE_USDC)')
+        missing = [k for k in CONFIG_FIELDS if k not in cfg]
+        extra = [k for k in cfg if k not in CONFIG_FIELDS]
+        if missing or extra:
+            return out + [f'vault.config: missing {missing}, unexpected {extra}']
+        if cfg['token'] != asset.get('contract'):
+            out.append('vault.config.token is not asset.contract')
+        for k in ('source_domain', 'native_domain', 'asset'):
+            if not isinstance(cfg[k], str) or not re.fullmatch(r'[0-9a-f]{64}', cfg[k]):
+                out.append(f'vault.config.{k} is not 32 bytes of lower-case hex')
+        if public and [cfg[k] for k in ('source_domain', 'native_domain', 'asset')] != [
+                hashlib.sha256(x).hexdigest() for x in (b'stellar-pubnet', b'bloch-l2-700770', b'USDC')]:
+            out.append('on the public network the labels are sha256 of "stellar-pubnet", "bloch-l2-700770", "USDC"')
+        for k in ('cap', 'window_limit', 'window_seconds', 'min_deposit', 'l2_min_burn', 'threshold', 'switch_threshold',
+                  'pause_duration', 'pause_cooldown', 'large_release_threshold', 'release_delay', 'deposit_fee_bps',
+                  'release_fee_bps'):
+            if not isinstance(cfg[k], int) or isinstance(cfg[k], bool) or cfg[k] < 0:
+                out.append(f'vault.config.{k} is undecided')
+        if out:
+            return out
+        for k, n in (('signers', None), ('guardians', None)):
+            v = cfg[k]
+            if not isinstance(v, list) or not all(isinstance(a, str) and re.fullmatch(r'[0-9a-f]{40}', a) for a in v):
+                out.append(f'vault.config.{k}: undecided, or not 20-byte lower-case hex without 0x')
+            elif v != sorted(set(v), key=lambda a: int(a, 16)):
+                out.append(f'vault.config.{k} must be strictly ascending')
+        if out:
+            return out
+        if set(cfg['signers']) & set(cfg['guardians']):
+            out.append('a signer is also a guardian')
+        if not 2 <= cfg['threshold'] <= cfg['switch_threshold'] <= len(cfg['signers']):
+            out.append('threshold <= switch_threshold <= number of signers does not hold')
+        if public and (len(cfg['signers']), cfg['threshold'], cfg['switch_threshold'], len(cfg['guardians'])) != (7, 5, 6, 3):
+            out.append('on the public network the committee is 5 of 7 (6 to unpause) with 3 guardians')
+        if cfg['guardians'] and cfg['release_delay'] > cfg['pause_cooldown'] // 2:
+            out.append('release_delay must be at most half of pause_cooldown')
+        if public and (cfg['deposit_fee_bps'], cfg['release_fee_bps']) != (5, 5):
+            out.append('on the public network the fee is 5 bps on deposit and 5 bps on release')
+        if public and cfg['window_seconds'] != 86400:
+            out.append('on the public network window_seconds is 86400')
+        if cfg['window_seconds'] < 1 or cfg['cap'] < 1 or not 0 < cfg['window_limit'] <= cfg['cap']:
+            out.append('cap, window_limit or window_seconds is zero or inconsistent')
+        if cfg['min_deposit'] <= cfg['l2_min_burn']:
+            out.append('min_deposit must be above l2_min_burn')
+        if strkey_decode(cfg['fee_recipient'])[0] != 'account':
+            out.append('fee_recipient must be an account (G...)')
+        wasm = (doc.get('source') or {}).get('wasmSha256')
+        if not isinstance(wasm, str) or not re.fullmatch(r'[0-9a-f]{64}', wasm):
+            out.append('source.wasmSha256 is undecided')
+    except (KeyError, TypeError, AttributeError, StellarError) as e:
+        out.append(f'the file is incomplete or malformed: {e}')
+    return out

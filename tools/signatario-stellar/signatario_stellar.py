@@ -18,7 +18,9 @@ Replaced:
      over the vault's pause count and the Stellar recipient whose commitment is the burn's 20-byte recipient. The
      half reports that address; it is accepted only if it hashes to the commitment read from the L2 burn, or, for
      a burn made directly on the token, if the account that burned (as this signer read it from the L2) signed
-     the claim text naming it (stellar_net.claim_text);
+     the claim text naming it (stellar_net.claim_text). That signature is recovered in this process
+     (stellar_net.verify_claim); the half's own signature is recovered in this process too, before the shared
+     module looks at it. No value of a claim or of a certificate is handed to another program;
   3. `combine` for a release: the arguments of the vault's `release` for the `stellar` CLI instead of an EVM call.
 
 The config is signatario.py's, with `provenance: true`, `source_chain_id` = the Stellar network id as a decimal
@@ -28,7 +30,6 @@ and `vault` (the C... address).
 """
 import json
 from pathlib import Path
-import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -60,15 +61,16 @@ class StellarCtx(S.Ctx):
         return '0x' + sn.deposit_id(route, nonce, sender, amount, pq[26:]).hex()
 
     def claim_holds(self, claim, burner, burn_id, recipient):
-        """The burner's signed claim for a direct burn: checked here again, with the burner this signer read."""
+        """The burner's signed claim for a direct burn: checked here again, in process, with the burner this signer
+        read from its own L2. True only if the claim names `recipient` and its signature recovers to `burner`."""
         try:
-            text = sn.claim_text(self.l2_chain_id, self.token, burn_id, recipient)
-            if not isinstance(claim, dict) or claim.get('stellar_address') != recipient:
+            if not isinstance(claim, dict):
                 return False
-            if len(str(burner)) != 42 or str(burner).lower() == str(self.cfg.get('router', '')).lower():
+            router = str(self.cfg.get('router') or '').lower()
+            if not isinstance(burner, str) or not sn.ADDRESS_RE.fullmatch(burner) or burner.lower() == router:
                 return False
-            return subprocess.run([self.cast, 'wallet', 'verify', '--address', burner, text, str(claim.get('signature'))],
-                                  capture_output=True).returncode == 0
+            bare = {k: claim.get(k) for k in ('stellar_address', 'signature')}
+            return sn.verify_claim(bare, burner, self.l2_chain_id, self.token, burn_id) == recipient
         except (sn.StellarError, KeyError, ValueError, TypeError):
             return False
 
@@ -93,6 +95,10 @@ class StellarCtx(S.Ctx):
                          'the account that burned', stellar_recipient=recipient, commitment=commitment)
             if out.get('vault_contract') != self.vault_contract:
                 S.refuse('the Stellar half answered for another vault', half=out)
+            # The half's signature, recovered here: the shared module's own check then sees a value of a known shape.
+            signer = sn.recover_hash(S.hex32(out.get('digest', ''), 'digest'), out.get('signature'))
+            if signer is None or signer != str(self.cfg['eth_signer']).lower():
+                S.refuse('the Stellar half\'s signature does not recover to the pinned eth_signer', recovered=signer)
             self.stellar_recipient = recipient
             self.pause_count = S.uint(out.get('pause_count'), 64, 'pause_count')
         return out
@@ -188,8 +194,11 @@ def cmd_combine(ctx, args):
                                  'native_finalized_number': c['nativeFinalizedNumber'],
                                  'native_finalized_hash': unhex(c['nativeFinalizedHash'])},
                      'signatures': [unhex(by_signer[a]) for a in chosen]}}
+    for a in chosen:   # every signature that goes into the call: a member of the pinned shape, recovered in process
+        if sn.recover_hash(first['digest'], by_signer[a]) != str(a).lower():
+            S.refuse('a partial signature does not recover to the signer it names', signer=a)
     result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'pause_count': ctx.pause_count,
-              'signers': chosen,
+              'claim': claim, 'signers': chosen,
               'signatures': [by_signer[a] for a in chosen], 'to': ctx.vault_contract, 'call': call}
     out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))

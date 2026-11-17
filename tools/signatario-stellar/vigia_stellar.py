@@ -14,12 +14,15 @@ directories) is that module's code. Replaced, because it reads or writes the sou
                them and keccak(head[n], id, amount, recipient) equals the stored head[n + 1], and only once that
                entry's ledger is `finality_ledgers` behind the node. Discovery only: signatario_stellar.py and
                stellar_half.py decide again before anything is signed.
-  released     the vault's own `burn_status` of the burn's nonce and id: queued or paid is done. A burn whose queued
+  released     the vault's own `burn_status` of the burn's nonce and id: queued or paid is done. PAID is final (a
+               closed Stellar ledger never changes and the vault never clears a paid record), so it is remembered
+               and never asked again: a pass costs one view per burn that is not yet paid, not one per burn the
+               token ever made. With `paid_file` the set also survives a restart. A burn whose queued
                release a guardian pause voided is open again and is signed again like any other, with no operator
                step. A burn whose nonce or id the vault counts for another release (a forgery took it) is parked
                with an alert until a pause voids that one.
-  certificates a partial counts if its signature (an Ethereum personal message) recovers to one of the vault's
-               signers, its digest is the vault's release digest of its fields (computed here; the vault's code is
+  certificates a partial counts if its signature (an Ethereum personal message) recovers IN THIS PROCESS to one
+               of the vault's signers, its digest is the vault's release digest of its fields (computed here; the vault's code is
                pinned by `vault_wasm_hash`), and it was signed under the vault's CURRENT pause count: a round from
                before a pause is dead and a new one is opened.
   anchor       a round can be joined if this node holds the same hash for the round's anchor ledger.
@@ -32,7 +35,8 @@ adapted and reviewed before chain 700770 (docs/STELLAR-BRIDGE.md, "Not done").
 
 Config: the signer's signatario_stellar.py config plus `shared_dir`, `stellar_rpc`, `view_account`,
 `vault_wasm_hash`; optional `stellar_config_dir`, `vault_from_ledger`, `finality_ledgers` (12), `anchor_max_age`
-(ledgers, default 160), `deposit_hints` (directory of JSON files named by the deposit nonce); for `relay` also
+(ledgers, default 160), `paid_file` (where the set of paid burn ids is kept across restarts; a liveness aid only: a
+burn listed there is not looked at again, so nothing is signed or paid because of it), `deposit_hints` (directory of JSON files named by the deposit nonce); for `relay` also
 `l2_chain_id`, the L2 gas key as in vigia.py, and relay_stellar.py's keys `relayer`, `relayer_identity`, `journal`.
 """
 import json
@@ -65,6 +69,9 @@ class VigiaStellar(V.Vigia):
         self.queued = set()        # release ids seen queued, for this process only
         self.queue_cursor = None
         self.burn_nonce = {}       # burn id -> nonce, from this process's own L2 reads and verified partials
+        self.burner = {}           # burn id -> the account in the Burned log, from this process's own L2 reads
+        self.paid_path = Path(c['paid_file']) if c.get('paid_file') else None
+        self.paid = self.load_paid()   # burn ids the vault answered "paid" for: final, never asked again
 
     # ── the source network's clock and identity ──────────────────────────────
     def latest(self):
@@ -176,6 +183,27 @@ class VigiaStellar(V.Vigia):
         return ids
 
     # ── releases ─────────────────────────────────────────────────────────────
+    def paid_scope(self):
+        return f'{self.net.passphrase}|{self.vault_contract}'
+
+    def load_paid(self):
+        try:
+            doc = json.loads(self.paid_path.read_text()) if self.paid_path and self.paid_path.exists() else {}
+            if doc.get('scope') != self.paid_scope():
+                return set()
+            return {b for b in doc.get('paid', []) if isinstance(b, str) and V.WORD.fullmatch(b)}
+        except (OSError, ValueError, AttributeError):
+            return set()
+
+    def mark_paid(self, burn_id):
+        if burn_id in self.paid:
+            return
+        self.paid.add(burn_id)
+        if self.paid_path:
+            tmp = self.paid_path.with_suffix('.tmp')
+            tmp.write_text(json.dumps({'scope': self.paid_scope(), 'paid': sorted(self.paid)}) + '\n')
+            tmp.replace(self.paid_path)
+
     def burns(self):
         burns = super().burns()
         for b in burns:
@@ -187,6 +215,8 @@ class VigiaStellar(V.Vigia):
 
     def status(self, burn_id):
         """The vault's burn_status for a burn id, or None while this process does not know the burn's nonce."""
+        if burn_id in self.paid:
+            return 2
         nonce = self.burn_nonce.get(burn_id)
         if nonce is None:
             # relay mode without an L2 scan: the nonce stated by the certificates in SHARED (untrusted; a wrong nonce
@@ -201,14 +231,18 @@ class VigiaStellar(V.Vigia):
                     continue
         if nonce is None:
             return None
-        return self.chain_read(('stellar-burn-status', burn_id), lambda: self.net.burn_status(nonce, burn_id))
+        status = self.chain_read(('stellar-burn-status', burn_id), lambda: self.net.burn_status(nonce, burn_id))
+        if status == 2 and self.burn_nonce.get(burn_id) is not None:
+            self.mark_paid(burn_id)   # only with a nonce this process read from its own L2 or a verified partial
+        return status
 
     def released(self, burn_id):
         return self.status(burn_id) in (1, 2)
 
     def release_finished(self, burn_id):
-        # Stellar does not reorganise: the answer of a closed ledger is final. Nothing is cached across passes. A
-        # queued release counts as done here; if a pause voids it, the vault answers "open" again and it is redone.
+        # Stellar does not reorganise: the answer of a closed ledger is final. "Paid" is remembered (status()); a
+        # queued release counts as done here but is asked again on every pass: if a pause voids it, the vault
+        # answers "open" again and it is redone.
         return self.released(burn_id)
 
     def burn_done(self, d, burn_id):
@@ -261,8 +295,10 @@ class VigiaStellar(V.Vigia):
             signer, digest, sig = rec['signer'], rec['digest'], rec['signature']
             if not (V.ADDRESS.fullmatch(signer) and V.WORD.fullmatch(digest) and V.SIGNATURE.fullmatch(sig)):
                 return None
-            rc, _, _ = self.run([self.cast, 'wallet', 'verify', '--no-hash', '--address', signer, digest, sig])
-            return rec if rc == 0 and signer[2:].lower() in self.vault_config()['signers'] else None
+            # Recovered in this process (secp256k1, low s, v 27 or 28): no external program decides.
+            if sn.recover_hash(digest, sig) != signer.lower():
+                return None
+            return rec if signer[2:].lower() in self.vault_config()['signers'] else None
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, sn.StellarError):
             return None
 
@@ -277,8 +313,15 @@ class VigiaStellar(V.Vigia):
             recipient, count = half['stellar_recipient'], int(half['pause_count'])
             if count != self.pause_count():
                 return None  # signed before a pause: dead
-            if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower() and not half.get('claim'):
-                return None  # (a claim is verified by signatario_stellar.py when the certificates are combined)
+            if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
+                # A direct burn paid on the burner's claim: the claim travels with the partial and is verified here,
+                # in process, against the burner the partial states (each signer verified it against the burner it
+                # read from its own L2 before signing; signatario_stellar.py checks again when combining).
+                claim = half.get('claim') or {}
+                bare = {k: claim.get(k) for k in ('stellar_address', 'signature')}
+                burner = (rec.get('l2') or {}).get('from')
+                if sn.verify_claim(bare, burner, self.cfg['l2_chain_id'], self.token, burn_id) != recipient:
+                    return None
             item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': recipient, 'amount': rel['amount'],
                     'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],
                     'minted_total': rel['mintedTotal'], 'mint_head': rel['mintHead']}
@@ -293,14 +336,22 @@ class VigiaStellar(V.Vigia):
     def signatario(self, *args):
         rc, out, err = self.run([sys.executable, HERE / 'signatario_stellar.py', '--config', self.cfg_path, *args])
         try:
-            return rc, json.loads(out)
+            doc = json.loads(out)
+            if not isinstance(doc, dict):
+                raise ValueError
+            # Exit 0 alone is never "signed": the tool's own JSON must say so too.
+            if rc == 0 and (doc.get('signed') is False or doc.get('ok') is False or 'reason' in doc):
+                return 1, {**doc, 'reason': 'signatario_stellar.py exited 0 with a refusal: ' + str(doc.get('reason'))}
+            return rc, doc
         except ValueError:
-            return rc, {'reason': 'no JSON from signatario_stellar.py: ' + err.strip()[-300:]}
+            return rc or 1, {'reason': 'no JSON from signatario_stellar.py: ' + err.strip()[-300:]}
 
     # ── relay ────────────────────────────────────────────────────────────────
     def relay_stellar(self, call, key=None):
         path = self.shared / '.calls'
         path.mkdir(parents=True, exist_ok=True)
+        if call.get('fn') not in sn.RELAYABLE or (key is not None and not V.re.fullmatch(r'[A-Za-z0-9_-]{1,80}', key)):
+            return 1, {'status': 'ERROR', 'error': 'not a relayable call'}
         f = path / f"{key or call['fn']}.json"
         f.write_text(json.dumps({'call': call}))
         argv = [sys.executable, HERE / 'relay_stellar.py', '--config', self.cfg_path, 'submit', '--call', f]
@@ -308,9 +359,15 @@ class VigiaStellar(V.Vigia):
             argv += ['--key', key]
         rc, out, err = self.run(argv)
         try:
-            return rc, json.loads(out)
+            doc = json.loads(out)
+            if not isinstance(doc, dict):
+                raise ValueError
+            # Exit 0 counts only with the relayer's own "ok": true and a final status.
+            if rc == 0 and not (doc.get('ok') is True and doc.get('status') in ('SUCCESS', 'DONE')):
+                return 1, {**doc, 'error': 'relay_stellar.py exited 0 without ok/status'}
+            return rc, doc
         except ValueError:
-            return rc, {'status': 'ERROR', 'error': err.strip()[-300:]}
+            return rc or 1, {'status': 'ERROR', 'error': err.strip()[-300:]}
 
     def relay_release(self, d):
         burn_id = '0x' + d.name
@@ -327,8 +384,27 @@ class VigiaStellar(V.Vigia):
         rc, sent = self.relay_stellar(call)
         if rc == 0:
             self.queued.add(sn.release_id(call['args']['item']).hex())
+        self.publish_claim(d, burn_id)
         V.log(kind='relay-release', burn=burn_id, round=rnd.name, tx=sent.get('hash'), status=sent.get('status'),
               error=sent.get('error'))
+
+    def publish_claim(self, d, burn_id):
+        """A burner's claim that a quorum signed for is copied to SHARED/claims/<burn id>.json, so guardians (and
+        anyone) can verify the same file the signers verified. The file is self-authenticating: every reader
+        recovers the signature itself."""
+        try:
+            for f in sorted(d.glob('r-*/*.json')):
+                claim = (json.loads(f.read_text()).get('eth') or {}).get('claim')
+                if isinstance(claim, dict) and sn.SIGNATURE_RE.fullmatch(str(claim.get('signature'))):
+                    out = self.shared / 'claims'
+                    out.mkdir(parents=True, exist_ok=True)
+                    target = out / f'{burn_id[2:]}.json'
+                    if not target.exists():
+                        target.write_text(json.dumps({'stellar_address': claim.get('stellar_address'),
+                                                      'signature': claim['signature']}) + '\n')
+                    return
+        except (OSError, ValueError, AttributeError):
+            return
 
     def execute_due(self):
         """Queued releases whose delay has passed are paid by anyone: here. Ids come from this process's own relays and
@@ -349,6 +425,9 @@ class VigiaStellar(V.Vigia):
         if now < int(st['paused_until']) or not st['releases_enabled']:
             return
         for rid in sorted(self.queued):
+            if not isinstance(rid, str) or not sn.HEX_RE.fullmatch(rid) or len(rid) != 64:
+                self.queued.discard(rid)
+                continue
             pending = self.net.view('pending', id=rid)
             if pending is None or int(pending['pause_count']) != int(st['pause_count']):
                 self.queued.discard(rid)   # paid, or voided by a pause (its burn is certified again by the signers)

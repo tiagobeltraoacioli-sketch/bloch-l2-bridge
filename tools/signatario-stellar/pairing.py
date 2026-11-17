@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
-"""Pairing of the Stellar vault with its L2 token (one vault, one token, set once).
+"""Pairing of the Stellar vault with its L2 token (one vault, one token, set once), and the checks of the vault against
+the committed deployment file. Read-only; no key.
 
-  pairing.py args  --config XLM.json --token-config TOKEN.json
-  pairing.py check --config XLM.json --token-config TOKEN.json --l2-rpc URL --token 0xTOKEN
+  pairing.py preflight   --config XLM.json --vault-config VAULT.json
+  pairing.py vault-check --config XLM.json --vault-config VAULT.json
+  pairing.py args        --config XLM.json --vault-config VAULT.json --token-config TOKEN.json
+  pairing.py check       --config XLM.json --vault-config VAULT.json --token-config TOKEN.json --l2-rpc URL --token 0xTOKEN
 
-args   reads the deployed vault (its pinned Wasm, its configuration and derived values) and prints the three source
-       fields `BridgedStablecoinV3` takes for it, with the full constructor argument list for `cast abi-encode`:
-       sourceChainId = the Stellar network id (sha256 of the passphrase) as a uint256, sourceVault = the low 20 bytes
-       of the vault's contract id, sourceRoute = the vault's route. Refuses unless the token config's limits fit the
-       vault's (supplyCap == cap, bucketCapacity == window_limit, minBurn == l2_min_burn, largeMintThreshold 0).
-       It also prints `stellarSection`: the values of the deployed vault for the `stellar` section of the token
-       config, which tools/deploy-pontes/deploy_pontes.py then validates, plans and verifies (the deployment itself
-       goes through that tool; this one only reads).
-check  after the token is deployed: its creation was the pinned bytecode's runtime (code keccak given in the token
-       config when known), `sourceChainId/sourceVault/sourceRoute` equal the vault's, `mintHead()` equals the vault's
-       chain genesis while nothing is minted, `decimals` is 6, threshold and signers equal the token config, and the
-       vault's signer and guardian sets equal the ones in the token config's `vault` section. Exit 1 on any difference.
+preflight    BEFORE the vault is deployed. The committed vault file by itself (complete, consistent; its asset
+             contract is the Stellar Asset Contract derived from its asset and network; on the public network the
+             asset is Circle's USDC); then, on the network: the RPC serves that network, the asset contract exists
+             and is a Stellar Asset Contract, and the fee account exists and holds an authorized trustline for the
+             asset (docs/STELLAR-BRIDGE-DEPLOY.md section 2). Refuses otherwise: no vault is deployed with a fee
+             address that cannot be paid, or over another asset.
+vault-check  AFTER the deploy, before any control is opened: the deployed vault's Wasm hash is the file's
+             `source.wasmSha256`, EVERY field of its `config()` equals the file's `vault.config`, its route and chain
+             genesis recompute from the FILE's values, and the fee account check again. Any difference is listed
+             and refused.
+args         runs vault-check, then prints the three source fields `BridgedStablecoinV3` takes for the vault, the
+             constructor argument list, and `stellarSection`: the `stellar` section of the token config, built from
+             the committed vault file (which the deployed vault was just shown to equal), never copied from the
+             vault. Refuses unless the token config's limits fit (supplyCap == cap, bucketCapacity == window_limit,
+             minBurn == l2_min_burn, largeMintThreshold 0).
+check        runs vault-check, then, after the token is deployed: its code keccak (when the token config gives one),
+             `sourceChainId/sourceVault/sourceRoute` equal the vault's, `mintHead()` equals the vault's chain genesis
+             while nothing is minted, `decimals` is 6, threshold and signers equal the token config, and the token
+             config's `stellar` section equals the vault file. The L2 is read over JSON-RPC in this process.
+             Exit 1 on any difference.
 
-`XLM.json`: `stellar_rpc`, `network_passphrase`, `vault`, `vault_wasm_hash`, `view_account`.
-`TOKEN.json`: deployments/stellar/busdc-xlm-token.config.json (the deploy_pontes.py schema with a `stellar` section).
+`XLM.json`: `stellar_rpc`, `network_passphrase`, `vault` (not needed for preflight).
+`VAULT.json`: deployments/stellar/busdc-xlm-vault.config.json. `TOKEN.json`: deployments/stellar/busdc-xlm-token.config.json.
 """
 import json
 from pathlib import Path
-import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,18 +47,73 @@ def fail(msg, **detail):
     raise SystemExit(1)
 
 
-def vault_facts(cfg):
-    net = sn.Net(cfg)
-    wasm, _, _ = net.wasm_hash()
-    if wasm != cfg['vault_wasm_hash'].replace('0x', '').lower():
-        fail('the vault runs another Wasm than the pinned one', got=wasm)
-    d, c = net.view('derived'), net.view('config')
-    if bytes.fromhex(d['network_id']) != sn.network_id(net.passphrase):
-        fail('the vault is on another network than the config\'s passphrase')
-    route = sn.route_id(net.passphrase, c['source_domain'], c['native_domain'], c['asset'], c['token'], net.vault, c['cap'])
+def vault_file(path):
+    doc = json.loads(Path(path).read_text())
+    problems = sn.vault_file_problems(doc)
+    if problems:
+        fail('the vault deployment file is not complete and consistent', problems=problems)
+    return doc
+
+
+def network_facts(cfg, doc):
+    """What must hold on the network before and after the deploy: the right network, the asset contract, the fee
+    account with its trustline."""
+    if cfg.get('network_passphrase') != doc['network']['passphrase']:
+        fail('the config names another network than the vault deployment file')
+    net = sn.Net({**cfg, 'vault': cfg.get('vault') or doc['asset']['contract']})
+    if net.rpc('getNetwork').get('passphrase') != net.passphrase:
+        fail('the Stellar RPC serves another network than network_passphrase')
+    asset = doc['asset']
+    exe, _, _ = net.wasm_hash(asset['contract'])
+    if exe != 'stellar_asset':
+        fail('the asset contract is not a Stellar Asset Contract on this network', executable=exe)
+    problems = sn.fee_account_problems(net, doc['vault']['config']['fee_recipient'], asset['code'], asset['issuer'])
+    if problems:
+        fail('the fee account is not ready: run the fee-account ceremony first (docs/STELLAR-BRIDGE-DEPLOY.md '
+             'section 2)', problems=problems)
+    return net
+
+
+def vault_facts(cfg, doc):
+    """The deployed vault compared with the committed file, field by field. Returns (net, derived, config)."""
+    net = network_facts(cfg, doc)
+    storage, wasm, _, _ = net.instance_storage()
+    if wasm != doc['source']['wasmSha256']:
+        fail('the vault runs another Wasm than the vault deployment file names', got=wasm, file=doc['source']['wasmSha256'])
+    if not all(k in storage for k in ('Config', 'Derived', 'State')):
+        fail('the vault instance holds no configuration')
+    c, d = storage['Config'], storage['Derived']
+    differences = sn.config_differences(doc['vault']['config'], c)
+    if differences:
+        fail('the deployed vault differs from the vault deployment file',
+             differences=[{'field': k, 'file': a, 'vault': b} for k, a, b in differences])
+    f = doc['vault']['config']
+    if bytes.fromhex(d['network_id']) != sn.network_id(net.passphrase) \
+            or bytes.fromhex(d['vault_id']) != sn.strkey_decode(net.vault)[1]:
+        fail('the vault is on another network or at another address than the config says')
+    # From the FILE's values, not the vault's.
+    route = sn.route_id(net.passphrase, f['source_domain'], f['native_domain'], f['asset'], f['token'], net.vault, f['cap'])
     if route.hex() != d['route'] or sn.genesis(net.passphrase, net.vault, route).hex() != d['genesis']:
-        fail('the vault\'s route or genesis does not recompute from its configuration')
+        fail('the vault\'s route or genesis does not recompute from the vault deployment file')
     return net, d, c
+
+
+def stellar_section(doc, vault, route):
+    """The `stellar` section of the token config, from the committed vault file (shown equal to the deployed vault)."""
+    f, asset = doc['vault']['config'], doc['asset']
+    return {'networkPassphrase': doc['network']['passphrase'], 'vault': vault, 'route': route,
+            'vaultWasmHash': '0x' + doc['source']['wasmSha256'],
+            'asset': {'code': asset['code'], 'issuer': asset['issuer'], 'contract': asset['contract']},
+            'labels': {'sourceDomain': '0x' + f['source_domain'], 'nativeDomain': '0x' + f['native_domain'],
+                       'asset': '0x' + f['asset']},
+            'vaultCap': f['cap'], 'vaultWindowLimit': f['window_limit'], 'vaultWindowSeconds': f['window_seconds'],
+            'vaultMinDeposit': f['min_deposit'], 'vaultSigners': ['0x' + x for x in f['signers']],
+            'vaultThreshold': f['threshold'], 'vaultSwitchThreshold': f['switch_threshold'],
+            'vaultGuard': {'guardians': ['0x' + x for x in f['guardians']], 'pauseDuration': f['pause_duration'],
+                           'pauseCooldown': f['pause_cooldown']},
+            'releaseDelay': f['release_delay'], 'largeReleaseThreshold': f['large_release_threshold'],
+            'feeRecipient': f['fee_recipient'], 'depositFeeBps': f['deposit_fee_bps'],
+            'releaseFeeBps': f['release_fee_bps']}
 
 
 def source_fields(d):
@@ -72,11 +137,23 @@ def main():
         raise SystemExit(__doc__)
     a = {x: argv[i + 1] for i, x in enumerate(argv[:-1]) if x.startswith('--')}
     cfg = json.loads(Path(a['--config']).read_text())
-    t = json.loads(Path(a['--token-config']).read_text())
+    if '--vault-config' not in a:
+        fail('--vault-config (deployments/stellar/busdc-xlm-vault.config.json) is required: the vault is compared with it')
+    doc = vault_file(a['--vault-config'])
     try:
-        net, d, c = vault_facts(cfg)
+        if 'preflight' in argv:
+            network_facts(cfg, doc)
+            print(json.dumps({'ok': True, 'decision': 'ready-to-deploy-the-vault', 'asset': doc['asset']['contract'],
+                              'feeRecipient': doc['vault']['config']['fee_recipient']}, indent=2))
+            return
+        net, d, c = vault_facts(cfg, doc)
     except sn.StellarError as e:
         fail('the Stellar node could not be read', error=str(e))
+    if 'vault-check' in argv:
+        print(json.dumps({'ok': True, 'decision': 'vault-equals-the-deployment-file', 'vault': net.vault,
+                          'wasm': doc['source']['wasmSha256'], **source_fields(d), 'genesis': '0x' + d['genesis']}, indent=2))
+        return
+    t = json.loads(Path(a['--token-config']).read_text())
     problems = fit(c, t)
     if problems:
         fail('the token config does not fit the vault', problems=problems)
@@ -93,51 +170,42 @@ def main():
                                            lim['largeMintThreshold'], lim['largeMintDelay'], lim['minBurn']),
                   '([%s],%s,%s)' % (','.join(guards), g['pauseDuration'], g['pauseCooldown']),
                   '(%s,%s)' % (sw['threshold'], sw['delay'])]
-        section = {'networkPassphrase': net.passphrase, 'vault': net.vault, 'route': src['sourceRoute'],
-                   'vaultWasmHash': '0x' + cfg['vault_wasm_hash'].replace('0x', '').lower(), 'vaultCap': int(c['cap']),
-                   'vaultWindowLimit': int(c['window_limit']), 'vaultSigners': ['0x' + x for x in c['signers']],
-                   'vaultThreshold': int(c['threshold']), 'vaultSwitchThreshold': int(c['switch_threshold']),
-                   'vaultGuard': {'guardians': ['0x' + x for x in c['guardians']],
-                                  'pauseDuration': int(c['pause_duration']), 'pauseCooldown': int(c['pause_cooldown'])},
-                   'releaseDelay': int(c['release_delay']), 'largeReleaseThreshold': int(c['large_release_threshold']),
-                   'feeRecipient': c['fee_recipient'], 'depositFeeBps': int(c['deposit_fee_bps']),
-                   'releaseFeeBps': int(c['release_fee_bps'])}
+        section = stellar_section(doc, net.vault, src['sourceRoute'])
         print(json.dumps({'ok': True, **src, 'genesis': '0x' + d['genesis'], 'constructor': CTOR, 'values': values,
                           'stellarSection': section}, indent=2))
         return
-    cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
+    try:
+        l2 = sn.L2(a['--l2-rpc'])
+        token = sn.address20(a['--token'], '--token')
+        at = l2.block('latest')['number']
 
-    def call(sig, *args):
-        done = subprocess.run([cast, 'call', a['--token'], sig, *args, '--rpc-url', a['--l2-rpc']], capture_output=True, text=True)
-        if done.returncode:
-            fail('L2 call failed', sig=sig, stderr=done.stderr.strip()[-300:])
-        return done.stdout.strip()
-    diffs = []
-    if call('sourceChainId()(uint256)').split()[0] != src['sourceChainId']:
-        diffs.append('sourceChainId')
-    if call('sourceVault()(address)').lower() != src['sourceVault']:
-        diffs.append('sourceVault')
-    if call('sourceRoute()(bytes32)') != src['sourceRoute']:
-        diffs.append('sourceRoute')
-    if int(call('mintCount()(uint64)').split()[0]) == 0 and call('mintHead()(bytes32)') != '0x' + d['genesis']:
-        diffs.append('mintHead != vault genesis')
-    if int(call('decimals()(uint8)').split()[0]) != 6:
-        diffs.append('decimals')
-    if int(call('threshold()(uint256)').split()[0]) != int(t['signers']['threshold']):
-        diffs.append('threshold')
-    onchain = call('signers()(address[])').strip('[]').replace(' ', '').lower().split(',')
-    if sorted(onchain) != sorted(x.lower() for x in signers):
-        diffs.append('signers')
-    v = t.get('stellar', {})
-    if c['signers'] != [x.lower().replace('0x', '') for x in v.get('vaultSigners', [])]:
-        diffs.append('vault signers differ from the token config\'s stellar section')
-    if c['guardians'] != [x.lower().replace('0x', '') for x in (v.get('vaultGuard') or {}).get('guardians', [])]:
-        diffs.append('vault guardians differ from the token config\'s stellar section')
-    if t.get('token', {}).get('codeKeccak'):
-        code = subprocess.run([cast, 'code', a['--token'], '--rpc-url', a['--l2-rpc']], capture_output=True, text=True).stdout.strip()
-        got = subprocess.run([cast, 'keccak', code], capture_output=True, text=True).stdout.strip()
-        if got != t['token']['codeKeccak']:
+        def word(sig):
+            return l2.call_word(token, sn.selector(sig), at)
+
+        diffs = []
+        if word('sourceChainId()') != int(src['sourceChainId']):
+            diffs.append('sourceChainId')
+        if '0x%040x' % word('sourceVault()') != src['sourceVault']:
+            diffs.append('sourceVault')
+        if '0x%064x' % word('sourceRoute()') != src['sourceRoute']:
+            diffs.append('sourceRoute')
+        if word('mintCount()') == 0 and '0x%064x' % word('mintHead()') != '0x' + d['genesis']:
+            diffs.append('mintHead != vault genesis')
+        if word('decimals()') != 6:
+            diffs.append('decimals')
+        if word('threshold()') != int(t['signers']['threshold']):
+            diffs.append('threshold')
+        raw = bytes.fromhex(l2.call(token, sn.selector('signers()'), at)[2:])
+        count = int.from_bytes(raw[32:64], 'big') if len(raw) >= 64 else -1
+        onchain = ['0x' + raw[64 + 32 * i + 12:96 + 32 * i].hex() for i in range(count)] if 0 <= count <= 64 else []
+        if sorted(onchain) != sorted(x.lower() for x in signers) or not onchain:
+            diffs.append('signers')
+        if t.get('stellar') != stellar_section(doc, net.vault, src['sourceRoute']):
+            diffs.append('the token config\'s stellar section is not the one the vault deployment file gives')
+        if t.get('token', {}).get('codeKeccak') and l2.code_keccak(token, at) != t['token']['codeKeccak']:
             diffs.append('token runtime code keccak')
+    except sn.StellarError as e:
+        fail('the L2 could not be read', error=str(e))
     print(json.dumps({'ok': not diffs, 'differences': diffs, **src, 'genesis': '0x' + d['genesis']}, indent=2))
     raise SystemExit(1 if diffs else 0)
 

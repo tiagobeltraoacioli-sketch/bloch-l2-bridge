@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Agent 324 (round 16): the Stellar source path of deploy_pontes.py, and that an Ethereum config does not reach it.
+"""Agent 324 (round 16), agent 338 (round 17, review 331 R331-XLM-2): the Stellar source path of deploy_pontes.py, and
+that an Ethereum config does not reach it. The asset contract, every constructor value and the fee account are pinned.
 
   python3 -m unittest -v test_source_stellar        (offline: no RPC, no cast, no forge, no stellar CLI)
 """
@@ -20,7 +21,8 @@ from launch_fixture import ROOT, filled, fresh, rehearsal  # noqa: E402
 sn = ss.sn
 XLM_CFG = ROOT / 'deployments/stellar/busdc-xlm-token.config.json'
 VAULT = sn.strkey_encode('contract', hashlib.sha256(b'a vault').digest())
-TOKEN = sn.strkey_encode('contract', hashlib.sha256(b'an asset contract').digest())
+TOKEN = sn.CIRCLE_USDC['contract']   # the committed config pins Circle's USDC
+OTHER_ISSUER = sn.strkey_encode('account', hashlib.sha256(b'a look-alike issuer').digest())
 FEE = 'GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA'
 PUBLIC_ID = 55527100184162397446267447655670856106844621679976070008664532462234000271737
 LABELS = [hashlib.sha256(x).hexdigest() for x in (b'stellar-pubnet', b'bloch-l2-700770', b'USDC')]
@@ -89,9 +91,16 @@ def instance(cfg, **state):
 
 class FakeNet:
     storage, wasm, heads = None, 'c0' * 32, {}
+    fee_account, fee_trustline = {'account_id': FEE}, {'flags': 1}
 
     def __init__(self, cfg):
         self.passphrase = cfg['network_passphrase']
+
+    def account(self, g):
+        return FakeNet.fee_account if g == FEE else None
+
+    def trustline(self, g, code, issuer):
+        return FakeNet.fee_trustline if (g, code, issuer) == (FEE, 'USDC', sn.CIRCLE_USDC['issuer']) else None
 
     def rpc(self, method, params=None):
         return {'passphrase': FakeNet.passphrase_served}
@@ -108,6 +117,7 @@ class StellarSource(unittest.TestCase):
         self.cfg = filled_xlm()
         FakeNet.storage, FakeNet.wasm, FakeNet.heads = instance(self.cfg), 'c0' * 32, {}
         FakeNet.passphrase_served = self.cfg['stellar']['networkPassphrase']
+        FakeNet.fee_account, FakeNet.fee_trustline = {'account_id': FEE}, {'flags': 1}
         patch = mock.patch.object(sn, 'Net', FakeNet)
         patch.start()
         self.addCleanup(patch.stop)
@@ -160,6 +170,21 @@ class StellarSource(unittest.TestCase):
             (('stellar', 'feeRecipient'), VAULT, 'must be an account'),
             (('stellar', 'depositFeeBps'), 0, '5 bps'),
             (('token', 'contract'), 'BridgedStablecoinV2', 'BridgedStablecoinV3'),
+            # review 331, R331-XLM-2: the asset and the remaining constructor values are pinned
+            (('stellar', 'asset', 'issuer'), OTHER_ISSUER, 'is not the Stellar Asset Contract of USDC:' + OTHER_ISSUER),
+            (('stellar', 'asset'), {'code': 'USDC', 'issuer': OTHER_ISSUER,
+                                    'contract': sn.asset_contract_id(ss.PUBLIC_PASSPHRASE, 'USDC', OTHER_ISSUER)},
+             'must be Circle'),
+            (('stellar', 'asset', 'contract'), VAULT, 'is not the Stellar Asset Contract'),
+            (('stellar', 'asset', 'code'), 'USDT', 'is not the Stellar Asset Contract'),
+            (('stellar', 'asset'), None, 'stellar.asset must be an object'),
+            (('stellar', 'labels', 'asset'), '0x' + 'ab' * 32, 'stellar.labels must be sha256'),
+            (('stellar', 'vaultWindowSeconds'), 1, 'vaultWindowSeconds must be 86400'),
+            (('stellar', 'vaultWindowSeconds'), None, 'vaultWindowSeconds is undecided'),
+            (('stellar', 'vaultMinDeposit'), None, 'vaultMinDeposit is undecided'),
+            (('stellar', 'vaultMinDeposit'), 10_000_000, 'above the token minBurn'),
+            (('stellar', 'route'), '0x' + 'ab' * 32, 'does not recompute from the config'),
+            (('limits', 'refillPerSecond'), 1, 'refillPerSecond must be'),
             (('mintSwitch', 'threshold'), 5, '6 of 7'),
         ]
         for path, value, expected in cases:
@@ -220,7 +245,14 @@ class StellarSource(unittest.TestCase):
                                      ('threshold', 4, 'threshold'), ('switch_threshold', 7, 'switchThreshold'),
                                      ('window_limit', 1, 'windowLimit'), ('deposit_fee_bps', 6, 'depositFeeBps'),
                                      ('pause_duration', 1, 'pause policy'),
-                                     ('signers', ['ab' * 20] * 7, 'signers'), ('guardians', ['ab' * 20], 'pause policy')):
+                                     ('signers', ['ab' * 20] * 7, 'signers'), ('guardians', ['ab' * 20], 'pause policy'),
+                                     # review 331, R331-XLM-2: none of these was compared before
+                                     ('token', sn.asset_contract_id(ss.PUBLIC_PASSPHRASE, 'USDC', OTHER_ISSUER),
+                                      'the config pins'),
+                                     ('window_seconds', 1, 'window_seconds'), ('min_deposit', 1, 'min_deposit'),
+                                     ('l2_min_burn', 1, 'l2_min_burn'), ('source_domain', 'ab' * 32, 'source_domain'),
+                                     ('native_domain', 'ab' * 32, 'native_domain'), ('asset', 'ab' * 32, 'asset (config'),
+                                     ('cap', 5, 'vault cap'), ('release_fee_bps', 6, 'releaseFeeBps')):
             with self.subTest(key=key):
                 FakeNet.storage = instance(self.cfg)
                 FakeNet.storage['Config'][key] = value
@@ -242,6 +274,47 @@ class StellarSource(unittest.TestCase):
         with self.assertRaises(dp.Refused) as e:
             dp.unused_vault(plan, 'http://stellar')
         self.assertIn('route', str(e.exception))
+
+    def test_a_vault_over_another_asset_is_refused_even_when_it_is_consistent_with_itself(self):
+        """R331-XLM-2: a vault deployed over a look-alike asset, whose own route and genesis are consistent."""
+        plan, _ = plan_of(self.cfg)
+        other = sn.asset_contract_id(ss.PUBLIC_PASSPHRASE, 'USDC', OTHER_ISSUER)
+        st = self.cfg['stellar']
+        route = sn.route_id(st['networkPassphrase'], *LABELS, other, VAULT, st['vaultCap']).hex()
+        FakeNet.storage = instance(self.cfg)
+        FakeNet.storage['Config']['token'] = other
+        FakeNet.storage['Derived'].update(route=route, genesis=sn.genesis(st['networkPassphrase'], VAULT, route).hex())
+        for call in (lambda: dp.unused_vault(plan, 'http://stellar'),
+                     lambda: ss.verify(plan, 'http://stellar', {}, None, dp.refuse)):
+            with self.assertRaises(dp.Refused) as e:
+                call()
+            self.assertIn('refusing this vault', str(e.exception))
+
+    def test_a_missing_fee_account_or_trustline_is_refused(self):
+        """Owner input 1: the deploy tool refuses while the fee account or its USDC trustline does not exist."""
+        plan, _ = plan_of(self.cfg)
+        for account, line, expected in ((None, {'flags': 1}, 'does not exist'), ({'account_id': FEE}, None, 'no trustline'),
+                                        ({'account_id': FEE}, {'flags': 0}, 'not authorized')):
+            FakeNet.fee_account, FakeNet.fee_trustline = account, line
+            with self.assertRaises(dp.Refused) as e:
+                dp.unused_vault(plan, 'http://stellar')
+            self.assertIn(expected, str(e.exception))
+            self.assertIn('fee account', str(e.exception))
+
+    def test_the_committed_asset_is_circles_and_its_contract_id_recomputes(self):
+        st = json.loads(XLM_CFG.read_text())['stellar']
+        self.assertEqual(st['asset'], sn.CIRCLE_USDC)
+        self.assertEqual(sn.asset_contract_id(st['networkPassphrase'], 'USDC', st['asset']['issuer']), st['asset']['contract'])
+        vault = json.loads((ROOT / 'deployments/stellar/busdc-xlm-vault.config.json').read_text())
+        self.assertEqual(vault['vault']['config']['token'], st['asset']['contract'])
+        self.assertEqual({k: vault['asset'][k] for k in ('code', 'issuer', 'contract')}, sn.CIRCLE_USDC)
+        f = vault['vault']['config']
+        self.assertEqual((st['vaultWindowSeconds'], st['vaultMinDeposit'], st['vaultCap'], st['vaultWindowLimit'],
+                          st['releaseDelay'], st['largeReleaseThreshold'], st['feeRecipient']),
+                         (f['window_seconds'], f['min_deposit'], f['cap'], f['window_limit'], f['release_delay'],
+                          f['large_release_threshold'], f['fee_recipient']))
+        self.assertEqual([st['labels'][k][2:] for k in ('sourceDomain', 'nativeDomain', 'asset')],
+                         [f['source_domain'], f['native_domain'], f['asset']])
 
     def test_verify_pairs_the_token_mint_chain_with_the_vault_chain(self):
         plan, p = plan_of(self.cfg)

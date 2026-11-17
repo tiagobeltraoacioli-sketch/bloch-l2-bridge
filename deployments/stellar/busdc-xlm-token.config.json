@@ -4,14 +4,15 @@
   "notes": {
     "status": "PROTOTYPE, UNAUDITED. Nothing is deployed. The owner deploys; never an agent.",
     "contract": "contracts/stable/BridgedStablecoinV3.sol, byte-identical to the Ethereum bridge's launch token (creation code keccak 0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7); only constructor arguments differ",
-    "tool": "tools/deploy-pontes/deploy_pontes.py takes this file as it takes deployments/mainnet/busdc-mainnet.config.json. The `stellar` section (in place of `ethereum`) selects the Stellar source path, tools/deploy-pontes/source_stellar.py: validate, plan, run --source-rpc <own Stellar RPC> (refuses a used vault), record, verify --source-rpc (Wasm hash, route, cap, committee, guardians, release delay, fee address and the mint-chain genesis read from the vault's ledger entries)",
-    "source": "sourceChainId is the Stellar network id (sha256 of the network passphrase) as a uint256, derived by the tool; sourceVault is the low 20 bytes of the vault's contract id, derived by the tool; stellar.route is the DEPLOYED vault's route (tools/signatario-stellar/pairing.py args prints it)",
+    "tool": "tools/deploy-pontes/deploy_pontes.py takes this file as it takes deployments/mainnet/busdc-mainnet.config.json. The `stellar` section (in place of `ethereum`) selects the Stellar source path, tools/deploy-pontes/source_stellar.py: validate (the asset contract id is derived from the asset and the network and must be Circle's USDC; the route is recomputed from this file's asset, labels, vault and cap), plan, run --source-rpc <own Stellar RPC> (refuses a used vault, a vault that differs from this file in ANY constructor value, and a fee account that does not exist or has no USDC trustline), record, verify --source-rpc (the same comparison again, plus the mint-chain genesis read from the vault's ledger entries)",
+    "source": "sourceChainId is the Stellar network id (sha256 of the network passphrase) as a uint256, derived by the tool; sourceVault is the low 20 bytes of the vault's contract id, derived by the tool; stellar.route is the route of the vault NAMED HERE as this file's own values give it (asset contract, labels, vault, cap): `tools/signatario-stellar/pairing.py args --vault-config deployments/stellar/busdc-xlm-vault.config.json` prints it after it has compared the deployed vault with the committed vault config field by field. Nothing is copied from the deployed vault unchecked",
     "committee": "the same 7 `l2-mint-signer` and 3 `l2-token-guardian` keys as bUSDC (EIP-712 binds the token address, so a signature for one token is not valid for another); stellar.vaultSigners are the 7 `eth-release-signer` addresses and stellar.vaultGuard.guardians the 3 `eth-vault-guardian` addresses of docs/BRIDGE-V3-KEY-CEREMONY.md, each list strictly ascending",
     "limits": "as bUSDC: T = 0 (every mint waits 12 h and is cancellable), bucket 10,000 a day, cap 100,000, minBurn 10. supplyCap must equal the vault cap and bucketCapacity the vault window limit",
     "releaseDelay": "stellar.releaseDelay and stellar.largeReleaseThreshold must equal the deployed vault's; the values here are the PROPOSAL of deployments/stellar/busdc-xlm-vault.config.json (owner decision, docs/STELLAR-BRIDGE.md section 5)",
     "router": "contracts/stellar/StellarBurnRouter.sol is deployed after the token, with the token as its only argument; it has no power",
     "l2Build": "L2 deposit-only launch build: release bloch-l2-2026-11-03-next-native-78d4921c, bloch-l2-evm build commit `926d2cf` against native 78d4921c (follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565; SHA256SUMS 6d3bd628, the owner's signing target); network.genesisHash = the pinned L2 genesis 632e45ae",
-    "TBD-owner": "source.revision; deployer.address and deployer.fundedBy.safe; signers.set and guardians.set (operators and addresses); stellar.vault, stellar.route and stellar.vaultWasmHash (from the vault deployment); stellar.vaultSigners and stellar.vaultGuard.guardians; confirmation of stellar.releaseDelay / largeReleaseThreshold; tx.maxGasPriceWei"
+    "TBD-owner": "source.revision; deployer.address and deployer.fundedBy.safe; signers.set and guardians.set (operators and addresses); stellar.vault, stellar.route and stellar.vaultWasmHash (from the vault deployment); stellar.vaultSigners and stellar.vaultGuard.guardians; confirmation of stellar.releaseDelay / largeReleaseThreshold; tx.maxGasPriceWei; the fee account funded with a USDC trustline (docs/STELLAR-BRIDGE-DEPLOY.md section 2)",
+    "asset": "stellar.asset is the asset in custody: Circle's USDC, issuer GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN (Circle's own list of USDC contract addresses, https://developers.circle.com/stablecoins/usdc-contract-addresses, row Stellar; the issuer account's home domain is circle.com), Stellar Asset Contract CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75 (derived by the tool from the network, the code and the issuer; equal to what Horizon reports for the asset). stellar.labels, vaultWindowSeconds and vaultMinDeposit are the remaining constructor values of deployments/stellar/busdc-xlm-vault.config.json; the vault's l2_min_burn is limits.minBurn"
   },
   "network": {
     "name": "bloch-l2-mainnet",
@@ -44,8 +45,20 @@
     "vault": null,
     "route": null,
     "vaultWasmHash": null,
+    "asset": {
+      "code": "USDC",
+      "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      "contract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+    },
+    "labels": {
+      "sourceDomain": "0xb3b1412aaf716368dd5aacf749d8347fd3d40bf579ed136293e3f2b80e7b13de",
+      "nativeDomain": "0x598527ae46b00d630ba662e2df7d4a3d52e2e2738562139cbef725336e9645ce",
+      "asset": "0x8591ee9090c0c02ca1f103cb637131d8f358870aba145245ff083e138fdd705b"
+    },
     "vaultCap": 100000000000,
     "vaultWindowLimit": 10000000000,
+    "vaultWindowSeconds": 86400,
+    "vaultMinDeposit": 11000000,
     "vaultSigners": "TBD-owner",
     "vaultThreshold": 5,
     "vaultSwitchThreshold": 6,

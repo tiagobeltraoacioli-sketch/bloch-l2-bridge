@@ -17,12 +17,12 @@ Exit 0: ok. Exit 2: at least one hard alert (print and page). Findings:
   archived       one of those entries is already archived: the vault cannot be called until it is restored.
   paused / closed   informational.
 
-Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`; optional `l2_rpc` + `token`, `min_ttl_ledgers`,
-`cast`, `stellar_cli`.
+  wrong-asset    the vault's asset contract is not the pinned one (`asset_contract`, required).
+Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`, `asset_contract`; optional `l2_rpc` + `token`
+(read over JSON-RPC in this process), `min_ttl_ledgers`, `stellar_cli`.
 """
 import json
 from pathlib import Path
-import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -42,6 +42,12 @@ def check(cfg):
     info['wasm'] = wasm
     code_key = {'contract_code': {'hash': wasm}}
     config = net.view('config')
+    pinned = cfg.get('asset_contract')
+    if pinned is None or config['token'] != pinned:
+        # Without the pin the monitor would measure whatever asset the vault names; with another asset it is an alert.
+        return {'ok': False, 'alerts': [{'kind': 'wrong-asset', 'vault': config['token'], 'pinned': pinned,
+                                         'detail': 'the vault\'s asset contract is not the one pinned in `asset_contract`'}],
+                'warnings': [], 'info': {'latest': latest}}
     state = net.view('state')
     backing = net.view('backing')
     balance_key = net.data_key({'vec': [{'symbol': 'Balance'}, {'address': net.vault}]}, config['token'])
@@ -75,14 +81,12 @@ def check(cfg):
     if not state['deposits_enabled'] or not state['releases_enabled']:
         warnings.append({'kind': 'closed', 'deposits': state['deposits_enabled'], 'releases': state['releases_enabled']})
     if cfg.get('l2_rpc') and cfg.get('token'):
-        cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
+        l2 = sn.L2(cfg['l2_rpc'])
+        head = l2.block('latest')
 
         def call(sig):
-            done = subprocess.run([cast, 'call', cfg['token'], sig, '--rpc-url', cfg['l2_rpc']], capture_output=True,
-                                  text=True)
-            if done.returncode:
-                raise sn.StellarError(f'L2 call {sig} failed: {done.stderr.strip()[-300:]}')
-            return int(done.stdout.split()[0])
+            return l2.call_word(cfg['token'], sn.selector(sig.split(')')[0] + ')'), head['number'])
+
         supply, pending = call('totalSupply()(uint256)'), call('pendingSupply()(uint256)')
         info.update(l2_supply=supply, l2_pending=pending)
         if supply + pending > int(state['total_locked']):
