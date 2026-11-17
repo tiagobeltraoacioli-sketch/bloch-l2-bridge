@@ -237,6 +237,8 @@ pattern) — deliberately excluded from the product root workspace.
 
 ## License
 
+Copyright (c) 2026 Bloch Inc.
+
 Not one licence for the whole tree; the `SPDX-License-Identifier` line of each file governs it.
 
 | Path | Licence | Text |
