@@ -313,12 +313,22 @@ every source was more than `height_margin` blocks behind the burn when it first 
 loss). This restores what revision 3's later-block rules did for a forgery naming an unreachable block or hidden
 behind another contract, without any timestamp.
 
-The stall rule (R331-XLM-3P-2, narrowed in round 18 by R331-XLM-4P-3 to the brief's "after a stated time without L2
-finality progress"). A release that is still QUEUED, that the guardian cannot judge BECAUSE its final view is behind
-the release (the nonce, or the burner's naming of the address paid, is above its final block), while its final L2
-block has not moved for longer than `stall_deadline` on the Stellar ledger clock (recorded in `seen_file`) and its
-sources answer and agree, is a finding. A cannot-judge of any other cause (a source that does not serve a log) is
-paged and never paused for. Honest signers certify only what was final before they signed, so a final
+The stall rule (R331-XLM-3P-2; round 18: R331-XLM-4P-3 and 4P-4): "page at once, pause at the deadline". A release
+that is still QUEUED, that the guardian cannot judge BECAUSE its final view is behind the release (the nonce, or the
+burner's naming of the address paid, is above its final block), and that is older than `stall_deadline` on the
+Stellar ledger clock, is a finding, whatever the L2's block cadence (finality standing still or moving; a version of
+round 18 that waited for finality to stand still let a forgery mature while the L2 made one block per 1,800 s). The
+deadline is derived from the vault's `release_delay` alone (default and maximum: half of it; the tool refuses a larger
+value), so the pause always comes before the release can be executed. A cannot-judge of any other cause (a source that
+does not serve a log) is paged and never paused for. The height rule above is what finds a forgery that was PAID
+without a queue (`release_delay` 0 or below a threshold); with the L2 at one block per 1,800 s its default margin of
+256 blocks is about 5 days, so with no queue the guardian check is detection after the fact.
+
+A paid address that the burner named but that is not its LATEST naming at the guardian's final block (an earlier
+claim; the `burnTo` address of an exit that also has a redirect) is no forgery and no pause, but an alert for a
+person (`paid-not-latest-naming`, exit 4 when nothing else is wrong; text "this exit was paid to an address its burner
+named earlier, not to the latest one it named on the router; ask the burner whether that was intended"): the
+certificate binds no naming, so five keys could have chosen among the burner's own addresses. Honest signers certify only what was final before they signed, so a final
 view that still does not reach a queued release after that time means one of two things, and both are reasons to
 pause before it is paid: the L2's finality stands still while releases land, or the release is forged in a way the
 final history cannot contradict yet (under the nonce of the forger's own pending burn; naming a block nobody will

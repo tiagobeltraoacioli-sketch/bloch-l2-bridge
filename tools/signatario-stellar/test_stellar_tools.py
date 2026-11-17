@@ -669,10 +669,8 @@ class GuardianCheck(Rig):
             FakeVault.events_list[0]['ledger'] = 970                 # ... 150 s old
             for s in FakeL2.state.values():
                 s['head'] = 320                                      # the head moved on
-            code, out = self.check(stall_deadline=100)
-            self.assertEqual((code, out['findings']), (3, []), kw)   # restated (round 18): finality not still long
-            self.still(150)                                          # ... finality where it was for 150 s
-            code, out = self.check(stall_deadline=100)
+            code, out = self.check(stall_deadline=100)              # 150 s old, head moved: a finding by age
+                                                                     # (round 18, R331-XLM-4P-4: whatever the L2 does)
             self.assertEqual(code, 2, kw)
             self.assertIn('stall rule', out['findings'][0]['reason'])
             for s in FakeL2.state.values():
@@ -680,9 +678,8 @@ class GuardianCheck(Rig):
 
     def test_3p2_by_default_the_deadline_is_half_the_release_delay_and_cannot_be_later(self):
         self.release(self.forged(1), MALLORY, ledger=300, event='release_queued', named=False)   # 3,500 s old
-        self.still(3500)                                             # finality still for 3,500 s: under 3,600
         self.assertEqual(self.check()[0], 3)
-        self.still(3650)                                             # 3,650 s: past 3,600
+        FakeVault.events_list[0]['ledger'] = 270                     # 3,650 s old: past 3,600
         self.assertEqual(self.check()[0], 2)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
@@ -837,7 +834,7 @@ class GuardianCheck(Rig):
         code, out = self.check(stall_deadline=100)
         self.assertEqual((code, out['findings']), (3, []))
         self.assertIn('not final in this guardian', out['cannot_judge'][0]['reason'])
-        self.still(150)                                              # finality has stood still past the deadline
+        FakeVault.events_list[0]['ledger'] = 900                     # older than the deadline (round 18, 4P-4: by age)
         self.assertEqual(self.check(stall_deadline=100)[0], 2)
         for st in FakeL2.state.values():
             st['fin'] = 270                                          # the naming is final: ok
@@ -851,7 +848,15 @@ class GuardianCheck(Rig):
         self.claim(1, PAYEE2, 200)
         self.release(b, PAYEE)
         for sources in ({}, {'l2_rpc_others': ['b']}, {'l2_rpc': 'b'}):
-            self.assertEqual(self.check(**sources)[0], 0)
+            code, out = self.check(**sources)
+            # no finding and no pause; a person is asked (exit 4): the paid address is not the burner's latest
+            self.assertEqual((code, out['findings'], out['action']), (4, [], 'alert-a-human'))
+            self.assertEqual([(a['kind'], a['paid'], a['latest']) for a in out['alerts']],
+                             [('paid-not-latest-naming', PAYEE, PAYEE2)])
+            self.assertIn('ask the burner', out['alerts'][0]['text'])
+        FakeVault.events_list = []
+        self.release(b, PAYEE2)
+        self.assertEqual(self.check()[0], 0)                         # the latest claim: no alert
         self.claim(1, MALLORY, 150, burner=STRANGER)                  # a stranger's claim never makes an address ok
         FakeVault.events_list = []
         self.release(b, MALLORY)
@@ -864,7 +869,8 @@ class GuardianCheck(Rig):
         self.assertEqual(self.check()[0], 0)                         # paid to the final redirect of its own burner
         FakeVault.events_list = []
         self.release(b, PAYEE)
-        self.assertEqual(self.check()[0], 0)                         # or where burnTo said (the exit was not held)
+        code, out = self.check()                                     # or where burnTo said (the exit was not held):
+        self.assertEqual((code, out['findings'], out['alerts'][0]['kind']), (4, [], 'paid-not-latest-naming'))
         FakeVault.events_list = []
         self.redirect(1, MALLORY, 280)                               # at the head only
         self.release(b, MALLORY, event='release_queued')

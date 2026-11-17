@@ -31,10 +31,10 @@ check    read-only. Every release the vault paid or queued (its events in the RP
                    block numbers and finality only.
                    Also a finding, by the HEIGHT RULE (no clock): the release's nonce holds no burn at a final
                    block more than `height_margin` blocks past this guardian's newest block when it first saw the
-                   release (queued or paid). And by the STALL RULE: a release that is still QUEUED, that this
-                   guardian cannot judge because its final view is behind it, while its final L2 block has not
-                   moved for longer than `stall_deadline` on the Stellar ledger clock (its sources answering and
-                   agreeing). Honest signers certify only what was final before they signed, so a view
+                   release (queued or paid). And by the STALL RULE ("page at once, pause at the deadline"): a
+                   release that is still QUEUED, that this guardian cannot judge because its final view is behind
+                   it, and that is older than `stall_deadline` (at most half the release delay) on the Stellar
+                   ledger clock, whatever the L2's block cadence (its sources answering and agreeing). Honest signers certify only what was final before they signed, so a view
                    that still does not reach a queued release after that time means the L2's finality stands still
                    while releases land, or the release is forged (for instance under the nonce of the forger's own
                    pending burn, naming a block nobody reaches): both are reasons to pause before it is paid.
@@ -243,13 +243,19 @@ class Guardian:
         if router_burn:
             # The address given to `burnTo` is bound to the burn by its commitment: checked by hash, so a pruned
             # router log can never turn an honest exit into a finding. Only redirects are read from the router.
-            if '0x' + sn.recipient_commitment(recipient).hex() == burned['recipient']:
-                return None
+            committed = '0x' + sn.recipient_commitment(recipient).hex() == burned['recipient']
             namings = lambda s, n: sn.redirects_of(s, self.router, burned['nonce'], n)  # noqa: E731
+            if committed:
+                later = self.agreed(lambda s: namings(s, fin))
+                if later:
+                    self.not_latest(burned, recipient, later[-1])
+                return None
         else:
             namings = lambda s, n: sn.claims_of(s, self.router, burned['from'], burned['nonce'], n)  # noqa: E731
         final = self.agreed(lambda s: namings(s, fin))
         if recipient in final:
+            if recipient != final[-1]:
+                self.not_latest(burned, recipient, final[-1])
             return None
         newest = self.agreed(lambda s: namings(s, head))
         if recipient in newest:
@@ -262,6 +268,14 @@ class Guardian:
                 'names it, even at this guardian\'s newest block)' if newest else
                 'a burn made directly on the token was paid, and the account that burned has claimed no address on '
                 'the router, even at this guardian\'s newest block')
+
+    def not_latest(self, burned, paid, latest):
+        """R331 fourth pass (Low, the certificate binds no naming): a release paid to an address the burner named, but
+        not to its LATEST naming at this guardian's final block. Not a forgery (the burner chose that address), so no
+        pause; but five keys may have chosen among the burner's addresses, so a person asks the burner."""
+        self.__dict__.setdefault('alerts', []).append({'kind': 'paid-not-latest-naming', 'nonce': burned['nonce'], 'paid': paid, 'latest': latest,
+                            'text': 'this exit was paid to an address its burner named earlier, not to the latest one '
+                                    'it named on the router; ask the burner whether that was intended'})
 
     def judge(self, e):
         """None when the release is a final L2 burn paid to its destination; a finding text; or CannotJudge."""
@@ -395,6 +409,7 @@ class Guardian:
         self.height_margin()   # a wrong value is refused at once, not only when the rule is reached
         still_since = self.finality_still_since(now) if not view_problem else None
         findings, unjudged, seen = [], [], 0
+        self.alerts = []
         # One complete scan, following the RPC's cursor to its latest ledger (round 18: stellar_net.Net.scan; a
         # scan that stopped on the first empty page saw no release at all once the RPC held more than 10,000 ledgers).
         events, latest, _ = self.net.scan(start)
@@ -426,24 +441,31 @@ class Guardian:
         done = [f for f in findings + unjudged if voided(f)]
         findings = [f for f in findings if f not in done]
         unjudged = [f for f in unjudged if f not in done]
-        # The stall rule (R331-XLM-3P-2, narrowed by R331-XLM-4P-3): a release still in the queue that this guardian
-        # cannot judge BECAUSE its final view is behind the release, while its final L2 block has not moved for
-        # longer than the deadline on the Stellar ledger clock (and its sources answer and agree). A cannot-judge of
-        # any other cause (a log the source does not serve) is paged, never paused for. While finality moves, the
-        # final history and the height rule above decide instead.
+        # The stall rule (R331-XLM-3P-2; R331-XLM-4P-3 and 4P-4): "page at once, pause at the deadline". A release
+        # still in the QUEUE that this guardian cannot judge BECAUSE its final view is behind it (the nonce, or the
+        # burner's naming of the address paid, is above its final block) is a finding once it is older than
+        # `stall_deadline` on the Stellar ledger clock, WHATEVER THE L2 DOES: finality standing still, or moving at
+        # any cadence (round 18: a rule that waited for finality to stand still, or for 256 more blocks, let a
+        # forgery mature while the L2 made one block per 1,800 s). The deadline is derived from the vault's own
+        # `release_delay` (default and maximum: half of it), so a pause always comes before the release can be
+        # executed, at any L2 block interval. A cannot-judge of another cause (a log the source does not serve) is
+        # paged, never paused for. Price, stated: a guardian whose own final view lags an honest release by more than
+        # the deadline pauses it (72 h, every queued exit void and certified again); so `release_delay` must exceed
+        # twice the L2's worst time to finalize a burn plus the check interval.
         stalled_for = None if still_since is None else now - still_since
         for f in list(unjudged):
             made = self.close_time(f['ledger'])
             age = None if made is None else now - made
             f['age_seconds'], f['stall_deadline'], f['l2_final_still_seconds'] = age, deadline, stalled_for
             if f.pop('stalled', False) and f['event'] == 'release_queued' and deadline is not None \
-                    and stalled_for is not None and stalled_for > deadline:
+                    and age is not None and age > deadline:
                 unjudged.remove(f)
-                findings.append({**f, 'reason': f'not judged while the final L2 block stood still for {stalled_for} s, '
-                                 f'more than {deadline} s, although the L2 sources answer (stall rule): {f["reason"]}'})
+                findings.append({**f, 'reason': f'not judged {age} s after the release was queued, more than {deadline} '
+                                 f's (half the release delay at most), because this guardian\'s final L2 view is behind '
+                                 f'it although the L2 sources answer (stall rule): {f["reason"]}'})
         self.save_seen()
         # An L2 block stamped ahead of the Stellar ledger clock changes no verdict; it is reported for a person.
-        alerts = []
+        alerts = list(self.alerts)
         limit = int(self.cfg.get('l2_clock_alert_seconds', 120))
         head = getattr(self, 'head', None)
         if limit and head and head['timestamp'] > now + limit:
