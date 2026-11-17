@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "NOT LAUNCHABLE until an external audit of this route and the owner key ceremony (unaudited; nothing deployed; addresses TBD-deploy). Open: R342-TRX-5/-6 (Info: the deployed bytecode is the TRON-compiler build, not executable by forge; three producers only), the compiler PGP signature, a release simulated against mainnet state; the fixed fee 14 / 70 / 71 is final only at the ceremony (two fresh TRX prices)."
+  },
   "network": {
     "id": "tron",
     "name": "TRON",

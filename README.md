@@ -32,7 +32,7 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | op-mainnet | bUSDC.op | launchable | - |
 | solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, fixed in 29cf708 (371), re-verification by 376 pending) |
 | stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, open at 5dce607 (guardian unchanged since 349bae6)) |
-| tron | bUSDT.trx | undeclared | - |
+| tron | bUSDT.trx | held | - |
 
 Open findings below Medium, listed on request (they do not hold the route):
 

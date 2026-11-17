@@ -683,10 +683,10 @@
       ],
       "launch": {
         "v1": false,
-        "state": "undeclared",
-        "sourceState": "undeclared",
-        "source": "none",
-        "reason": "the route's bridge.network.json carries no `launch` block",
+        "state": "held",
+        "sourceState": "held",
+        "source": "route-file",
+        "reason": "NOT LAUNCHABLE until an external audit of this route and the owner key ceremony (unaudited; nothing deployed; addresses TBD-deploy). Open: R342-TRX-5/-6 (Info: the deployed bytecode is the TRON-compiler build, not executable by forge; three producers only), the compiler PGP signature, a release simulated against mainnet state; the fixed fee 14 / 70 / 71 is final only at the ceremony (two fresh TRX prices).",
         "openFindings": []
       },
       "sourceDomain": "tron-mainnet",
