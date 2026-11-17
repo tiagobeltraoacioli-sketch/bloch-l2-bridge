@@ -3,7 +3,9 @@
 
   python3 -m unittest tools/signatario-solana/test_r376_review.py
 
-A test named `test_r376_sol_4p_N_...` PASSES while the defect R330-SOL-4P-N is present (invert it once fixed).
+A test named `test_r376_sol_4p_N_...` PASSED while the defect R330-SOL-4P-N was present; developer 371 (round 18)
+fixed 4P-1, 4P-2 and 4P-3 and inverted the three demonstrations below (each now asserts the fixed behaviour on the
+reviewer's unchanged scenario; the reviewer's original assertions are kept in the comments).
 A test named `test_control_...` checks a property that holds and must keep holding (several restate unit tests that
 the round-17 WIP removed from test_solana_tools.py, see review 330, fourth pass, R330-SOL-4P-4).
 Fake L2 and Solana endpoints on loopback (testkit.py); throwaway keys only. Not product code.
@@ -65,15 +67,15 @@ class GuardianBlindRound(unittest.TestCase):
         self.assertEqual(self.findings_for(unproven, S.unhex(unproven['recipient'], 20)),
                          [f"release-mismatch:unproven-{unproven['nonce']}"])
 
-    def test_r376_sol_4p_1_a_blind_round_marks_the_payment_checked_and_it_is_never_reported(self):
+    def test_r376_sol_4p_1_fixed_a_payment_first_seen_in_a_blind_round_is_reported_once_the_l2_answers(self):
         unproven = self.l2.exit(text=S.b58encode(K.keyless_address('g4 blind')), proof=bytes(65))
         recipient = S.unhex(unproven['recipient'], 20)
         self.g.blind = True  # the guardian's L2 endpoint does not answer in the round that first sees the payment
         self.assertEqual(self.findings_for(unproven, recipient), [], 'a blind round cannot judge: expected')
         self.g.blind = False  # the L2 answers again
-        self.assertEqual(self.findings_for(unproven, recipient), [],
-                         'DEFECT: the payment to a destination nobody proved is never reported once the L2 is back')
-        self.assertIn((unproven['nonce'], 1), self.g._paid_checked)
+        # was: findings [] ('DEFECT: ... never reported once the L2 is back') and the record in _paid_checked
+        self.assertEqual(self.findings_for(unproven, recipient), [f"release-mismatch:unproven-{unproven['nonce']}"])
+        self.assertNotIn((unproven['nonce'], 1), self.g._paid_checked)
 
 
 class RedirectAfterApproval(unittest.TestCase):
@@ -87,15 +89,18 @@ class RedirectAfterApproval(unittest.TestCase):
         self.g._senders = None
         return self.g.recipient_verdict(dict(burn, eth_recipient=burn['recipient']), recipient20, None)
 
-    def test_r376_sol_4p_3_a_second_redirect_turns_the_first_ones_approval_into_a_hard_finding(self):
+    def test_r376_sol_4p_3_fixed_a_second_redirect_does_not_turn_the_first_ones_approval_into_a_finding(self):
         held = self.l2.direct(S.account_id(K.wallet_of('typed by habit')[1]))  # any held burn: direct, or no valid proof
         first = self.l2.redirect(held, 'first wallet, never creates its USDC account')
         w1 = S.account_id(first['wallet'])
         self.assertEqual(self.verdict(held, w1), ('ok', None), 'the signers certify and the relayer approves W1: honest')
         # The approval stands while W1 has no associated token account (the burner never creates it; the relayer
         # creates none by default). Then the burner sends a second redirect.
-        self.l2.redirect(held, 'second wallet')
-        self.assertEqual(self.verdict(held, w1), ('mismatch', None))
+        second = self.l2.redirect(held, 'second wallet')
+        # was: ('mismatch', None)
+        self.assertEqual(self.verdict(held, w1), ('ok', None), 'an approval for an earlier PROVEN redirect stays honest')
+        self.assertEqual(self.verdict(held, S.account_id(second['wallet'])), ('ok', None))
+        self.assertEqual(self.verdict(held, S.account_id(K.wallet_of('never named')[1]))[0], 'mismatch')
         record = dict(held, nonce=held['nonce'])
         b = dict(record, eth_recipient=held['recipient'])
         unpaid = {'nonce': held['nonce'], 'seq': 1, 'state': 1, 'recipient': w1, 'amount': held['amount'],
@@ -107,17 +112,18 @@ class RedirectAfterApproval(unittest.TestCase):
         self.g._senders = None
         _, _, findings = self.g.eth_source([b], fin=None)
         hard = [(f[0], f[1], f[2]) for f in findings if f[1].startswith('release-mismatch')]
-        self.assertEqual(hard, [('hard', f"release-mismatch:approval-{held['nonce']}-1", 0)],
-                         'DEFECT: any burner of a held burn makes the guardians pause the whole vault (72 h), repeatably')
+        # was: [('hard', 'release-mismatch:approval-N-1', 0)] ('DEFECT: any burner of a held burn makes the guardians
+        # pause the whole vault (72 h), repeatably')
+        self.assertEqual(hard, [])
         # The same for a PAID record judged after the second redirect (a guardian restarted within the retention)
         self.g._paid_checked = {}
-        self.assertEqual(self.findings_for(held, w1), [f"release-mismatch:{held['nonce']}"])
+        self.assertEqual(self.findings_for(held, w1), [])  # was: ['release-mismatch:N']
 
 
 class LatchFromOneEndpoint(unittest.TestCase):
     """R330-SOL-4P-2: one endpoint that shows a non-wallet once latches the hold for good, whatever the others say."""
 
-    def test_r376_sol_4p_2_one_disagreeing_endpoint_latches_a_proven_wallet(self):
+    def test_r376_sol_4p_2_fixed_one_disagreeing_endpoint_holds_for_its_read_and_latches_nothing(self):
         c = T.Cluster()
         l2 = K.L2(self, c)
         holds = R.Holds(Path(tempfile.mkdtemp()) / 'db.json')
@@ -137,12 +143,31 @@ class LatchFromOneEndpoint(unittest.TestCase):
         honest_rpc = S.Rpc(honest.url)
         view = R.exit_view(l2.cfg(), c.a, burn)
         first = R.decide(view, burn['burn_id'], holds, lambda w: R.destination([lying, honest_rpc], w, c.a))
-        self.assertEqual(first['hold'], 'destination-not-a-wallet')
+        self.assertEqual(first['hold'], 'destination-not-a-wallet')  # any endpoint that shows a non-wallet holds
+        self.assertFalse(first['destination']['unanimous'])
+        self.assertIsNone(holds.get(burn['burn_id']), 'one endpoint alone latches nothing')
         # every endpoint now agrees that the address is absent (a fresh wallet whose key signed the proof)
         again = R.decide(view, burn['burn_id'], holds, lambda w: R.destination([lying, honest_rpc], w, c.a))
-        self.assertEqual((again['hold'], again['latched']), ('destination-not-a-wallet', True),
-                         'DEFECT (availability): held for good by one endpoint\'s single answer; only release-hold or a '
-                         'redirect (judged by the same endpoints) ends it')
+        # was: ('destination-not-a-wallet', True) ('DEFECT (availability): held for good by one endpoint's answer')
+        self.assertEqual((again['hold'], again['latched'], again['target']), (None, False, 'original'))
+
+    def test_every_endpoint_showing_the_non_wallet_still_latches(self):
+        """Round 18 (agent 371), control for the 4P-2 fix: R330-SOL-3P-1's latch is kept when the endpoints agree."""
+        c = T.Cluster()
+        l2 = K.L2(self, c)
+        holds = R.Holds(Path(tempfile.mkdtemp()) / 'db.json')
+        burn = l2.exit('a token account at a keypair address')
+        c.accounts[burn['wallet']] = (S.TOKEN_PROGRAM, bytes(165))
+        one, two = T.Fake(c.answer), T.Fake(c.answer)
+        self.addCleanup(one.close)
+        self.addCleanup(two.close)
+        rpcs = [S.Rpc(one.url), S.Rpc(two.url)]
+        view = R.exit_view(l2.cfg(), c.a, burn)
+        first = R.decide(view, burn['burn_id'], holds, lambda w: R.destination(rpcs, w, c.a))
+        self.assertEqual((first['hold'], first['destination']['unanimous']), ('destination-not-a-wallet', True))
+        del c.accounts[burn['wallet']]  # the owner closes it: every endpoint now shows the address absent
+        again = R.decide(view, burn['burn_id'], holds, lambda w: R.destination(rpcs, w, c.a))
+        self.assertEqual((again['hold'], again['latched']), ('destination-not-a-wallet', True))
 
 
 class Controls(unittest.TestCase):
@@ -229,6 +254,36 @@ class Controls(unittest.TestCase):
             digest = S.keccak256(bytes([i]))
             self.assertEqual(S.secp256k1_recover(digest, K.secp_sign(key, digest)), K.secp_address(key))
 
+
+
+import test_r330_review as R330  # noqa: E402
+
+
+class RelayerLatchKeyOfAnEarlierRedirect(unittest.TestCase):
+    """R330-SOL-4P-7 (review 376, on 29cf708): after the 4P-3 fix an approval for an EARLIER proven redirect is
+    acceptable, but the relayer judges it under the latch key of the burn's ORIGINAL destination. (The rig of
+    test_r330_review.R330Sol1Relayer, without inheriting its tests.)"""
+
+    setUp, again, approval = R330.R330Sol1Relayer.setUp, R330.R330Sol1Relayer.again, R330.R330Sol1Relayer.approval
+
+    def test_r376_sol_4p_7_an_approval_for_the_first_redirect_is_judged_under_the_originals_latch(self):
+        held = self.l2.exit(text=S.b58encode(K.keyless_address('4p7')), proof=bytes(65))  # held: invalid-proof
+        self.b = held
+        self.v._burns_pass = {held['burn_id']: held}
+        self.again()
+        self.v.verdict_of(held)  # the relayer's own pass latches the original (invalid-proof) under the burn id
+        self.assertEqual(self.v.holds().get(held['burn_id'])['problem'], 'invalid-proof')
+        first = self.l2.redirect(held, 'first redirect')
+        self.wallet = first['wallet']
+        self.cluster.accounts[S.associated_token_address(first['wallet'], self.cluster.config.mint)] = (
+            S.TOKEN_PROGRAM, R330.token_account(self.cluster.config.mint, first['wallet']))
+        self.approval(S.account_id(first['wallet']))  # honest: certified while W1 was the latest redirect
+        self.l2.redirect(held, 'second redirect')
+        self.again()
+        self.v.pay_approved(held['burn_id'], held, self.v.node('confirmed').release(held['nonce']))
+        self.assertEqual(self.v.sent, [], 'DEFECT: the approval for the proven first redirect is never paid by the relayer')
+        self.assertEqual([x['id'] for x in self.logs][-1:], ['approved-destination-not-a-wallet'])
+        self.assertTrue(self.logs[-1]['latched'], "judged under the ORIGINAL destination's latch")
 
 if __name__ == '__main__':
     unittest.main()
