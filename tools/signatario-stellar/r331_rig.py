@@ -48,7 +48,7 @@ def main():
 
 def flow(r):
     r.committee()
-    r.setup_stellar(delay=3600, pause=60, window_seconds=600)
+    r.setup_stellar(delay=3600, pause=7200, window_seconds=600)
     ks = r.dir / 'keystores'
     r.setup_l2()
     for i in range(3):
