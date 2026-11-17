@@ -130,19 +130,12 @@
         "deployments/arbitrum-one/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it.",
-        "openFindings": [
-          {
-            "id": "R329-EVM-3P-1",
-            "severity": "Low (merge hold)",
-            "state": "fixed-not-on-audit-line",
-            "owner": 372
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "arbitrum-one",
       "sourceChainId": "42161"
@@ -404,19 +397,12 @@
         "deployments/linea/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": [
-          {
-            "id": "R329-EVM-3P-1",
-            "severity": "Low (merge hold)",
-            "state": "fixed-not-on-audit-line",
-            "owner": 372
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "linea-mainnet",
       "sourceChainId": "59144"
@@ -477,19 +463,12 @@
         "deployments/op-mainnet/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": [
-          {
-            "id": "R329-EVM-3P-1",
-            "severity": "Low (merge hold)",
-            "state": "fixed-not-on-audit-line",
-            "owner": 372
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "op-mainnet",
       "sourceChainId": "10"
@@ -563,7 +542,7 @@
           {
             "id": "R330-SOL-4P-3",
             "severity": "Medium",
-            "state": "open",
+            "state": "fixed in 29cf708 (371), re-verification by 376 pending",
             "owner": 371
           }
         ]
@@ -633,9 +612,15 @@
         "reason": "the route's bridge.network.json carries no `launch` block",
         "openFindings": [
           {
-            "id": "R331-XLM-4P-1",
+            "id": "R331-XLM-4P-5",
+            "severity": "High",
+            "state": "fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending",
+            "owner": 373
+          },
+          {
+            "id": "R331-XLM-4P-4",
             "severity": "Medium",
-            "state": "open",
+            "state": "open at 5dce607 (guardian unchanged since 349bae6)",
             "owner": 373
           }
         ]
@@ -714,7 +699,7 @@
       "routes": [
         "bitcoin"
       ],
-      "severity": "Low",
+      "severity": "Low (fixed in cd0d0ab by 370; 378 re-verification pending)",
       "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
       "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
     },
@@ -723,7 +708,7 @@
       "routes": [
         "bitcoin"
       ],
-      "severity": "Info (regression, explained)",
+      "severity": "Info (floors restored in b225e91 by 370; 378 re-verification pending)",
       "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
       "source": "same"
     },

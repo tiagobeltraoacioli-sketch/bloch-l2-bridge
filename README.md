@@ -21,22 +21,22 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | Route | L2 token | Launch status | Open findings (Medium or above) |
 |---|---|---|---|
 | ethereum | bUSDC | launchable | - |
-| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
+| arbitrum-one | bUSDC.arb | launchable | - |
 | base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
 | bitcoin | bBTC | undeclared | - |
 | bnb | bUSDC.bnb | out | - |
-| linea | bUSDC.linea | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
-| op-mainnet | bUSDC.op | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
-| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, open) |
-| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-1 (Medium, open) |
+| linea | bUSDC.linea | launchable | - |
+| op-mainnet | bUSDC.op | launchable | - |
+| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, fixed in 29cf708 (371), re-verification by 376 pending) |
+| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, open at 5dce607 (guardian unchanged since 349bae6)) |
 | tron | bUSDT.trx | undeclared | - |
 
 Open findings below Medium, listed on request (they do not hold the route):
 
 | Finding | Route | Severity | What |
 |---|---|---|---|
-| R342-BTC-2P-8 | bitcoin | Low | the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited |
-| R342-BTC-2P-6 | bitcoin | Info (regression, explained) | the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test |
+| R342-BTC-2P-8 | bitcoin | Low (fixed in cd0d0ab by 370; 378 re-verification pending) | the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited |
+| R342-BTC-2P-6 | bitcoin | Info (floors restored in b225e91 by 370; 378 re-verification pending) | the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test |
 | R342-BTC-2P-7 | bitcoin | Info (latent) | whether a direct burner has code is read at today's block, not at the burn |
 <!-- allnets-launch-table:end -->
 

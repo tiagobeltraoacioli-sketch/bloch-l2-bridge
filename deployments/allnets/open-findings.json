@@ -1,7 +1,7 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T05:45:00Z",
+  "asOf": "2026-11-17T07:00:00Z",
   "findings": [
     {
       "id": "R330-SOL-1",
@@ -14,20 +14,6 @@
       "reviewer": 376,
       "what": "an on-curve destination that nobody holds a key for cannot be told from a fresh wallet; the residual closes only with the destination-key proof bound into the exit (task 371 item 3) and the page's proof (task 363)",
       "source": "agents/330-bridge-solana-review-r17.md 3P.5 'Before launch' item 1; BRIEF-ROUND18.md tasks 371 and 363"
-    },
-    {
-      "id": "R329-EVM-3P-1",
-      "routes": [
-        "arbitrum-one",
-        "op-mainnet",
-        "linea"
-      ],
-      "severity": "Low (merge hold)",
-      "state": "fixed-not-on-audit-line",
-      "owner": 372,
-      "reviewer": 379,
-      "what": "a non-int JSON chain id skips the launch gate of vault_pontes.py; fixed on the EVM working line 82fb701 and closed by 379 there; the audit line taken here (9187656) does not carry the fix. The reviewer asked the integrator not to merge the EVM line into main before it: counted as blocking until the re-cut audit line is merged.",
-      "source": "cross-area 2026-11-17 04:19 and 04:53 UTC (agent 379)"
     },
     {
       "id": "R329-EVM-3P-2",
@@ -47,23 +33,35 @@
         "solana"
       ],
       "severity": "Medium",
-      "state": "open",
+      "state": "fixed in 29cf708 (371), re-verification by 376 pending",
       "owner": 371,
       "reviewer": 376,
       "what": "existing approvals and payments are judged against the latest redirect only: a burner can make every honest guardian pause the vault and the token for 72 h, repeatedly",
       "source": "cross-area 2026-11-17 04:50 UTC (agent 376)"
     },
     {
-      "id": "R331-XLM-4P-1",
+      "id": "R331-XLM-4P-5",
+      "routes": [
+        "stellar"
+      ],
+      "severity": "High",
+      "state": "fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending",
+      "what": "every event scan of the route stopped at the first empty getEvents page: after ~14 h without a vault event a guardian sees no release (a forgery is never judged) and deposits are not found",
+      "source": "cross-area 2026-11-17 05:23 UTC (373) and 06:45 UTC (377); coordinator: Stellar stays not launchable until the re-check",
+      "owner": 373,
+      "reviewer": 377
+    },
+    {
+      "id": "R331-XLM-4P-4",
       "routes": [
         "stellar"
       ],
       "severity": "Medium",
-      "state": "open",
+      "state": "open at 5dce607 (guardian unchanged since 349bae6)",
       "owner": 373,
       "reviewer": 377,
-      "what": "a queued release to an address that cannot receive is never executed and never redirected; only a guardian pause frees it",
-      "source": "cross-area 2026-11-17 05:20 UTC (agent 377)"
+      "what": "see agents/331-bridge-stellar-review-r17.md section 4P",
+      "source": "cross-area 2026-11-17 06:45 UTC (377)"
     }
   ],
   "removed": [
@@ -101,6 +99,16 @@
       "id": "R342-BTC-2P-2",
       "why": "closed by reviewer 378, second pass FINAL on codex/bridge-btc-r17-20261117 c50b8f3 (fit for external audit as a frozen line; no Critical/High/Medium open; regtest 93/93, unit 68, forge 605/0/1), relayed by the coordinator 2026-11-17",
       "on": "2026-11-17"
+    },
+    {
+      "id": "R329-EVM-3P-1",
+      "why": "fixed on the re-cut EVM audit line d6ad227; reviewer 379 FINAL (relayed by the coordinator 2026-11-17): Arbitrum One, OP Mainnet, Linea fit for external audit",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R331-XLM-4P-1",
+      "why": "reviewer 377: 4P-1/2/3 fixed (cross-area 2026-11-17 06:45 UTC)",
+      "on": "2026-11-17"
     }
   ],
   "listed": [
@@ -109,7 +117,7 @@
       "routes": [
         "bitcoin"
       ],
-      "severity": "Low",
+      "severity": "Low (fixed in cd0d0ab by 370; 378 re-verification pending)",
       "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
       "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
     },
@@ -118,7 +126,7 @@
       "routes": [
         "bitcoin"
       ],
-      "severity": "Info (regression, explained)",
+      "severity": "Info (floors restored in b225e91 by 370; 378 re-verification pending)",
       "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
       "source": "same"
     },

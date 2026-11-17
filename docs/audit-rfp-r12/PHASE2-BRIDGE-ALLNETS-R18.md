@@ -6,6 +6,8 @@ records stay where they are: the round-15 freeze `cc2511a` (`PHASE2-BRIDGE-FREEZ
 `ec79cf8` (`PHASE2-BRIDGE-TOOLS-REFREEZE-R17.md`); at those commits their manifests are exact. An auditor who takes
 this tree takes this manifest and the list of differences below.
 
+Regenerated again at the merge of the re-cut audit line `d6ad227` and 374's final `07433d8` (round 18, 07:00 UTC). The Ethereum mainnet configs in this tree are the fee-schedule values (release 10 bps, minimums 101/100 USDC, relayer ceiling 2 gwei), not the pre-schedule values (5 bps, 11/10, 300 gwei) that the record at `ec79cf8` carries (reviewer 379).
+
 Why (reviewer 379, R329-EVM-3P-4, Info): the EVM line merged 374's whole tip, so this tree carried the refreeze
 manifest of `ec79cf8`, whose rows for the files the EVM line and the integration changed no longer matched, and which
 records the Ethereum mainnet configs with the values before the fee schedule of 2026-11-17.
@@ -25,8 +27,8 @@ the commit that changed each file:
 
 | File | Changed by | What |
 |---|---|---|
-| `tools/signatario-stable/vigia.py`, `signatario.py`, `eth_half.py`, `preflight_signer.py` | EVM line `9187656` (337) | per-network launch refusal (chain ids 8453 and 56), timing watch, missing-key refusal; every new branch behind a chain id other than 1 (337's report section 3) |
-| `tools/deploy-pontes/vault_pontes.py` | EVM line `9187656` | the EVM launch registry and the minimum-burn floor |
+| `tools/signatario-stable/vigia.py`, `signatario.py`, `eth_half.py`, `preflight_signer.py` | EVM line `9187656` (337), re-cut audit line `d6ad227` (372: missing anchor key refused at start, chain id form R329-EVM-3P-1) | per-network launch refusal (chain ids 8453 and 56), timing watch, missing-key refusal; every new branch behind a chain id other than 1 (337's report section 3) |
+| `tools/deploy-pontes/vault_pontes.py` | EVM line `9187656`, `d6ad227` (launch gate for every non-int chain id form) | the EVM launch registry and the minimum-burn floor |
 | `tools/deploy-pontes/deploy_pontes.py` | EVM line `9187656`; integration `6095d04` (355: `routes` / `route` commands, data rule for TRON, Stellar source path); `740f4e6` (375: chain id 1 accepts only bUSDC, A375-1) | one deploy tool for every route |
 | `deployments/mainnet/busdc-mainnet.config.json`, `busdc-vault-mainnet.config.json`, `busdc-ops/relayer.template.json` | EVM line `9187656` (fee schedule, coordinator decision of 2026-11-17) | values only: release 10 bps, minimum deposit 101 and burn 100 USDC, relayer ceiling 2 gwei |
 
