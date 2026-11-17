@@ -125,7 +125,7 @@ and their operators, `vault.guard.guardians` with the three `eth-vault-guardian`
 `source.revision`; `program.elfSha256`. `program.id` and `deployer.address` are filled in section 5.
 
 The fee owner is already filled: `BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8`. It is part of the vault's
-address and can never be changed. Confirm it on the second channel before `init`.
+address and can never be changed. Confirm it on the second channel, and do section 4.1, before `init`.
 
 ```
 python3 tools/signatario-solana/sol_vault.py validate --config deployments/solana/busdc-sol-vault.config.json
@@ -135,6 +135,60 @@ python3 tools/deploy-pontes/legacy_digests.py scan deployments/solana/busdc-sol-
 ```
 
 The second command must end with `0 of 2 file(s) hold a refused address`.
+
+`validate` also refuses, outside a rehearsal, a `recordRetention` below 259,200 s (4,320 guardian watch rounds,
+never less than `pauseDuration`), and `"rehearsal": true` together with the genesis hash of a public cluster.
+
+### 4.1 The fee owner proves its key and gets its USDC account (owner; before anything is deployed)
+
+On 2026-11-16 the fee address `BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8` did not exist as an account on
+mainnet-beta, and neither did its USDC account `2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg`. Both are fixed by
+the vault's address for good: every fee of this bridge can only ever be swept to that one account. If nobody
+holds the key of the address, the fees are collected for nobody, and it cannot be corrected after `init`. So the
+owner, who holds the key, does two things first. `init` refuses until both are done.
+
+**Step 1: a signature made with the key.** Print the text to sign (it names the address, its token account, the
+mint, the cluster and today's date):
+
+```
+python3 tools/signatario-solana/sol_proof.py fee-owner-message --config deployments/solana/busdc-sol-vault.config.json
+```
+
+Sign that one line, exactly as printed between the quotes of `"message"`, with the key of the fee address. With
+the Solana CLI and a hardware wallet (replace the path by the keypair file if the key is a file):
+
+```
+solana sign-offchain-message "PASTE THE MESSAGE LINE HERE" -k usb://ledger
+```
+
+A wallet application's "sign message" over the same line is accepted as well. The command prints the signature.
+On any machine, offline, verify it and write the proof file:
+
+```
+python3 tools/signatario-solana/sol_proof.py verify --address BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8 --message "PASTE THE MESSAGE LINE HERE" --signature PASTE_THE_SIGNATURE_HERE --out fee-owner-proof.json
+```
+```
+python3 tools/signatario-solana/sol_proof.py check-fee-owner --config deployments/solana/busdc-sol-vault.config.json --proof fee-owner-proof.json
+```
+
+Both must answer `"ok": true`. The verification uses no network and no key; a signature of another key, of
+another text, or anything that is not a 64-byte signature is refused. The proof file is public and is kept with
+the ceremony record. If the key cannot be produced, STOP: choose another fee address (an owner decision) and
+change `vault.fees.owner` before anything is deployed.
+
+**Step 2: the USDC account of the fee address.** Anyone may pay for it (about 0.00204 SOL); the vault need not
+exist and the program id may still be undecided:
+
+```
+python3 tools/signatario-solana/sol_vault.py create-fee-account --config deployments/solana/busdc-sol-vault.config.json --rpc $RPC --fee-payer deployer.json
+```
+```
+python3 tools/signatario-solana/sol_vault.py fee-account --config deployments/solana/busdc-sol-vault.config.json --rpc $RPC
+```
+
+The second command reads at `finalized` and must answer `"ok": true` with `feeTokenAccount`
+`2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg` and `feeAccountOwner` the fee address. It refuses an account that
+is missing, of another mint, frozen, or whose owner was changed to another address.
 
 ## 5. Deploy the program, final
 
@@ -205,7 +259,7 @@ This prints the vault address, its token account, `vault20`, the route and the f
 offline. A second reviewer derives them on their own machine. They do not exist on chain yet.
 
 ```
-python3 tools/signatario-solana/sol_vault.py init --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID --rpc $RPC --fee-payer deployer.json
+python3 tools/signatario-solana/sol_vault.py init --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID --rpc $RPC --fee-payer deployer.json --fee-owner-proof fee-owner-proof.json
 ```
 ```
 python3 tools/signatario-solana/sol_vault.py verify --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID --rpc $RPC
@@ -216,15 +270,14 @@ vault, and `init` then has nothing to do. `verify` reads the vault at `finalized
 with the config, the program's finality and the binary hash. Its output names the vault's 20-byte id
 (`sourceVault`) and the route (`sourceRoute`); the token deployment of section 7 derives both by itself.
 
-Create the fee owner's USDC account (anyone may; the deployer pays about 0.00204 SOL of rent):
+Before it sends anything, `init` refuses unless: the configuration passes the mainnet policy (the retention
+floor included); the fee owner's USDC account exists at `finalized`, is a classic token account of the mint and
+is OWNED BY the fee address (section 4.1, step 2); and `fee-owner-proof.json` is a valid signature of the fee
+address over the canonical text for this configuration (section 4.1, step 1). `verify` repeats the fee account
+check and the policy on the vault as it is on chain.
 
-```
-spl-token create-account EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --owner BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8 --fee-payer deployer.json --url $RPC
-```
-
-It must print `2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg`, the associated token account of the fee owner for
-the USDC mint (seeds: fee owner, token program, mint; bump 253), which is also the address `verify` shows as the
-vault's fee token account. `sol_vault.py create-fee-account` does the same through the tool.
+`2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg` is the associated token account of the fee owner for the USDC mint
+(seeds: fee owner, token program, mint; bump 253), the address `verify` shows as the vault's fee token account.
 
 The vault is now initialized with deposits and releases **off**.
 
@@ -304,17 +357,28 @@ cluster, and a vault that was already used. It has not run against chain 700770 
 
 ## 8. The burn router and the registry
 
-Exits go through `contracts/solana/SolanaBurnRouter.sol` (one constructor argument: the token; no owner, no
-state). It is deployed once on the L2 by any funded account after the token is verified, and its address goes
+Exits go through `contracts/solana/SolanaBurnRouter.sol` (two constructor arguments: the token, and the 32 bytes
+of the SPL mint the vault holds, which the router then refuses as a destination; no owner, no state). `MINT32` is
+the `mint32` value printed by `sol_vault.py address` (for USDC:
+`0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61`). It is deployed once on the L2 by any funded account after the token is verified, and its address goes
 into `router.address` of the token config, into every signer's Solana half (`burn_router`), into the relayers and
 into the frontend. No page or integration of this bridge calls `burn` on the token directly
 (`docs/SOLANA-VAULT.md` 11.1).
 
 ```
-forge create contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter --rpc-url $L2_RPC --legacy --ledger --mnemonic-derivation-path "$REGISTRY_PATH" --broadcast --constructor-args $TOKEN
+forge create contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter --rpc-url $L2_RPC --legacy --ledger --mnemonic-derivation-path "$REGISTRY_PATH" --broadcast --constructor-args $TOKEN $MINT32
 ```
 ```
 cast call $ROUTER "token()(address)" --rpc-url $L2_RPC
+```
+```
+cast call $ROUTER "solanaMint()(bytes32)" --rpc-url $L2_RPC
+```
+```
+cast call $ROUTER "commitment(string)(address)" EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v --rpc-url $L2_RPC
+```
+```
+cast call $ROUTER "commitment(string)(address)" 4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM --rpc-url $L2_RPC
 ```
 ```
 cast call $ROUTER "commitment(string)(address)" BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8 --rpc-url $L2_RPC
@@ -323,9 +387,10 @@ cast call $ROUTER "commitment(string)(address)" BMnorAB28mGPthJkbC2iLxbEpWYRCHaf
 cast call $ROUTER "commitment(string)(address)" 2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg --rpc-url $L2_RPC
 ```
 
-The first must print the token; the second `0xdF5a03Ae91Aca56d37572127c03e371a9563F8A0` (the fee wallet's
-commitment, a vector of the test suite); the third must REVERT (`NotASolanaWallet`): that address is a token
-account.
+The first must print the token; the second the mint's 32 bytes; the third and the fourth must REVERT
+(`NotASolanaWallet`): the USDC mint, and the identity point of the curve, for which no key exists. Of the last
+two commands the first must print `0xdF5a03Ae91Aca56d37572127c03e371a9563F8A0` (the fee wallet's commitment, a
+vector of the test suite) and the second must REVERT: that address is a token account.
 
 The registry is how a burn made directly on the token becomes payable (its wallet is announced there).
 
@@ -375,7 +440,7 @@ python3 tools/signatario-solana/sol_vault.py show --config deployments/solana/bu
 | # | Item | Answer |
 |---|---|---|
 | 1 | External audit of the Solana program, the registry and the Solana tools: firm, scope (`docs/AUDIT-SCOPE-BRIDGE-SOLANA.md`), report | TBD-owner |
-| 2 | Fee owner on Solana, immutable in the vault address: confirm on the second channel | `BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8` (round 16 brief, 2026-11-16); fee account `2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg` |
+| 2 | Fee owner on Solana, immutable in the vault address: confirm on the second channel; sign the proof text with its key and create its USDC account (section 4.1). Neither the address nor the account existed on mainnet-beta on 2026-11-16 | `BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8` (round 16 brief, 2026-11-16); fee account `2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg`; `fee-owner-proof.json`: TBD-owner |
 | 3 | Confirm that the seven release keys and three vault guardian keys of the Ethereum bridge are reused here (coordinator decision), and that one exposed key then migrates both bridges | TBD-owner |
 | 4 | `largeReleaseThreshold` 1,000 USDC and `releaseDelay` 1,800 s (the Ethereum vault has no delay), or 0 and 0 | TBD-owner |
 | 5 | Cap 100,000 USDC and window 10,000 USDC per day for this bridge | TBD-owner |
@@ -387,5 +452,6 @@ python3 tools/signatario-solana/sol_vault.py show --config deployments/solana/bu
 | 11 | Burn router and registry addresses on the L2 (section 8); every signer's Solana half carries `burn_router` | TBD-deploy |
 | 12 | Who creates a recipient's missing token account: the user (default), or the relayer under a stated limit | TBD-owner |
 | 13 | Each signer's TWO Solana endpoints for mint signing (operator, provider), recorded in the key inventory; no provider shared by two signers | TBD-owner |
-| 14 | `recordRetention` 604,800 s (7 days): how long a paid release record stays readable before its rent may be reclaimed | TBD-owner |
-| 15 | A refund rule for a burn made directly on the token to 20 bytes that are not a wallet commitment: none exists (`docs/SOLANA-VAULT.md` 11.1); accept that such a burn is held for good, or commission the signer change | TBD-owner |
+| 14 | `recordRetention` 604,800 s (7 days): how long a paid release record stays readable before its rent may be reclaimed. The tools refuse less than 259,200 s outside a rehearsal | TBD-owner |
+| 15 | A held exit has no refund: a burn made directly on the token to 20 bytes that are no wallet commitment, and (since round 17) a burn, through the router or not, whose destination is not a wallet on Solana. Option A: no refund, stated on the page. Option B: a signed-claim refund path as on the Bitcoin route (a change to the signer; its own review). `docs/SOLANA-VAULT.md` 11.1, 11.2; report of agent 336, "Owner inputs" | TBD-owner |
+| 16 | The bridge page takes the exit destination from a connected wallet and has it sign the text of `docs/SOLANA-VAULT.md` 11.3 before the router is called; `sol_create_recipient_account` stays false | TBD-owner (frontend) |

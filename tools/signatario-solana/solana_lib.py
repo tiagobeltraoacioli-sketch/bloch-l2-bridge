@@ -539,6 +539,7 @@ class Addresses:
                 'programData': b58encode(self.program_data), 'configHash': hx(self.config_hash),
                 'sourceChainId': str(int.from_bytes(self.config.source_chain_id, 'big')),
                 'sourceVault': hx(self.vault20), 'sourceRoute': hx(self.route), 'mintId': hx(self.mint20),
+                'mint32': hx(self.config.mint),
                 'mintChainGenesis': hx(self.genesis)}
 
 

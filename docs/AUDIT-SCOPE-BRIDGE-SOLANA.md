@@ -139,11 +139,37 @@ check against section 3, item 5.
   refund path: it needs a release whose recipient differs from the burn's, which the unchanged L2 half of the
   signer refuses to sign (`docs/SOLANA-VAULT.md` 11.1).
 - The router's curve test refuses program-derived wallets (multisig vaults) and cannot tell whether anyone holds
-  the key of an on-curve address.
+  the key of an on-curve address. Since review 330 the router also refuses the small-order points, the route's
+  mint and three program ids, and every signer holds a burn whose destination is, on Solana at `finalized`, not
+  absent and not a plain System account. What remains (stated in `docs/SOLANA-VAULT.md` 11.5): an on-curve
+  address nobody holds a key for, absent from the chain or merely funded, cannot be told from a fresh wallet;
+  only the page's wallet signature (11.3) covers it, and only for exits made through the page.
+- A held exit (no wallet, or a destination that is not a wallet) has no refund path.
+- The retention floor, the cluster rule for `rehearsal` and the fee-account gate are tool-side: the program image
+  is unchanged (`33f7027d…7316`) and still accepts `record_retention` 0 and pays any 32 bytes that hash to an
+  approved burn.
 - After a guardian pause ended early by 6 of 7, release signing waits until a certificate dated now can no longer
   predate the pause (`max_valid_seconds` less the certificate life after the pause began).
 - Mint signing requires at least two Solana endpoints that agree; nothing in the tool can check that two endpoints
   are independent.
+
+## 4.1 Round 17 additions (review 330), for the auditor
+
+| Path | What | In scope |
+|---|---|---|
+| `contracts/solana/SolanaBurnRouter.sol` | Constructor gains the SPL mint; `walletOf` refuses small-order points, the mint, three program ids | Yes |
+| `tools/signatario-solana/sol_recipient.py` | `destination` (the read at `finalized`), `burn_status`, the fixed list | Yes, first among the tools with `sol_half.py` |
+| `tools/signatario-solana/solana_lib.py` | `rehearsal` (cluster rule), `retention_floor`, `small_order`, `ed25519_verify`, `secp256k1_recover` (pure Python, verification only) | Yes: two signature verifiers are new cryptographic code |
+| `tools/signatario-solana/sol_proof.py` | Offline key proofs: the fee owner's, and the reference for the page's destination proof | Yes |
+| `tools/signatario-solana/sol_vault.py` | `init` gates (fee account, proof, policy), `fee-account`, `burn-status`, `reserves` with held burns, in-process signature checks | Yes |
+| `tools/signatario-solana/sol_vigia.py`, `sol_guardiao.py` | Holds and alerts; partials verified in process; the watch interval rule | Yes: the overridden methods |
+| `tools/signatario-solana/test_r330_review.py`, `test_untrusted_inputs.py`, `solidity-tests/R330SolanaBurnRouter.t.sol`, `solana/vault-tests/tests/r330_review.rs` | Regression and attack tests | Supporting |
+
+No signature decides anything in the Solana tools through another program's exit code any more: committee and
+guardian signatures are recovered in process (`secp256k1_recover`), key proofs are verified in process
+(`ed25519_verify`), from strictly parsed bytes. The parents `vigia.py`, `guardiao.py` and `signatario.py` are
+byte-identical to `cc2511a` and still call `cast wallet verify` on values they have matched against a fixed-length
+hexadecimal pattern (`vigia.py`) or that come from the operator's own source half (`signatario.py`).
 
 ## 5. Not in this note
 

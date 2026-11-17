@@ -257,6 +257,16 @@ and the rent comes back after the retention; what stays is one bit, in a page wh
 shared by 8,192 nonces. The retention (7 days proposed, at most 30) is the time a watcher has to read the full
 record of a paid release; after it, a watcher can still check that every paid nonce belongs to an L2 burn.
 
+**The retention has a floor outside a rehearsal (review 330, R330-SOL-3).** The program bounds `record_retention`
+from above only; with 0 a payment and the closing of its record fit one transaction and no watcher ever reads a
+paid record. The program image is unchanged, so the floor is in the tools' mainnet policy and in the deploy
+check: `solana_lib.retention_floor` = max(4,320 guardian watch rounds of 60 s, `pauseDuration`) = 259,200 s with
+the proposed values. The margin: a guardian watch may be down for three days and still read every paid record in
+full when it returns, and what was paid just before a guardian pause stays readable for the whole pause.
+`sol_vault.py validate`, `init` and `verify` refuse a configuration below it; `sol_guardiao.py` refuses to watch
+such a vault, refuses a watch `--interval` of which 4,320 rounds exceed the vault's retention (140 s at 7 days),
+and alerts when its last verified round is further back than the retention (`watch-gap-exceeds-retention`).
+
 ## 4. Layouts
 
 Every program account starts with a type tag and a layout version (2). Nothing is reallocated after creation.
@@ -612,9 +622,28 @@ canonical form or the curve check with probability about one half, not always); 
 keypair address is on the curve; and a wallet that is itself a program-derived address (a multisig vault) is
 refused, so such a holder exits to a key wallet.
 
+**Review 330, R330-SOL-1: "on the curve" is not "a wallet".** Half of all 32-byte values are curve points. Among
+them are the USDC mint itself (`EPjFWdd5…Dt1v`, the answer to "what is the USDC address on Solana"), the token
+programs' ids, every mint and token account created at a keypair address, and the eight points of small order,
+for which no private key can exist. Three layers now stand in front of such a destination, sections 11.2 to 11.4:
+the router refuses what it can know without reading Solana, every signer reads the destination on Solana and
+holds what is not a wallet there, and the bridge page proves the key with a wallet signature before it calls the
+router. Section 11.5 says what remains.
+
+Since round 17 the router (constructor `SolanaBurnRouter(token, bytes32 solanaMint)`; `walletOf` and `commitment`
+are `view`, no longer `pure`, because they read the immutable mint) also refuses, with the same error
+`NotASolanaWallet` and before anything is burned:
+
+- the eight small-order points, in every spelling the curve test accepts (y = 0, 1, p - 1 and the two order-8
+  values, either sign bit, y written unreduced);
+- `solanaMint`, the SPL mint this route's vault holds;
+- the program ids the bridge itself names: classic SPL Token, Token-2022, Associated Token Account.
+
 **What the signers do: a burn is certified only when a wallet is known for it** (`tools/signatario-solana/
 sol_recipient.py`, applied by the Solana half before it signs, by the sign daemon before it rebuilds anything, by
-the relayer before it pays). A wallet is 32 bytes, not zero, on the curve, hashing to the burn's 20 bytes. It is
+the relayer before it pays). A wallet is 32 bytes, not zero, on the curve, not of small order, not on the list of
+addresses known not to be wallets, hashing to the burn's 20 bytes; and what the chain shows at it must be a wallet
+(11.2). It is
 looked for in the router's `SolanaExit` log of that burn id, then in a `SolanaRecipient` log of
 `SolanaRecipientRegistry` for those 20 bytes, then in an operator's hint file. Where it comes from does not
 matter, because the hash decides. On a public cluster the Solana half refuses to run without `l2_rpc` and
@@ -627,13 +656,98 @@ matter, because the hash decides. On a public cluster the Solana half refuses to
 | The commitment of a wallet, and the wallet is announced on the registry (by the burner or anyone: `announce(bytes32)`) | Certified, approved and paid like any other exit. This is the recovery rule: announce the wallet |
 | The commitment of a wallet nobody has published | HELD: not certified, not approved, alerted by every sign daemon (`release-held-no-wallet`). Paid once the wallet is announced |
 | Not a commitment of any wallet (an Ethereum address, the commitment of a token account) | HELD for good by the same rule. Nothing is paid to anyone, the amount stays in the vault's `total_locked`, and it is visible: the alert names the burn. It is not silently approved, and it cannot be paid into an account nobody controls |
+| The commitment of an on-curve address that is not a wallet on Solana (a mint, a token account or a program at a keypair address), or of a small-order point, announced or not | HELD by the destination rule of 11.2, for as long as the chain shows that. The same holds for such a burn made THROUGH the router, when the router could not know |
 
 The third row is a loss for the holder that this design does not undo: paying it would need a release whose
 recipient differs from the one in the burn, and the unchanged signer (`signatario.py`) refuses to sign a release
 that is not exactly the burn's (`the Ethereum half signed another release`). A recovery path (a signed claim by
 the burner naming a wallet, certified as a release with a substituted recipient, and accepted by the guardian
 watch) is a change to the frozen signer and is not built; until it is, the defence is that no interface of the
-bridge calls `token.burn` and the router refuses the mistake. The rehearsal shows all three rows on a validator.
+bridge calls `token.burn` and the router refuses the mistake. The rehearsal shows all four rows on a validator.
+Whether to build that refund path is an owner decision (ceremony checklist 15).
+
+### 11.2 The destination is read on Solana (review 330, R330-SOL-1)
+
+Before a signer certifies a burn, its Solana half reads the address the release would be paid for
+(`sol_recipient.destination`), at `finalized`, on every Solana endpoint that signer is configured with. The burn
+is HELD (not certified, alerted, nothing paid, the amount stays in `total_locked`) unless every endpoint shows
+the address either
+
+- absent from the chain, or
+- an account owned by the System program, with no data and not executable.
+
+A mint, a token account, a program, a sysvar, a nonce account, a stake account, any account owned by another
+program: held, for as long as that is what the chain shows. The vault's own accounts (its mint, program, vault,
+token account, the fee owner's token account) and a short fixed list of well-known non-wallets are refused by
+name without a read. An endpoint that does not answer is not "absent": the signer signs nothing.
+
+Each of the seven signers applies the rule on its own node(s); five must agree before anything can be approved.
+The sign daemon applies it before it opens a round (`release-held-destination`), and the relayer applies it twice:
+before it delivers a certificate (`certificate-withheld-destination`) and before it pays
+(`approved-destination-not-a-wallet`). No tool creates the associated token account of an address that is not a
+FUNDED System account at `finalized` (`sol_vault.py execute --create-account` refuses; `sol_vigia.py` with
+`sol_create_recipient_account` waits), and `sol_create_recipient_account` stays false at launch.
+
+Why "absent" passes: a wallet that was never funded has no account, and it must be payable (anyone can create its
+token account). An account can be created AT an on-curve address only with that address's signature, so an
+address that is absent when the signers read it cannot later become a mint or a token account unless somebody
+holds its key. The payment itself is permissionless once approved (`execute_release`), so the signers' read is
+the gate; the relayer's checks are a second look, not a lock.
+
+**A hold is visible with its reason.** `sol_vault.py burn-status --l2-rpc URL --token 0x.. --router 0x..
+--registry 0x.. (--burn 0xID | --nonce N | --all)` prints, per L2 burn: `state` (`paid`, `approved`, `waiting`,
+`held`), and for a held one `hold` (`no-wallet` or `destination-not-a-wallet`) and `reason` in words (for
+example "the destination exists on Solana and is not a wallet: an account owned by the classic SPL Token program
+with 82 bytes of data"). `sol_vault.py reserves` with the same options lists every held burn with its reason and
+`heldTotal`, which explains that part of `lockedMinusSupply`. The sign daemons' alerts carry the same text.
+
+### 11.3 Proof of the destination key (the bridge page; for the frontend)
+
+The only proof that somebody holds the key of an address is a signature made with it. The bridge page therefore:
+
+1. takes the destination from a CONNECTED Solana wallet (never from a text field);
+2. asks that wallet to sign, with `signMessage`, exactly this one line of printable ASCII (no trailing newline):
+
+   `Bloch bridge exit: pay bUSDC.sol exits to my Solana wallet <WALLET>. L2 account <0x…>. Router <0x…>. Chain 700770. Issued <UNIX>.`
+
+   `<WALLET>` the base58 address; `<0x…>` the user's L2 account and the router address, lowercase, 0x + 40 hex;
+   `<UNIX>` the current time in seconds. Reference text and verification:
+   `python3 tools/signatario-solana/sol_proof.py exit-message --wallet W --l2-account 0x.. --router 0x.. --issued T`
+   and `sol_proof.py verify --address W --message TEXT --signature SIG`;
+3. verifies the 64-byte Ed25519 signature itself, in the page, against the wallet's public key over the UTF-8
+   bytes of the line (a wallet that signs the Solana off-chain message envelope instead, as hardware wallets
+   through the Solana app do, signs `0xff "solana offchain"`, a zero byte for the version, a zero byte for the
+   format, the length as two little-endian bytes, then the line: accept both, as `sol_proof.py` does), and refuses
+   a signature older than 10 minutes;
+4. only then calls `approve` and `SolanaBurnRouter.burnTo(amount, <WALLET>)`.
+
+The page should also read the address on Solana and refuse anything that exists and is not a System account
+without data, so that the user is told before burning what the signers would hold afterwards. A wallet that
+cannot sign a message cannot use the page for an exit. The signature is checked by the page only: the L2 cannot
+verify Ed25519, the router does not see it, and the signers do not ask for it.
+
+### 11.4 Cases that are the recipient's own doing (review 330, R330-SOL-6)
+
+The payment requires the account at the wallet's associated token address to exist, to be of the mint, and to be
+owned by the wallet. A recipient who gave that account to another owner (`SetAuthority`, which the classic token
+program allows on associated accounts) can never be paid at this wallet: the address cannot be created again
+while the account exists. The same holds while the issuer freezes the recipient's account. The burn stays
+approved and unpaid; nothing is lost from the vault. Tested (`r330_sol_6_…` in the SVM suite).
+
+### 11.5 What remains, said plainly
+
+An on-curve address for which NOBODY holds a key, that is not of small order and not on a list, looks to every
+reader of the chain exactly like a wallet that was never used: it is absent, or, since anyone may send lamports
+to any address, a System account with a balance and no data. The signers cannot tell the two apart, and neither
+can the router, the relayer or the vault. A burn through the router to such an address is certified and paid into
+a token account nobody can spend from.
+
+The wallet signature of 11.3 closes this for exits made through the bridge page, and only for those: a user who
+calls the router from another interface, a script or an integration gets the router's checks and the signers'
+read, not the proof of a key. This is the residual of R330-SOL-1 and it is not closed by anything in this
+repository. (Requiring on-chain evidence of a key, such as a transaction the address signed, would close it for
+used wallets and would refuse every fresh one; it also needs transaction history that many nodes prune. Not
+adopted.)
 
 ## 12. Token-2022 versus classic SPL Token; the issuer's powers
 
@@ -671,6 +785,24 @@ cluster or disagrees stops the signature. The endpoints should be of different o
 provider, or two providers no other signer shares): the tool can require two answers, not their independence,
 which the ceremony inventory records. Skipped
 slots do not matter: the signer reads account state at a commitment, not blocks by number.
+
+**Which cluster this is, is decided by the genesis hash (review 330, R330-SOL-2).** `solana.rehearsal: true` in a
+vault file relaxes rules that exist for real funds: two agreeing endpoints for a mint, the burn router and an L2
+endpoint for a release, the mainnet policy of the configuration. The flag is not part of the vault's address, so
+it is REFUSED, not obeyed, whenever the genesis hash (the file's, and the one the node reports) is that of
+mainnet-beta, devnet or testnet, and whenever any configured endpoint is not on loopback (`localhost` or a
+literal loopback IP): a rehearsal is a local private cluster and nothing else. With the flag false or absent
+every production rule applies, whatever the cluster. `solana_lib.rehearsal` is the one place that decides it;
+`sol_half.py` (both commands and every `Node`), `sol_vault.py validate` and `init` call it.
+
+Facts read on mainnet-beta at `finalized` by reviewer 330 on 2026-11-16 (review 330, R330-SOL-7), for the external
+auditor: (a) the feature "SIMD-0326: Alpenglow: new consensus algorithm" is active since epoch 1064 (slot
+459,648,000); the signers' rule above (`finalized`, a margin of 150 slots, every endpoint) does not depend on
+which consensus produces `finalized`, but the timing figures of this document were written without naming it and
+the guarantee of `finalized` under Alpenglow was not analysed here. (b) Rent per byte is scheduled to change
+(SIMD-0437 steps, inactive on that date): the program reads the rent sysvar and returns whatever a record holds,
+so nothing breaks; the SOL figures of section 10 will age. (c) The fee owner's address and its USDC account did
+not exist on that date: see the ceremony document, section 4.1.
 
 The L2 token's 12-hour queue with guardian cancel is the second line. If a deposit vanishes after it was attested
 (a cluster restart that drops finalized slots), the mint has no backing record: the guardians cancel it within the

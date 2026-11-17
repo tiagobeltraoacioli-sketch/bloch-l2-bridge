@@ -60,7 +60,7 @@
   },
   "router": {
     "contract": "contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter",
-    "constructor": "the token address",
+    "constructor": "the token address, then the 32 bytes of the SPL mint the vault holds (mint32 of sol_vault.py address; USDC: 0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61)",
     "address": "TBD-deploy"
   },
   "signers": {
