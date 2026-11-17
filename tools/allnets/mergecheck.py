@@ -172,8 +172,8 @@ def main(argv):
             continue
         subject = git('log', '-1', '--format=%s', m).strip()
         lost = [(p, x) for p, xs in res['missing'].items() for x in xs]
-        unjust = [(p, x) for p, x in lost
-                  if x['line'] not in just.get(m, {}).get(p, {}) and x['line'] not in just.get(m[:7], {}).get(p, {})]
+        keys = [m, m[:7], f'staged:{res["parents"][1]}']  # a justification written before the commit is keyed by the tip
+        unjust = [(p, x) for p, x in lost if not any(x['line'] in just.get(k, {}).get(p, {}) for k in keys)]
         state = 'OK' if not lost else ('JUSTIFIED' if not unjust else 'LOST')
         print(f'{m[:7]} {state:9} both-sides files {res["filesChangedByBoth"]:3}, one-side files {res["filesOneSide"]:4}, '
               f'missing lines {len(lost)} (unjustified {len(unjust)}): {subject}')

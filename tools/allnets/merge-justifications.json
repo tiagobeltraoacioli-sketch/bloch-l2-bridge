@@ -1,0 +1,7 @@
+{
+  "staged:9187656dd021848bf85b7102605af8720333787d": {
+    "tools/deploy-pontes/deploy_pontes.py": {
+      "        refuse(rehearsal or eth['chainId'] == ETH_MAINNET or eth['chainId'] in named,": "Not lost: superseded by the integration commit 6095d04 (355's data-driven source-chain rule, TRON's proposal of 2026-11-16 21:05 UTC), which keeps this condition word for word and appends `or by_data`; `by_data` is True only after routes.source_refusal() returned None, i.e. a reviewed deployments/<network>/bridge.network.json names this chain id and this token symbol. Chain id 1 and the EVM registry networks never reach that branch (they satisfy an earlier disjunct), so the EVM line's refusal set for its own networks is unchanged; tests: tools/deploy-pontes/test_routes.py. The merged tree 9187656 equals 2f22b20, already merged at 8722ff4, where this line was present."
+    }
+  }
+}
