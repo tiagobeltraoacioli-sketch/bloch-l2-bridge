@@ -8,6 +8,8 @@
   deploy_pontes.py record   --config C --plan PLAN --rpc URL --broadcast-file BROADCAST [--rehearsal] --write RECORD
   deploy_pontes.py verify   --config C --plan PLAN --rpc URL --record RECORD [--rehearsal] [--block finalized]
                             [--source-rpc ETH_URL]
+  deploy_pontes.py routes                          every bridge route of the tree, its launch status and deployment path
+  deploy_pontes.py route NETWORK COMMAND [...]     a command of that route's deployment path (tools/deploy-pontes/routes.py)
 
 One reviewed JSON config per bridge (deployments/mainnet/*.config.json); `null` = undecided and refused.
   validate  strict schema + mainnet policy (5-of-7 signers of distinct operators, independent pause-only
@@ -369,7 +371,17 @@ def validate(cfg, rehearsal):
                     named = {int(n['chainId']): n['l2'] for n in launch.launchable().values()}
                 except launch.LaunchError:
                     named = {}  # an untrusted registry names no network; its decided chain ids were refused above
-        refuse(rehearsal or eth['chainId'] == ETH_MAINNET or eth['chainId'] in named,
+        # Integration of the bridge lines (agent 355): a source chain that is neither Ethereum nor an EVM registry network
+        # is accepted from data, by the one rule of routes.source_refusal (the route's reviewed bridge.network.json names
+        # this chain id and this token). Chain id 1 and the registry networks never reach it.
+        by_data = False
+        if not rehearsal and eth['chainId'] != ETH_MAINNET and eth['chainId'] not in named:
+            import routes
+            why = routes.source_refusal(eth['chainId'], name, symbol)
+            refuse(why is None, 'mainnet policy: ethereum.chainId must be 1' + (f' or one of {sorted(named)}' if named else '')
+                   + f', or the source chain of a route under deployments/: {why}')
+            by_data = True
+        refuse(rehearsal or eth['chainId'] == ETH_MAINNET or eth['chainId'] in named or by_data,
                'mainnet policy: ethereum.chainId must be 1' + (f' or one of {sorted(named)}' if named else ''))
         if not rehearsal and eth['chainId'] in named:
             want = named[eth['chainId']]
@@ -857,6 +869,9 @@ def parse(argv):
 
 
 def main(argv):
+    if argv and argv[0] in ('routes', 'route'):  # every route of the tree and its deployment path (routes.py)
+        import routes
+        return routes.cli(argv, sys.modules[__name__])
     opts = parse(argv)
     cmd = opts['command']
     cfg_path = opts['config']
