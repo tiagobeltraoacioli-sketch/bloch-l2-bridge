@@ -175,7 +175,8 @@ reserves monitor applies it again afterwards (section 8):
   set-aside at its own L2 block, every late payment against its burner's call, every payout against its burner's
   ceiling (ceilings only rise, so the finalized one bounds every earlier one). The reserves monitor reports a
   violation as `held` (exit 2, pause); every honest signer HOLDS before extending such a thread (4e), judging each
-  set-aside at its block where its own L2 view serves it and skipping (never a false alarm) where it does not. The
+  set-aside at its own block; a signer whose L2 view cannot answer there signs nothing and marks nothing (fail
+  closed, review R342-BTC-2P-8): signers need an L2 view that serves past state. The
   hold is released only by an operator naming the investigated transaction in `acknowledged_violations` (per txid,
   still listed by the monitor). The part of `blocked` that is a signer's own market reading is not re-judged by the
   monitor. Rehearsal X3, X3b; unit `test_btc_r18`.

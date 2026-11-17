@@ -24,15 +24,23 @@ replay cannot know, because the Bitcoin chain does not carry it, is whether thos
 
 `historical=False` reads every term at one block, the finalized one. Then a set-aside whose burner called the router
 after it cannot be re-judged (its earlier terms are gone) and is skipped, never reported. The signer runs
-historical=True with a reader that answers None when its own L2 cannot serve the set-aside's block: judged where the
-state exists, skipped (never a false alarm) where it does not. Found by the rehearsal (X3): judged at the finalized
+historical=True and strict=True: a set-aside its own L2 view cannot answer for raises Unjudged and the signer refuses
+to sign and marks nothing (fail closed, review R342-BTC-2P-8; round 18 first skipped it and marked it audited). Found by the rehearsal (X3): judged at the finalized
 block only, a rogue set-aside became invisible to every signer as soon as its burner made the call that it needs to
 be paid. The reserves monitor reads at each set-aside's own block and judges every one. UNAUDITED.
 """
 import btc_policy as pol
 
 
-def audit_thread(vault, entries, burns, terms_at, burn_time, historical=True, skip=frozenset()):
+class Unjudged(Exception):
+    """strict mode: a set-aside could not be judged because the reader has no answer at its L2 block."""
+
+    def __init__(self, txid, nonce, block):
+        super().__init__(f'the set-aside of burn {nonce} in {txid} cannot be judged: no answer at L2 block {block}')
+        self.txid, self.nonce, self.block = txid, nonce, block
+
+
+def audit_thread(vault, entries, burns, terms_at, burn_time, historical=True, skip=frozenset(), strict=False):
     """Violations of the L2-side rules in the thread, as a list of {'rule', 'nonce', 'txid', ...}.
 
     entries    btc_vault.VaultView.entries (entries[0] is the anchor; each later one has 'build', 'state', 'time')
@@ -40,6 +48,7 @@ def audit_thread(vault, entries, burns, terms_at, burn_time, historical=True, sk
     terms_at   function(burn log, L2 block number or None) -> btc_l2.burn_terms dict; None = the finalized block
     burn_time  function(burn log) -> the L2 timestamp of the block the burn is in
     skip       txids already audited (and confirmed) by this caller: not read again
+    strict     an unanswered past block raises Unjudged instead of skipping (the signer: review R342-BTC-2P-8)
     """
     p, out = vault.policy, []
     for i in range(1, len(entries)):
@@ -77,7 +86,9 @@ def audit_thread(vault, entries, burns, terms_at, burn_time, historical=True, sk
             if historical:
                 t = terms_at(b, marker.aside_block)
                 if t is None:
-                    continue  # the caller's L2 cannot serve that block (a signer's view): not judged, never a false alarm
+                    if strict:
+                        raise Unjudged(e['txid'], n, marker.aside_block)
+                    continue  # the caller's L2 cannot serve that block: not judged (non-strict callers only)
             else:
                 t = terms_at(b, None)
                 if t['updated_block'] > marker.aside_block:

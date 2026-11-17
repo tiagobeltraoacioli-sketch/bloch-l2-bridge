@@ -143,10 +143,11 @@ class Held(unittest.TestCase):
         owed0 = s['marker'].liabilities
         paid_once, ever_aside, top = set(), set(), 0
         accepted = 0
-        for step in range(30_000):
+        for step in range(45_000):   # 370: 30,000 in pass 1; longer so the restored floors hold
             m = s['marker'].normalised()
             top = max(top, m.burn_base + max([0] + [n - m.burn_base for n in m.paid]))
-            mark = rnd.choice([0, 0, m.burn_base + rnd.randrange(1, 12), m.burn_base + rnd.randrange(1, 900), rnd.randrange(0, top + 3)])
+            mark = rnd.choice([0, 0, m.burn_base + rnd.randrange(1, 12), m.burn_base + rnd.randrange(1, 900), rnd.randrange(0, top + 3),
+                               m.burn_base + rnd.randrange(1, 6), m.burn_base + rnd.randrange(1, 6)])   # 370: marks the rules can accept
             pool = list(range(max(1, m.burn_base - 6), m.burn_base + 30)) + sorted(s['aside'])[:8] + sorted(paid_once)[-3:]
             names = rnd.sample(pool, min(len(pool), rnd.randrange(0, 7)))
             if rnd.random() < 0.05 and names:
@@ -177,10 +178,11 @@ class Held(unittest.TestCase):
                 self.assertTrue(pol.burn_paid(s, n))
             for n in s['aside']:
                 self.assertTrue(s['marker'].is_paid(n) and not pol.burn_paid(s, n))
-        # 332: the walk's own generator is unchanged; under the stricter rules (at most 4 set aside, only with a paying
-        # item) it gets fewer transactions accepted: the two thresholds were 1,500 and 100
-        self.assertGreater(accepted, 500)
-        self.assertGreater(len(ever_aside & paid_once), 30)   # late payments happened
+        # Review 342's floors restored (round 18, R342-BTC-2P-6): the stricter rules (at most 4 set aside, only with a
+        # paying item) accept fewer of the generator's moves, so the generator also proposes marks the rules can accept
+        # (two more choices, within 5 of the base); every earlier move is still proposed and checked.
+        self.assertGreater(accepted, 1_500)
+        self.assertGreater(len(ever_aside & paid_once), 100)   # late payments happened
 
     def test_replay_cannot_be_made_to_drop_or_invent_a_set_aside_burn(self):
         """Markers edited by hand on a transaction that sets aside 1..2 and pays 3, and on a late payment: every edit
