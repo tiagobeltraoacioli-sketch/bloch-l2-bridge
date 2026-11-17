@@ -333,12 +333,19 @@ def cmd_reserves(args):
     # Burns that are not paid yet explain `lockedMinusSupply`; the held ones are named with their reason and with
     # how they are recovered (the burner's redirectHeldBurn). Nothing held is ever paid blind.
     rows = [r for r in burn_rows(args, node) if r['state'] != 'paid']
+    # Round 18 (agent 371, F371-1): what the vault owes is the L2 supply PLUS every burn not yet paid (held burns
+    # included: they stay recoverable by their burners). Comparing the locked backing with the supply alone let
+    # the unpaid burns hide an unbacked mint of up to their total (rehearsal run 1: 60 USDC minted without a
+    # deposit behind 120 USDC of unpaid burns, monitor "ok").
+    if s['totalLocked'] - supply - sum(r['amount'] for r in rows) < 0:
+        problems.append('the L2 supply plus the burns not yet paid exceeds the locked backing')
     held = [r for r in rows if r['state'] == 'held']
     redirected = [r for r in rows if r['state'] != 'held' and r.get('redirected')]
     keep = ('burn', 'nonce', 'amount', 'recipient', 'burner', 'direct', 'state', 'hold', 'latched', 'redirects', 'reason', 'recoverable')
     out(not problems, problems=problems, tokenBalance=s['tokenBalance'], totalLocked=s['totalLocked'],
         feesAccrued=s['feesAccrued'], l2Supply=supply, l2Pending=pending,
-        lockedMinusSupply=s['totalLocked'] - supply, contextSlot=s['contextSlot'],
+        lockedMinusSupply=s['totalLocked'] - supply, lockedMinusObligations=s['totalLocked'] - supply - sum(r['amount'] for r in rows),
+        contextSlot=s['contextSlot'],
         unpaidBurns=len(rows), unpaidTotal=sum(r['amount'] for r in rows),
         heldBurns=len(held), heldTotal=sum(r['amount'] for r in held),
         redirectedBurns=len(redirected), redirectedTotal=sum(r['amount'] for r in redirected),

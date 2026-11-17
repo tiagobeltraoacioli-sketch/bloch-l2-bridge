@@ -108,21 +108,12 @@
     },
     "solana": {
       "branch": "codex/bridge-solana-r17-20261117",
-      "commit": "29cf7089923321ef349bdad2fac6bb325844ba0e",
+      "commit": "c90c6f8c60683ae7414d899a45b1127a65c19c55",
       "agent": 371,
       "routes": [
         "solana"
       ],
-      "conflicts": [
-        {
-          "path": "tools/deploy-pontes/vault_pontes.py",
-          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.3de16b87740c5505"
-        },
-        {
-          "path": "tools/signatario-stable/signatario.py",
-          "resolution": "recorded resolution tools__signatario-stable__signatario.py.c32665712f0818c6"
-        }
-      ],
+      "conflicts": [],
       "history": [
         {
           "branch": "codex/bridge-solana-r17-20261117",
@@ -139,6 +130,10 @@
         {
           "branch": "codex/bridge-solana-r17-20261117",
           "commit": "ea580107483a4d2f6b17b3979aadfe71f94b2417"
+        },
+        {
+          "branch": "codex/bridge-solana-r17-20261117",
+          "commit": "29cf7089923321ef349bdad2fac6bb325844ba0e"
         }
       ]
     },

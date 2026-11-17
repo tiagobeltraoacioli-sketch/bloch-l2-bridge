@@ -732,7 +732,7 @@ class Rehearsal:
     def burner_of(self, sender):
         return self.user_l2_addr if sender in (None, self.user_l2) else address_of(sender)
 
-    def burn(self, amount, wallet, how='cli', sender=None, expect_ok=True):
+    def burn(self, amount, wallet, how='cli', sender=None, expect_ok=True, mine=True):
         """An exit the intended way: through the burn router, the wallet as base58 text, with the proof of its key
         over the router's exit line at the burner's next nonce (round 17: the proof is part of the exit)."""
         burner = self.burner_of(sender)
@@ -743,7 +743,8 @@ class Rehearsal:
         if not expect_ok:
             return r
         assert r['status'] == '0x1', r
-        l2_mine()
+        if mine:
+            l2_mine()
         return r['transactionHash']
 
     def redirect(self, burn_id, wallet, how='cli', sender=None):
@@ -1039,6 +1040,7 @@ class Rehearsal:
             r2 = self.vault('execute', '--nonce', str(c['doc']['release']['nonce']), '--owner', S.b58encode(self.walletB.public), *self.pay)
             check(f'and approved and paid (tag {0 if how == "text" else 2})', r['ok'] and r2['ok'], approve=r, execute=r2)
         self.held_burns += [tx_mint, tx_own, tx_id, tx_keyless, tx_other, tx_listed]
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # the monitor and burn-status read at `finalized`
         s1 = self.state()
         check('the six held burns moved nothing on Solana: only the two proven exits were approved and paid',
               s1['totalLocked'] == s0['totalLocked'] - 2 * 10 * U and s1['approvalSeq'] == s0['approvalSeq'] + 2,
@@ -1185,6 +1187,7 @@ class Rehearsal:
         check('relay daemon: the redirected release is approved (recipient rule applied by sol_vault.py approve) and paid to the '
               'wallet the burner named, less 5 bps', bool(approve) and approve[0].get('ok') and approve[0].get('redirected')
               and paid == 10 * U - 5_000, approve=approve, paid=paid, log=lines[-6:])
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # burn-status reads at `finalized`
         r = self.vault('burn-status', *self.l2_args, '--burn', bid)
         row = (r.get('burns') or [{}])[0]
         check('burn-status: paid, to the redirected wallet', r['ok'] and row.get('state') == 'paid' and row.get('redirected') is True, answer=r)
@@ -1294,11 +1297,6 @@ class Rehearsal:
         row = status(b2, '--holds', str(WORK / 'soldb1.json'))
         check('burn-status with the operator\'s latch: held, latched, recoverable by the burner',
               row.get('state') == 'held' and row.get('latched') is True and 'redirectHeldBurn' in (row.get('recoverable') or ''), row=row)
-        r = self.half(0, 'release-hold', '--burn', b2, '--note', 'rehearsal: one operator clears its own latch')
-        db = json.loads((WORK / 'soldb1.json').read_text())
-        check('an operator\'s explicit release-hold names the burn and is recorded; one signer is not a threshold',
-              r['ok'] and b2 not in (db.get('held') or {}) and any(x.get('key') == b2 for x in db.get('released_holds', []))
-              and not rounds_of(b2), answer=r)
         keyless = S.sha256(b'a redirect nobody can prove')
         while not S.on_curve(keyless) or S.small_order(keyless):
             keyless = S.sha256(keyless)
@@ -1306,7 +1304,8 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         third = self.sign_passes()
         check("the burner's redirect without a valid proof keeps it held (release-held-redirect-invalid-proof)",
-              'release-held-redirect-invalid-proof' in alerts(third[0], b2) and not list((WORK / 'shared' / 'redirect' / b2[2:]).glob('n*')),
+              all('release-held-redirect-invalid-proof' in alerts(t, b2) for t in third)
+              and not list((WORK / 'shared' / 'redirect' / b2[2:]).glob('n*')) and not rounds_of(b2),
               alerts=alerts(third[0], b2), case='release-held-redirect-invalid-proof')
         k3, _ = self.sol.keygen('exit-rule-k3')
         n3 = self.redirect(b2, k3.public)  # the latest redirect wins
@@ -1324,6 +1323,21 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
         check('then paid to the redirected wallet', self.sol.balance(S.associated_token_address(k3.public, self.mint)) == 10 * U - 5_000)
+        # An operator's explicit, logged release of its own latch (sol_half.py release-hold): recorded with the note,
+        # and it does not make a burn payable that the rule still refuses (the keyless exit: no valid proof).
+        keyless_burn = self.burn_id_of(self.held_proof[0])
+        r = self.half(0, 'release-hold', '--burn', keyless_burn, '--note', 'rehearsal: one operator clears its own latch')
+        db = json.loads((WORK / 'soldb1.json').read_text())
+        check('release-hold names the burn, needs a note and is recorded in the database (released_holds)',
+              r['ok'] and keyless_burn not in (db.get('held') or {})
+              and any(x.get('key') == keyless_burn and 'rehearsal' in x.get('note', '') for x in db.get('released_holds', [])), answer=r)
+        r = self.signatario(0, 'release', '--burn-tx', self.held_proof[0], '--out', str(WORK / 'rel-after-release-hold.json'))
+        db = json.loads((WORK / 'soldb1.json').read_text())
+        check('after it the same signer still holds that exit (invalid-proof, judged afresh) and latches it again',
+              not r.get('signed') and 'invalid-proof' in json.dumps(r)
+              and (db.get('held') or {}).get(keyless_burn, {}).get('problem') == 'invalid-proof', answer=r)
+        r = self.half(0, 'release-hold', '--burn', '0x' + '77' * 32, '--note', 'rehearsal: a burn this signer never held')
+        check('release-hold of a burn the signer does not hold is refused', not r['ok'], answer=r)
 
         section('Guardian and relayer: approvals five committee keys make outside the rule')
         self.wait_bucket(30 * U)
@@ -1332,6 +1346,9 @@ class Rehearsal:
         rel, ctx = self.l2_burn_release(tx_eth)
         code, _ = self.forged_approve(rel, ctx, self.release_keys[:5])
         check('five committee keys approve the direct burn to an Ethereum address as it is', code is None, code=code)
+        # The relayer acts on burns that have a directory in the shared directory. Honest sign daemons open none for a
+        # held burn; a signer whose half skipped the rule would. Its directory is created here (no partial in it).
+        (WORK / 'shared' / 'release' / self.burn_id_of(tx_eth)[2:]).mkdir(parents=True, exist_ok=True)
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
         check('relay daemon: approved-without-wallet, not paid', 'approved-without-wallet' in alerts(lines, self.burn_id_of(tx_eth)),
@@ -1350,9 +1367,8 @@ class Rehearsal:
         check("guardian watch: an approval to a recipient that is neither the burn's nor its burner's redirect (release-mismatch)",
               code is None and any('neither' in t for t in reasons), ids=ids, reasons=reasons, case='release-mismatch:recipient')
         # (c) a burn not yet final on the L2 (no blocks mined after it)
-        r = l2_send(self.user_l2, self.router, 'burnTo(uint64,string,uint64,bytes)', str(10 * U), S.b58encode(self.walletB.public),
-                    l2_view(self.router, 'nextNonce(address)(uint64)', self.user_l2_addr), '0x01' + '00' * 64)
-        rel, ctx = self.l2_burn_release(r['transactionHash'])
+        tx_new = self.burn(10 * U, self.walletB.public, mine=False)  # a proven exit, no blocks mined after it
+        rel, ctx = self.l2_burn_release(tx_new)
         code, _ = self.forged_approve(rel, ctx, self.release_keys[:5])
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         _, ids, _ = guardian_ids(quiet_cfg)
@@ -1977,7 +1993,11 @@ class Rehearsal:
         r = self.credit(dep)
         check('(worst case) the unbacked mint credits on the L2', r['status'] == '0x1')
         r = self.vault('reserves', *self.l2_args)
-        check('reserves monitor raises: the L2 supply exceeds the locked backing', not r['ok'] and r.get('lockedMinusSupply', 0) < 0, answer=r)
+        # Restated in round 18 (F371-1): with burns not yet paid (held ones included) the supply alone can stay below the
+        # backing while the mint is unbacked; the monitor compares the backing with supply plus unpaid burns.
+        check('reserves monitor raises: the L2 supply plus the burns not yet paid exceeds the locked backing',
+              not r['ok'] and r.get('lockedMinusObligations', 0) < 0
+              and any('burns not yet paid' in x or 'supply exceeds' in x for x in r.get('problems', [])), answer=r)
         self.wait_bucket(10 * U)
         burn = self.burn(10 * U, wallet)
         c = self.certify_release(burn, 'b-held')
