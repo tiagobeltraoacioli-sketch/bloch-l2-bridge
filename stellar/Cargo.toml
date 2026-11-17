@@ -1,0 +1,25 @@
+# Stellar (Soroban) side of the Bloch bridge: the source vault for issuer-native USDC on Stellar (bUSDC.xlm).
+# A standalone workspace: it never builds with the repository's root crate and carries its own lock file.
+# STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
+[workspace]
+resolver = "2"
+members = ["vault"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+soroban-sdk = "=29.0.1"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

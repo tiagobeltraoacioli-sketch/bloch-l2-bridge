@@ -1,0 +1,71 @@
+{
+  "domain": "bloch.bridge.stellar-vault-deploy.v1",
+  "status": "PROTOTYPE, UNAUDITED. Nothing is deployed. The owner deploys; never an agent.",
+  "notes": {
+    "contract": "stellar/vault (bloch-stellar-vault), built with stellar-cli 30.0.1, soroban-sdk 29.0.1, rustc 1.92.0; source.wasmSha256 is the hash of the round 16 build (docs/STELLAR-BRIDGE-DEPLOY.md section 1) and must be reproduced by the owner before the deploy",
+    "config": "the object under vault.config is the constructor argument of the contract, verbatim; it is immutable once deployed (no setter, no administrator, no upgrade)",
+    "units": "amounts are in the L2 token's units: 1 USDC = 1e6 units = 1e7 stroops",
+    "token": "vault.config.token must equal asset.contract: the Stellar Asset Contract of USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN on the public network. `pairing.py preflight` (before the deploy) and `pairing.py vault-check` (after it) recompute the id from the asset and the network passphrase and refuse anything else; the vault itself accepts any 7-decimal asset contract, so this pin is what stands between a typo and a vault over another asset",
+    "labels": "source_domain = sha256('stellar-pubnet'), native_domain = sha256('bloch-l2-700770'), asset = sha256('USDC')",
+    "limits": "the Ethereum bridge's launch values, proposed: cap 100,000 USDC (must equal the L2 supplyCap), window 10,000 USDC per 24 h (must equal the L2 bucketCapacity), minDeposit 11 USDC, l2MinBurn 10 USDC",
+    "committee": "the same keys as the Ethereum vault: the 7 `eth-release-signer` addresses (5 of 7 release and controls, 6 of 7 unpause) and the 3 `eth-vault-guardian` addresses of docs/BRIDGE-V3-KEY-CEREMONY.md, as 20-byte hex without 0x, each list strictly ascending. No Stellar key holds any power in the vault",
+    "releaseDelay": "OWNER DECISION, not hard-coded: large_release_threshold and release_delay are constructor values. PROPOSED here (and recommended by rounds 16 and 17): threshold 0 and delay 7,200 s, so every release waits 2 h in the queue, where ONE guardian's pause voids it (guardians can only pause; a pause voids the queue and every older certificate; the committee certifies the real burns again with the ordinary 5 of 7 and they wait the delay again; three hostile guardian keys delay an exit by at most 9 days 8 h with these values). release_delay 0 gives the Ethereum launch behaviour: no queue, the bucket (10,000 USDC a day) is the only bound on a forged release. The delay must be at most half of pause_cooldown (the constructor refuses more). Trade-off and table: docs/STELLAR-BRIDGE.md section 5",
+    "fee": "5 bps of each deposit and 5 bps of each release, fixed. fee_recipient is the owner's Stellar address (owner input 2026-11-16). On 2026-11-17 this account does NOT exist on the public network (Horizon 404). The owner runs the fee-account ceremony of docs/STELLAR-BRIDGE-DEPLOY.md section 2 FIRST (create the account with 3 XLM, add the USDC trustline with that account's own key, which proves control of the key); `pairing.py preflight`, `pairing.py vault-check` and `deploy_pontes.py run / verify` all refuse while the account or the trustline is missing",
+    "TBD-owner": "the 7 signer addresses, the 3 guardian addresses, the deployer account, source.revision, confirmation of the limits, the decision on the release delay, and the fee account ceremony",
+    "check": "tools/signatario-stellar/pairing.py preflight --vault-config THIS-FILE --config XLM.json before the deploy (policy of this file, Circle's asset, the fee account and its trustline on the network); pairing.py vault-check after it compares every field of vault.config with the deployed vault's config() and refuses any difference. No control is opened and no token is deployed over a vault that fails it"
+  },
+  "network": {
+    "passphrase": "Public Global Stellar Network ; September 2015",
+    "networkId": "7ac33997544e3175d266bd022439b22cdb16508c01163f26e5cb2a3e1045a979",
+    "rehearsal": false
+  },
+  "asset": {
+    "code": "USDC",
+    "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "contract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+    "source": "Issuer: Circle's list of USDC contract addresses (https://developers.circle.com/stablecoins/usdc-contract-addresses, row Stellar) and the issuer account itself (home domain circle.com, read from Horizon 2026-11-16 and 2026-11-17). Contract: the Stellar Asset Contract id the protocol derives from (network id, USDC, issuer); tools/signatario-stellar/stellar_net.py asset_contract_id recomputes it, and Horizon reports the same id for the asset."
+  },
+  "source": {
+    "revision": null,
+    "wasmSha256": "ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9"
+  },
+  "deployer": {
+    "account": "TBD-owner"
+  },
+  "vault": {
+    "config": {
+      "token": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+      "source_domain": "b3b1412aaf716368dd5aacf749d8347fd3d40bf579ed136293e3f2b80e7b13de",
+      "native_domain": "598527ae46b00d630ba662e2df7d4a3d52e2e2738562139cbef725336e9645ce",
+      "asset": "8591ee9090c0c02ca1f103cb637131d8f358870aba145245ff083e138fdd705b",
+      "cap": 100000000000,
+      "window_limit": 10000000000,
+      "window_seconds": 86400,
+      "min_deposit": 11000000,
+      "l2_min_burn": 10000000,
+      "signers": [
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner"
+      ],
+      "threshold": 5,
+      "switch_threshold": 6,
+      "guardians": [
+        "TBD-owner",
+        "TBD-owner",
+        "TBD-owner"
+      ],
+      "pause_duration": 259200,
+      "pause_cooldown": 259200,
+      "large_release_threshold": 0,
+      "release_delay": 7200,
+      "fee_recipient": "GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA",
+      "deposit_fee_bps": 5,
+      "release_fee_bps": 5
+    }
+  }
+}

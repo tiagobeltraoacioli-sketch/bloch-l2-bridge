@@ -1,0 +1,146 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "network": {
+    "id": "stellar",
+    "name": "Stellar",
+    "kind": "stellar",
+    "chainId": "Public Global Stellar Network ; September 2015",
+    "nativeCurrency": {
+      "symbol": "XLM",
+      "decimals": 7
+    }
+  },
+  "asset": {
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 7,
+    "id": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN (asset contract CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75)",
+    "issuer": "Circle (issuer account GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN, home domain circle.com)",
+    "issuerNative": true,
+    "issuerPowers": [
+      "freeze (AUTH_REVOCABLE is set: the issuer can revoke the authorization of any balance, the vault's included)",
+      "flags not immutable (AUTH_IMMUTABLE is not set: the issuer can still set AUTH_REQUIRED or AUTH_CLAWBACK_ENABLED; clawback then applies only to balances created afterwards)",
+      "mint"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading on https://horizon.stellar.org (accounts/<issuer>, assets?asset_code=USDC&asset_issuer=<issuer>): flags auth_required false, auth_revocable true, auth_immutable false, auth_clawback_enabled false; thresholds 2/2/2 over 4 signers; contract_id CCW67TS...MI75; the same id recomputed locally from the asset and the passphrase",
+        "date": "2026-11-16"
+      },
+      {
+        "source": "https://developers.circle.com/stablecoins/usdc-contract-addresses (Circle's own address table: Stellar mainnet USDC-GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN)",
+        "date": "2026-11-16"
+      }
+    ],
+    "unit": {
+      "adapter": "TBD-deploy",
+      "decimals": 6,
+      "assetUnitsPerUnit": "10",
+      "note": "the vault itself is the adapter: it keeps its books in the L2 token's 6-decimal units and moves 10 stroops per unit; a deposit must be a multiple of 10 stroops, so nothing is rounded"
+    }
+  },
+  "custody": {
+    "type": "soroban-contract",
+    "address": "TBD-deploy",
+    "contract": "stellar/vault (bloch-stellar-vault)",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDC (Stellar)",
+    "symbol": "bUSDC.xlm",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "11000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "10000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0",
+    "releaseDelaySeconds": 7200
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweep_fees() and the vault pays the recipient, which must exist and hold a USDC trustline",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction (0.0166 XLM charged for a release with 5 signatures on a private network with the public network's per-transaction limits) and, for a queued release, its execution"
+  },
+  "finality": {
+    "rule": "Stellar closes a ledger by consensus and does not reorganise. A deposit is attested when its ledger is closed and at least 12 ledgers (about one minute) behind the signer's own node, that node is fresh, and every RPC the signer configures reports the same hash for that ledger. The deposit is read from the vault's state (its deposit chain), not from an event feed.",
+    "tag": "closed ledger + 12",
+    "confirmations": 12,
+    "typicalSeconds": 60,
+    "worstCaseSeconds": 3600,
+    "reorg": "There is no reorganisation to handle. A signer whose views of a closed ledger disagree, or whose node is stale, signs nothing (hold). Every mint still waits 12 hours on the L2, where the guardians cancel one whose deposit is not in the vault's chain."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "BytesN<20>: the 20-byte L2 address (argument l2_recipient); no memo is used",
+    "function": "deposit(from: Address, amount: i128 (stroops, a multiple of 10), l2_recipient: BytesN<20>)",
+    "approvalTarget": "none: the depositor authorizes the vault call, which carries the asset transfer as a sub-invocation",
+    "steps": [
+      "hold USDC on Stellar in the account or contract `from`",
+      "invoke deposit(from, amount, l2_recipient) on the vault, signed by `from`",
+      "after the ledger margin and the 12 hour mint delay the L2 token credits amount / 10 less 0.05% to l2_recipient"
+    ],
+    "refusals": [
+      "an amount that is not a multiple of 10 stroops, below minDeposit or above maxDeposit, or one that would pass the cap",
+      "a zero l2_recipient",
+      "a classic payment to the vault's address is not a deposit (a contract address cannot receive one); only the contract call is"
+    ]
+  },
+  "release": {
+    "l2Function": "StellarBurnRouter.burnTo(uint64 amount, string stellarAddress) after approving the router; it emits StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress)",
+    "recipientEncoding": "a Stellar G... account or C... contract address; the burn names its commitment, the low 20 bytes of keccak256(bytes32('BLOCH-XLM-RECIPIENT-v1') ‖ the 56-character address)",
+    "typicalSeconds": 10800,
+    "paysAsset": "USDC on Stellar, the burned amount less 0.05%, in stroops (amount * 10)",
+    "notes": [
+      "a G... recipient must already hold a USDC trustline; until it does the release stays unpaid and can be retried, it is not lost",
+      "every release waits release_delay (proposed 2 hours) in the vault's queue before anyone can execute it; a guardian pause voids the queue, and the exit is then re-certified and waits the delay again",
+      "a recipient whose authorization the issuer revoked cannot be paid until the issuer restores it",
+      "muxed (M...) addresses are not accepted"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://stellar.expert/explorer/public/tx/{tx}",
+      "address": "https://stellar.expert/explorer/public/contract/{address}",
+      "block": "https://stellar.expert/explorer/public/ledger/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
+    "limits are in custody units of 6 decimals (asset.unit); one unit is 10 stroops of the 7-decimal asset.",
+    "guardians: pause-only, as on the other networks (confirmed by the coordinator in round 17; the earlier 'bounded cancel' is superseded). One guardian pauses the vault for 72 h by a signature (an Ethereum personal message) that anyone relays. A pause VOIDS: every release still queued and every certificate signed before it is dead for good, and the committee certifies those burns again by itself (ordinary 5 of 7) once the pause is over; they wait the delay again. Worst case with the proposed values (pause 72 h, cooldown 72 h, delay 2 h): three hostile guardian keys delay an exit by 9 days 8 h (two keys 6 days 6 h, one key 3 days 4 h); after a chain no guardian can pause for 72 h. There is no cancel (committee.guardianCancelQuorum is absent). docs/STELLAR-BRIDGE.md section 4.",
+    "what a page reads for an exit: burn_status(nonce, burnId) on the vault = 0 open (never released, OR voided by a pause: show 'waiting for the committee', never 'failed'; it is also 0 while a pause lasts), 1 queued, 2 paid, 3 held. pending(releaseId) keeps returning a voided entry with its old ready_at, and the re-certified release has the same id: an entry is payable only if pending.pause_count equals state().pause_count and paused() is false. One exit of a whole window that matures first holds the exits behind it until the bucket refills (they stay queued; say so for large exits).",
+    "exits go through StellarBurnRouter.burnTo. A burn made directly on the token is NEVER paid to the 20 bytes it names. It is paid only after the account that burned calls StellarBurnRouter.claimDirectBurn(uint64 burnNonce, string stellarAddress) on the L2 (event DirectBurnClaimed(address indexed burner, uint64 indexed burnNonce, bytes20 commitment, string stellarAddress); view claimOf(address burner, uint64 burnNonce) returns the address, or the empty string). The claim is set once and cannot be changed; it counts once it is final on the L2; there is no timeout and no other way (no signed message, no file). Integrations must not burn bUSDC.xlm directly; a page may offer the claim call to a user who did (docs/STELLAR-BRIDGE.md section 4b).",
+    "release delay (limits.releaseDelaySeconds with largeItemThreshold 0: every release queues): 7200 s is a PROPOSAL. The delay is a deployment parameter the owner decides; 0 gives the Ethereum launch behaviour. docs/STELLAR-BRIDGE.md section 5.",
+    "the asset in custody is pinned by the deployment files and tools (docs/STELLAR-BRIDGE.md section 5a): USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN, Stellar Asset Contract CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75; a vault over any other asset contract is refused by the deploy tool, the signers and the monitors. The fee recipient must exist and hold a USDC trustline before the vault is deployed (on 2026-11-17 it does not exist yet)."
+  ]
+}

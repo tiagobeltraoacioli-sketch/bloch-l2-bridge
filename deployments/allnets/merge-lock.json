@@ -64,6 +64,20 @@
         "solana"
       ],
       "conflicts": []
+    },
+    "stellar": {
+      "branch": "codex/bridge-stellar-r17-20261117",
+      "commit": "3ce640fccb2a4f6384094346239e82cc6ca4ab94",
+      "agent": 338,
+      "routes": [
+        "stellar"
+      ],
+      "conflicts": [
+        {
+          "path": "deployments/schema/bridge.network.schema.json",
+          "resolution": "schema owner's version (ours)"
+        }
+      ]
     }
   }
 }

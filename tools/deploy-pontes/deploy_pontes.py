@@ -197,7 +197,10 @@ def validate(cfg, rehearsal):
     refuse(isinstance(cfg, dict), 'config must be a JSON object')
     bridge = cfg.get('bridge')
     refuse(bridge in CONTRACTS, 'bridge must be "wgnb" or "stable"')
-    specific = ['gnb'] if bridge == 'wgnb' else ['ethereum', 'mintSwitch']
+    # Round 16: a stable config names its source network by its section. `stellar` (and no `ethereum`) takes the
+    # per-network path of source_stellar.py; every other config is validated exactly as before.
+    stellar = bridge == 'stable' and 'stellar' in cfg and 'ethereum' not in cfg
+    specific = ['gnb'] if bridge == 'wgnb' else ['stellar' if stellar else 'ethereum', 'mintSwitch']
     exact_keys(cfg, ['domain', 'bridge', 'notes', 'network', 'source', 'deployer', 'token', 'signers',
                      'guardians', 'limits', 'tx', *specific], 'config')
     refuse(cfg['domain'] == DOMAIN, f'domain must be {DOMAIN}')
@@ -334,6 +337,9 @@ def validate(cfg, rehearsal):
         refuse(g == GNB_MAINNET or (rehearsal and g == GNB_TESTNET),
                f'gnb.chainId must be {hex(GNB_MAINNET)} (mainnet){" or 0x474e0002" if rehearsal else ""}')
         params['gnbChainId'] = g
+    elif stellar:
+        import source_stellar
+        params.update(source_stellar.validate_source(cfg, sys.modules[__name__], k, signers, guardians, lim, rehearsal))
     else:
         eth = cfg['ethereum']
         exact_keys(eth, ['chainId', 'vault', 'route', 'vaultCodeHash', 'vaultCap', 'vaultGuard'], 'ethereum')
@@ -564,6 +570,8 @@ def make_plan(cfg, rehearsal, build=True):
         plan['sourceVault'] = {'chainId': p['sourceChainId'], 'address': p['sourceVault'],
                                'codeHash': p['vaultCodeHash'], 'route': p['sourceRoute'], 'cap': p['vaultCap'],
                                'guard': p['vaultGuard']}
+        if 'sourceStellar' in p:  # the Stellar path only: what source_stellar.py reads back from the vault
+            plan['sourceVault'].update(p['sourceStellar'])
     return plan, init_code
 
 
@@ -609,6 +617,9 @@ def unused_vault(plan, source_rpc):
     Signers key a mint on the deposit id, which is per vault, and keep that memory per token database: a second
     token over a vault with deposits lets a fresh signer database mint every old deposit again, and its burn nonces
     restart at 1 against the vault's `releasedNonce` (F4). A used vault is never reused: new vault, new token."""
+    if plan['sourceVault'].get('kind') == 'stellar':
+        import source_stellar
+        return source_stellar.unused_vault(plan, source_rpc, refuse)
     sv, eth = plan['sourceVault'], Rpc(source_rpc)
     refuse(int(eth('eth_chainId', []), 16) == sv['chainId'], 'source RPC serves another chain')
     refuse(code_hash(eth('eth_getCode', [sv['address'], 'latest'])) == sv['codeHash'],
@@ -780,6 +791,10 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
               'runtimeCodeHash': plan['contract']['runtimeCodeHash'], 'checked': checks, 'state': state}
     if plan['bridge'] == 'stable':
         refuse(source_rpc is not None, 'stable: pass --source-rpc (own Ethereum node) to verify the vault')
+        if plan['sourceVault'].get('kind') == 'stellar':
+            import source_stellar
+            result.update(source_stellar.verify(plan, source_rpc, exp, get, refuse))
+            return result
         sv, eth = plan['sourceVault'], Rpc(source_rpc)
         refuse(int(eth('eth_chainId', []), 16) == sv['chainId'], 'source RPC serves another chain')
         refuse(code_hash(eth('eth_getCode', [sv['address'], 'finalized'])) == sv['codeHash'],
