@@ -528,10 +528,10 @@
       ],
       "launch": {
         "v1": false,
-        "state": "undeclared",
-        "sourceState": "undeclared",
-        "source": "none",
-        "reason": "the route's bridge.network.json carries no `launch` block",
+        "state": "held",
+        "sourceState": "held",
+        "source": "route-file",
+        "reason": "NOT LAUNCHABLE until the external audit (program, burn router, tools, the pure-Python signature verifiers) and the owner's key ceremony (fee-owner proof within 30 days of init, committee and guardian keys) are done. Residual of R330-SOL-1, stated: a destination's key holder can turn its own address into a mint after the signers read it, and five signers who skip the rule can approve anything the vault accepts (the relayer refuses to pay and the guardian raises release-destination / release-mismatch); a burn whose burner can no longer transact stays held. Open Infos of review 376: R330-SOL-4P-5 (exitHash is read by no tool) and R330-SOL-4P-8; proof not tested on a Ledger device. Tip eac2b35: rehearsal 255/0 default, 132/0 --r330.",
         "openFindings": []
       },
       "sourceDomain": "solana-mainnet",

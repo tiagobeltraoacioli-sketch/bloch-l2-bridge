@@ -120,7 +120,7 @@
     },
     "solana": {
       "branch": "codex/bridge-solana-r17-20261117",
-      "commit": "eac2b35dfbd53509ef69a50d70d8f9c5dfe48d7c",
+      "commit": "e833b64fb63c75c8384610b30fbaf86bcd42ca05",
       "agent": 371,
       "routes": [
         "solana"
@@ -158,6 +158,10 @@
         {
           "branch": "codex/bridge-solana-r17-20261117",
           "commit": "c8816a501b2df8eb1a4f45fc58e0f1d6e5ea66ed"
+        },
+        {
+          "branch": "codex/bridge-solana-r17-20261117",
+          "commit": "eac2b35dfbd53509ef69a50d70d8f9c5dfe48d7c"
         }
       ]
     },

@@ -30,7 +30,7 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | bnb | bUSDC.bnb | out | - |
 | linea | bUSDC.linea | launchable | - |
 | op-mainnet | bUSDC.op | launchable | - |
-| solana | bUSDC.sol | undeclared | - |
+| solana | bUSDC.sol | held | - |
 | stellar | bUSDC.xlm | undeclared | - |
 | tron | bUSDT.trx | held | - |
 
