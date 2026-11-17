@@ -1046,8 +1046,12 @@ def main_flow(r):
     r.classic('change-trust', '--source-account', 'payee2', '--line', r.asset)
     ok, cn2 = r.certify(tx, 'notl')
     rc, sent = r.submit(cn2) if ok else (1, cn2)
+    replay = r.submit(cn, key='notl-hand-2')
+    parts = {'certified': ok, 'rc': rc, 'p2_balance': r.balance(p2), 'want': 50 * S - 250_000,
+             'hand_certificate_again_rc': replay[0], 'burn_status': r.net.burn_status(bn['nonce'], bn['burn_id'])}
     check('trustline: after the recipient adds the trustline five signers certify the burn and it is paid once',
-          ok and rc == 0 and r.balance(p2) == 50 * S - 250_000 and r.submit(cn, key='notl-hand-2')[0] != 0, sent)
+          ok and rc == 0 and parts['p2_balance'] == parts['want'] and replay[0] != 0 and parts['burn_status'] == 2,
+          [parts, sent, replay])
 
     # 12a. (round 18, brief 373) a HELD router exit, redirected by its own burner on the L2. The exit names an account
     #      that cannot receive the asset (no trustline): no signer certifies it (R331-XLM-4P-1), so nothing is
@@ -1057,6 +1061,7 @@ def main_flow(r):
     txh = r.burn(40 * U, held)
     bh = r.burned(txh)
     rc_h, out_h = r.signer(0, 'release', '--burn-tx', txh, '--out', r.dir / 'held-0.json')
+    status_h = r.net.burn_status(bh['nonce'], bh['burn_id'])
     stranger_redirect = r.redirect(ANVIL_KEYS[0], bh['nonce'], payee)
     redirected = r.redirect(ANVIL_KEYS[1], bh['nonce'], payee)
     rc_nf, out_nf = r.signer(1, 'release', '--burn-tx', txh, '--out', r.dir / 'held-nf-1.json')   # not final yet
@@ -1069,8 +1074,8 @@ def main_flow(r):
     r.mine()
     rc_late, out_late = r.signer(1, 'release', '--burn-tx', txh, '--out', r.dir / 'held-late-1.json')
     check('held exit: no signer certifies a router exit to an account that cannot receive the asset (held, not lost; '
-          'nothing is queued)', rc_h and 'held:' in json.dumps(out_h)
-          and r.net.burn_status(bh['nonce'], sn.b32(bh['burn_id'])) == 0, out_h)
+          'nothing is queued)', rc_h != 0 and 'held:' in json.dumps(out_h) and status_h == 0,
+          {'rc': rc_h, 'burn_status': status_h, 'out': out_h})
     check('held exit: only the exit\'s own burner can redirect it (a stranger\'s redirectHeldBurn reverts); a redirect '
           'counts only once it is final on the L2', not stranger_redirect and redirected and rc_nf
           and 'held:' in json.dumps(out_nf), [stranger_redirect, redirected, out_nf])

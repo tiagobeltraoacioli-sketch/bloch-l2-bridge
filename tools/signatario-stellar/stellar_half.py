@@ -151,16 +151,13 @@ class Half:
         start = int(self.cfg.get('vault_from_ledger', 0))
         health = self.net.health()
         start = max(start, int(health.get('oldestLedger', 1)))
-        while True:
-            events, latest, _ = self.net.events(start)
-            for e in events:
-                if e['name'] == 'deposited' and e['topics'] and e['topics'][0] == deposit_id.hex():
-                    d = e['data']
-                    return {'sender': d['sender'], 'amount': int(d['amount']), 'l2_recipient': d['l2_recipient'],
-                            'tx': e['tx'], 'ledger': e['ledger']}
-            if not events or events[-1]['ledger'] >= latest:
-                return None
-            start = events[-1]['ledger'] + 1
+        events, _, _ = self.net.scan(start)
+        for e in events:
+            if e['name'] == 'deposited' and e['topics'] and e['topics'][0] == deposit_id.hex():
+                d = e['data']
+                return {'sender': d['sender'], 'amount': int(d['amount']), 'l2_recipient': d['l2_recipient'],
+                        'tx': e['tx'], 'ledger': e['ledger']}
+        return None
 
     def deposit(self, args):
         deposit_id = sn.b32(args['--deposit-id'])
