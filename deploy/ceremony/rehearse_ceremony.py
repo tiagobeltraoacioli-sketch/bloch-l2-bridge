@@ -154,6 +154,13 @@ class Rig:
         self.repo = self.work / 'repo'
         if not self.repo.exists():
             sh('git', 'clone', '-q', '--no-local', str(ROOT), str(self.repo))
+            if args.build_cache:
+                # Iteration only: forge's own artifacts and cache of an earlier clean clone (forge rebuilds whatever
+                # source differs; the kit still compares the creation code with the audit freeze). The final run has none.
+                for d in ('out', 'cache'):
+                    if (Path(args.build_cache) / d).exists():
+                        shutil.copytree(Path(args.build_cache) / d, self.repo / d)
+                note(f'forge artifacts copied from {args.build_cache} (iteration run, not the final one)')
         head = sh('git', '-C', ROOT, 'rev-parse', 'HEAD').stdout.strip()
         check('[clone] the clean checkout is the committed HEAD of this branch',
               sh('git', '-C', self.repo, 'rev-parse', 'HEAD').stdout.strip() == head)
@@ -234,10 +241,21 @@ def main():
     ap.add_argument('--work')
     ap.add_argument('--pidfile', default=str(Path(tempfile.gettempdir()) / 'a380-ceremony.pids'))
     ap.add_argument('--keep', action='store_true')
+    ap.add_argument('--build-cache', help='a clone whose forge out/ and cache/ may be reused (iteration runs only)')
+    ap.add_argument('--hold-on-fail', type=int, default=0, help='seconds to keep the anvils up after the first failure')
     args = ap.parse_args()
     rig = Rig(args)
     try:
         flow(rig)
+    except SystemExit as e:
+        print(f'STOPPED {e}', flush=True)
+        if args.hold_on_fail:
+            hold = rig.work / 'HOLD'
+            hold.write_text('delete this file to stop holding\n')
+            note(f'holding the anvils for up to {args.hold_on_fail} s: {rig.eth} {rig.l2}; delete {hold} to end')
+            end = time.time() + args.hold_on_fail
+            while hold.exists() and time.time() < end:
+                time.sleep(5)
     finally:
         for p in PIDS:
             p.kill()
@@ -483,8 +501,10 @@ def flow(rig):
     check('[13] no mint is queued before Ethereum finality', daemons.tview('nextSlot()(uint64)') == '0')
     rig.mine(rig.eth, 0x80)
     daemons.passes('after finality')
-    check('[13] after finality 5 of 7 attest and the relayer queues the mint (T = 0)', daemons.tview('nextSlot()(uint64)') == '1'
-          and daemons.tview('mintCount()(uint64)') == '0')
+    if not check('[13] after finality 5 of 7 attest and the relayer queues the mint (T = 0)', daemons.tview('nextSlot()(uint64)') == '1'
+                 and daemons.tview('mintCount()(uint64)') == '0'):
+        print(json.dumps(daemons.events[-12:])[:4000], flush=True)
+        raise SystemExit('no mint queued')
     sh(rig.cast, 'rpc', 'evm_increaseTime', str(DELAY + 1), '--rpc-url', rig.l2)
     rig.mine(rig.l2, 1)
     daemons.passes('after the 12 h delay')
@@ -598,14 +618,19 @@ class Daemons:
         return ev
 
     def passes(self, label):
+        start = len(self.events)
         for _ in range(2):
             for c in self.cfgs:
                 self.vigia(c, 'sign')
             self.vigia(self.relay_cfg, 'relay')
-        errs = [e for e in self.events[-60:] if 'rc' in e]
-        note(f'daemon passes ({label}): 7 x vigia.py sign, vigia.py relay; {len(errs)} exits with an error')
-        if errs:
-            print(json.dumps(errs[-2:])[:1500], flush=True)
+        new = self.events[start:]
+        errs = [e for e in new if 'rc' in e or e.get('error')]
+        kinds = {}
+        for e in new:
+            kinds[e.get('kind', '?')] = kinds.get(e.get('kind', '?'), 0) + 1
+        note(f'daemon passes ({label}): 7 x vigia.py sign, vigia.py relay twice; events {kinds}; {len(errs)} errors')
+        for e in (errs or [])[-3:]:
+            print('  ' + json.dumps(e)[:900], flush=True)
 
     def tview(self, sig, *a):
         return self.rig.c('call', self.ho['l2']['token'], sig, *a, url=self.rig.l2).split()[0]
