@@ -171,11 +171,16 @@ contract R324StellarBurnRouterTest {
         require(!ok && token.balanceOf(ALICE) == 500 * U && token.burnNonce() == 0, "nothing burned");
     }
 
-    // ── round 17 (review 331, R331-XLM-3P-1): the claim of a direct burn is on the L2, set once ──────────────
-    function test_aDirectBurnIsClaimedOnceByItsBurner() public {
+    // ── round 17 (review 331, R331-XLM-3P-1): the claim of a direct burn is on the L2 ──────────────────────────
+    // Round 18 (brief 373): it is no longer set once. Every claim is kept in order and the latest is `claimOf`;
+    // the signers certify the latest claim final before the vault records a release. The properties of the set-once
+    // test are kept: one log per claim with the same topics and data, a claim by another account is ignored, the
+    // address must be valid; restated: a second claim for another address is now RECORDED (it was: reverts), a
+    // second claim for the same address still reverts (SameAddress), and the history is bounded.
+    function test_aDirectBurnIsClaimedByItsBurnerAndTheLatestClaimCounts() public {
         vm.prank(ALICE);
         token.burn(uint64(50 * U), ALICE); // a direct burn towards 20 bytes that are no commitment
-        require(bytes(router.claimOf(ALICE, 1)).length == 0, "no claim yet");
+        require(bytes(router.claimOf(ALICE, 1)).length == 0 && router.claimCount(ALICE, 1) == 0, "no claim yet");
         vm.recordLogs();
         vm.prank(ALICE);
         router.claimDirectBurn(1, G_ADDR);
@@ -186,14 +191,92 @@ contract R324StellarBurnRouterTest {
         require(address(uint160(uint256(logs[0].topics[1]))) == ALICE && uint256(logs[0].topics[2]) == 1, "indexed");
         (bytes20 c, string memory to) = abi.decode(logs[0].data, (bytes20, string));
         require(c == bytes20(router.commitment(G_ADDR)) && keccak256(bytes(to)) == keccak256(bytes(G_ADDR)), "data");
-        // set once: neither another address nor the same one again
+        // the same address twice in a row reverts and changes nothing
+        vm.prank(ALICE);
+        (bool ok, bytes memory why) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, G_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.SameAddress.selector, "same claim again");
+        require(router.claimCount(ALICE, 1) == 1, "unchanged");
+        // another address: recorded, and it is the latest
+        vm.prank(ALICE);
+        router.claimDirectBurn(1, C_ADDR);
+        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(C_ADDR)), "latest claim");
+        require(router.claimCount(ALICE, 1) == 2, "two claims");
+        require(keccak256(bytes(router.claimAt(ALICE, 1, 0))) == keccak256(bytes(G_ADDR)), "history 0");
+        require(keccak256(bytes(router.claimAt(ALICE, 1, 1))) == keccak256(bytes(C_ADDR)), "history 1");
+        // and back again: allowed (not the same as the latest)
+        vm.prank(ALICE);
+        router.claimDirectBurn(1, G_ADDR);
+        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(G_ADDR)) && router.claimCount(ALICE, 1) == 3, "back");
+    }
+
+    function test_theClaimHistoryIsBounded() public {
+        vm.prank(ALICE);
+        token.burn(uint64(50 * U), ALICE);
+        uint256 max = router.MAX_NAMINGS();
+        for (uint256 i; i < max; ++i) {
+            vm.prank(ALICE);
+            router.claimDirectBurn(1, i % 2 == 0 ? G_ADDR : C_ADDR);
+        }
         vm.prank(ALICE);
         (bool ok, bytes memory why) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, C_ADDR)));
-        require(!ok && bytes4(why) == StellarBurnRouter.AlreadyClaimed.selector, "second claim");
+        require(!ok && bytes4(why) == StellarBurnRouter.TooManyNamings.selector && router.claimCount(ALICE, 1) == max, "bounded");
+    }
+
+    // ── round 18 (brief 373): a held router exit is redirected by its own burner, on the L2 ───────────────────
+    function test_aRouterExitRecordsItsBurnerAndOnlyItRedirects() public {
         vm.prank(ALICE);
-        (ok,) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, G_ADDR)));
-        require(!ok, "same claim again");
-        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(G_ADDR)), "claim unchanged");
+        token.approve(address(router), 200 * U);
+        vm.prank(ALICE);
+        router.burnTo(uint64(200 * U), G_ADDR);
+        require(router.exitBurnerOf(1) == ALICE, "exit burner");
+        require(bytes(router.redirectOf(1)).length == 0 && router.redirectCount(1) == 0, "no redirect");
+        address mallory = address(0xBAD);
+        vm.prank(mallory);
+        (bool ok, bytes memory why) = address(router).call(abi.encodeCall(router.redirectHeldBurn, (1, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.NotTheBurner.selector, "stranger");
+        vm.prank(ALICE);
+        (ok, why) = address(router).call(abi.encodeCall(router.redirectHeldBurn, (2, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.NotTheBurner.selector, "no such exit");
+        vm.prank(ALICE);
+        (ok, why) = address(router).call(abi.encodeCall(router.redirectHeldBurn, (0, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.BadNonce.selector, "nonce 0");
+        vm.prank(ALICE);
+        (ok, why) = address(router).call(
+            abi.encodeCall(router.redirectHeldBurn, (1, "GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNB"))
+        );
+        require(!ok && bytes4(why) == StellarBurnRouter.BadStrkey.selector, "bad strkey");
+        vm.recordLogs();
+        vm.prank(ALICE);
+        router.redirectHeldBurn(1, C_ADDR);
+        R324Vm.Log[] memory logs = vm.getRecordedLogs();
+        require(logs.length == 1 && logs[0].emitter == address(router), "one log");
+        require(logs[0].topics[0] == keccak256("HeldBurnRedirected(address,uint64,uint256,bytes20,string)"), "topic");
+        require(address(uint160(uint256(logs[0].topics[1]))) == ALICE && uint256(logs[0].topics[2]) == 1, "indexed");
+        (uint256 version, bytes20 c, string memory to) = abi.decode(logs[0].data, (uint256, bytes20, string));
+        require(version == 1 && c == bytes20(router.commitment(C_ADDR)) && keccak256(bytes(to)) == keccak256(bytes(C_ADDR)), "data");
+        require(keccak256(bytes(router.redirectOf(1))) == keccak256(bytes(C_ADDR)) && router.redirectCount(1) == 1, "stored");
+        vm.prank(ALICE);
+        (ok, why) = address(router).call(abi.encodeCall(router.redirectHeldBurn, (1, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.SameAddress.selector, "same again");
+        vm.prank(ALICE);
+        router.redirectHeldBurn(1, G_ADDR);
+        require(keccak256(bytes(router.redirectAt(1, 0))) == keccak256(bytes(C_ADDR)), "history");
+        require(keccak256(bytes(router.redirectOf(1))) == keccak256(bytes(G_ADDR)) && router.redirectCount(1) == 2, "latest");
+    }
+
+    function test_aDirectBurnCannotBeRedirectedAndARouterBurnCannotBeClaimed() public {
+        vm.prank(ALICE);
+        token.burn(uint64(50 * U), ALICE); // nonce 1, direct
+        vm.prank(ALICE);
+        (bool ok, bytes memory why) = address(router).call(abi.encodeCall(router.redirectHeldBurn, (1, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.NotTheBurner.selector && router.exitBurnerOf(1) == address(0), "direct");
+        vm.prank(ALICE);
+        token.approve(address(router), 100 * U);
+        vm.prank(ALICE);
+        router.burnTo(uint64(100 * U), G_ADDR); // nonce 2, through the router
+        vm.prank(ALICE);
+        router.claimDirectBurn(2, C_ADDR); // recorded under ALICE, but the burn's `from` is the router: ignored by readers
+        require(bytes(router.claimOf(address(router), 2)).length == 0, "the router never claims");
     }
 
     function test_aClaimBelongsToItsCallerOnly() public {
