@@ -217,6 +217,33 @@ class DeployGate(unittest.TestCase):
             self.assertNotIn('constructorArgs', r)
             self.assertNotIn('forge', r)
 
+    def test_r379_a_chain_id_that_is_not_a_json_integer_is_refused_before_anything_else(self):
+        # R329-EVM-3P-1 (379, round 18): `"chainId": 8453.0` skipped the launch gate (not an int) but matched the
+        # registry row (8453.0 == 8453), so a Base config validated and printed its forge line. `true` matched chain 1.
+        for name, value in (('base', 8453.0), ('bnb', 56.0), ('op-mainnet', 10.0), ('op-mainnet', True), ('op-mainnet', '10'),
+                            ('op-mainnet', 0), ('op-mainnet', -10)):
+            c = filled_vault(name)
+            c['ethereum']['chainId'] = value
+            for command in ('validate', 'args'):
+                rc, r = self.vault(c, command)
+                self.assertEqual((rc, r['decision']), (1, 'refused'), (name, value, command, r))
+                self.assertIn('ethereum.chainId must be a positive JSON integer', r['reason'], (name, value))
+                self.assertNotIn('constructorArgs', r)
+                self.assertNotIn('forge', r)
+        # the float form in the raw JSON text, exactly as the reviewer wrote it
+        c = filled_vault('base')
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / 'c.json'
+            p.write_text(json.dumps(c).replace('"chainId": 8453', '"chainId": 8.453e3'))
+            done = subprocess.run([sys.executable, str(ROOT / 'tools/deploy-pontes/vault_pontes.py'), 'validate', '--config', str(p)],
+                                  capture_output=True, text=True, env=ENV)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn('positive JSON integer', json.loads(done.stdout)['reason'])
+
+    def test_r379_the_source_networks_are_the_launchable_ones_only(self):
+        import vault_pontes
+        self.assertEqual(set(vault_pontes.source_networks()), {1} | {s['chainId'] for s in launch.launchable().values()})
+
     def test_r329_op_mainnet_control_still_validates(self):
         rc, r = self.vault(filled_vault('op-mainnet'))
         self.assertEqual((rc, r['decision']), (0, 'config-valid'), r)
