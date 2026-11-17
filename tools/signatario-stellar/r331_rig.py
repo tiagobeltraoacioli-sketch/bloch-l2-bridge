@@ -10,10 +10,11 @@ with its claim, and the guardian check both ways.
 
 The reviewer wrote it against revision 3 (`22ea9a4`), where three checks failed on purpose (named DEFECT ...). What
 changed here, and why:
-  3P-1  the claim of a direct burn is a transaction of the burner on the L2 router (set once), not a file. Section D
-        drives that; the reviewer's case "a guardian handed the burner's OTHER valid claim" becomes: a second claim
-        reverts on the L2, and a claim file for another address, signed by the burner as in revision 3 and put in a
-        directory the guardian config names, changes nothing.
+  3P-1  the claim of a direct burn is a transaction of the burner on the L2 router, not a file. Section D drives
+        that; the reviewer's case "a guardian handed the burner's OTHER valid claim" becomes: a second claim of the
+        burner (revision 5: recorded, the latest before certification counts; this one comes after the payment) and
+        a claim file for another address, signed by the burner as in revision 3 and put in a directory the guardian
+        config names, change nothing.
   3P-2  the guardian has a stall rule (`stall_deadline`, 100 s on this rig; the vault's delay is 3,600 s) in place of
         the two later-block rules, which compared L2 timestamps. The checks that named those rules now name the stall
         rule; the reviewer's failing check is unchanged.
@@ -223,8 +224,11 @@ def flow(r):
     check('DEFECT R331-XLM-3P-1: a guardian handed the burner\'s OTHER valid claim does not read the honest, paid release '
           'as a forgery (it should be "cannot judge", then a finding only after the grace time)', kind != 'findings',
           [kind, why, rc])
-    check('one claim (revision 4): the burner\'s second claim reverts on the L2, and every guardian judges the release ok '
-          'against the one claim, whatever file it is handed', not second and kind == 'ok'
+    # Restated in round 18 (revision 5: claims accumulate; was: the second claim reverts). The release is already
+    # paid, so the second claim is recorded and changes nothing: the guardian judges the release against every claim
+    # of its burner, and the paid address is one of them.
+    check('two claims (revision 5): the burner\'s second claim, after the payment, is recorded on the L2 and every '
+          'guardian still judges the paid release ok, whatever file it is handed', second and kind == 'ok'
           and [verdict(bd['nonce'])[0] for _ in range(1)] == ['ok'], [second, kind, why])
     notes['two_claims_guardian'] = [kind, why, rc]
 
