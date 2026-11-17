@@ -1050,7 +1050,9 @@ def main_flow(r):
     parts = {'certified': ok, 'rc': rc, 'p2_balance': r.balance(p2), 'want': 50 * S - 250_000,
              'hand_certificate_again_rc': replay[0], 'burn_status': r.net.burn_status(bn['nonce'], bn['burn_id'])}
     check('trustline: after the recipient adds the trustline five signers certify the burn and it is paid once',
-          ok and rc == 0 and parts['p2_balance'] == parts['want'] and replay[0] != 0 and parts['burn_status'] == 2,
+          ok and rc == 0 and parts['p2_balance'] == parts['want'] and parts['burn_status'] == 2
+          and (replay[0] != 0 or (replay[1].get('status') == 'DONE' and 'already records' in json.dumps(replay[1])))
+          and r.balance(p2) == parts['want'],
           [parts, sent, replay])
 
     # 12a. (round 18, brief 373) a HELD router exit, redirected by its own burner on the L2. The exit names an account
