@@ -1,7 +1,7 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T07:00:00Z",
+  "asOf": "2026-11-17T08:30:00Z",
   "findings": [
     {
       "id": "R330-SOL-1",
@@ -28,18 +28,6 @@
       "source": "cross-area 2026-11-17 04:41 UTC (agent 379)"
     },
     {
-      "id": "R330-SOL-4P-3",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Medium",
-      "state": "fixed in 29cf708 (371), re-verification by 376 pending",
-      "owner": 371,
-      "reviewer": 376,
-      "what": "existing approvals and payments are judged against the latest redirect only: a burner can make every honest guardian pause the vault and the token for 72 h, repeatedly",
-      "source": "cross-area 2026-11-17 04:50 UTC (agent 376)"
-    },
-    {
       "id": "R331-XLM-4P-5",
       "routes": [
         "stellar"
@@ -57,11 +45,23 @@
         "stellar"
       ],
       "severity": "Medium",
-      "state": "open at 5dce607 (guardian unchanged since 349bae6)",
+      "state": "fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending",
       "owner": 373,
       "reviewer": 377,
       "what": "see agents/331-bridge-stellar-review-r17.md section 4P",
       "source": "cross-area 2026-11-17 06:45 UTC (377)"
+    },
+    {
+      "id": "R330-SOL-4P-9",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Medium",
+      "state": "open (371 fixing)",
+      "owner": 371,
+      "reviewer": 376,
+      "what": "sol_guardiao.py eth_source: the recipient findings (each followed by continue) come before the release-before-final test, and recipient_verdict reads the router logs only up to the guardian's own finalized block",
+      "source": "agents/330-bridge-solana-review-r17.md fourth pass (376 FINAL at 93edeee)"
     }
   ],
   "removed": [
@@ -109,26 +109,40 @@
       "id": "R331-XLM-4P-1",
       "why": "reviewer 377: 4P-1/2/3 fixed (cross-area 2026-11-17 06:45 UTC)",
       "on": "2026-11-17"
+    },
+    {
+      "id": "R330-SOL-4P-3",
+      "why": "confirmed fixed by reviewer 376, fourth pass FINAL at 93edeee (relayed by the coordinator)",
+      "on": "2026-11-17"
     }
   ],
   "listed": [
     {
-      "id": "R342-BTC-2P-8",
+      "id": "R330-SOL-4P-6",
       "routes": [
-        "bitcoin"
+        "solana"
       ],
-      "severity": "Low (fixed in cd0d0ab by 370; 378 re-verification pending)",
-      "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
-      "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
+      "severity": "Low",
+      "what": "docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing)",
+      "source": "376 fourth pass"
     },
     {
-      "id": "R342-BTC-2P-6",
+      "id": "R330-SOL-4P-7",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Low",
+      "what": "sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing)",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R342-BTC-2P-5",
       "routes": [
         "bitcoin"
       ],
-      "severity": "Info (floors restored in b225e91 by 370; 378 re-verification pending)",
-      "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
-      "source": "same"
+      "severity": "Info",
+      "what": "set-aside terms are read at the signer's own finalized block (docstring and rule wording)",
+      "source": "agents/342-bridge-btc-tron-review-r17.md"
     },
     {
       "id": "R342-BTC-2P-7",
@@ -138,7 +152,35 @@
       "severity": "Info (latent)",
       "what": "whether a direct burner has code is read at today's block, not at the burn",
       "source": "same"
+    },
+    {
+      "id": "R342-BTC-6",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "a burn whose fee ceiling never pays is shown as payable unless a fee rate is given; no page-readable status source",
+      "source": "same"
+    },
+    {
+      "id": "R342-BTC-7",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash",
+      "source": "same"
     }
   ],
-  "noteListed": "listed: findings below Medium that the coordinator or a reviewer asked to be shown in main's README; they do not hold a route."
+  "noteListed": "listed: findings below Medium that the coordinator or a reviewer asked to be shown in main's README; they do not hold a route.",
+  "removedListed": [
+    {
+      "id": "R342-BTC-2P-8",
+      "why": "closed by reviewer 378's re-check of cd0d0ab"
+    },
+    {
+      "id": "R342-BTC-2P-6",
+      "why": "closed by reviewer 378's re-check of cd0d0ab"
+    }
+  ]
 }

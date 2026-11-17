@@ -30,17 +30,20 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | bnb | bUSDC.bnb | out | - |
 | linea | bUSDC.linea | launchable | - |
 | op-mainnet | bUSDC.op | launchable | - |
-| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, fixed in 29cf708 (371), re-verification by 376 pending) |
-| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, open at 5dce607 (guardian unchanged since 349bae6)) |
+| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-9 (Medium, open (371 fixing)) |
+| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending) |
 | tron | bUSDT.trx | held | - |
 
 Open findings below Medium, listed on request (they do not hold the route):
 
 | Finding | Route | Severity | What |
 |---|---|---|---|
-| R342-BTC-2P-8 | bitcoin | Low (fixed in cd0d0ab by 370; 378 re-verification pending) | the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited |
-| R342-BTC-2P-6 | bitcoin | Info (floors restored in b225e91 by 370; 378 re-verification pending) | the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test |
+| R330-SOL-4P-6 | solana | Low | docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing) |
+| R330-SOL-4P-7 | solana | Low | sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing) |
+| R342-BTC-2P-5 | bitcoin | Info | set-aside terms are read at the signer's own finalized block (docstring and rule wording) |
 | R342-BTC-2P-7 | bitcoin | Info (latent) | whether a direct burner has code is read at today's block, not at the burn |
+| R342-BTC-6 | bitcoin | Info | a burn whose fee ceiling never pays is shown as payable unless a fee rate is given; no page-readable status source |
+| R342-BTC-7 | bitcoin | Info | the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash |
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before

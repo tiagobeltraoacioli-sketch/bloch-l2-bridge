@@ -540,9 +540,9 @@
             "owner": 371
           },
           {
-            "id": "R330-SOL-4P-3",
+            "id": "R330-SOL-4P-9",
             "severity": "Medium",
-            "state": "fixed in 29cf708 (371), re-verification by 376 pending",
+            "state": "open (371 fixing)",
             "owner": 371
           }
         ]
@@ -620,7 +620,7 @@
           {
             "id": "R331-XLM-4P-4",
             "severity": "Medium",
-            "state": "open at 5dce607 (guardian unchanged since 349bae6)",
+            "state": "fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending",
             "owner": 373
           }
         ]
@@ -695,22 +695,31 @@
   ],
   "listedFindings": [
     {
-      "id": "R342-BTC-2P-8",
+      "id": "R330-SOL-4P-6",
       "routes": [
-        "bitcoin"
+        "solana"
       ],
-      "severity": "Low (fixed in cd0d0ab by 370; 378 re-verification pending)",
-      "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
-      "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
+      "severity": "Low",
+      "what": "docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing)",
+      "source": "376 fourth pass"
     },
     {
-      "id": "R342-BTC-2P-6",
+      "id": "R330-SOL-4P-7",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Low",
+      "what": "sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing)",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R342-BTC-2P-5",
       "routes": [
         "bitcoin"
       ],
-      "severity": "Info (floors restored in b225e91 by 370; 378 re-verification pending)",
-      "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
-      "source": "same"
+      "severity": "Info",
+      "what": "set-aside terms are read at the signer's own finalized block (docstring and rule wording)",
+      "source": "agents/342-bridge-btc-tron-review-r17.md"
     },
     {
       "id": "R342-BTC-2P-7",
@@ -719,6 +728,24 @@
       ],
       "severity": "Info (latent)",
       "what": "whether a direct burner has code is read at today's block, not at the burn",
+      "source": "same"
+    },
+    {
+      "id": "R342-BTC-6",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "a burn whose fee ceiling never pays is shown as payable unless a fee rate is given; no page-readable status source",
+      "source": "same"
+    },
+    {
+      "id": "R342-BTC-7",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info",
+      "what": "the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash",
       "source": "same"
     }
   ]
