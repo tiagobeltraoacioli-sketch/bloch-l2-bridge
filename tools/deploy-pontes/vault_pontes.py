@@ -53,6 +53,38 @@ CONTRACT = 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault'
 # mint chain at the burn matches it. Config `vault.provenance` = {"mode": 1, "releaseDelay": 0, "mintVerifier": null,
 # "fees": {"recipient": ADDRESS, "depositBps": 5, "releaseBps": 5}} (agent 197: protocol fee fixed at deployment).
 PROVENANCE_CONTRACT = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'
+# Round 16 (agent 320): the same vault on other EVM source networks. `ethereum` in a config then names that network.
+# tools/evm-nets/networks.json gives, per chain id, the domain label and the asset. Ethereum (chain 1) is unchanged.
+PROVENANCE_CONTRACTS = (PROVENANCE_CONTRACT,)
+# Round 17 (reviews R329-EVM-1, R329-EVM-2): tools/evm-nets/launch.py holds the launch status of each of those networks;
+# a network that is not launchable is refused by validate, args and verify alike, with no flag to lift it, and the
+# registry pins the fee recipient and rates of every vault config of those networks. Chain 1 never reaches that module.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
+    import launch  # noqa: E402
+except ImportError:  # a tree without tools/evm-nets: Ethereum only, as before round 16
+    launch = None
+
+
+def source_networks():
+    """chain id -> (source label, asset label, required token or None, vault contracts allowed[, asset, unit token, fees])."""
+    nets = {ETH_MAINNET: ('ethereum-mainnet', 'USDC', USDC_MAINNET, (CONTRACT, PROVENANCE_CONTRACT))}
+    try:
+        registry = launch.registry() if launch else None
+    except launch.LaunchError:
+        registry = None  # every chain id of the registry is then refused by launch.refusal with the reason
+    if registry:
+        for spec in registry['networks'].values():
+            fees = (registry['feeRecipient'].lower(), spec['feeBps']['deposit'], spec['feeBps']['release'])
+            asset = spec['asset']
+            # An asset that is not six-decimal is held through its unit token, deployed first; the raw asset is refused.
+            token = asset['address'].lower() if asset['decimals'] == 6 else None
+            # Review R325-EVM-2: the unit token is pinned by address in the registry once deployed and verified
+            # (tools/evm-nets/evm_nets.py verify-unit); until then no vault config over it validates.
+            unit = str((asset.get('unit') or {}).get('address') or '').lower() or None
+            nets[int(spec['chainId'])] = (spec['sourceDomainLabel'], spec['assetLabel'], token, (PROVENANCE_CONTRACT,),
+                                          asset['address'].lower(), unit, fees)
+    return nets
 ZERO = '0x' + '00' * 20
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
 CAST = str(FOUNDRY / 'cast')
@@ -108,17 +140,26 @@ def validate(cfg, rehearsal, token_cfg=None):
     exact_keys(eth, ['chainId', 'rehearsal'], 'ethereum')
     refuse(isinstance(eth['rehearsal'], bool) and eth['rehearsal'] == rehearsal,
            'ethereum.rehearsal and the --rehearsal flag disagree')
-    refuse(eth['chainId'] == (REHEARSAL_CHAIN if rehearsal else ETH_MAINNET),
-           f'chainId must be {REHEARSAL_CHAIN if rehearsal else ETH_MAINNET}')
+    nets = source_networks()
+    if launch and not rehearsal and is_uint(eth['chainId'], lo=1) and eth['chainId'] != ETH_MAINNET:
+        why = launch.refusal(eth['chainId'])
+        refuse(why is None, why)
+    refuse(eth['chainId'] == REHEARSAL_CHAIN if rehearsal else eth['chainId'] in nets,
+           f'chainId must be {REHEARSAL_CHAIN}' if rehearsal else
+           f'chainId must be {ETH_MAINNET}' + (f', or a source network of tools/evm-nets/networks.json: {sorted(set(nets) - {ETH_MAINNET})}'
+                                               if len(nets) > 1 else ''))
+    net = None if rehearsal else nets[eth['chainId']]
     exact_keys(cfg['source'], ['revision'], 'source')
     refuse(isinstance(cfg['source']['revision'], str) and re.fullmatch(r'[0-9a-f]{40}', cfg['source']['revision']),
            'source.revision is undecided (full git commit hash)')
 
     v = cfg['vault']
-    provenance = v.get('contract') == PROVENANCE_CONTRACT
+    provenance = v.get('contract') in PROVENANCE_CONTRACTS
     exact_keys(v, ['contract', 'sourceDomainLabel', 'nativeDomainLabel', 'assetLabel', 'token', 'cap',
                    'transferMode', 'signers', 'policy', 'guard'] + (['provenance'] if provenance else []), 'vault')
-    refuse(v['contract'] in (CONTRACT, PROVENANCE_CONTRACT), f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
+    refuse(v['contract'] in (CONTRACT,) + PROVENANCE_CONTRACTS, f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
+    if net is not None:
+        refuse(v['contract'] in net[3], f'vault.contract on chain {eth["chainId"]} must be {" or ".join(net[3])}')
     if provenance:
         pv = v['provenance']
         exact_keys(pv, ['mode', 'releaseDelay', 'mintVerifier', 'fees'], 'vault.provenance')
@@ -133,13 +174,29 @@ def validate(cfg, rehearsal, token_cfg=None):
                'vault.provenance.fees.recipient is undecided (the protocol treasury on Ethereum), or set with both fees 0')
         if not rehearsal:
             refuse(not no_fee, 'mainnet charges a protocol fee (owner: the bridge must generate revenue); both rates are 0')
+        if net is not None and len(net) > 6:
+            # Review R329-EVM-2: on the registry's networks the fee is not a free field of the config. The recipient and
+            # both rates are the owner's input recorded in tools/evm-nets/networks.json; the vault makes them immutable.
+            want = net[6]
+            refuse(str(fe['recipient']).lower() == want[0] and (fe['depositBps'], fe['releaseBps']) == want[1:],
+                   f'vault.provenance.fees on chain {eth["chainId"]} must be recipient {want[0]}, depositBps {want[1]}, '
+                   f'releaseBps {want[2]} (the owner\'s fee address and rates, tools/evm-nets/networks.json); the config has '
+                   f'{str(fe["recipient"]).lower()}, {fe["depositBps"]}, {fe["releaseBps"]}')
     labels = (v['sourceDomainLabel'], v['nativeDomainLabel'], v['assetLabel'])
     refuse(all(isinstance(x, str) and x for x in labels), 'a vault domain label is undecided')
     refuse(v['sourceDomainLabel'] != v['nativeDomainLabel'], 'source and native domains must differ')
     if not rehearsal:
-        refuse(labels == ('ethereum-mainnet', 'bloch-l2-700770', 'USDC'),
-               'mainnet labels are ethereum-mainnet / bloch-l2-700770 / USDC')
-        refuse(str(v['token']).lower() == USDC_MAINNET, 'mainnet token must be the canonical USDC contract')
+        refuse(labels == (net[0], 'bloch-l2-700770', net[1]),
+               f'mainnet labels are {net[0]} / bloch-l2-700770 / {net[1]}')
+        if net[2] is not None:
+            refuse(str(v['token']).lower() == net[2], 'mainnet token must be the canonical USDC contract'
+                   if eth['chainId'] == ETH_MAINNET else f'vault.token on chain {eth["chainId"]} must be {net[2]}')
+        else:
+            refuse(str(v['token']).lower() != net[4], 'vault.token must be the deployed six-decimal unit token '
+                   '(ScaledUnitToken) of this asset, not the asset itself: the vault refuses a token without 6 decimals')
+            refuse(net[5] is not None, 'the unit token of this network is not deployed and pinned yet: deploy it, check it with '
+                   'tools/evm-nets/evm_nets.py verify-unit and write its address and code hash into tools/evm-nets/networks.json')
+            refuse(str(v['token']).lower() == net[5], f'vault.token must be the pinned unit token {net[5]}')
     refuse(is_addr(v['token']), 'vault.token is undecided or invalid')
     refuse(is_uint(v['cap'], lo=1), 'vault.cap is undecided')
     refuse(v['transferMode'] == 0, 'vault.transferMode must be 0 (Ethereum USDC)')
@@ -176,7 +233,19 @@ def validate(cfg, rehearsal, token_cfg=None):
     if provenance and isinstance(pol['minDeposit'], int) and isinstance(v['provenance']['fees'].get('depositBps'), int):
         net = pol['minDeposit'] - pol['minDeposit'] * v['provenance']['fees']['depositBps'] // 10_000
         refuse(net >= pol['l2MinBurn'], f'vault.policy.minDeposit nets {net} after the deposit fee, below l2MinBurn '
-               '(the constructor refuses it; with 5 bps use minDeposit 11 USDC for l2MinBurn 10)')
+               '(the constructor refuses it; with a 5 bps deposit fee use minDeposit 101 USDC for l2MinBurn 100)')
+    if launch and not rehearsal and provenance:
+        # Fee schedule of 2026-11-17 (coordinator): no vault whose smallest exit pays out less than relaying it costs at
+        # the relayer's gas ceiling. floor = ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps/10000)),
+        # from tools/evm-nets/networks.json (`relay`, `relayCost`; chain 1: `relayCost.ethereum`).
+        try:
+            floor = launch.min_burn_floor(eth['chainId'], v['provenance']['fees']['releaseBps'])
+        except launch.LaunchError as e:
+            refuse(False, f'the relayer cost of a release cannot be read, so the minimum burn cannot be checked: {e}')
+        refuse(floor is None or pol['l2MinBurn'] >= floor,
+               f'vault.policy.l2MinBurn {pol["l2MinBurn"]} is below {floor}: the measured relayer cost of one release at the gas '
+               'ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula); an exit that small '
+               'would pay out less than relaying it costs')
     windows = -(-v['cap'] // pol['windowLimit'])
     refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
            'switchDelay is too short for holders to exit: the cap needs '
@@ -253,7 +322,7 @@ def constructor_args(cfg, norm):
             str(v['signers']['threshold']),
             f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
             f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})'] + (
-                [provenance_arg(v['provenance'])] if v['contract'] == PROVENANCE_CONTRACT else [])
+                [provenance_arg(v['provenance'])] if v['contract'] in PROVENANCE_CONTRACTS else [])
 
 
 def provenance_arg(pv):
@@ -298,7 +367,7 @@ def verify(cfg, norm, url, address, block, unused=False):
         'verifier()(address)': '0x' + '00' * 20, 'proposedVerifier()(address)': '0x' + '00' * 20,
         'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
-    if v['contract'] == PROVENANCE_CONTRACT:
+    if v['contract'] in PROVENANCE_CONTRACTS:
         fe = v['provenance']['fees']
         expect.update({'provenanceMode()(uint8)': str(v['provenance']['mode']), 'releaseDelay()(uint64)': '0',
                        'mintVerifier()(address)': ZERO, 'forgeryProvenAt()(uint64)': '0',
@@ -323,7 +392,7 @@ def verify(cfg, norm, url, address, block, unused=False):
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
     code_hash = cast('keccak', *plain(code)).lower()
-    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] == PROVENANCE_CONTRACT else None
+    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
             'busdcEthereum': {'chainId': cfg['ethereum']['chainId'], 'vault': address.lower(), 'route': route,

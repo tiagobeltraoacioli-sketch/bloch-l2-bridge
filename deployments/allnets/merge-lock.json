@@ -9,6 +9,24 @@
         "ethereum"
       ],
       "conflicts": []
+    },
+    "evm-nets": {
+      "branch": "codex/bridge-evm-nets-r17-20261117",
+      "commit": "2f22b204f1f772d48da4a9fa4b598fa889dfe118",
+      "agent": 337,
+      "routes": [
+        "arbitrum-one",
+        "op-mainnet",
+        "linea",
+        "base",
+        "bnb"
+      ],
+      "conflicts": [
+        {
+          "path": "tools/deploy-pontes/vault_pontes.py",
+          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.ca43a63658c95de4"
+        }
+      ]
     }
   }
 }

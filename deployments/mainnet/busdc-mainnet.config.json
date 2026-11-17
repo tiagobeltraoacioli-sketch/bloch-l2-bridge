@@ -108,7 +108,7 @@
     "refillPerSecond": 115740,
     "largeMintThreshold": 0,
     "largeMintDelay": 43200,
-    "minBurn": 10000000
+    "minBurn": 100000000
   },
   "tx": {
     "gasLimit": 5000000,

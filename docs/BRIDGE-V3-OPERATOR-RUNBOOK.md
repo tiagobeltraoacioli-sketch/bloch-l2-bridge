@@ -39,8 +39,11 @@ hosts (old primary to a backup index, one backup to primary) and restart those t
 
 ### 2.3 Gas ceilings (agent 229)
 
-`l2_max_gas_price_gwei` 50 and `eth_max_gas_price_gwei` 300 are config defaults. Above the ceiling a relayer sends
-nothing and raises `gas-price-ceiling`. A release of ours still in the Ethereum pool after `eth_replace_after_s` (300 s)
+`l2_max_gas_price_gwei` 50 is the config default; `eth_max_gas_price_gwei` is **2** on Ethereum (fee schedule of
+2026-11-17; the code default is 300; per network: 2 on Linea, 0.5 on Arbitrum One and OP Mainnet,
+`deployments/<network>/ops/relayer.template.json`). Above the ceiling a relayer sends nothing and raises
+`gas-price-ceiling`: **a release waits until the network's gas price is back under the ceiling; it is not lost.** The
+relayer pays twice the node's `eth_gasPrice` quote, at most the ceiling. A release of ours still in the Ethereum pool after `eth_replace_after_s` (300 s)
 and priced below the current quote is replaced at the same nonce, never above the ceiling (F229-9). At the ceiling the
 alert is `release-stuck-at-ceiling`: wait, or the owner raises the ceiling in the config of the primary. The ceilings
 are an owner input if they change; `preflight_signer.py` refuses values above 50 and 300.

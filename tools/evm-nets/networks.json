@@ -1,0 +1,390 @@
+{
+  "domain": "bloch.bridge.evm-networks.v1",
+  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` is the owner's fee address; each network's `feeBps`, `minDeposit` and `l2MinBurn` are the fee schedule decided by the coordinator on 2026-11-17 (agents/347-fee-economics-r17.md), which the deploy tools require of every vault config of these networks (R329-EVM-2); `relay` and `relayCost` hold the measured relayer cost of a release and the gas ceiling, from which the tools derive the least minimum burn they accept (`relayCost.formula`). `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
+  "feeRecipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+  "relayCost": {
+    "formula": "l2MinBurn >= ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps / 10000)) units: the smallest exit still pays out at least what its release costs the relayer at the gas ceiling. The deploy tools refuse a config below it (tools/deploy-pontes/vault_pontes.py, deploy_pontes.py). It is a floor, not the fee break-even: the fee of the smallest exit covers the relayer at a gas price of l2MinBurn x releaseBps / 10000 / (releaseGas x 1e-9 x nativeUsd) gwei.",
+    "nativeUsd": 1816.445,
+    "nativeUsdRead": "ETH-USD spot 1,816.445 (Coinbase public API; Kraken 1,816.38), 2026-11-17 02:25 UTC. A reading, not a pin: redo it before deployment.",
+    "pricing": "vigia.py sends a release as a legacy transaction at min(2 x eth_gasPrice, eth_max_gas_price_gwei) and sends nothing while eth_gasPrice is above the ceiling (the release waits; alert gas-price-ceiling).",
+    "ethereum": {
+      "chainId": 1,
+      "feeBps": {
+        "deposit": 5,
+        "release": 10
+      },
+      "minDeposit": 101000000,
+      "l2MinBurn": 100000000,
+      "releaseGas": 207000,
+      "gasCeilingGwei": 2,
+      "measured": "release gas: the Ethereum bridge rehearsals (206,932 to 207,000). eth_gasPrice 0.1148 gwei on 2026-11-17 02:25 UTC: the relayer pays 0.23 gwei, 0.086 USD a release; 0.752 USD at the ceiling. Fee of the smallest exit (100 USDC at 10 bps): 0.10 USD."
+    }
+  },
+  "networks": {
+    "arbitrum-one": {
+      "name": "Arbitrum One",
+      "chainId": 42161,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206932,
+        "gasCeilingGwei": 0.5,
+        "measured": "release gas 206,932 on the fork (execution only: the parent-chain data component of a real Arbitrum transaction is NOT in it). eth_gasPrice 0.02 gwei on 2026-11-17 02:25 UTC: the relayer pays 0.04 gwei, 0.015 USD a release; 0.188 USD at the ceiling. Fee of the smallest exit (20 USDC at 5 bps): 0.010 USD, below today's 0.015: the break-even exit is 30 USDC."
+      },
+      "rpc": "https://arb1.arbitrum.io/rpc",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "arbitrum-one",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Arbitrum)",
+        "symbol": "bUSDC.arb"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 200,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 Ethereum block numbers (24 s of a 51 min window): ArbOS fills the value for a number only once it has seen the next one",
+        "interval_s": 60,
+        "max_release_signs_per_hour": 6,
+        "refused_retry": 300,
+        "pacing_why": "window 200 x 12 s = 2,400 s (Ethereum block numbers): the Ethereum bridge pacing and budgets fit unchanged"
+      },
+      "timing": {
+        "anchorBlockSeconds": 12.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
+      },
+      "measured": {
+        "blockTimeSeconds": 0.29,
+        "finalizedLagSeconds": 1161,
+        "blockhashWindowSeconds": 3072,
+        "numberSpace": "Ethereum block numbers"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://arbiscan.io",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1200,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "base": {
+      "name": "Base",
+      "chainId": 8453,
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "reason": "Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures)."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206950,
+        "gasCeilingGwei": 0.5,
+        "measured": "not launchable; the OP Mainnet figures are assumed."
+      },
+      "rpc": "https://mainnet.base.org",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "base-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Base)",
+        "symbol": "bUSDC.base"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 5,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 5 blocks (1 s of 51 s): 0.2 s blocks, so five blocks cost 2% of the window and cover a one-second reordering of the newest blocks",
+        "interval_s": 5,
+        "max_release_signs_per_hour": 18,
+        "refused_retry": 12,
+        "pacing_why": "window 250 x 0.2 s = 50 s: 5 s passes; a round lives 50 s, so the hourly budget is 18 rounds and a refused round is tried again after 12 s (not launchable: values for rehearsals only)"
+      },
+      "timing": {
+        "anchorBlockSeconds": 0.2,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
+      },
+      "measured": {
+        "blockTimeSeconds": 0.2,
+        "finalizedLagSeconds": 1133,
+        "blockhashWindowSeconds": 51,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://basescan.org",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1200,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "op-mainnet": {
+      "name": "OP Mainnet",
+      "chainId": 10,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206968,
+        "gasCeilingGwei": 0.5,
+        "measured": "release gas 206,968 on the fork. eth_gasPrice 0.00103 gwei on 2026-11-17 02:25 UTC: under 0.001 USD of execution a release; the L1 data fee of a real OP Mainnet transaction is NOT measured. 0.188 USD at the ceiling. Fee of the smallest exit: 0.010 USD."
+      },
+      "rpc": "https://mainnet.optimism.io",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "op-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+        "symbol": "USDC",
+        "name": "USD Coin",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (OP Mainnet)",
+        "symbol": "bUSDC.op"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate",
+        "interval_s": 20,
+        "max_release_signs_per_hour": 6,
+        "refused_retry": 120,
+        "pacing_why": "window 250 x 2 s = 500 s: 20 s passes (two passes are 8% of the window); a refused round is tried again after a quarter of the window; six rounds an hour cover 50 minutes of consecutive misses"
+      },
+      "timing": {
+        "anchorBlockSeconds": 2.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
+      },
+      "measured": {
+        "blockTimeSeconds": 2.0,
+        "finalizedLagSeconds": 1278,
+        "blockhashWindowSeconds": 512,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://optimistic.etherscan.io",
+      "finality": {
+        "meaning": "its batch is in a finalized Ethereum block",
+        "typicalSeconds": 1300,
+        "worstCaseSeconds": 86400
+      }
+    },
+    "linea": {
+      "name": "Linea",
+      "chainId": 59144,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 15
+      },
+      "minDeposit": 601000000,
+      "l2MinBurn": 600000000,
+      "relay": {
+        "releaseGas": 210269,
+        "gasCeilingGwei": 2,
+        "measured": "release gas 210,269 on the fork. Three readings of Linea's price on 2026-11-17 02:25 UTC disagree: eth_gasPrice 1.5 gwei (what the relayer uses); linea_estimateGas 0.0385 gwei priority over a 7 wei base fee; tips actually paid in the last 100 blocks 0.035 to 2.4 gwei, median 1.0. The relayer pays min(2 x 1.5, 2) = 2 gwei: 0.764 USD a release, the ceiling itself. At 15 bps the fee covers that from 510 USDC; 600 keeps it covered up to 2,139 USD per ETH."
+      },
+      "rpc": "https://rpc.linea.build",
+      "nativeSymbol": "ETH",
+      "sourceDomainLabel": "linea-mainnet",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x176211869cA2b568f2A7D4EE941E073a821EE1ff",
+        "symbol": "USDC",
+        "name": "USDC",
+        "decimals": 6,
+        "issuer": "Circle",
+        "issuerNative": true,
+        "kind": "fiattoken"
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (Linea)",
+        "symbol": "bUSDC.linea"
+      },
+      "signer": {
+        "anchor_policy": "probe",
+        "anchor_depth": 2,
+        "anchor_max_age": 250,
+        "finalized_margin": 0,
+        "deposit_cursor": true,
+        "why": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet",
+        "interval_s": 20,
+        "max_release_signs_per_hour": 8,
+        "refused_retry": 60,
+        "pacing_why": "window 250 x 1 s = 250 s at the fastest block pace (14 s a block when read on 2026-11-16: the window is then 58 min); 20 s passes; a refused round is tried again after a quarter of the window; eight rounds an hour"
+      },
+      "timing": {
+        "anchorBlockSeconds": 1.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
+      },
+      "measured": {
+        "blockTimeSeconds": 9.0,
+        "finalizedLagSeconds": 16481,
+        "blockhashWindowSeconds": 2300,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 130
+      },
+      "explorer": "https://lineascan.build",
+      "finality": {
+        "meaning": "the proof covering it was verified on Ethereum and that Ethereum block is finalized",
+        "typicalSeconds": 7200,
+        "worstCaseSeconds": 57600
+      }
+    },
+    "bnb": {
+      "name": "BNB Smart Chain",
+      "chainId": 56,
+      "launch": {
+        "v1": false,
+        "state": "out",
+        "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 11000000,
+      "l2MinBurn": 10000000,
+      "relay": {
+        "releaseGas": null,
+        "gasCeilingGwei": null,
+        "measured": "out of v1: no relayer cost recorded (its gas is paid in BNB)."
+      },
+      "rpc": "https://bsc-dataseed.bnbchain.org",
+      "nativeSymbol": "BNB",
+      "sourceDomainLabel": "bnb-smart-chain",
+      "assetLabel": "USDC",
+      "asset": {
+        "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+        "symbol": "USDC",
+        "name": "Binance-Peg USD Coin",
+        "decimals": 18,
+        "issuer": "Binance (peg token)",
+        "issuerNative": false,
+        "kind": "peg-18",
+        "unit": {
+          "name": "Bloch bridge unit of Binance-Peg USD Coin",
+          "symbol": "uUSDC.bnb",
+          "address": null,
+          "runtimeCodeKeccak": null
+        }
+      },
+      "l2": {
+        "name": "Bloch Bridged USDC (BNB Chain)",
+        "symbol": "bUSDC.bnb"
+      },
+      "signer": {
+        "anchor_policy": "finalized",
+        "anchor_max_age": 250,
+        "finalized_margin": 135,
+        "deposit_cursor": true,
+        "why": "the finalized block itself (1 to 2 blocks back), the Ethereum rule",
+        "interval_s": 5,
+        "max_release_signs_per_hour": 8,
+        "refused_retry": 28,
+        "pacing_why": "window 250 x 0.45 s = 112 s: 5 s passes (out of v1: values for rehearsals only)"
+      },
+      "timing": {
+        "anchorBlockSeconds": 0.45,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
+      },
+      "measured": {
+        "blockTimeSeconds": 0.45,
+        "finalizedLagSeconds": 1,
+        "blockhashWindowSeconds": 115,
+        "numberSpace": "own blocks"
+      },
+      "fork": {
+        "slotsInAnEpoch": 1
+      },
+      "explorer": "https://bscscan.com",
+      "finality": {
+        "meaning": "fast finality, two more blocks voted by two thirds of the validators",
+        "typicalSeconds": 62,
+        "worstCaseSeconds": 600
+      }
+    }
+  }
+}
