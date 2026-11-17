@@ -641,6 +641,65 @@ class GuardianVerdict(unittest.TestCase):
         self.assertNotIn((unproven['nonce'], 1), self.g._paid_checked)
 
 
+class GuardianPauseBlocked(unittest.TestCase):
+    """Round 18 (agent 371; rehearsal run 5): with a hard finding open, a guardian that cannot pause because the
+    committee unpaused the vault (the cooldown) or because it already paused in this chain logged only a
+    `vault-pause-skip` line: no alert, no `alert_command`, so nobody was paged while the finding stood. It must
+    raise `vault-pause-blocked` (critical, once); a vault that is already paused needs no page."""
+
+    def guardian(self, **vault):
+        import sol_guardiao
+        g = sol_guardiao.SolGuardian.__new__(sol_guardiao.SolGuardian)
+        g.state, g.dry_run, g.name, g.cfg = {'problems': {}}, False, 'unit', {}
+        g.sent = []
+        g.notify = lambda pid, detail: g.sent.append(pid)
+        g.scrub = lambda text: text
+        node = type('N', (), {})()
+        node.config = type('C', (), {'guardians': [bytes([1]) * 20]})()
+        v = {'pause_count': 1, 'paused_until': 0, 'guardian_blocked_until': 0, 'pause_chain': 1,
+             'guardian_last_chain': [0], 'config': type('V', (), {'pause_cooldown': 100})()}
+        v.update(vault)
+        g.vault_view = lambda: (node, v, 1000)
+        g.eth_me = lambda: '0x' + '01' * 20
+        g.sol_vault = lambda *a: self.fail('no pause may be sent while it cannot succeed')
+        return g
+
+    def test_inside_the_committee_cooldown_the_guardian_pages(self):
+        g = self.guardian(guardian_blocked_until=2000, paused_until=900)
+        g.pause_vault(['release-mismatch:unproven-approval-2-22'])
+        self.assertIn('vault-pause-blocked', g.state['problems'])
+        self.assertEqual(g.sent, ['vault-pause-blocked'])
+        g.pause_vault(['release-mismatch:unproven-approval-2-22'])
+        self.assertEqual(g.sent, ['vault-pause-blocked'], 'paged once, not every round')
+
+    def test_the_page_ends_when_no_hard_finding_asks_for_a_pause(self):
+        import guardiao
+        g = self.guardian(guardian_blocked_until=2000, paused_until=900)
+        g.pause_vault(['release-mismatch:unproven-approval-2-22'])
+        self.assertIn('vault-pause-blocked', g.state['problems'])
+        g.check_retention, g.blind, g.log = (lambda: None), False, (lambda **kv: None)
+        original = guardiao.Guardian.round
+        try:
+            guardiao.Guardian.round = lambda self: g.pause_vault(['still']) or 'round'  # the finding still stands
+            g.round()
+            self.assertIn('vault-pause-blocked', g.state['problems'])
+            guardiao.Guardian.round = lambda self: 'round'  # the finding resolved: nothing asks for a pause
+            g.round()
+            self.assertNotIn('vault-pause-blocked', g.state['problems'])
+            g.pause_vault(['again'])
+            g.blind = True
+            guardiao.Guardian.round = lambda self: 'round'
+            g.round()
+            self.assertIn('vault-pause-blocked', g.state['problems'], 'a round without the L2 resolves nothing')
+        finally:
+            guardiao.Guardian.round = original
+
+    def test_already_paused_needs_no_page(self):
+        g = self.guardian(paused_until=2000)
+        g.pause_vault(['x'])
+        self.assertNotIn('vault-pause-blocked', g.state['problems'])
+        self.assertEqual(g.sent, [])
+
 class Policy(unittest.TestCase):
     """R330-SOL-3P-4 (a): the tools apply the policy to the vault they serve."""
 

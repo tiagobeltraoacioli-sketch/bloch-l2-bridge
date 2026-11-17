@@ -113,7 +113,12 @@ class SolGuardian(Guardian):
     def round(self):
         self._nodes, self._senders = {}, None
         self.check_retention()
-        return super().round()
+        self._pause_wanted = False
+        out = super().round()
+        if not self._pause_wanted and not self.blind:
+            # no hard finding asked for a vault pause in a round that read everything: the page of a blocked pause ends
+            self.clear_problem('vault-pause-blocked')
+        return out
 
     def check_retention(self):
         """R330-SOL-3. A paid record is compared with its burn only while it exists, so this watch must complete a
@@ -413,6 +418,7 @@ class SolGuardian(Guardian):
             return {'ok': False, 'reason': (err or out).strip()[-300:]}
 
     def pause_vault(self, reasons):
+        self._pause_wanted = True
         n, v, now = self.vault_view()
         count = v['pause_count']
         me = n.config.guardians.index(S.unhex(self.eth_me(), 20))
@@ -423,6 +429,14 @@ class SolGuardian(Guardian):
                else None)
         if why:
             self.clear_problem('vault-pause-failed')
+            if why == 'already paused':
+                self.clear_problem('vault-pause-blocked')
+            elif 'vault-pause-blocked' not in self.state['problems']:
+                # Round 18 (rehearsal run 5): a hard finding stands and this guardian cannot pause (the committee's
+                # cooldown, or its one pause of this chain is used): page, once, until the vault is paused or the
+                # finding is gone. Before, only a `vault-pause-skip` line was written.
+                self.problem('vault-pause-blocked', f'{why} until {max(v["paused_until"], v["guardian_blocked_until"])}: '
+                                                    f'hard findings stand and this guardian cannot pause: {", ".join(map(str, reasons))[:200]}')
             note = f'{why}:{count}'
             if self.state.get('vault_skip') != note:
                 self.state['vault_skip'] = note

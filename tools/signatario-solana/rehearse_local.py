@@ -114,7 +114,8 @@ REQUIRED_CASES = {
     'mint-chain': 'an L2 mint chain the deposits do not back',
     'release-held-no-router-log': 'a router burn whose SolanaExit log the signer cannot find (its router_from_block is above the burn)',
     'deposit-record-changed': 'a deposit record a guardian read earlier is replaced after a Solana rollback (soft)',
-    'vault-pause-failed': 'a guardian pause the vault refuses (the cooldown after a committee unpause)',
+    'vault-pause-failed': 'a guardian pause that is sent and refused (a fee payer without SOL)',
+    'vault-pause-blocked': 'a hard finding while the guardian cannot pause (the cooldown after a committee unpause)',
 }
 REQUIRED_ELSEWHERE = {
     'release-held-redirect-destination': 'same code path as release-held-destination for the redirect key (test_exit_rule.Latch)',
@@ -1121,6 +1122,40 @@ class Rehearsal:
         r = self.half(0, 'release', '--intent', str(self.write_intent(rel, ctx)))
         check('a signer refuses to certify the closed nonce', not r['ok'] and 'already has a release' in r.get('reason', ''), answer=r)
 
+        section('Round 18: sweep refused while the fee owner has no token account (its owner closed it after init)')
+        # 32e124c staged this before init; since round 17 init creates the account, so the case is the owner closing it
+        # later (an empty classic token account can be closed by its owner). The swept fees must never go elsewhere.
+        fee_ata = self.a.fee_account
+        dep = self.deposit(20 * U)  # a deposit: its fee accrues in the vault
+        m = self.attest_and_mint(dep, 'r330-sweep')  # minted and credited in order, as every deposit (the mint chain)
+        r = self.credit(dep)
+        check('the deposit behind those fees is attested, minted and credited in order',
+              m.get('receipt', {}).get('status') == '0x1' and r['status'] == '0x1', mint=m, credit=r)
+        balance = self.sol.balance(fee_ata)
+        if balance:
+            dump = S.associated_token_address(self.thief.public, self.mint)  # created at setup
+            ix = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(fee_ata, False, True), S.Meta(dump, False, True),
+                                                 S.Meta(self.fee_owner.public, True)], b'\x03' + balance.to_bytes(8, 'little'))
+            code, res = self.sol.tx(self.payer, [ix], extra=[self.fee_owner])
+            assert code is None, res
+        close = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(fee_ata, False, True), S.Meta(self.fee_owner.public, False, True),
+                                                S.Meta(self.fee_owner.public, True)], bytes([9]))
+        code, res = self.sol.tx(self.payer, [close], extra=[self.fee_owner])
+        check('the fee owner closes its (emptied) USDC token account after init', code is None and self.sol.balance(fee_ata) is None,
+              code=code)
+        accrued = self.state()['feesAccrued']
+        r = self.vault('sweep', *self.pay)
+        check('sweep is refused by the tool while the fee owner has no token account; the fees stay accrued in the vault',
+              not r['ok'] and 'no associated token account' in r.get('reason', '') and self.state()['feesAccrued'] == accrued
+              and accrued > 0, answer=r)
+        code, _ = self.sol.tx(self.payer, [self.ix.sweep_fees()])
+        check('and by the program, whoever sends it', code is not None and self.state()['feesAccrued'] == accrued, code=code)
+        r = self.vault('create-fee-account', *self.pay)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        r2 = self.vault('sweep', *self.pay)
+        check('create-fee-account restores it (anyone may) and the accrued fees are swept to the fee owner',
+              r['ok'] and r2['ok'] and self.sol.balance(fee_ata) == accrued, create=r, sweep=r2)
+
         section('R330: a plain validator restart between attestation, certificate and payment')
         wallet = self.walletB.public
         dep = self.deposit(30 * U)
@@ -1189,7 +1224,11 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # burn-status reads at `finalized`
         r = self.vault('burn-status', *self.l2_args, '--burn', bid)
         row = (r.get('burns') or [{}])[0]
-        check('burn-status: paid, to the redirected wallet', r['ok'] and row.get('state') == 'paid' and row.get('redirected') is True, answer=r)
+        # The burn committed to this same wallet, made directly on the token: the redirect names the wallet with a proof,
+        # so the paid record names the burn's own 20 bytes and `redirected` (a different recipient) is false.
+        check('burn-status: paid, to the wallet its burner named with a proof (the same 20 bytes as the burn: redirected false)',
+              r['ok'] and row.get('state') == 'paid' and row.get('paidFor') == S.hx(S.account_id(wallet))
+              and row.get('redirected') is False and row.get('redirects') == 1, answer=r)
         self.held_direct.remove(self.direct_ok)
 
     def run_exit_rule(self):
@@ -1248,18 +1287,28 @@ class Rehearsal:
         self.sol.create_mint(self.payer, 'exit-rule-k1', self.payer.public)  # only the key holder can do this
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 1)
         s0 = self.state()
+        n1 = int(status(b1)['nonce'])
+
+        def record_of(nonce):
+            return self.vault('show', '--commitment', 'confirmed', '--release', str(nonce)).get('release')
         _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        # Per burn (restated in round 18 with reviewer 376's agreement): this burn has no release record; the vault-wide
+        # approval counter rises only by the approvals this pass made for OTHER burns (an honest one may be due).
+        others = [x for x in lines if x.get('kind') == 'relay-approve' and x.get('ok') and x.get('burn') != b1]
+        s1 = self.state()
         check('the relay daemon withholds the five-signature certificate (certificate-withheld-destination): no approval',
-              'certificate-withheld-destination' in alerts(lines, b1) and self.state()['approvalSeq'] == s0['approvalSeq'],
-              alerts=alerts(lines, b1), case='certificate-withheld-destination')
+              'certificate-withheld-destination' in alerts(lines, b1) and record_of(n1) is None
+              and not any(x.get('kind') == 'relay-approve' and x.get('burn') == b1 for x in lines)
+              and s1['approvalSeq'] == s0['approvalSeq'] + len(others),
+              alerts=alerts(lines, b1), others=len(others), case='certificate-withheld-destination')
         row = status(b1)
         check('burn-status reads it as held (destination-not-a-wallet)', row.get('state') == 'held' and row.get('hold') == 'destination-not-a-wallet', row=row)
         calls = list((WORK / 'shared' / 'release' / b1[2:]).glob('r-*/release.call'))
         check('the certificate file exists in the shared directory', len(calls) == 1, found=len(calls))
         ra = self.vault('approve', *self.l2_args, '--cert', str(calls[0]), *self.pay) if calls else {'ok': True}
         check('R330-SOL-3P-2 fixed: sol_vault.py approve refuses to deliver it WITHOUT any flag (the rule always applies)',
-              not ra['ok'] and 'not a wallet' in json.dumps(ra) and self.state()['approvalSeq'] == s0['approvalSeq'],
-              answer=ra, case='approve-refused-destination')
+              not ra['ok'] and 'not a wallet' in json.dumps(ra) and record_of(n1) is None
+              and self.state()['approvalSeq'] == s1['approvalSeq'], answer=ra, case='approve-refused-destination')
         code = self.raw_cert_approve(json.loads(calls[0].read_text())) if calls else 'no certificate'
         check('delivered raw, outside the tools, the vault approves it (it cannot know Solana ownership: the stated residual)',
               code is None, code=code)
@@ -1340,6 +1389,10 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
         check('then paid to the redirected wallet', self.sol.balance(S.associated_token_address(k3.public, self.mint)) == 10 * U - 5_000)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        row = status(b2)
+        check('burn-status: paid to a DIFFERENT wallet than the burn named: redirected true, paidFor the new wallet',
+              row.get('state') == 'paid' and row.get('redirected') is True and row.get('paidFor') == S.hx(S.account_id(k3.public)), row=row)
         # An operator's explicit, logged release of its own latch (sol_half.py release-hold): recorded with the note,
         # and it does not make a burn payable that the rule still refuses (the keyless exit: no valid proof).
         keyless_burn = self.burn_id_of(self.held_proof[0])
@@ -1409,9 +1462,24 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         p1 = self.state()['pauseCount']
         code_g, ids, _ = guardian_ids(pausing_cfg)
-        check('a new hard finding inside the cooldown: the pause is refused by the vault and the guardian raises vault-pause-failed',
-              code is None and 'vault-pause-failed' in ids and self.state()['pauseCount'] == p1, exit=code_g, ids=ids,
-              case='vault-pause-failed')
+        # Run 5: the guardian knew the vault would refuse (the cooldown) and only wrote a vault-pause-skip line; since
+        # round 18 it pages vault-pause-blocked (test_exit_rule.GuardianPauseBlocked).
+        check('a new hard finding inside the committee cooldown: the guardian sends no pause and pages vault-pause-blocked',
+              code is None and 'vault-pause-blocked' in ids and self.state()['pauseCount'] == p1, exit=code_g, ids=ids,
+              case='vault-pause-blocked')
+        # A pause that is sent and refused: another guardian key (its one pause of this chain unused) whose fee payer
+        # holds no SOL, after the cooldown.
+        broke, broke_path = self.sol.keygen('guardian-fee-payer-without-sol')
+        failing_cfg = WORK / 'guardian-failing.json'
+        failing_cfg.write_text(json.dumps(dict(quiet, vault_pause=True, sol_keystore=str(WORK / 'keys' / 'guard1'),
+                                               sol_fee_payer=str(broke_path), state=str(WORK / 'guardian-failing-state.json'))))
+        self.wait_guardians_free()
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        p2 = self.state()['pauseCount']
+        code_g, ids, glines = guardian_ids(failing_cfg)
+        check('a pause that is sent and refused (its fee payer has no SOL): the vault is not paused and the guardian raises '
+              'vault-pause-failed', 'vault-pause-failed' in ids and self.state()['pauseCount'] == p2, exit=code_g, ids=ids,
+              log=[x for x in glines if str(x.get('kind', '')).startswith('vault-pause')][-2:], case='vault-pause-failed')
         # The guardian watches above (without vault pause) paused the L2 token's mints on their hard findings, as the
         # parent does; the later sections deposit and mint again, so the L2 clock is moved past that pause.
         l2_warp(259200 + 10)
