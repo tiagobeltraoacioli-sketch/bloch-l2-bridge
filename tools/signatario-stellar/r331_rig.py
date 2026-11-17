@@ -16,7 +16,8 @@ changed here, and why:
         a claim file for another address, signed by the burner as in revision 3 and put in a directory the guardian
         config names, change nothing.
   3P-2  the guardian has a stall rule (`stall_deadline`, 100 s on this rig; the vault's delay is 3,600 s) in place of
-        the two later-block rules, which compared L2 timestamps. The checks that named those rules now name the stall
+        the two later-block rules, which compared L2 timestamps; round 18 (R331-XLM-4P-2/3) adds a height rule
+        (`height_margin`, 4 blocks on this rig) and counts the stall from the last move of L2 finality. The checks that named those rules now name the stall
         rule; the reviewer's failing check is unchanged.
   3P-3  no verdict depends on a timestamp. The reviewer's failing check is unchanged, except that the forgery made
         just before the stamped block is judged once it is older than the deadline (a rule by time since the release
@@ -69,7 +70,7 @@ def flow(r):
         g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600,
              'l2_rpc': r.l2, 'l2_finalized_tag': 'finalized', 'l2_chain_id': 31337, 'token': r.l2token,
              'router': r.router, 'token_code_keccak': r.code_keccak, 'router_code_keccak': r.router_keccak,
-             'stall_deadline': 100}
+             'stall_deadline': 100, 'height_margin': 4, 'seen_file': str(r.dir / f'guard-seen-{i}.json')}
         (r.dir / f'guard-{i}.json').write_text(json.dumps(g, indent=1))
     r.signer_configs()
     l2 = sn.L2(r.l2)
@@ -261,30 +262,32 @@ def flow(r):
           and 'holds no burn' in vb[1], [va, vb])
     check('guardian: a forgery naming an unreachable L2 block is "cannot judge" while the L2 has made no later block '
           '(stated behaviour)', v2[0] == 'cannot_judge' and v3[0] == 'cannot_judge', [v2, v3])
-    # Wait until the L2 clock (wall - 30 s) is more than l2_clock_skew (120 s) past the releases, then two new blocks.
+    # Wait until the L2 clock (wall - 30 s) is more than l2_clock_skew (120 s) past the releases. Round 18
+    # (R331-XLM-4P-3): no block is made meanwhile, so L2 finality stands still for those 125 s; the stall rule
+    # counts that time (it used to count the release's age while two new blocks moved the head and finality).
     while l2_now(r) <= made + 125:
         time.sleep(5)
-    mine(2)
     head, fin2 = l2.block('latest'), l2.block('finalized')
     notes['later_blocks'] = {'made_at': made, 'head_ts': head['timestamp'], 'fin_ts': fin2['timestamp'],
                              'fin_number': fin2['number'], 'pending_burn_block': bp['block'], 'host': int(time.time())}
     v2, v3 = verdict(903), verdict(bp['nonce'])
     k2 = verdict(bh['nonce'], l2_finalized_tag=str(bh['block'] - 1))
     check('stall rule, sane clock (was: later-block rule 2): the forgery naming an unreachable block, still queued and '
-          'not judged 127 s after the release (deadline 100 s), is a FINDING', v2[0] == 'findings'
+          'not judged while L2 finality stood still for 125 s (deadline 100 s), is a FINDING', v2[0] == 'findings'
           and 'stall rule' in v2[1], [v2, notes['later_blocks']])
     check('later-block rules, sane clock: no false finding for the honest exit on a view whose final block is behind the '
           'burn while its head is current', k2[0] == 'cannot_judge', k2)
     check('DEFECT R331-XLM-3P-2: a forgery that takes the nonce of a burn still PENDING on the L2 (the forger\'s own 10 '
-          'USDC burn) and names an unreachable block is found while L2 finality stands still although the head moves',
+          'USDC burn) and names an unreachable block is found while L2 finality stands still',
           v3[0] == 'findings', [v3, notes['later_blocks']])
     notes['pending_nonce_hold'] = v3
     mine(70)
     fin3 = l2.block('finalized')
     v2, v3 = verdict(903), verdict(bp['nonce'])
     check('final history, sane clock (was: later-block rule 1): once the forger\'s pending burn is FINAL the pending-nonce '
-          'forgery is a finding by the final history (another burn id), and the unreachable-block forgery stays a finding',
-          v2[0] == 'findings' and v3[0] == 'findings' and 'another burn id' in v3[1]
+          'forgery is a finding by the final history (another burn id), and the unreachable-block forgery stays a finding '
+          '(round 18: by the height rule, finality having moved past its first-seen head by more than the margin)',
+          v2[0] == 'findings' and v3[0] == 'findings' and 'another burn id' in v3[1] and 'blocks past block' in v2[1]
           and fin3['timestamp'] > made + 120, [v2, v3, fin3])
     # Last: one L2 block stamped 10 minutes ahead of the host clock.
     f4, _ = r.direct_release(905, payee, 2_000 * U, mc, range(5), block=(10**9, '11' * 32))

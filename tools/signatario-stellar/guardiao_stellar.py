@@ -29,9 +29,12 @@ check    read-only. Every release the vault paid or queued (its events in the RP
                    guardian's newest block); or the L2 block the release names is final in this guardian's view
                    and holds no such burn (or is another block than the one named). These need no clock at all:
                    block numbers and finality only.
-                   Also a finding, by the STALL RULE: a release that is still QUEUED, that this guardian could not
-                   judge although its L2 sources answer and agree, and that is older than `stall_deadline` on the
-                   Stellar ledger clock. Honest signers certify only what was final before they signed, so a view
+                   Also a finding, by the HEIGHT RULE (no clock): the release's nonce holds no burn at a final
+                   block more than `height_margin` blocks past this guardian's newest block when it first saw the
+                   release (queued or paid). And by the STALL RULE: a release that is still QUEUED, that this
+                   guardian cannot judge because its final view is behind it, while its final L2 block has not
+                   moved for longer than `stall_deadline` on the Stellar ledger clock (its sources answering and
+                   agreeing). Honest signers certify only what was final before they signed, so a view
                    that still does not reach a queued release after that time means the L2's finality stands still
                    while releases land, or the release is forged (for instance under the nonce of the forger's own
                    pending burn, naming a block nobody reaches): both are reasons to pause before it is paid.
@@ -65,9 +68,12 @@ Config: `stellar_rpc`, `network_passphrase`, `vault`, `view_account`, `keystore`
 every source must report the same final block and the same answers), `require_two_l2_sources` (true: with one source
 nothing is ever a finding), `token_code_keccak`, `token_from_block`, `l2_finalized_tag` (default "finalized"),
 `stall_deadline` (seconds; default and maximum: half the vault's `release_delay`), `l2_clock_alert_seconds` (default
-120; 0 switches the alert off), `from_ledger`; optional `cast`, `stellar_cli`. `cast` is used only to sign.
+120; 0 switches the alert off), `from_ledger`, `height_margin` (L2 blocks, default 256); REQUIRED for `check`:
+`seen_file` (this guardian's own state: the newest L2 block at which it first saw each release, and since when its
+final L2 block has stood still; never shared); optional `cast`, `stellar_cli`. `cast` is used only to sign.
 """
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -84,7 +90,14 @@ def fail(msg, **detail):
 
 
 class CannotJudge(Exception):
-    """This guardian's view does not allow a verdict. Never a reason to pause, always a reason to alert."""
+    """This guardian's view does not allow a verdict. Never by itself a reason to pause, always a reason to alert.
+    `behind` is True when the cause is that this guardian's FINAL view does not reach the release yet (the burn's
+    nonce, or the burner's naming of the address paid, is above its final block): only those are subject to the
+    stall rule (R331-XLM-4P-3); a source that cannot serve a log, disagrees or fails is never paused for."""
+
+    def __init__(self, text, behind=False):
+        super().__init__(text)
+        self.behind = behind
 
 
 class Guardian:
@@ -241,7 +254,7 @@ class Guardian:
         newest = self.agreed(lambda s: namings(s, head))
         if recipient in newest:
             raise CannotJudge('the address paid was named by the burn\'s own burner in a block that is not final in '
-                              'this guardian\'s view yet: the view is behind the naming')
+                              'this guardian\'s view yet: the view is behind the naming', behind=True)
         if router_burn:
             return ('the burn came through the router, and the address paid is neither the one the router committed '
                     'to nor a redirect by the exit\'s own burner')
@@ -282,10 +295,74 @@ class Guardian:
                 return (f'the release names L2 block {named[0]} with a hash that is not the final chain\'s at that '
                         'height')
             return f'the final L2 at block {named[0]}, which the release names, holds no burn with this nonce'
+        # R331-XLM-4P-2 (the height rule; no clock): the first time this guardian sees the release it records its
+        # newest L2 block (the lowest head of its agreeing sources) in `seen_file`. An honest release's burn was
+        # final for its signers before the release was made, so it lies at or below every node's head at that
+        # moment. Once this guardian's FINAL block has moved more than `height_margin` blocks (default 256) PAST
+        # that recorded height and still holds no burn with this nonce, the release is a forgery (it names a block
+        # nobody reaches, or hides it behind another contract), queued or already paid. Residual, stated: a
+        # guardian whose every source's head was more than `height_margin` blocks behind the burn when it first saw
+        # the release can misjudge an honest one (a false pause, no loss); a smaller lag only delays the verdict,
+        # because the final block reaches the burn first.
+        mark = self.mark(e['topics'][0])
+        margin = self.height_margin()
+        if mark is not None and fin['number'] > mark + margin:
+            return (f'the final L2 has moved more than {margin} blocks past block {mark}, this guardian\'s newest '
+                    f'block when it first saw the release, and holds no burn with nonce {nonce} (burn count {count})')
         where = f'block {named[0]}' if named else 'a block this guardian could not read from the release transaction'
         raise CannotJudge(f'this guardian\'s final L2 block is {fin["number"]}; the release names {where}: the final '
                           'view does not reach the release (the view is behind, finality stands still, or the '
-                          'release is forged)')
+                          'release is forged)', behind=True)
+
+    def height_margin(self):
+        given = self.cfg.get('height_margin', 256)
+        if isinstance(given, bool) or not isinstance(given, int) or not 1 <= given <= 1_000_000:
+            fail('height_margin must be a whole number of L2 blocks within 1 .. 1,000,000', height_margin=given)
+        return given
+
+    # ── the guardian's own small state (`seen_file`) ─────────────────────────
+    def load_seen(self):
+        path = self.cfg.get('seen_file')
+        if not path:
+            fail('check needs `seen_file` (a file this guardian alone writes: the height at which it first saw each '
+                 'release, and since when the final L2 block has not moved)')
+        self.seen_path = Path(path)
+        try:
+            seen = json.loads(self.seen_path.read_text()) if self.seen_path.exists() else {}
+            if not isinstance(seen, dict) or seen.get('vault', self.net.vault) != self.net.vault:
+                raise ValueError('the file belongs to another vault')
+            seen.setdefault('vault', self.net.vault)
+            seen.setdefault('releases', {})
+            if not isinstance(seen['releases'], dict):
+                raise ValueError('releases is not an object')
+        except (OSError, ValueError) as e:
+            fail('seen_file cannot be read', error=str(e))
+        self.seen = seen
+
+    def save_seen(self):
+        tmp = self.seen_path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self.seen, indent=1, sort_keys=True) + '\n')
+        os.replace(tmp, self.seen_path)
+
+    def mark(self, rid):
+        """The newest L2 block this guardian had when it first saw release `rid` (recorded now if it is new)."""
+        got = self.seen['releases'].get(rid)
+        if got is None:
+            head = getattr(self, 'head', None)
+            if head is None:
+                return None
+            got = self.seen['releases'][rid] = {'head': max(int(head['number']), int(self.fin['number']))}
+        return int(got['head'])
+
+    def finality_still_since(self, now):
+        """Since when (Stellar ledger close time) this guardian's final L2 block has had its present number."""
+        fin = getattr(self, 'fin', None)
+        if fin is None:
+            return None
+        last = self.seen.get('final') or {}
+        if last.get('number') != fin['number']:
+            self.seen['final'] = last = {'number': fin['number'], 'since': now}
+        return int(last['since'])
 
     def deadline(self):
         """Seconds after which a queued release this guardian still cannot judge is a finding (the stall rule);
@@ -314,6 +391,9 @@ class Guardian:
             self.l2_view()
         except CannotJudge as e:
             view_problem = str(e)
+        self.load_seen()
+        self.height_margin()   # a wrong value is refused at once, not only when the rule is reached
+        still_since = self.finality_still_since(now) if not view_problem else None
         findings, unjudged, seen = [], [], 0
         while True:
             events, latest, _ = self.net.events(start)
@@ -332,7 +412,7 @@ class Guardian:
                     if reason:
                         findings.append({**row, 'reason': reason})
                 except CannotJudge as why:
-                    unjudged.append({**row, 'reason': str(why), 'stalled': not view_problem})
+                    unjudged.append({**row, 'reason': str(why), 'stalled': why.behind and not view_problem})
                 except (KeyError, TypeError, ValueError, sn.StellarError) as err:
                     unjudged.append({**row, 'reason': f'the release could not be compared: {err}'})
             if not events or events[-1]['ledger'] >= latest:
@@ -348,17 +428,22 @@ class Guardian:
         done = [f for f in findings + unjudged if voided(f)]
         findings = [f for f in findings if f not in done]
         unjudged = [f for f in unjudged if f not in done]
-        # The stall rule: a release still in the queue that the answering, agreeing L2 sources have not let this
-        # guardian judge for longer than the deadline, on the Stellar ledger clock (event to latest ledger).
+        # The stall rule (R331-XLM-3P-2, narrowed by R331-XLM-4P-3): a release still in the queue that this guardian
+        # cannot judge BECAUSE its final view is behind the release, while its final L2 block has not moved for
+        # longer than the deadline on the Stellar ledger clock (and its sources answer and agree). A cannot-judge of
+        # any other cause (a log the source does not serve) is paged, never paused for. While finality moves, the
+        # final history and the height rule above decide instead.
+        stalled_for = None if still_since is None else now - still_since
         for f in list(unjudged):
             made = self.close_time(f['ledger'])
             age = None if made is None else now - made
-            f['age_seconds'], f['stall_deadline'] = age, deadline
+            f['age_seconds'], f['stall_deadline'], f['l2_final_still_seconds'] = age, deadline, stalled_for
             if f.pop('stalled', False) and f['event'] == 'release_queued' and deadline is not None \
-                    and age is not None and age > deadline:
+                    and stalled_for is not None and stalled_for > deadline:
                 unjudged.remove(f)
-                findings.append({**f, 'reason': f'not judged within {deadline} s of the release although the L2 '
-                                 f'sources answer (stall rule): {f["reason"]}'})
+                findings.append({**f, 'reason': f'not judged while the final L2 block stood still for {stalled_for} s, '
+                                 f'more than {deadline} s, although the L2 sources answer (stall rule): {f["reason"]}'})
+        self.save_seen()
         # An L2 block stamped ahead of the Stellar ledger clock changes no verdict; it is reported for a person.
         alerts = []
         limit = int(self.cfg.get('l2_clock_alert_seconds', 120))
