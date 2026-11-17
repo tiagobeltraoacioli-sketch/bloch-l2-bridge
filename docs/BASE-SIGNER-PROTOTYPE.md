@@ -104,3 +104,17 @@ flipped bit in the database, an edited manifest, other arguments, another produc
    `check_report()` are the old lines moved into functions; the Ethereum suites must be rerun on this branch.
 8. **Then the criterion itself**: one release on a paced Base fork with `l2_source: rebuild`, the burn read from
    the rebuilt L2, five signers on separate hosts.
+
+## 6. Review finding R329-EVM-3P-2 (Medium, round 18, reviewer 379): OPEN on this prototype
+
+`warm_stale` checks only values that the writer of `warm_dir` supplies: the stored `produce` report and a database
+fingerprint that any writer can recompute. A writer of `warm_dir` that holds no key can therefore replace the database
+the release reads (and the report and fingerprint with it) and every check passes (reviewer's demonstration
+`tools/evm-nets/r379_warm_forge.py` on `codex/bridge-evm-nets-review-r18-20261117`). The full-rebuild path of the
+audit line does not have this exposure in this form (it rebuilds into its own work directory at every signature).
+
+Consequence: **Base must not be lifted on this prototype.** Fix direction (not built): bind the warm view to the
+signing process (a MAC under a credential only the signer's own user can read, over the manifest and a hash of the
+exact bytes that will be served, checked on the copy that is served, after the copy), or re-derive the state roots
+and block hashes of every finalized settlement from the served database itself instead of from the stored report.
+Until one of the two is built and reviewed, the prototype's measurements (section 3) stand only as timing evidence.
