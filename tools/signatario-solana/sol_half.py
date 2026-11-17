@@ -35,18 +35,25 @@ Review 325: `deposit` is answered only when EVERY configured endpoint shows the 
 `release` only when a wallet is known for the burn's 20-byte recipient (R325-SOL-1, sol_recipient.py), no paid
 page marks the nonce as paid, and the certificate could not predate the vault's last guardian pause (R325-SOL-2).
 
-Review 330: `release` is answered only when the address to be paid for is, at `finalized` on every configured
-endpoint, absent from the chain or a System account without data: a mint, a token account, a program or any
-account of another program is HELD, as is a small-order point (R330-SOL-1). `solana.rehearsal: true` in the
-vault file is refused, not obeyed, when the genesis hash is a public cluster's or an endpoint is not on
-loopback: the two-endpoint rule and the router requirement cannot be switched off there (R330-SOL-2).
+Review 330 and the coordinator's decisions of round 17 (the whole rule: sol_recipient.py). `release` is
+answered only for a target that is a wallet address, WITH A PROOF OF ITS KEY in the burn router's log (a signature
+by the destination over the exit message, verified here in process), and that is a wallet on Solana at
+`finalized` on every configured endpoint. The target is the burn's own destination, or, for a HELD burn, the
+destination its own burner named with `redirectHeldBurn`; the release then carries the new wallet's commitment
+and its partial is written by this half (the unchanged Bloch half only accepts a release equal to the burn).
+Holds are LATCHED in this signer's database: a destination once refused for a burn stays refused whatever the
+chain shows later (`holds`, `release-hold --burn 0x.. --note TEXT`). The router is pinned by address AND code
+(`burn_router_code_keccak`), mint, route and token. `solana.rehearsal: true` is refused, not obeyed, when the
+genesis hash is a public cluster's or an endpoint is not on loopback. The policy of the vault configuration (the
+retention floor included) is applied to the vault this half serves.
 
 Config (one JSON per signer): `sol_rpc` (one URL, or a list of URLs of different operators; a deposit needs
 `sol_rpc_min` of them, default 2 on a public cluster and 1 in a rehearsal, and all listed must agree),
 `vault_config` (the deployments/solana/*.config.json file, with `program.id` and `program.elfSha256` filled),
 `keystore`, `password_file` (the secp256k1 release key, the same keystore format as the Ethereum half), `db`;
-for releases `l2_rpc` and `burn_router` (required on a public cluster), `recipient_registry`,
-`router_from_block`, `registry_from_block`, `recipient_hints`; optional `cast`, `finality_margin_slots` (150),
+for releases `l2_rpc`, `burn_router`, `burn_router_code_keccak`, `l2_chain_id`, `token` (all required),
+`router_from_block`, `redirect_dir` (where partials of redirected releases are written; default next to `db`);
+optional `cast`, `finality_margin_slots` (150),
 `valid_seconds` (1800), `max_valid_seconds` (3600), `anchor_max_age_slots` (9000), `max_clock_skew` (120).
 """
 import fcntl
@@ -106,6 +113,11 @@ class Node:
                             config=doc['solana']['genesisHash'])
         # R330-SOL-2: a rehearsal is decided by the cluster this node serves, not by the flag in the file.
         self.rehearsal = S.rehearsal(doc, [self.url, *endpoints(cfg)], genesis)
+        # R330-SOL-3P-4: the policy (the retention floor included) holds for the vault this tool serves, whoever
+        # initialized it: a vault below it is not signed for, relayed for or watched.
+        problems = self.config.problems(mainnet=not self.rehearsal)
+        if problems:
+            raise S.Refused('the vault configuration is refused by the policy', problems=problems)
         self.floor = None
         if check_pins:
             self.check_program()
@@ -314,19 +326,33 @@ def cmd_release(cfg, intent_path):
         refuse('provenance: the burn was made under a mint chain the deposits do not back (held)',
                mintHead=got['mintHead'], vault=S.hx(backing['head_after']) if backing else None)
 
-    # The recipient must be a wallet (R325-SOL-1): held until one is known for these 20 bytes.
-    if not node.rehearsal and not (cfg.get('l2_rpc') and cfg.get('burn_router')):
-        refuse('`l2_rpc` and `burn_router` are required on a public cluster: without them no recipient can be checked')
-    paid_to, found_in = sol_recipient.find_wallet(cfg, rel['recipient'], got['nativeBurn'])
-    direct = str((intent.get('l2') or {}).get('from', '')).lower() != str(cfg.get('burn_router', '')).lower()
-    if paid_to is None:
-        refuse(sol_recipient.HELD, hold='no-wallet', recipient=got['recipient'], burn=got['nativeBurn'], direct_burn=direct)
-    # ... and what the chain shows at that address must be a wallet (R330-SOL-1): read at `finalized` on every
-    # endpoint this signer configured; held unless absent or a System account without data. Fail closed.
-    dest = sol_recipient.destination([S.Rpc(u) for u in endpoints(cfg)], paid_to, a)
-    if dest['hold']:
-        refuse(sol_recipient.HELD_DESTINATION + dest['hold'], hold='destination-not-a-wallet', recipient=got['recipient'],
-               burn=got['nativeBurn'], wallet=S.b58encode(paid_to), destination=dest, direct_burn=direct)
+    # Who may be paid (sol_recipient.py): the burn's own destination, or its burner's redirect when the burn is
+    # held; a wallet address, with a proof of its key in the router's log, that is a wallet on Solana at
+    # `finalized` on every endpoint. Holds are latched in this signer's database.
+    l2 = intent.get('l2') or {}
+    if not (cfg.get('l2_rpc') and cfg.get('burn_router') and cfg.get('l2_chain_id') is not None and cfg.get('token')):
+        refuse('`l2_rpc`, `burn_router`, `burn_router_code_keccak`, `l2_chain_id` and `token` are required: without the '
+               'router log no destination can be checked')
+    if (l2.get('chain_id') is not None and int(l2['chain_id']) != int(str(cfg['l2_chain_id']), 0)) or \
+            (l2.get('token') is not None and str(l2['token']).lower() != str(cfg['token']).lower()):
+        refuse('the intent is for another L2 chain or token than this half is configured for')
+    sol_recipient.check_router(cfg, a)
+    burn = {'burn_id': got['nativeBurn'], 'nonce': rel['nonce'], 'amount': rel['amount'], 'recipient': got['recipient'],
+            'from': l2.get('from')}
+    # The logs are read up to the L2 block the Bloch half verified as final for this burn, when it names one.
+    to_block = hex(int(l2['finalized_number'])) if l2.get('finalized_number') is not None else 'finalized'
+    view = sol_recipient.exit_view(cfg, a, burn, to_block)
+    rpcs = [S.Rpc(u) for u in endpoints(cfg)]
+    verdict = sol_recipient.decide(view, S.hx(rel['nativeBurn']), sol_recipient.Holds(cfg['db']),
+                                   lambda wallet: sol_recipient.destination(rpcs, wallet, a))
+    if verdict['hold']:
+        refuse(verdict['reason'], hold=verdict['hold'], latched=verdict['latched'], recipient=got['recipient'],
+               burn=got['nativeBurn'], burner=view['burner'], direct_burn=view['direct'], redirect=verdict['redirect'],
+               destination=verdict['destination'])
+    paid_to, dest, redirected = verdict['wallet'], verdict['destination'], verdict['target'] == 'redirect'
+    if redirected:
+        # The burner sent its held burn elsewhere (redirectHeldBurn): the release names the new wallet's commitment.
+        rel['recipient'] = S.account_id(paid_to)
 
     # Anchor and validity.
     finalized = node.rpc.slot('finalized')
@@ -354,20 +380,37 @@ def cmd_release(cfg, intent_path):
     digest = S.eip191(S.release_authorization(node.config.source_chain_id, a.vault20, rel, ctx))
 
     # Equivocation guard: one release per nonce and per burn, whatever the vault would accept later.
+    # A redirect changes the recipient of a burn's release. This signer signs a release that differs from one it
+    # signed before for the same nonce or burn ONLY when the new one follows a newer redirect of the burner AND the
+    # earlier certificate can no longer be approved (its validUntil has passed on the cluster clock, with the skew
+    # margin): two certificates for one burn are then never live together.
     core = {'nonce': rel['nonce'], 'recipient': S.hx(rel['recipient']), 'amount': rel['amount'],
             'nativeBurn': S.hx(rel['nativeBurn']), 'mintCount': rel['mintCount'], 'mintedTotal': rel['mintedTotal'],
             'mintHead': S.hx(rel['mintHead'])}
+    stamp = {'redirect': verdict['redirect'] if redirected else None, 'validUntil': ctx['validUntil']}
     db_path = Path(cfg['db'])
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(db_path) + '.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        db = json.loads(db_path.read_text()) if db_path.exists() else {'by_nonce': {}, 'by_burn': {}}
+        db = json.loads(db_path.read_text()) if db_path.exists() else {}
+        db.setdefault('by_nonce', {})
+        db.setdefault('by_burn', {})
         for table, key in (('by_nonce', str(rel['nonce'])), ('by_burn', core['nativeBurn'])):
             prior = db[table].get(key)
-            if prior is not None and prior != core:
-                refuse('this signer already signed a different release for that nonce or burn', prior=prior, now=core)
-        db['by_nonce'][str(rel['nonce'])] = core
-        db['by_burn'][core['nativeBurn']] = core
+            if prior is None:
+                continue
+            before = {k: prior.get(k) for k in core}
+            if before == core:
+                stamp['validUntil'] = max(stamp['validUntil'], int(prior.get('validUntil') or 0))
+                continue
+            newer = stamp['redirect'] is not None and (prior.get('redirect') is None or stamp['redirect'] > prior['redirect'])
+            expired = int(cluster_now) > int(prior.get('validUntil') or 2**62) + int(cfg.get('max_clock_skew', 120))
+            if not (newer and expired):
+                refuse('this signer already signed a different release for that nonce or burn'
+                       + ('; the release for the newer redirect is signed once the earlier certificate has expired' if newer else ''),
+                       prior=prior, now=dict(core, **stamp), earlier_certificate_expires=prior.get('validUntil'))
+        db['by_nonce'][str(rel['nonce'])] = dict(core, **stamp)
+        db['by_burn'][core['nativeBurn']] = dict(core, **stamp)
         tmp = db_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(db, indent=2) + '\n')
         os.replace(tmp, db_path)
@@ -394,13 +437,48 @@ def cmd_release(cfg, intent_path):
         made = None
     if made is None or made != S.unhex(signer, 20):
         refuse('the signing tool did not return a signature of this digest by this keystore')
-    answer(True, signer=signer, release={k: (S.hx(rel[k]) if isinstance(rel[k], bytes) else rel[k]) for k in S.RELEASE_FIELDS},
-           context={'validUntil': ctx['validUntil'], 'sourceAnchorNumber': ctx['sourceAnchorNumber'],
-                    'sourceAnchorHash': S.hx(ctx['sourceAnchorHash']),
-                    'nativeFinalizedNumber': ctx['nativeFinalizedNumber'],
-                    'nativeFinalizedHash': S.hx(ctx['nativeFinalizedHash'])},
-           digest=S.hx(digest), signature=done.stdout.strip().lower(), finalized_slot=finalized,
-           wallet=S.b58encode(paid_to), wallet_found_in=found_in, destination=dest)
+    shown = {'signer': signer, 'release': {k: (S.hx(rel[k]) if isinstance(rel[k], bytes) else rel[k]) for k in S.RELEASE_FIELDS},
+             'context': {'validUntil': ctx['validUntil'], 'sourceAnchorNumber': ctx['sourceAnchorNumber'],
+                         'sourceAnchorHash': S.hx(ctx['sourceAnchorHash']),
+                         'nativeFinalizedNumber': ctx['nativeFinalizedNumber'],
+                         'nativeFinalizedHash': S.hx(ctx['nativeFinalizedHash'])},
+             'digest': S.hx(digest), 'signature': done.stdout.strip().lower()}
+    if redirected:
+        # The unchanged Bloch half accepts only a release that is exactly the burn's (it would answer "the Ethereum
+        # half signed another release"), so the partial of a redirected release is written HERE, in the shape of the
+        # partials it writes, and this half answers "refused: redirected". The Bloch half has by then verified the
+        # burn on the L2 at finality and built the intent; that part of its work is used, its output is not.
+        partial = dict(shown, kind='stable-release', source_chain_id=int.from_bytes(node.config.source_chain_id, 'big'),
+                       source_vault=S.hx(a.vault20), redirect=verdict['redirect'], wallet=S.b58encode(paid_to))
+        out_dir = (Path(cfg.get('redirect_dir') or db_path.parent / 'redirect-partials') / S.hx(rel['nativeBurn'])[2:]
+                   / f"n{verdict['redirect']}-{ctx['validUntil']}-{ctx['sourceAnchorNumber']}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f'{signer[2:]}.json'
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(partial, indent=2) + '\n')
+        os.replace(tmp, path)
+        refuse('redirected: the burner sent this held burn to another wallet (redirectHeldBurn); the partial signature '
+               'of the redirected release was written by this half', redirected=True, partial=str(path),
+               redirect=verdict['redirect'], wallet=S.b58encode(paid_to), context=shown['context'],
+               release=shown['release'], destination=dest)
+    answer(True, **shown, finalized_slot=finalized, wallet=S.b58encode(paid_to), destination=dest)
+
+
+def cmd_release_hold(cfg, args):
+    """An operator's explicit action: this signer forgets that it held one destination of one burn. The burn is then
+    judged afresh by what the chains show. It names the burn (and the redirect nonce, for a redirect's hold), needs
+    a note, and is recorded in the database (`released_holds`) and in this answer, which the operator keeps.
+    Releasing a hold whose destination was closed and is now "absent" lets the burn be paid to that address:
+    the note says who asked and why that address is a wallet after all."""
+    burn = S.hx(S.unhex(args[args.index('--burn') + 1], 32, 'burn id'))
+    note = args[args.index('--note') + 1] if '--note' in args else ''
+    if len(note.strip()) < 10:
+        refuse('release-hold needs --note: who asked for it and why (at least 10 characters)')
+    key = burn + (f":r{int(args[args.index('--redirect') + 1])}" if '--redirect' in args else '')
+    entry = sol_recipient.Holds(cfg['db']).release(key, note.strip())
+    if entry is None:
+        refuse('this signer holds no latch under that key', key=key)
+    answer(True, released=key, was=entry, note=note.strip(), at=int(time.time()))
 
 
 def main():
@@ -409,10 +487,15 @@ def main():
         cfg = json.loads(Path(args[args.index('--config') + 1]).read_text())
         if 'deposit' in args:
             cmd_deposit(cfg, args[args.index('--deposit-id') + 1])
+        elif 'release-hold' in args:
+            cmd_release_hold(cfg, args)
+        elif 'holds' in args:
+            answer(True, held=sol_recipient.Holds(cfg['db']).all())
         elif 'release' in args:
             cmd_release(cfg, args[args.index('--intent') + 1])
         else:
-            refuse('usage: sol_half.py --config SOL.json deposit --deposit-id 0xID | release --intent FILE')
+            refuse('usage: sol_half.py --config SOL.json deposit --deposit-id 0xID | release --intent FILE | holds | '
+                   'release-hold --burn 0xID [--redirect N] --note TEXT')
     except S.Refused as e:
         refuse(e.reason, **{k: (S.hx(v) if isinstance(v, bytes) else v) for k, v in e.detail.items()})
     except S.RpcError as e:

@@ -51,6 +51,7 @@ for the L2 side, `feed`, relay role ...) and
 `eth_rpc`, `eth_chain_id`, `vault_from_block` and the `eth_relayer_*` keys are not used. Development tool; UNAUDITED.
 """
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -72,7 +73,8 @@ class SolVigia(Vigia):
         super().__init__(cfg_path)
         self.sol_cfg = json.loads(Path(self.cfg['sol_half_config']).read_text())
         self.anchor_max_age = int(self.cfg.get('anchor_max_age', 9000))
-        self._nodes, self._records, self._wallets, self._burns_pass, self._destinations = {}, [], {}, None, {}
+        self._nodes, self._records, self._burns_pass = {}, [], None
+        self._views, self._verdicts, self._senders = {}, {}, None
         self._held_logged = set()
 
     # ── this operator's Solana node ─────────────────────────────────────────
@@ -84,7 +86,8 @@ class SolVigia(Vigia):
 
     def new_pass(self):
         super().new_pass()
-        self._nodes, self._burns_pass, self._destinations = {}, None, {}
+        self._nodes, self._burns_pass = {}, None
+        self._views, self._verdicts, self._senders = {}, {}, None
 
     def rounds(self, d, margin):
         """The parent's live rounds, without those the vault would refuse as older than its last guardian pause
@@ -206,56 +209,70 @@ class SolVigia(Vigia):
         return self.chain_read(('block', tag), read)
 
     def recipient_cfg(self):
-        """Where a burn's wallet is looked for: the Solana half's keys, or this config's (the relayer has no half)."""
-        return {k: self.cfg.get(k, self.sol_cfg.get(k)) if k != 'l2_rpc' else (self.sol_cfg.get(k) or self.cfg.get(k))
-                for k in ('l2_rpc', 'burn_router', 'router_from_block', 'recipient_registry', 'registry_from_block',
-                          'recipient_hints')}
+        """Where a burn's destination is checked (sol_recipient.py): the Solana half's keys, or this config's (a
+        relay-only operator has a half config for its Solana endpoints, the router pin and the hold latch)."""
+        keys = ('l2_rpc', 'burn_router', 'burn_router_code_keccak', 'l2_chain_id', 'token', 'router_from_block')
+        return {k: self.sol_cfg.get(k) if self.sol_cfg.get(k) is not None else self.cfg.get(k) for k in keys}
 
-    def wallet_for(self, b):
-        """The wallet behind a burn's 20-byte recipient (sol_recipient.py), or None: looked up once per burn."""
-        key = b['burn_id']
-        if self._wallets.get(key) is None:
-            self._wallets[key] = sol_recipient.find_wallet(self.recipient_cfg(), S.unhex(b['recipient'], 20), key)[0]
-        return self._wallets[key]
+    def holds(self):
+        return sol_recipient.Holds(self.sol_cfg['db'])
 
-    def destination_of(self, b, wallet):
-        """What this operator's node(s) show at the address a burn would be paid for, at `finalized` (R330-SOL-1,
-        sol_recipient.destination): read once per burn and pass, on every endpoint of the Solana half's config."""
+    def view_of(self, b):
+        """(burn, the router's logs for it up to the L2 `finalized` head) (sol_recipient.exit_view): once per burn and
+        pass. The burner of a direct burn is the `from` of its `Burned` log, read here from the token's logs."""
         key = b['burn_id']
-        if key not in self._destinations:
-            self._destinations[key] = sol_recipient.destination([S.Rpc(u) for u in endpoints(self.sol_cfg)], wallet, self.node().a)
-        return self._destinations[key]
+        if key not in self._views:
+            cfg = self.recipient_cfg()
+            if self._senders is None:
+                sol_recipient.check_router(cfg, self.node().a)
+                self._senders = {x['burn_id']: x['from'] for x in sol_recipient.l2_burns(
+                    cfg['l2_rpc'], self.token, self.cfg.get('token_from_block', 0), 'finalized')}
+            burn = {'burn_id': key, 'nonce': b['nonce'], 'amount': b['amount'], 'recipient': b['recipient'],
+                    'from': self._senders.get(key)}
+            self._views[key] = (burn, sol_recipient.exit_view(cfg, self.node().a, burn, 'finalized'))
+        return self._views[key]
+
+    def destination_read(self, wallet):
+        return sol_recipient.destination([S.Rpc(u) for u in endpoints(self.sol_cfg)], wallet, self.node().a)
+
+    def verdict_of(self, b):
+        """The whole rule for a burn (sol_recipient.decide), with this operator's latch: once per burn and pass."""
+        key = b['burn_id']
+        if key not in self._verdicts:
+            _, view = self.view_of(b)
+            self._verdicts[key] = sol_recipient.decide(view, key, self.holds(), self.destination_read)
+        return self._verdicts[key]
+
+    @staticmethod
+    def hold_id(code):
+        return 'release-held-' + {'destination-not-a-wallet': 'destination',
+                                  'redirect-destination-not-a-wallet': 'redirect-destination'}.get(code, code)
 
     def hold_of(self, b):
-        """(hold id, reason) when the recipient rule holds this burn, else (None, None): no wallet is known for its
-        20 bytes, or the address to be paid for is not a wallet on Solana."""
-        wallet = self.wallet_for(b)
-        if wallet is None:
-            return 'release-held-no-wallet', sol_recipient.HELD
-        dest = self.destination_of(b, wallet)
-        if dest['hold']:
-            return 'release-held-destination', sol_recipient.HELD_DESTINATION + dest['hold']
-        return None, None
+        """(alert id, reason) when the recipient rule holds this burn, else (None, None)."""
+        verdict = self.verdict_of(b)
+        return (self.hold_id(verdict['hold']), verdict['reason']) if verdict['hold'] else (None, None)
 
     def unpayable(self, b):
         """Held, not lost. (1) The burn was made under a mint chain this vault's deposits do not back: the vault
-        refuses it (ProvenanceMismatch) whatever is signed. (2) No wallet is known for the burn's 20-byte recipient
-        (R325-SOL-1), or (3) the address to be paid for is, on Solana at `finalized`, not a wallet: a mint, a token
-        account, a program, any account of another program (R330-SOL-1). The Solana half would refuse (2) and (3).
-        None costs a rebuild or a certificate; all are alerted with their reason."""
+        refuses it (ProvenanceMismatch) whatever is signed. (2) The recipient rule of sol_recipient.py holds it: no
+        valid proof of the destination's key, a destination that is not a wallet on Solana, a burn made directly on
+        the token, a latched hold. (3) Its burner redirected it: the parent must not sign the burn's own release;
+        `sign_redirect` signs the redirected one. None costs a rebuild; holds are alerted with their reason."""
         if 'mint_head' not in b:
             return False
         n = self.node()
         backing = n.deposit(b['mint_count'] - 1) if 1 <= b['mint_count'] <= n.vault['deposit_count'] else None
         if backing is not None and S.hx(backing['head_after']) == b['mint_head']:
-            hold, reason = self.hold_of(b)
-            if hold is None:
+            verdict = self.verdict_of(b)
+            if verdict['target'] == 'original':
                 return False
+            if verdict['target'] == 'redirect':
+                return True
             if b['burn_id'] not in self.parked_logged:
-                wallet = self.wallet_for(b)
-                log(kind='alert', severity='critical', id=hold, burn=b['burn_id'], nonce=b.get('nonce'),
-                    recipient=b['recipient'], wallet=S.b58encode(wallet) if wallet else None, amount=b.get('amount'),
-                    reason=reason)
+                log(kind='alert', severity='critical', id=self.hold_id(verdict['hold']), burn=b['burn_id'], nonce=b.get('nonce'),
+                    recipient=b['recipient'], amount=b.get('amount'), latched=verdict['latched'],
+                    redirect=verdict['redirect'], reason=verdict['reason'])
             return True
         if b['burn_id'] not in self.parked_logged:
             log(kind='alert', severity='critical', id='release-held-provenance', burn=b['burn_id'], mint_count=b['mint_count'],
@@ -317,6 +334,11 @@ class SolVigia(Vigia):
 
     # ── relay: approve, then execute ────────────────────────────────────────
     def sol_vault(self, command, *argv):
+        if command == 'approve':  # the tool applies the recipient rule itself, with this operator's router pin and latch
+            cfg = self.recipient_cfg()
+            argv = (*argv, '--l2-rpc', cfg['l2_rpc'], '--router', cfg['burn_router'], '--router-code-keccak',
+                    cfg['burn_router_code_keccak'], '--l2-chain-id', str(cfg['l2_chain_id']), '--token', self.token,
+                    '--from-block', str(cfg.get('router_from_block') or 0), '--holds', self.sol_cfg['db'])
         rc, out, err = self.run([sys.executable, HERE / 'sol_vault.py', command, '--config', self.sol_cfg['vault_config'],
                                  '--rpc', endpoints(self.sol_cfg)[0], '--fee-payer', self.cfg['sol_fee_payer'], *argv])
         try:
@@ -348,12 +370,16 @@ class SolVigia(Vigia):
                 return
             # The relayer applies the recipient rule itself before it delivers a certificate (R330-SOL-1): five
             # signatures over a burn whose destination is not a wallet are not a reason to approve it.
-            hold, reason = self.hold_of(b)
-            if hold is not None:
+            verdict = self.verdict_of(b)
+            if verdict['target'] != 'original':
+                # held, or redirected by its burner: the certificate for the burn's own destination is not delivered
                 if burn_id not in self._held_logged:
                     self._held_logged.add(burn_id)
-                    log(kind='alert', severity='critical', id='certificate-withheld-' + hold.removeprefix('release-held-'),
-                        burn=burn_id, nonce=b['nonce'], recipient=b['recipient'], reason=reason)
+                    code = verdict['hold'] or 'redirected'
+                    log(kind='alert', severity='critical', id='certificate-withheld-' + self.hold_id(code).removeprefix('release-held-'),
+                        burn=burn_id, nonce=b['nonce'], recipient=b['recipient'], latched=verdict['latched'],
+                        reason=verdict['reason'] or 'the burner redirected this burn: the certificate for its first '
+                        'destination is not delivered')
                 return
             self._held_logged.discard(burn_id)
             if not self.backup_due('eth', f'release:{burn_id}'):
@@ -369,11 +395,19 @@ class SolVigia(Vigia):
             b, record = self.release_state(burn_id, 'confirmed')
             if record is None or not record['standing']:
                 return
-        if (S.hx(record['native_burn']), S.hx(record['recipient']), record['amount']) != (burn_id, b['recipient'], b['amount']):
+        self.pay_approved(burn_id, b, record)
+
+    def pay_approved(self, burn_id, b, record):
+        """A standing approval is paid by this relayer only when it is the burn's: same burn id and amount, and a
+        recipient the rule accepts (the burn's own destination, or its burner's latest redirect, each with a valid
+        proof of its key)."""
+        burn, view = self.view_of(b)
+        if (S.hx(record['native_burn']), record['amount']) != (burn_id, b['amount']) or (
+                S.hx(record['recipient']) != b['recipient'] and not sol_recipient.acceptable_recipient(view, burn, record['recipient'])):
             log(kind='alert', severity='critical', id='approval-mismatch', burn=burn_id, nonce=b['nonce'],
-                reason='the vault holds an approval under this burn nonce that differs from the L2 burn: not paid by this '
-                       'relayer, left to the guardians\' pause', approved_amount=record['amount'],
-                approved_recipient=S.hx(record['recipient']))
+                reason='the vault holds an approval under this burn nonce that differs from the L2 burn and from its '
+                       'burner\'s redirect: not paid by this relayer, left to the guardians\' pause',
+                approved_amount=record['amount'], approved_recipient=S.hx(record['recipient']))
             return
         self.execute(burn_id, b, record)
 
@@ -401,18 +435,25 @@ class SolVigia(Vigia):
         if wait:
             log(kind='relay-execute', burn=burn_id, nonce=b['nonce'], waiting=True, reason=wait, ready_at=record['ready_at'])
             return
-        wallet = self.wallet_for(b)
+        burn, view = self.view_of(b)
+        wallet = sol_recipient.wallet_for_recipient(view, burn, record['recipient'])
         if wallet is None:
-            log(kind='alert', severity='critical', id='approved-without-wallet', burn=burn_id, commitment=b['recipient'],
-                reason='the vault holds an approval for a burn with no known wallet: honest signers do not certify one. '
-                       'Not paid by this relayer')
+            log(kind='alert', severity='critical', id='approved-without-wallet', burn=burn_id, commitment=S.hx(record['recipient']),
+                reason='the vault holds an approval for this burn, and no wallet with a valid proof of its key stands '
+                       'behind its recipient: honest signers do not certify one. Not paid by this relayer')
             return
-        dest = self.destination_of(b, wallet)
-        if dest['hold']:
+        redirect = view['redirect'] if view['redirect'] is not None and view['redirect'].get('wallet') == wallet else None
+        key = burn_id if redirect is None else f"{burn_id}:r{redirect['nonce']}"
+        latched = self.holds().get(key)
+        dest = self.destination_read(wallet)
+        if dest['hold'] and latched is None:
+            self.holds().latch(key, 'destination-not-a-wallet', dest['hold'], S.b58encode(wallet))
+        if dest['hold'] or latched is not None:
             log(kind='alert', severity='critical', id='approved-destination-not-a-wallet', burn=burn_id, nonce=b['nonce'],
-                wallet=S.b58encode(wallet), reason=sol_recipient.HELD_DESTINATION + dest['hold'] + '. The vault holds an '
-                'approval for it: honest signers do not certify one. Not paid by this relayer (anyone may still send the '
-                'payment: a guardian pause voids the approval)')
+                wallet=S.b58encode(wallet), latched=latched is not None,
+                reason=sol_recipient.HELD_PREFIX + (dest['hold'] or 'latched since an earlier read: ' + latched['reason'])
+                + '. The vault holds an approval for it: honest signers do not certify one. Not paid by this relayer '
+                '(anyone may still send the payment: a guardian pause voids the approval)')
             return
         argv = ['--nonce', str(b['nonce']), '--owner', S.b58encode(wallet)]
         if n.token_balance(S.associated_token_address(wallet, n.config.mint)) is None:
@@ -431,6 +472,157 @@ class SolVigia(Vigia):
         log(kind='relay-execute', burn=burn_id, nonce=b['nonce'], ok=res.get('ok'), tx=res.get('signature'),
             units=res.get('units'), paid=res.get('paidAmount'), reason=res.get('reason') or res.get('error_name'))
         self._nodes.pop('confirmed', None)
+
+
+    # ── redirected burns (redirectHeldBurn on the router; sol_recipient.py) ─────────────────────────────────────────
+    # A held burn whose own burner named another wallet is certified for THAT wallet. The parent's rounds cannot carry
+    # such a release (they compare every partial with the burn), so redirected releases have their own small rounds:
+    #   <shared>/redirect/<burn id>/n<redirect nonce>-<validUntil>-<anchor slot>/context.json   the first signer's context
+    #   .../<signer name>.json                                                               one partial per signer
+    # The Bloch half (signatario.py, unchanged) verifies the burn on the L2 at finality and builds the intent; the
+    # Solana half applies the whole rule, signs and writes the partial (see sol_half.py); the relayer verifies every
+    # partial here, in process, against the same rule before it combines and delivers them.
+    def sign_round(self):
+        super().sign_round()
+        for b in list(self.last_burns):
+            self.isolated('redirect', b['burn_id'], lambda b=b: self.sign_redirect(b))
+
+    def relay_round(self):
+        super().relay_round()
+        base = self.shared / 'redirect'
+        for d in sorted(base.glob('*')) if base.exists() else []:
+            self.isolated('relay-redirect', d.name, lambda d=d: self.relay_redirect(d))
+
+    def redirect_rounds(self, d, nonce):
+        """Live rounds of one redirect, newest first: (validUntil, dir). Live as the parent's rounds are (more than
+        `round_margin` left, not further ahead than the limit) and not older than the vault's last guardian pause."""
+        now, v, limit = self.eth_now(), self.node().vault, self.node().config.max_valid_seconds
+        out = []
+        for rnd in d.glob(f'n{nonce}-*-*'):
+            try:
+                valid_until = int(rnd.name.split('-')[1])
+            except (IndexError, ValueError):
+                continue
+            if self.margin < valid_until - now <= self.max_valid and (not v['last_pause_at'] or valid_until > v['last_pause_at'] + limit):
+                out.append((valid_until, rnd))
+        return sorted(out, reverse=True)
+
+    def sign_redirect(self, b):
+        burn_id = b['burn_id']
+        if 'mint_head' not in b or self.release_finished(burn_id):
+            return
+        n = self.node()
+        backing = n.deposit(b['mint_count'] - 1) if 1 <= b['mint_count'] <= n.vault['deposit_count'] else None
+        if backing is None or S.hx(backing['head_after']) != b['mint_head'] or self.verdict_of(b)['target'] != 'redirect':
+            return
+        record = n.release(b['nonce'])
+        if record is not None and record['standing']:
+            return  # approved (or paid): a redirect never changes an approval
+        nonce = self.verdict_of(b)['redirect']
+        d = self.shared / 'redirect' / burn_id[2:]
+        with self.locked(d):
+            live = self.redirect_rounds(d, nonce)
+            if any((rnd / f'{self.me}.json').exists() for _, rnd in live):
+                return
+            argv = ['release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--out', d / f'.{self.me}.unused.json']
+            if live:
+                argv += ['--context', live[0][1] / 'context.json']
+            rc, res = self.signatario(*argv)
+            half = res.get('eth') if isinstance(res.get('eth'), dict) else {}
+            if not half.get('redirected'):
+                log(kind='redirect', burn=burn_id, nonce=b['nonce'], redirect=nonce, signed=False,
+                    reason=half.get('reason') or res.get('reason'))
+                return
+            c = half['context']
+            rnd = d / f"n{nonce}-{c['validUntil']}-{c['sourceAnchorNumber']}"
+            rnd.mkdir(parents=True, exist_ok=True)
+            if not (rnd / 'context.json').exists():
+                tmp = rnd / f'.context.{self.me}.tmp'
+                tmp.write_text(json.dumps({'context': c}) + '\n')
+                os.replace(tmp, rnd / 'context.json')
+            tmp = rnd / f'.{self.me}.tmp'
+            tmp.write_text(Path(half['partial']).read_text())
+            os.replace(tmp, rnd / f'{self.me}.json')
+            log(kind='redirect', burn=burn_id, nonce=b['nonce'], redirect=nonce, round=rnd.name, signed=True,
+                opened=not live, wallet=half.get('wallet'))
+
+    def redirect_partial(self, path, rel, ctx, digest):
+        """A partial of a redirected release counts when it is for exactly this release and context and its signature
+        recovers, in process, to a signer of the vault: (address, signature), or None."""
+        try:
+            rec = json.loads(path.read_text())
+            if rec.get('kind') != 'stable-release' or str(rec.get('source_vault')).lower() != self.vault:
+                return None
+            got = {k: (S.unhex(rec['release'][k]) if isinstance(rel[k], bytes) else int(rec['release'][k])) for k in S.RELEASE_FIELDS}
+            had = {k: (S.unhex(rec['context'][k]) if isinstance(ctx[k], bytes) else int(rec['context'][k])) for k in S.CONTEXT_FIELDS}
+            if got != rel or had != ctx:
+                return None
+            signature = S.unhex(rec['signature'], 65, 'signature')
+            signer = S.secp256k1_recover(digest, signature)
+            if signer is None or signer != S.unhex(rec['signer'], 20, 'signer') or signer not in self.node().config.signers:
+                return None
+            return signer, signature
+        except (OSError, ValueError, KeyError, TypeError, S.Refused):
+            return None
+
+    def relay_redirect(self, d):
+        burn_id = '0x' + d.name
+        if not WORD.fullmatch(burn_id):
+            return
+        b, record = self.release_state(burn_id, 'confirmed')
+        if b is None or 'mint_head' not in b:
+            return
+        if record is not None and record['state'] == 2:
+            self.close_if_due(burn_id, b, record)
+            return
+        if record is not None and record['standing']:
+            if S.hx(record['recipient']) != b['recipient']:  # the parent's pass pays an approval for the burn's own recipient
+                self.pay_approved(burn_id, b, record)
+            return
+        verdict = self.verdict_of(b)
+        if verdict['target'] != 'redirect':
+            if verdict['hold'] and ('r', burn_id) not in self._held_logged:
+                self._held_logged.add(('r', burn_id))
+                log(kind='alert', severity='critical', id='certificate-withheld-' + self.hold_id(verdict['hold']).removeprefix('release-held-'),
+                    burn=burn_id, nonce=b['nonce'], latched=verdict['latched'], redirect=verdict['redirect'], reason=verdict['reason'])
+            return
+        n, config = self.node(), self.node().config
+        rel = {'route': n.a.route, 'nonce': b['nonce'], 'recipient': S.account_id(verdict['wallet']), 'amount': b['amount'],
+               'nativeBurn': S.unhex(burn_id, 32), 'mintCount': b['mint_count'], 'mintedTotal': b['minted_total'],
+               'mintHead': S.unhex(b['mint_head'], 32)}
+        for _, rnd in self.redirect_rounds(d, verdict['redirect']):
+            try:
+                c = json.loads((rnd / 'context.json').read_text())['context']
+                ctx = {k: (S.unhex(c[k], 32) if k.endswith('Hash') else int(c[k])) for k in S.CONTEXT_FIELDS}
+            except (OSError, ValueError, KeyError, TypeError, S.Refused):
+                continue
+            if rnd.name != f"n{verdict['redirect']}-{ctx['validUntil']}-{ctx['sourceAnchorNumber']}":
+                continue
+            digest = S.eip191(S.release_authorization(config.source_chain_id, n.a.vault20, rel, ctx))
+            good = dict(filter(None, (self.redirect_partial(path, rel, ctx, digest) for path in sorted(rnd.glob('*.json'))
+                                      if path.name != 'context.json' and not path.name.startswith('.'))))
+            if len(good) < config.threshold:
+                continue
+            if not self.backup_due('eth', f'redirect:{burn_id}:{verdict["redirect"]}'):
+                return
+            chosen = sorted(good.items())[:config.threshold]
+            cert = rnd / 'release.call'
+            cert.write_text(json.dumps({
+                'kind': 'stable-release', 'source_chain_id': int.from_bytes(config.source_chain_id, 'big'),
+                'source_vault': S.hx(n.a.vault20), 'digest': S.hx(digest), 'redirect': verdict['redirect'],
+                'release': {k: (S.hx(rel[k]) if isinstance(rel[k], bytes) else rel[k]) for k in S.RELEASE_FIELDS},
+                'context': {k: (S.hx(ctx[k]) if isinstance(ctx[k], bytes) else ctx[k]) for k in S.CONTEXT_FIELDS},
+                'signers': [S.hx(a) for a, _ in chosen], 'signatures': [S.hx(sig) for _, sig in chosen]}, indent=2) + '\n')
+            res = self.sol_vault('approve', '--cert', cert)
+            log(kind='relay-approve', burn=burn_id, nonce=b['nonce'], round=rnd.name, ok=res.get('ok'), redirected=True,
+                redirect=verdict['redirect'], tx=res.get('signature'), units=res.get('units'), ready_at=res.get('readyAt'),
+                reason=res.get('reason') or res.get('error_name'))
+            if res.get('ok'):
+                self._nodes.pop('confirmed', None)
+                b, record = self.release_state(burn_id, 'confirmed')
+                if record is not None and record['standing']:
+                    self.pay_approved(burn_id, b, record)
+            return
 
 
 def main():

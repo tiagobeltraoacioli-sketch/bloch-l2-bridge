@@ -1,31 +1,41 @@
 #!/usr/bin/env python3
-"""Offline proof that somebody holds the private key of a Solana address: a signed message, verified here.
+"""Proof that somebody holds the private key of a Solana address: a signed message, verified here in process.
 
-  sol_proof.py fee-owner-message --config VAULT.json [--date YYYY-MM-DD]
-  sol_proof.py exit-message --wallet BASE58 --l2-account 0x.. --router 0x.. --issued UNIX [--chain-id 700770]
+  sol_proof.py fee-owner-message --config VAULT.json --program-id ID [--date YYYY-MM-DD]
   sol_proof.py verify --address BASE58 --message TEXT --signature SIG [--out PROOF.json]
-  sol_proof.py check-fee-owner --config VAULT.json --proof PROOF.json
+  sol_proof.py check-fee-owner --config VAULT.json --program-id ID --proof PROOF.json
+  sol_proof.py exit-message --wallet BASE58 --burner 0x.. --amount N --nonce N --router 0x.. --route 0x.. [--chain-id 700770]
+  sol_proof.py redirect-message --wallet BASE58 --burner 0x.. --burn 0x.. --nonce N --router 0x.. --route 0x.. [--chain-id 700770]
+  sol_proof.py exit-proof --wallet BASE58 --message TEXT --signature SIG [--envelope text|offchain|offchain-domain --domain 0x..]
 
-Why (review 330, R330-SOL-1 and its owner input): an address on the Ed25519 curve proves nothing about a key.
-Nobody reading the chain can tell a wallet that was never used from a point no key exists for. A signature can.
+Why: an address on the Ed25519 curve proves nothing about a key. Nobody reading the chain can tell a wallet that
+was never used from a point no key exists for. A signature can.
 
   The fee owner. The vault's fee address is part of the vault's address for good, and 5 + 5 bps of every deposit
-  and release can only ever be swept to its USDC account. Before the ceremony the owner signs the text of
-  `fee-owner-message` with that key; `verify` checks it offline and writes PROOF.json; `sol_vault.py init`
-  refuses to create a vault outside a rehearsal without a proof that `check-fee-owner` accepts.
+  and release can only ever be swept to its USDC account. The owner signs ONE line (`fee-owner-message`: the
+  address, the route, the cluster's genesis hash, the purpose, a date) with that key; `verify` checks it and
+  writes the proof file, which is committed; `sol_vault.py init` refuses to create a vault without it.
 
-  An exit destination. The bridge page takes the destination from the user's connected wallet and has it sign
-  the text of `exit-message` (the wallet's `signMessage`) before it calls SolanaBurnRouter.burnTo. The page
-  verifies the signature itself; this file is the reference for the text and the verification.
+  An exit. The destination of every exit signs one line (`exit-message`) that names the amount, the burner, the
+  wallet, the burner's nonce on the router, the router, the L2 chain id and the route. The signature travels
+  INSIDE the exit: `SolanaBurnRouter.burnTo(amount, recipient, nonce, proof)` publishes it in the burn's log, and
+  every signer, the relayer and the guardian verify it here before anything is certified, delivered or accepted.
+  A burn whose proof does not verify is held. `redirect-message` is the line the NEW destination signs when the
+  burner of a held burn sends it elsewhere (`redirectHeldBurn`).
 
-No network, no key: this tool never signs. The message is one line of printable ASCII, so that it can be signed
-  by a wallet's `signMessage` (the signature is over the bytes of the text), or
-  by `solana sign-offchain-message` (also with a hardware wallet); the signature is then over the off-chain
-  message envelope around the text, which this tool rebuilds.
-Both are accepted. A signature is 64 bytes, given as base58 (87 or 88 characters), as 128 hex characters with
-or without 0x, or as base64 (88 characters ending in "=="). Everything is parsed strictly and verified in
-process (solana_lib.ed25519_verify); no value is ever passed to another program, and no decision is read from an
-exit code. Standard library only.
+  `proof` as the router takes it is `tag | 64-byte signature [| 32-byte application domain]`:
+    tag 0  the signature covers the bytes of the line (the `signMessage` of a browser wallet);
+    tag 1  it covers the Solana off-chain message envelope, version 0, as `solana sign-offchain-message` of
+           Agave 4.4.1 builds it: 0xff "solana offchain" | 0x00 | 0x00 (format: restricted ASCII) | length u16 LE | line;
+    tag 2  it covers the envelope with an application domain and the signer:
+           0xff "solana offchain" | 0x00 | domain (32) | 0x00 | 0x01 | signer (32) | length u16 LE | line.
+  `exit-proof` builds those bytes from a signature and says under which envelope it verifies.
+
+No network, no key: this tool never signs. Every line is printable ASCII (format 0 of the off-chain message
+standard, which a hardware wallet can display). A signature given as text is 64 bytes in canonical base58, 128
+hex characters with or without 0x, or base64. Everything is parsed strictly and verified in process
+(solana_lib.ed25519_verify); no value is ever passed to another program, and no decision is read from an exit
+code. Standard library only.
 """
 import base64
 import json
@@ -45,25 +55,86 @@ BASE58_SIGNATURE = re.compile(r'[1-9A-HJ-NP-Za-km-z]{64,88}')
 PRINTABLE = re.compile(r'[\x20-\x7e]{1,1000}')
 
 
-def fee_owner_message(doc, date):
-    """The one line the fee owner signs. It names the address, its token account, the mint and the cluster."""
+def fee_owner_message(doc, program_id, date):
+    """The one line the fee owner signs: the address, the route (so: this program, this vault configuration, this
+    mint and cap), the cluster's genesis hash, the purpose, a date."""
     if not DATE.fullmatch(str(date)):
         raise S.Refused('the date is YYYY-MM-DD', got=date)
-    config = S.Config.from_json(doc, allow_undecided=True)
-    account = S.associated_token_address(config.fee_owner, config.mint)
-    return ('Bloch bridge bUSDC.sol fee-owner proof: I hold the private key of ' + S.b58encode(config.fee_owner)
-            + ' and accept the bridge fees of this route at its token account ' + S.b58encode(account)
-            + ' (mint ' + S.b58encode(config.mint) + ', cluster ' + str(doc['solana']['genesisHash']) + '). Date ' + date + '.')
+    if not program_id:
+        raise S.Refused('the program id is undecided: the route the fee owner signs for follows from it')
+    config = S.Config.from_json(doc)
+    a = S.Addresses(S.pubkey(program_id), config)
+    return ('Bloch bridge fee-owner proof v1: I hold the private key of ' + S.b58encode(config.fee_owner)
+            + ' and accept at this address the bridge fees of route ' + S.hx(a.route) + ' on the Solana cluster with '
+            'genesis hash ' + str(doc['solana']['genesisHash']) + '. Date ' + date + '.')
 
 
-def exit_message(wallet, l2_account, router, issued, chain_id=700770):
-    """The one line a user's wallet signs on the bridge page before the router is called."""
+def _tail(nonce, router, chain_id, route):
+    return (f'Nonce {int(nonce)}. Router {S.hx(S.unhex(router, 20, "router"))}. Chain {int(chain_id)}. '
+            f'Route {S.hx(S.unhex(route, 32, "route"))}.')
+
+
+def _wallet_text(wallet):
     key = S.pubkey(wallet)
     if S.b58encode(key) != wallet or not S.on_curve(key) or S.small_order(key):
         raise S.Refused('not a wallet address', got=wallet)
-    account, route = S.hx(S.unhex(l2_account, 20, 'L2 account')), S.hx(S.unhex(router, 20, 'router'))
-    return (f'Bloch bridge exit: pay bUSDC.sol exits to my Solana wallet {wallet}. L2 account {account}. '
-            f'Router {route}. Chain {int(chain_id)}. Issued {int(issued)}.')
+    return wallet
+
+
+def exit_message(wallet, burner, amount, nonce, router, route, chain_id=700770):
+    """The one line the DESTINATION key signs for an exit: byte for byte `SolanaBurnRouter.exitMessage`."""
+    return (f'Bloch bridge exit v1: pay {int(amount)} units burned by {S.hx(S.unhex(burner, 20, "burner"))} to my Solana '
+            f'wallet {_wallet_text(wallet)}. ' + _tail(nonce, router, chain_id, route))
+
+
+def redirect_message(wallet, burner, burn_id, nonce, router, route, chain_id=700770):
+    """The one line the NEW destination key signs for a redirected burn: `SolanaBurnRouter.redirectMessage`."""
+    return (f'Bloch bridge redirect v1: pay burn {S.hx(S.unhex(burn_id, 32, "burn id"))} made by '
+            f'{S.hx(S.unhex(burner, 20, "burner"))} to my Solana wallet {_wallet_text(wallet)}. '
+            + _tail(nonce, router, chain_id, route))
+
+
+ENVELOPE_TAGS = {'text': 0, 'offchain': 1, 'offchain-domain': 2}
+
+
+def covered_bytes(tag, message, public, domain=None):
+    """The bytes a proof of this tag signs for `message` (ASCII bytes) by `public`."""
+    body = len(message).to_bytes(2, 'little') + message
+    if tag == 0:
+        return message
+    if tag == 1:
+        return OFFCHAIN_DOMAIN + b'\0' + b'\0' + body
+    if tag == 2 and domain is not None and len(domain) == 32:
+        return OFFCHAIN_DOMAIN + b'\0' + domain + b'\0' + b'\x01' + public + body
+    return None
+
+
+def exit_proof_valid(public, message, proof):
+    """True only if `proof` (the router's bytes: tag | signature [| domain]) is a signature by `public` over
+    `message` under the envelope its tag names. Strict: exact lengths, known tags, canonical signature, a key
+    that is on the curve and not of small order. Never raises on malformed input."""
+    if not (isinstance(public, (bytes, bytearray)) and len(public) == 32 and isinstance(proof, (bytes, bytearray))
+            and isinstance(message, str) and PRINTABLE.fullmatch(message)):
+        return False
+    proof = bytes(proof)
+    if not proof or not ((proof[0] in (0, 1) and len(proof) == 65) or (proof[0] == 2 and len(proof) == 97)):
+        return False
+    covered = covered_bytes(proof[0], message.encode('ascii'), bytes(public), proof[65:] if proof[0] == 2 else None)
+    return covered is not None and S.ed25519_verify(bytes(public), covered, proof[1:65])
+
+
+def make_exit_proof(wallet, message, signature, envelope=None, domain=None):
+    """The router's `proof` bytes for a signature given as text, under the envelope named or the first that verifies."""
+    public = S.pubkey(_wallet_text(wallet))
+    raw = parse_signature(signature)
+    domain = S.unhex(domain, 32, 'application domain') if domain is not None else None
+    for name, tag in ENVELOPE_TAGS.items():
+        if envelope not in (None, name) or (tag == 2 and domain is None):
+            continue
+        proof = bytes([tag]) + raw + (domain if tag == 2 else b'')
+        if exit_proof_valid(public, message, proof):
+            return name, proof
+    raise S.Refused('the signature is not a signature of this message by this wallet under any accepted envelope')
 
 
 def parse_signature(text):
@@ -115,21 +186,28 @@ def proof_of(address, message, signature):
             'envelope': verify(address, message, signature)}
 
 
-def check_fee_owner_proof(proof, doc, now=None):
-    """`init` calls this: the proof is for THIS configuration's fee owner, token account, mint and cluster, its
-    text is exactly the canonical one for the date it names, the date is not in the future, and the signature
-    verifies. Raises S.Refused otherwise; returns the envelope name."""
+FEE_PROOF_MAX_AGE_DAYS = 30
+
+
+def check_fee_owner_proof(proof, doc, program_id, now=None, max_age_days=None):
+    """The proof is for THIS route's fee owner on THIS cluster: its text is exactly the canonical one for the date
+    it names, the date is not in the future, and the signature verifies. With `max_age_days` (what `init` passes:
+    30) a proof dated longer ago is refused: the owner showed the key recently, not at some time in the past.
+    Raises S.Refused otherwise; returns the envelope name."""
     if not isinstance(proof, dict) or proof.get('kind') != 'bloch.solana.key-proof.v1':
         raise S.Refused('not a key proof written by sol_proof.py verify')
     message = proof.get('message')
     if not isinstance(message, str) or not PRINTABLE.fullmatch(message):
         raise S.Refused('the proof carries no message')
     date = message[-11:-1]
-    if not DATE.fullmatch(date) or message != fee_owner_message(doc, date):
-        raise S.Refused('the proof is not for the fee owner, token account, mint and cluster of this configuration')
-    if date > time.strftime('%Y-%m-%d', time.gmtime((now if now is not None else time.time()) + 86400)):
+    if not DATE.fullmatch(date) or message != fee_owner_message(doc, program_id, date):
+        raise S.Refused('the proof is not for the fee owner, the route and the cluster of this configuration')
+    now = now if now is not None else time.time()
+    if date > time.strftime('%Y-%m-%d', time.gmtime(now + 86400)):
         raise S.Refused('the proof is dated in the future', date=date)
-    config = S.Config.from_json(doc, allow_undecided=True)
+    if max_age_days is not None and date < time.strftime('%Y-%m-%d', time.gmtime(now - max_age_days * 86400)):
+        raise S.Refused(f'the proof is dated more than {max_age_days} days ago: the fee owner signs a fresh one', date=date)
+    config = S.Config.from_json(doc)
     if proof.get('address') != S.b58encode(config.fee_owner):
         raise S.Refused('the proof is for another address than the fee owner')
     return verify(proof['address'], message, proof.get('signature'))
@@ -155,19 +233,30 @@ def main(argv):
     try:
         if command == 'fee-owner-message':
             doc = json.loads(Path(need(args, '--config')).read_text())
-            out = {'message': fee_owner_message(doc, opt(args, '--date', time.strftime('%Y-%m-%d', time.gmtime()))),
+            program_id = opt(args, '--program-id') or (doc.get('program') or {}).get('id')
+            out = {'message': fee_owner_message(doc, program_id, opt(args, '--date', time.strftime('%Y-%m-%d', time.gmtime()))),
                    'address': doc['vault']['fees']['owner']}
         elif command == 'exit-message':
-            out = {'message': exit_message(need(args, '--wallet'), need(args, '--l2-account'), need(args, '--router'),
-                                           need(args, '--issued'), opt(args, '--chain-id', '700770'))}
+            out = {'message': exit_message(need(args, '--wallet'), need(args, '--burner'), need(args, '--amount'),
+                                           need(args, '--nonce'), need(args, '--router'), need(args, '--route'),
+                                           opt(args, '--chain-id', '700770'))}
+        elif command == 'redirect-message':
+            out = {'message': redirect_message(need(args, '--wallet'), need(args, '--burner'), need(args, '--burn'),
+                                               need(args, '--nonce'), need(args, '--router'), need(args, '--route'),
+                                               opt(args, '--chain-id', '700770'))}
+        elif command == 'exit-proof':
+            name, proof = make_exit_proof(need(args, '--wallet'), need(args, '--message'), need(args, '--signature'),
+                                          opt(args, '--envelope'), opt(args, '--domain'))
+            out = {'envelope': name, 'proof': S.hx(proof)}
         elif command == 'verify':
             out = proof_of(need(args, '--address'), need(args, '--message'), need(args, '--signature'))
             if opt(args, '--out'):
                 Path(opt(args, '--out')).write_text(json.dumps(out, indent=2) + '\n')
         elif command == 'check-fee-owner':
             doc = json.loads(Path(need(args, '--config')).read_text())
+            program_id = opt(args, '--program-id') or (doc.get('program') or {}).get('id')
             proof = json.loads(Path(need(args, '--proof')).read_text())
-            out = {'envelope': check_fee_owner_proof(proof, doc), 'address': proof['address'], 'message': proof['message']}
+            out = {'envelope': check_fee_owner_proof(proof, doc, program_id), 'address': proof['address'], 'message': proof['message']}
         else:
             raise S.Refused('unknown command', command=command)
     except S.Refused as e:

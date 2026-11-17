@@ -10,23 +10,31 @@ Offline:
 Read-only (own node):
   verify               program final and pinned, vault equals the file, token account, mint, fee account
   show                 the vault's state            deposits [--from N]   deposit records at `finalized`
-  reserves --l2-rpc URL --token 0x.. [--router 0x.. --registry 0x.. --hints DIR --from-block N]
+  reserves <L2 arguments>
                        backing against the L2 token's supply (exit 1 when broken), and every burn that is not
-                       paid yet with its state; a HELD burn is listed with the reason it is held
-  burn-status --l2-rpc URL --token 0x.. (--burn 0xID | --nonce N | --all) [--router ... as above]
+                       paid yet with its state; a HELD burn is listed with the reason it is held and how its
+                       burner recovers it, a REDIRECTED one with its new wallet
+  burn-status <L2 arguments> (--burn 0xID | --nonce N | --all)
                        the state of an L2 burn: paid, approved, waiting, or held and why
+                       L2 arguments: --l2-rpc URL --token 0x.. --router 0x.. --router-code-keccak 0x.. --l2-chain-id N
+                       [--from-block N] [--l2-block finalized|latest] [--holds DB: the operator's hold latch]
+  router-pin --artifact out/SolanaBurnRouter.sol/SolanaBurnRouter.json --token 0x.. --program-id ID
+                       offline: the code hash a deployed burn router of this route must have
   fee-account          the fee owner's address and associated token account at `finalized` (exit 1 unless the
                        account exists, is a USDC account of the classic token program and is owned by the fee owner)
 Transactions (need --fee-payer KEYPAIR.json, an Ed25519 key that only pays fees and rent):
   init [--fee-owner-proof PROOF.json]  create the vault (permissionless: its address is a function of the
-                       configuration). Refused unless the fee owner's associated token account exists at
-                       `finalized` and is owned by the fee owner; outside a rehearsal also unless PROOF.json
-                       (sol_proof.py) shows a signature made with the fee owner's key
-  create-fee-account   create the fee owner's associated token account (before `init`; the vault need not exist)
+                       configuration). Refused without the fee owner's proof (default: fee-owner-proof.json next
+                       to the configuration; one signature of the fee key, sol_proof.py, at most 30 days old). The
+                       fee owner's associated token account is created here when absent (no owner key is needed;
+                       this fee payer pays) and verified at `finalized`: canonical address, mint, owner
+  create-fee-account   the same creation alone (anyone may run it; the vault need not exist)
   deposit --keypair USER.json --amount N --l2-recipient 0x..   (a user's deposit; reference client and rehearsal)
-  approve --cert CERT.json [--owner WALLET]   CERT = `signatario.py combine` output for a release; its signatures
-                                       are recovered here before anything is sent; with --owner the wallet is
-                                       checked against the recipient rule first
+  approve --cert CERT.json <L2 arguments>   CERT = `signatario.py combine` output for a release (or the relayer's
+                                       certificate of a redirected one). Its signatures are recovered here, and
+                                       the recipient rule of sol_recipient.py is ALWAYS applied before anything is
+                                       sent: the burn is read on the L2, the proof of the destination key is
+                                       verified, the destination is read on Solana, the latch is consulted
   execute --nonce N --owner WALLET [--create-account]   pay an approved release to the wallet the burn committed
                                        to. Refused when the wallet is, at `finalized`, not absent and not a System
                                        account without data; --create-account only for a funded System account
@@ -278,53 +286,64 @@ def l2_uint(url, token, signature, block):
         raise S.Refused('the L2 call failed', call=signature)
 
 
+L2_ARGS = '--l2-rpc URL --token 0x.. --router 0x.. --router-code-keccak 0x.. --l2-chain-id N [--from-block N] [--holds DB]'
+
+
 def recipient_cfg(args):
-    """Where a burn's wallet is looked for (sol_recipient.find_wallet), from the command line. Every value is
-    parsed strictly here; none is handed to another program."""
-    cfg = {'l2_rpc': need(args, '--l2-rpc')}
-    for key, name in (('burn_router', '--router'), ('recipient_registry', '--registry')):
-        if opt(args, name) is not None:
-            cfg[key] = S.hx(S.unhex(opt(args, name), 20, name))
-    for key, name in (('router_from_block', '--from-block'), ('registry_from_block', '--from-block')):
-        cfg[key] = int(opt(args, name, '0'))
-    cfg['recipient_hints'] = opt(args, '--hints')
+    """Where a burn's destination is checked (sol_recipient.py), from the command line. Every value is parsed
+    strictly here; none is handed to another program."""
+    cfg = {'l2_rpc': need(args, '--l2-rpc'), 'burn_router': S.hx(S.unhex(need(args, '--router'), 20, '--router')),
+           'burn_router_code_keccak': S.hx(S.unhex(need(args, '--router-code-keccak'), 32, '--router-code-keccak')),
+           'l2_chain_id': int(need(args, '--l2-chain-id')), 'token': S.hx(S.unhex(need(args, '--token'), 20, '--token')),
+           'router_from_block': int(opt(args, '--from-block', '0'))}
     return cfg
 
 
-def burn_rows(args, node):
-    """Every `Burned` log of the token up to `--l2-block` (default finalized), with its state on Solana."""
-    cfg = recipient_cfg(args)
-    token = S.hx(S.unhex(need(args, '--token'), 20, '--token'))
+def l2_block(args):
     block = opt(args, '--l2-block', 'finalized')
     if block not in ('finalized', 'latest', 'safe'):
         raise S.Refused('--l2-block is finalized, safe or latest')
-    burns = sol_recipient.l2_burns(cfg['l2_rpc'], token, int(opt(args, '--from-block', '0')), block)
-    return [sol_recipient.burn_status(node, cfg, b) for b in burns]
+    return block
+
+
+def burns_of(args, node):
+    """(config, every `Burned` log of the token up to `--l2-block`), after the router pin was checked."""
+    cfg = recipient_cfg(args)
+    sol_recipient.check_router(cfg, node.a)
+    return cfg, sol_recipient.l2_burns(cfg['l2_rpc'], cfg['token'], cfg['router_from_block'], l2_block(args))
+
+
+def burn_rows(args, node):
+    """Every burn with its state on Solana; with `--holds DB` the operator's latch is applied (and written)."""
+    cfg, burns = burns_of(args, node)
+    holds = sol_recipient.Holds(opt(args, '--holds')) if opt(args, '--holds') else None
+    return [sol_recipient.burn_status(node, cfg, b, holds=holds, to_block=l2_block(args)) for b in burns]
 
 
 def cmd_reserves(args):
     node = node_of(args, commitment='finalized')
     s = state_of(node)
-    token, l2 = S.hx(S.unhex(need(args, '--token'), 20, '--token')), need(args, '--l2-rpc')
-    block = opt(args, '--l2-block', 'finalized')
-    if block not in ('finalized', 'latest', 'safe'):
-        raise S.Refused('--l2-block is finalized, safe or latest')
+    token, l2, block = S.hx(S.unhex(need(args, '--token'), 20, '--token')), need(args, '--l2-rpc'), l2_block(args)
     supply, pending = l2_uint(l2, token, 'totalSupply()', block), l2_uint(l2, token, 'pendingSupply()', block)
     problems = []
     if s['tokenBalance'] is None or s['tokenBalance'] < s['totalLocked'] + s['feesAccrued']:
         problems.append('the vault token balance is below locked plus fees')
     if supply > s['totalLocked']:
         problems.append('the L2 supply exceeds the locked backing')
-    # Burns that are not paid yet explain `lockedMinusSupply`; the held ones are named with their reason (R330-SOL-1).
+    # Burns that are not paid yet explain `lockedMinusSupply`; the held ones are named with their reason and with
+    # how they are recovered (the burner's redirectHeldBurn). Nothing held is ever paid blind.
     rows = [r for r in burn_rows(args, node) if r['state'] != 'paid']
-    held = [r for r in rows if r['hold']]
+    held = [r for r in rows if r['state'] == 'held']
+    redirected = [r for r in rows if r['state'] != 'held' and r.get('redirected')]
+    keep = ('burn', 'nonce', 'amount', 'recipient', 'burner', 'direct', 'state', 'hold', 'latched', 'redirects', 'reason', 'recoverable')
     out(not problems, problems=problems, tokenBalance=s['tokenBalance'], totalLocked=s['totalLocked'],
         feesAccrued=s['feesAccrued'], l2Supply=supply, l2Pending=pending,
         lockedMinusSupply=s['totalLocked'] - supply, contextSlot=s['contextSlot'],
         unpaidBurns=len(rows), unpaidTotal=sum(r['amount'] for r in rows),
         heldBurns=len(held), heldTotal=sum(r['amount'] for r in held),
-        held=[{k: r.get(k) for k in ('burn', 'nonce', 'amount', 'recipient', 'wallet', 'direct', 'state', 'hold', 'reason')}
-              for r in held])
+        redirectedBurns=len(redirected), redirectedTotal=sum(r['amount'] for r in redirected),
+        held=[{k: r.get(k) for k in keep} for r in held],
+        redirected=[{k: r.get(k) for k in ('burn', 'nonce', 'amount', 'burner', 'state', 'wallet', 'redirectNonce')} for r in redirected])
 
 
 def cmd_burn_status(args):
@@ -341,6 +360,19 @@ def cmd_burn_status(args):
     out(True, burns=rows, held=sum(1 for r in rows if r['hold']))
 
 
+def cmd_router_pin(args):
+    """Offline: the code hash a deployed SolanaBurnRouter of this route must have (`burn_router_code_keccak`), from
+    the compiler's artifact and the three constructor values, and the hash of its creation code."""
+    doc, config, program_id = offline(args)
+    if not program_id:
+        raise S.Refused('the program id is undecided: pass --program-id')
+    a = S.Addresses(S.pubkey(program_id), config)
+    artifact = json.loads(Path(need(args, '--artifact')).read_text())
+    token = S.hx(S.unhex(need(args, '--token'), 20, '--token'))
+    out(True, token=token, solanaMint=S.hx(config.mint), route=S.hx(a.route),
+        **sol_recipient.router_runtime_pin(artifact, token, S.hx(config.mint), S.hx(a.route)))
+
+
 def fee_account_state(rpc, config, a, commitment='finalized'):
     """The fee owner's address and its associated token account as this node shows them. The fee owner is part of
     the vault's address for good and fees can only ever be swept to this one account, so `init` refuses unless
@@ -349,6 +381,8 @@ def fee_account_state(rpc, config, a, commitment='finalized'):
     owner = sol_recipient.destination([rpc], config.fee_owner) if commitment == 'finalized' else {'hold': None}
     if owner['hold']:
         problems.append('the fee owner is not a wallet address: ' + owner['hold'])
+    if a.fee_account != S.associated_token_address(config.fee_owner, config.mint):
+        problems.append('the fee account is not the canonical associated token address of the fee owner and the mint')
     info = rpc.account_info(a.fee_account, commitment)
     account = None
     if info is None:
@@ -405,15 +439,31 @@ def cmd_init(args):
         # The fee owner is in the vault's address for good. Before anything is paid for: its associated token
         # account exists at `finalized` and is the fee owner's, and (outside a rehearsal) a signature made with
         # the fee owner's key is shown: a fee address nobody holds a key for would collect every fee for nobody.
+        # 1. One signature made with the fee owner's key (the committed proof file), checked offline, in process.
+        proof = opt(args, '--fee-owner-proof', str(Path(need(args, '--config')).with_name('fee-owner-proof.json')))
+        if not Path(proof).is_file():
+            raise S.Refused('the fee owner\'s proof is missing: the owner signs the text of `sol_proof.py fee-owner-message` '
+                            'with the fee key once, and `sol_proof.py verify --out` writes the file '
+                            '(docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md 4.1)', looked_for=proof)
+        sol_proof.check_fee_owner_proof(json.loads(Path(proof).read_text()), doc, program_id,
+                                        max_age_days=sol_proof.FEE_PROOF_MAX_AGE_DAYS)
+        # 2. Its token account needs no owner key: anyone may create the associated token account of any owner. It
+        # is created here when absent (idempotent; this fee payer pays the rent) and then verified at `finalized`:
+        # the canonical associated address, a classic token account of the mint, owned by the fee owner.
         fee = fee_account_state(rpc, config, a, 'finalized')
+        if not fee['feeAccountExists'] and len(fee['problems']) == 1:
+            payer = S.Keypair(need(args, '--fee-payer'))
+            made = S.send_and_confirm(rpc, payer, [S.create_ata_instruction(payer.public, config.fee_owner, config.mint)])
+            if made['err'] is not None:
+                out(False, step='create the fee owner\'s token account', **made)
+            for _ in range(120):
+                fee = fee_account_state(rpc, config, a, 'finalized')
+                if fee['feeAccountExists']:
+                    break
+                time.sleep(0.5)
+            fee['created'] = True
         if fee['problems']:
             raise S.Refused('the fee account is refused', **fee)
-        proof = opt(args, '--fee-owner-proof')
-        if proof is not None or not rehearsal:
-            if proof is None:
-                raise S.Refused('--fee-owner-proof is required outside a rehearsal: a signature of the fee owner over '
-                                'the text of `sol_proof.py fee-owner-message` (docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md)')
-            sol_proof.check_fee_owner_proof(json.loads(Path(proof).read_text()), doc)
         probe = Node.__new__(Node)  # the program pin and finality, before paying for anything
         probe.cfg, probe.rpc, probe.commitment, probe.a, probe.config, probe.floor = cfg, rpc, 'confirmed', a, config, None
         probe.elf_pin = ((doc.get('program') or {}).get('elfSha256') or '').lower()
@@ -502,8 +552,24 @@ def cmd_approve(args):
     for addr, sig in zip(cert['signers'], cert['signatures']):
         if S.secp256k1_recover(S.eip191(authorization), S.unhex(sig, 65, 'signature')) != S.unhex(addr, 20, 'signer'):
             raise S.Refused('a signature of the certificate does not recover to the signer it names', signer=addr)
-    if opt(args, '--owner') is not None:  # the wallet to be paid, when the caller knows it: the recipient rule
-        refuse_destination(node, S.pubkey(opt(args, '--owner')), rel['recipient'])
+    # The recipient rule, ALWAYS (review 330, R330-SOL-3P-2): no flag delivers a certificate without it. The burn is
+    # looked up on the L2, and the certificate must pay exactly what the rule allows for it now: the burn's own
+    # destination with a valid proof of its key, or, for a held burn, its burner's latest redirect; a wallet on
+    # Solana at `finalized`; not latched in the operator's database when one is given (--holds).
+    cfg, burns = burns_of(args, node)
+    burn = next((b for b in burns if b['burn_id'] == S.hx(rel['nativeBurn'])), None)
+    if burn is None or (burn['nonce'], burn['amount']) != (rel['nonce'], rel['amount']):
+        raise S.Refused('the certificate is for a burn the L2 token does not show at this block, or with other values',
+                        burn=S.hx(rel['nativeBurn']))
+    view = sol_recipient.exit_view(cfg, a, burn, l2_block(args))
+    holds = sol_recipient.Holds(opt(args, '--holds')) if opt(args, '--holds') else sol_recipient.Holds(None)
+    verdict = sol_recipient.decide(view, burn['burn_id'], holds, lambda wallet: sol_recipient.destination([node.rpc], wallet, a))
+    if verdict['hold']:
+        raise S.Refused(verdict['reason'], hold=verdict['hold'], latched=verdict['latched'], burn=burn['burn_id'])
+    if S.account_id(verdict['wallet']) != rel['recipient']:
+        raise S.Refused('the certificate pays another recipient than the rule allows for this burn now (the burn\'s own '
+                        'destination, or its burner\'s latest redirect when the burn is held)', burn=burn['burn_id'],
+                        certificate=S.hx(rel['recipient']), allowed=S.hx(S.account_id(verdict['wallet'])), target=verdict['target'])
     if node.vault['last_pause_at'] and ctx['validUntil'] <= node.vault['last_pause_at'] + node.config.max_valid_seconds:
         raise S.Refused('this certificate is not newer than the last guardian pause: the vault refuses it for good '
                         '(StaleCertificate); the signers certify the burn again', validUntil=ctx['validUntil'],
@@ -680,7 +746,7 @@ def cmd_sweep(args):
 
 COMMANDS = {'address': cmd_address, 'elf-sha256': cmd_elf_sha256, 'validate': cmd_validate, 'verify': cmd_verify, 'show': cmd_show,
             'deposits': cmd_deposits, 'reserves': cmd_reserves, 'burn-status': cmd_burn_status,
-            'fee-account': cmd_fee_account, 'init': cmd_init,
+            'fee-account': cmd_fee_account, 'router-pin': cmd_router_pin, 'init': cmd_init,
             'create-fee-account': cmd_create_fee_account, 'deposit': cmd_deposit, 'approve': cmd_approve,
             'execute': cmd_execute, 'close': cmd_close, 'pause-sign': cmd_pause_sign, 'pause-submit': cmd_pause_submit,
             'controls-sign': cmd_controls_sign, 'controls-submit': cmd_controls_submit,

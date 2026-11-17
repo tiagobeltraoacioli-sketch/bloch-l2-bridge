@@ -1,73 +1,69 @@
 #!/usr/bin/env python3
-"""Which Solana wallet stands behind the 20-byte recipient of an L2 burn (review 325, R325-SOL-1).
+"""Who may be paid for an L2 burn of the Solana bridge, and why a burn is held.
 
 The frozen L2 token's `burn(uint64,address)` takes any 20 bytes. The Solana vault pays a release only to the
-associated token account of a wallet whose address hashes to them (`solana_lib.account_id`), so a burn whose 20
-bytes are not such a commitment (an Ethereum address typed by habit) can never be paid, and a commitment to an
-address that is not a wallet (a token account) is paid into an account nobody controls.
+associated token account of a wallet whose address hashes to the release's 20 bytes (`solana_lib.account_id`).
+Three things can go wrong with those bytes, and each has cost a user's funds on some bridge:
 
-The rule, applied by the signer's Solana half before it certifies, by the sign daemon before it rebuilds
-anything, and by the relayer before it pays:
+  they are not a commitment to a wallet at all (an Ethereum address typed by habit);
+  they commit to an address that is on the curve and is not a wallet (a mint, a token account, a program);
+  they commit to an address nobody holds a key for.
 
-  a burn is certified only when a WALLET is known for its 20 bytes: 32 bytes, not zero, a point of the Ed25519
-  curve (every associated token account and every other program-derived address is off the curve), hashing to
-  exactly those 20 bytes.
+THE RULE (round 17; reviews 325 and 330 and the coordinator's decisions). A burn is certified, delivered and
+accepted only for a TARGET that satisfies all of:
 
-Where the wallet comes from does not matter, because the hash decides; it is looked for, in this order, in
-  1. the `SolanaExit` log of the burn router for this burn id (contracts/solana/SolanaBurnRouter.sol: every exit
-     made the intended way has one, written in the burn's own transaction, and the router refused anything that
-     is not a wallet address before burning);
-  2. a `SolanaRecipient` log of the registry for these 20 bytes (contracts/solana/SolanaRecipientRegistry.sol:
-     how a burn made DIRECTLY on the token becomes payable: its burner, or anyone, announces the wallet);
-  3. a hint file `<recipient_hints>/<40 hex>` holding the base58 address (operators, by hand).
+  1. A wallet address: 32 bytes in canonical base58, on the Ed25519 curve, not of small order, not on the list of
+     addresses known not to be wallets (`is_wallet`).
+  2. A PROOF OF ITS KEY: a signature by that address over the line `SolanaBurnRouter.exitMessage` (for the burn's
+     own destination) or `redirectMessage` (for a redirect), read from the router's log on the L2 and verified
+     here in process (`sol_proof.exit_proof_valid`). The line names the amount or the burn, the burner, the
+     wallet, the burner's router nonce, the router, the chain id and the route. An address nobody holds a key for
+     cannot produce it. This closes what a reader of the chain cannot see.
+  3. A wallet ON SOLANA: at `finalized`, on every endpoint, the address is absent from the chain or an account of
+     the System program with no data, not executable (`destination`). A key holder can sign AND be a mint.
 
-A burn with no such wallet is HELD: not certified, not approved, alerted. Nothing is paid to anybody, and the
-amount stays in the vault's `total_locked`. It becomes payable the moment a wallet for its 20 bytes is
-published. If its 20 bytes are not a commitment at all, no wallet can exist: see docs/SOLANA-VAULT.md 11.
+Which target:
 
-Review 330 (R330-SOL-1): "on the curve" is not "a wallet". Half of all 32-byte values are curve points, and
-among them are the USDC mint itself, program ids, mints and token accounts created at keypair addresses, and
-the eight small-order points for which no key exists. So, besides the rule above:
+  the burn's own destination, when the burn went through the router (`SolanaExit` log of the burn id, emitted in
+  the burn's transaction) and 1 to 3 hold;
+  otherwise the burn is HELD, and the target is the destination of the latest `SolanaRedirect` log for the burn
+  id whose `from` is the burn's own BURNER (`redirectHeldBurn`, called on the L2 by the account that made the
+  burn; the highest router nonce wins, and an older one counts for nothing), when 1 to 3 hold for it. A burn made
+  directly on the token has no destination of its own: it is held until its burner claims it this way.
 
-  the wallet is not a small-order point and not one of the addresses known not to be wallets (`NOT_WALLETS`,
-  the vault's own mint and program); and
-  THE DESTINATION IS READ ON SOLANA AT `finalized` (`destination`): the burn is HELD unless the address is
-  absent from the chain, or is an account owned by the System program that holds no data and is not executable
-  (what a wallet looks like). A mint, a token account, a program, a sysvar, a nonce account, anything owned by
-  another program: held, for as long as that is what the chain shows. Every signer applies this on its own
-  node(s) before it signs (sol_half.py), the sign daemon before it rebuilds anything, and the relayer before it
-  delivers a certificate and again before it pays (sol_vigia.py). Nobody creates a token account for an address
-  that is not a funded System account.
+HOLDS ARE LATCHED (review 330, R330-SOL-3P-1). What the chain shows at an address can change: a token account at
+a keypair address can be closed by its owner, and the address is then absent, "a fresh wallet". So a signer (and
+a relayer) that has once found a burn's own destination, or one particular redirect, not payable for reason 2 or
+3 writes that into its database (`Holds`), and from then on refuses that destination for that burn whatever the
+chain shows later. A latched burn leaves the hold only by a redirect of its burner to another destination, or by
+an operator's explicit action that names the burn and is logged (`sol_half.py release-hold`).
 
-  Why "absent" passes: a wallet that was never funded has no account, and its owner can still be paid (the
-  associated token account is created by anyone). An account can be CREATED at an on-curve address only with
-  that address's signature, so an absent address cannot later turn into a mint or a token account unless
-  somebody holds its key.
+A held burn is never paid blind and never stranded: nothing is certified for it, the amount stays in the vault's
+`total_locked`, the reserves monitor lists it with its reason, and its burner can redirect it. What stays
+unrecoverable: a burn whose burner can no longer send an L2 transaction (a lost L2 key; a contract that burned
+and has no way to call the router), and a payment made to a wallet whose owner signed and then lost the key.
 
-  WHAT THIS DOES NOT CLOSE. An on-curve address for which nobody holds a key, and which is not of small order
-  and not on a list, looks exactly like a fresh wallet: absent, or (anyone may send lamports to any address) a
-  System account with a balance. No reader of the chain can tell the two apart. Only a signature made with the
-  key proves a key exists: the bridge page takes the destination from the user's connected wallet and has it
-  sign a message before it calls the router (docs/SOLANA-VAULT.md, "Proof of the destination key";
-  `sol_proof.py`). That closes it for exits made through the page, and for no other caller of the router.
+Nothing here trusts where a wallet's text came from: for a destination the commitment must equal the burn's 20
+bytes, for every target the signature decides. `SolanaRecipientRegistry` and operator hint files are no longer
+read: an announcement cannot carry a proof.
 
-`burn_status` gives the state of one burn as the chain shows it (paid, approved, waiting, held and why); it is
-what `sol_vault.py burn-status` and the reserves monitor print.
-
-Config keys read here: `l2_rpc`, `burn_router`, `router_from_block` (0), `recipient_registry`,
-`registry_from_block` (0), `recipient_hints`.
+Config keys read here: `l2_rpc`, `burn_router`, `l2_chain_id`, `router_from_block` (0), and for the router pin
+`burn_router_code_keccak`, `token`.
 """
 import json
+import os
 from pathlib import Path
 import sys
+import time
 import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import solana_lib as S  # noqa: E402
+import sol_proof  # noqa: E402
 
-ROUTER_EVENT = 'SolanaExit(bytes32,address,uint64,address,string)'
-REGISTRY_EVENT = 'SolanaRecipient(address,bytes32)'
+EXIT_EVENT = 'SolanaExit(bytes32,address,uint64,address,string,uint64,bytes,bytes32)'
+REDIRECT_EVENT = 'SolanaRedirect(bytes32,address,uint64,address,string,bytes)'
 
 
 def topic(signature):
@@ -184,47 +180,322 @@ def l2_call(url, to, data, block='finalized'):
     return out['result']
 
 
-def exit_text(data_hex):
-    """The `recipient` string of a SolanaExit log's data (amount, commitment, offset, then length and bytes)."""
+def _word(data, i):
+    return int.from_bytes(data[32 * i:32 * i + 32], 'big')
+
+
+def _dynamic(data, offset, limit):
+    """The bytes of an ABI dynamic value at `offset`, or None when it is malformed or longer than `limit`."""
+    if offset % 32 or offset + 32 > len(data):
+        return None
+    length = _word(data, offset // 32)
+    if length > limit or offset + 32 + length > len(data):
+        return None
+    return data[offset + 32:offset + 32 + length]
+
+
+def _log_data(entry):
     try:
-        data = bytes.fromhex(data_hex[2:])
-        offset = int.from_bytes(data[64:96], 'big')
-        length = int.from_bytes(data[offset:offset + 32], 'big')
-        if length > 64 or offset + 32 + length > len(data):
-            return None
-        return data[offset + 32:offset + 32 + length].decode('ascii')
-    except (ValueError, IndexError, UnicodeDecodeError, TypeError):
+        return bytes.fromhex(entry['data'][2:])
+    except (ValueError, KeyError, TypeError, AttributeError):
         return None
 
 
-def find_wallet(cfg, commitment, burn_id=None):
-    """(wallet bytes, where it was found) or (None, None). Reading failures raise S.RpcError: a caller that signs
-    must not read "the L2 did not answer" as "there is no wallet", and must not sign either."""
-    hexed = S.hx(commitment)
-    url = cfg.get('l2_rpc')
-    router, registry = cfg.get('burn_router'), cfg.get('recipient_registry')
-    if url and router and burn_id:
-        burn_id = S.hx(S.unhex(burn_id, 32, 'burn id'))  # strict: this text goes into a JSON-RPC filter
-        for entry in l2_logs(url, router, [topic(ROUTER_EVENT), burn_id], cfg.get('router_from_block') or 0):
-            wallet = wallet_of_text(exit_text(entry.get('data', '0x') if isinstance(entry, dict) else None))
-            if is_wallet(wallet, commitment):
-                return wallet, 'router'
-    if url and registry:
-        for entry in l2_logs(url, registry, [topic(REGISTRY_EVENT), '0x' + '00' * 12 + hexed[2:]], cfg.get('registry_from_block') or 0):
-            try:
-                wallet = bytes.fromhex(entry['data'][2:66])
-            except (ValueError, KeyError, TypeError):
-                continue
-            if is_wallet(wallet, commitment):
-                return wallet, 'registry'
-    hints = cfg.get('recipient_hints')
-    if hints:
-        path = Path(hints) / hexed[2:]
-        if path.is_file():
-            wallet = wallet_of_text(path.read_text())
-            if is_wallet(wallet, commitment):
-                return wallet, 'hint'
-    return None, None
+def is_address(text):
+    return isinstance(text, str) and len(text) == 42 and text[:2] == '0x' and all(c in '0123456789abcdef' for c in text[2:])
+
+
+def decode_exit(entry):
+    """A `SolanaExit` log: from, amount, commitment, recipient text, nonce, proof. None when malformed."""
+    data = _log_data(entry)
+    try:
+        topics = entry['topics']
+        if data is None or len(topics) != 3 or len(data) < 32 * 6:
+            return None
+        text, proof = _dynamic(data, _word(data, 2), 64), _dynamic(data, _word(data, 4), 97)
+        if text is None or proof is None or _word(data, 0) >= 2**64 or _word(data, 3) >= 2**64 or any(data[32:44]):
+            return None
+        return {'from': '0x' + topics[2][-40:].lower(), 'amount': _word(data, 0), 'commitment': data[44:64],
+                'text': text.decode('ascii'), 'nonce': _word(data, 3), 'proof': proof, 'exit_hash': data[160:192],
+                'tx': entry.get('transactionHash')}
+    except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, AttributeError):
+        return None
+
+
+def decode_redirect(entry):
+    """A `SolanaRedirect` log: from, nonce, commitment, recipient text, proof. None when malformed."""
+    data = _log_data(entry)
+    try:
+        topics = entry['topics']
+        if data is None or len(topics) != 3 or len(data) < 32 * 4:
+            return None
+        text, proof = _dynamic(data, _word(data, 2), 64), _dynamic(data, _word(data, 3), 97)
+        if text is None or proof is None or _word(data, 0) >= 2**64 or any(data[32:44]):
+            return None
+        return {'from': '0x' + topics[2][-40:].lower(), 'nonce': _word(data, 0), 'commitment': data[44:64],
+                'text': text.decode('ascii'), 'proof': proof, 'tx': entry.get('transactionHash')}
+    except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, AttributeError):
+        return None
+
+
+def _candidate(text, commitment, proof, message_of):
+    """One named destination, judged by rules 1 and 2: {'wallet', 'text', 'problem', 'reason'}."""
+    wallet = wallet_of_text(text)
+    out = {'wallet': wallet, 'text': text, 'problem': None, 'reason': None}
+    if wallet is None or not is_wallet(wallet, bytes(commitment)):
+        return dict(out, wallet=None, problem='not-a-wallet-address',
+                    reason='the address named is not a wallet address (not canonical, off the curve, a point without a '
+                           'key, an address known not to be a wallet, or not the one the 20 bytes commit to)')
+    try:
+        message = message_of(text)
+    except S.Refused:
+        message = None
+    if message is None or not sol_proof.exit_proof_valid(wallet, message, proof):
+        return dict(out, problem='invalid-proof',
+                    reason='the proof in the router log is not a signature of the destination key over the message of '
+                           'this exit: nothing shows that anybody holds the key of that address')
+    return out
+
+
+def exit_view(cfg, a, burn, to_block='finalized'):
+    """What the L2 logs up to `to_block` say about who may be paid for `burn` (rules 1 and 2 only; `decide` adds the
+    hold latch and rule 3). `burn`: burn_id, nonce, amount, recipient (20 bytes, hex), from (the `Burned` log's).
+
+    Returns {'direct', 'burner', 'original', 'redirect', 'redirects'}: `original` is the burn's own destination as
+    the router logged it (None for a burn made directly on the token), `redirect` the burner's redirect with the
+    highest nonce (None when there is none), each a candidate of `_candidate` with its router 'nonce'.
+    Reading failures raise S.RpcError: "the L2 did not answer" is never "there is no redirect"."""
+    url, router = cfg.get('l2_rpc'), str(cfg.get('burn_router') or '').lower()
+    if not url or not is_address(router) or cfg.get('l2_chain_id') is None:
+        raise S.Refused('`l2_rpc`, `burn_router` and `l2_chain_id` are required: without the router log no destination '
+                        'can be checked')
+    chain_id, route = int(str(cfg['l2_chain_id']), 0), S.hx(a.route)
+    burn_id = S.hx(S.unhex(burn['burn_id'], 32, 'burn id'))
+    commitment = S.unhex(burn['recipient'], 20, 'recipient')
+    sender = str(burn.get('from', '')).lower()
+    direct = sender != router
+    start = cfg.get('router_from_block') or 0
+    view = {'direct': direct, 'burner': sender if direct and is_address(sender) else None, 'original': None,
+            'redirect': None, 'redirects': 0}
+    if not direct:
+        exits = [decode_exit(e) for e in l2_logs(url, router, [topic(EXIT_EVENT), burn_id], start, to_block)]
+        exits = [e for e in exits if e is not None]
+        if len(exits) != 1 or exits[0]['commitment'] != commitment or exits[0]['amount'] != int(burn['amount']):
+            # The token says the router burned; the router's log for this burn id is missing, doubled or names other
+            # values. Nothing can be established about the destination or the burner: held, and not redirectable.
+            view['original'] = {'wallet': None, 'text': None, 'nonce': None, 'problem': 'no-router-log',
+                                'reason': 'the token names the router as the burner, but the router has no single '
+                                          'matching SolanaExit log for this burn up to this L2 block'}
+            return view
+        e = exits[0]
+        view['burner'] = e['from']
+        view['original'] = _candidate(e['text'], commitment, e['proof'], lambda text: sol_proof.exit_message(
+            text, e['from'], e['amount'], e['nonce'], router, route, chain_id))
+        view['original']['nonce'] = e['nonce']
+    burner = view['burner']
+    if burner is None:
+        return view
+    found = [decode_redirect(e) for e in l2_logs(url, router, [topic(REDIRECT_EVENT), burn_id, '0x' + '00' * 12 + burner[2:]],
+                                                 start, to_block)]
+    found = sorted((r for r in found if r is not None and r['from'] == burner), key=lambda r: r['nonce'])
+    view['redirects'] = len(found)
+    if found:
+        r = found[-1]  # the latest wins; an older redirect counts for nothing, valid or not
+        view['redirect'] = _candidate(r['text'], r['commitment'], r['proof'], lambda text: sol_proof.redirect_message(
+            text, burner, burn_id, r['nonce'], router, route, chain_id))
+        view['redirect']['nonce'] = r['nonce']
+    return view
+
+
+class Holds:
+    """The latch (R330-SOL-3P-1), inside the signer's database file (`db` of the Solana half's config): once a
+    destination of a burn was found not payable for a reason that the chain could later stop showing, it stays
+    refused for that burn. Keys: the burn id for the burn's own destination, `<burn id>:r<nonce>` for a redirect.
+    Entries leave only through `release`, which records what was released, when and why."""
+
+    def __init__(self, path):
+        self.path = Path(path) if path else None
+
+    def _update(self, change):
+        if self.path is None:
+            return None
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(self.path) + '.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            db = json.loads(self.path.read_text()) if self.path.exists() else {}
+            out = change(db)
+            if out is not False:
+                tmp = self.path.with_suffix('.tmp')
+                tmp.write_text(json.dumps(db, indent=2) + '\n')
+                os.replace(tmp, self.path)
+            return out
+
+    def get(self, key):
+        if self.path is None or not self.path.exists():
+            return None
+        return (json.loads(self.path.read_text()).get('held') or {}).get(key)
+
+    def all(self):
+        if self.path is None or not self.path.exists():
+            return {}
+        return dict(json.loads(self.path.read_text()).get('held') or {})
+
+    def latch(self, key, problem, reason, wallet=None):
+        def change(db):
+            held = db.setdefault('held', {})
+            if key in held:
+                return False
+            held[key] = {'problem': problem, 'reason': reason, 'wallet': wallet, 'since': int(time.time())}
+        self._update(change)
+
+    def release(self, key, note):
+        def change(db):
+            entry = (db.get('held') or {}).pop(key, None)
+            if entry is None:
+                return False
+            db.setdefault('released_holds', []).append(dict(entry, key=key, released=int(time.time()), note=note))
+            return entry
+        return self._update(change) or None
+
+
+HELD_PREFIX = ('held: nothing is certified, approved or paid for this burn and its amount stays in the vault. Its '
+               'burner can send it to another wallet with redirectHeldBurn on the burn router. Reason: ')
+
+
+def decide(view, burn_id, holds, destination_of):
+    """The whole rule for one burn: {'target', 'wallet', 'redirect', 'hold', 'reason', 'latched', 'destination'}.
+
+    `target` is 'original', 'redirect' or None (held); `wallet` the 32 bytes to pay for; `hold` a short code and
+    `reason` words when held. `holds` is a `Holds` (the caller's latch); `destination_of(wallet)` is rule 3, the
+    read at `finalized` (`destination`). New holds for reasons 2 and 3 are latched here."""
+    out = {'target': None, 'wallet': None, 'redirect': None, 'hold': None, 'reason': None, 'latched': False,
+           'destination': None}
+
+    def judge(candidate, key):
+        """None when the candidate may be paid, else (code, reason); latches reasons 2 and 3."""
+        prior = holds.get(key)
+        if prior is not None:
+            out['latched'] = True
+            return prior['problem'], 'latched since an earlier read: ' + prior['reason']
+        if candidate['problem']:
+            if candidate['problem'] == 'invalid-proof':
+                holds.latch(key, 'invalid-proof', candidate['reason'], candidate['text'])
+            return candidate['problem'], candidate['reason']
+        dest = destination_of(candidate['wallet'])
+        out['destination'] = dest
+        if dest['hold']:
+            holds.latch(key, 'destination-not-a-wallet', dest['hold'], candidate['text'])
+            return 'destination-not-a-wallet', dest['hold']
+        return None
+
+    original, redirect = view['original'], view['redirect']
+    if original is None:
+        held = ('direct-burn', 'the burn was made directly on the token, without the router: it names no destination '
+                               'with a proof of its key')
+    else:
+        held = judge(original, burn_id)
+        if held is None:
+            return dict(out, target='original', wallet=original['wallet'])
+    if redirect is not None and (original is None or original['problem'] != 'no-router-log'):
+        again = judge(redirect, f'{burn_id}:r{redirect["nonce"]}')
+        if again is None:
+            return dict(out, target='redirect', wallet=redirect['wallet'], redirect=redirect['nonce'], held_before=held[0])
+        return dict(out, hold='redirect-' + again[0], redirect=redirect['nonce'],
+                    reason=HELD_PREFIX + f'its burner redirected it (router nonce {redirect["nonce"]}), and that '
+                    'destination is refused too: ' + again[1] + '. Before the redirect: ' + held[1])
+    return dict(out, hold=held[0], reason=HELD_PREFIX + held[1])
+
+
+def acceptable_recipient(view, burn, recipient20):
+    """Whether a release for `burn` may name `recipient20` (bytes) by rules 1 and 2: the burn's own 20 bytes when
+    its destination is a wallet with a valid proof, or the commitment of the burner's latest redirect when that
+    is. Used where an approval or a payment on Solana is compared with its burn (relayer, guardian, approve)."""
+    return wallet_for_recipient(view, burn, recipient20) is not None
+
+
+def wallet_for_recipient(view, burn, recipient20):
+    """The 32-byte wallet behind an acceptable release recipient, or None."""
+    recipient20 = bytes(recipient20)
+    original, redirect = view['original'], view['redirect']
+    if redirect is not None and redirect['problem'] is None and S.account_id(redirect['wallet']) == recipient20:
+        return redirect['wallet']
+    if original is not None and original['problem'] is None and recipient20 == S.unhex(burn['recipient'], 20):
+        return original['wallet']
+    return None
+
+
+def l2_raw(url, method, params):
+    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode()
+    req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json', 'User-Agent': 'generic-client'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise S.RpcError(method, str(e))
+    if out.get('error') or out.get('result') is None:
+        raise S.RpcError(method, out.get('error') or 'no result')
+    return out['result']
+
+
+def check_router(cfg, a, block='latest'):
+    """The router at `burn_router` is the pinned one (review 330, R330-SOL-3P-3): its code hashes to
+    `burn_router_code_keccak`, its `solanaMint()` is the vault's mint, its `route()` the vault's route, its
+    `token()` the configured token, and the L2 answers the configured chain id. Raises S.Refused / S.RpcError."""
+    url, router = cfg['l2_rpc'], str(cfg['burn_router']).lower()
+    pin = str(cfg.get('burn_router_code_keccak') or '').lower()
+    if len(pin) != 66:
+        raise S.Refused('`burn_router_code_keccak` is required: the router is pinned by its code, not only by its address')
+    code = l2_raw(url, 'eth_getCode', [router, block])
+    try:
+        got = S.hx(S.keccak256(bytes.fromhex(code[2:])))
+    except (ValueError, TypeError):
+        raise S.Refused('the L2 endpoint returned no code for `burn_router`')
+    if got != pin:
+        raise S.Refused('the code at `burn_router` is not the pinned router', pin=pin, chain=got)
+    if int(l2_raw(url, 'eth_chainId', []), 16) != int(str(cfg['l2_chain_id']), 0):
+        raise S.Refused('the L2 endpoint answers another chain id than `l2_chain_id`')
+
+    def view(signature):
+        return l2_call(url, router, S.hx(S.keccak256(signature.encode())[:4]), block).lower()
+    if view('solanaMint()') != S.hx(a.config.mint):
+        raise S.Refused('the router was deployed for another mint than the vault holds')
+    if view('route()') != S.hx(a.route):
+        raise S.Refused('the router was deployed for a token of another route than this vault')
+    token = str(cfg.get('token') or '').lower()
+    if not is_address(token) or view('token()')[-40:] != token[2:]:
+        raise S.Refused('the router was deployed for another token than the configured `token`')
+
+
+def router_runtime_pin(artifact, token, mint32, route):
+    """keccak256 of the router's runtime code as it must be on chain for these constructor values, computed offline
+    from the compiler's artifact (deployedBytecode with its immutable references filled in), and keccak256 of the
+    creation code. A deployed router is pinned by the first; the second identifies the source build."""
+    code = bytearray.fromhex(artifact['deployedBytecode']['object'][2:])
+    refs = artifact['deployedBytecode'].get('immutableReferences') or {}
+    ids = {}
+    for node in _ast_nodes(artifact.get('ast') or {}):
+        if node.get('nodeType') == 'VariableDeclaration' and node.get('mutability') == 'immutable':
+            ids[str(node['id'])] = node['name']
+    values = {'token': S.unhex(token, 20, 'token').rjust(32, b'\0'), 'solanaMint': S.unhex(mint32, 32, 'mint'),
+              'route': S.unhex(route, 32, 'route')}
+    if sorted(ids.get(k) for k in refs) != sorted(values):
+        raise S.Refused('the artifact does not name exactly the immutables token, solanaMint and route (build with --ast)')
+    for key, places in refs.items():
+        for place in places:
+            code[place['start']:place['start'] + place['length']] = values[ids[key]]
+    return {'runtimeCodeKeccak': S.hx(S.keccak256(bytes(code))),
+            'creationCodeKeccak': S.hx(S.keccak256(bytes.fromhex(artifact['bytecode']['object'][2:])))}
+
+
+def _ast_nodes(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _ast_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _ast_nodes(value)
 
 
 def l2_burns(url, token, from_block=0, to_block='finalized'):
@@ -240,43 +511,39 @@ def l2_burns(url, token, from_block=0, to_block='finalized'):
     return burns
 
 
-def burn_status(node, cfg, burn, rpcs=None):
-    """The state of one L2 burn as the chain shows it now, with the reason when it is held.
+def burn_status(node, cfg, burn, rpcs=None, holds=None, to_block='finalized'):
+    """The state of one L2 burn as the chains show it now, with the reason when it is held.
 
     state: 'paid' (the release record, or its bit in the paid page once the record was closed), 'approved'
-    (payable at readyAt), 'held' (`hold` says which rule, `reason` the words), 'waiting' (nothing stands in the
-    way of the signers: waiting for certificate, approval or the end of a pause). `node` is a sol_half.Node."""
+    (payable at readyAt), 'held' (`hold` is the code, `reason` the words, `recoverable` how), 'waiting' (nothing
+    stands in the way of the signers). `redirected` says a redirect of the burner is what will be, or was, paid.
+    `holds` is the caller's latch (`Holds`); without one only what the chains show now is reported and nothing is
+    latched. `node` is a sol_half.Node."""
     out = {'burn': burn['burn_id'], 'nonce': burn['nonce'], 'amount': burn['amount'], 'recipient': burn['recipient'],
-           'direct': str(burn.get('from', '')).lower() != str(cfg.get('burn_router') or '').lower(),
-           'state': 'waiting', 'hold': None, 'reason': None, 'wallet': None}
-    commitment = S.unhex(burn['recipient'], 20)
+           'state': 'waiting', 'hold': None, 'reason': None, 'wallet': None, 'redirected': False}
     record = node.release(burn['nonce'])
-    wallet, found_in = find_wallet(cfg, commitment, burn['burn_id'])
-    if wallet is not None:
-        out.update(wallet=S.b58encode(wallet), walletFoundIn=found_in)
+    view = exit_view(cfg, node.a, burn, to_block)
+    out.update(direct=view['direct'], burner=view['burner'], redirects=view['redirects'])
     if record is not None and record['state'] == 2:
         out.update(state='paid', closed=bool(record.get('closed')), paidAmount=record.get('paid_amount'), paidAt=record.get('paid_at'))
+        if not record.get('closed'):
+            out.update(paidFor=S.hx(record['recipient']), redirected=S.hx(record['recipient']) != burn['recipient'])
         return out
     if record is not None and record['standing']:
-        out.update(state='approved', readyAt=record['ready_at'],
-                   approvalMatchesBurn=(S.hx(record['native_burn']), S.hx(record['recipient']), record['amount'])
-                   == (burn['burn_id'], burn['recipient'], burn['amount']))
-    if wallet is None:
-        return dict(out, state='held' if out['state'] == 'waiting' else out['state'], hold='no-wallet', reason=HELD)
-    dest = destination(rpcs or [node.rpc], wallet, node.a)
-    out['destination'] = dest
-    if dest['hold']:
-        return dict(out, state='held' if out['state'] == 'waiting' else out['state'], hold='destination-not-a-wallet',
-                    reason=HELD_DESTINATION + dest['hold'])
-    if out['state'] == 'waiting':
-        out['recipientTokenAccountExists'] = node.token_balance(S.associated_token_address(wallet, node.config.mint)) is not None
+        return dict(out, state='approved', readyAt=record['ready_at'], approvedFor=S.hx(record['recipient']),
+                    redirected=S.hx(record['recipient']) != burn['recipient'],
+                    approvalMatches=acceptable_recipient(view, burn, record['recipient'])
+                    and (S.hx(record['native_burn']), record['amount']) == (burn['burn_id'], burn['amount']))
+    verdict = decide(view, burn['burn_id'], holds if holds is not None else Holds(None),
+                     lambda wallet: destination(rpcs or [node.rpc], wallet, node.a))
+    out['latched'] = verdict['latched']
+    if verdict['hold']:
+        can = view['burner'] is not None and (view['original'] or {}).get('problem') != 'no-router-log'
+        return dict(out, state='held', hold=verdict['hold'], reason=verdict['reason'], redirectNonce=verdict['redirect'],
+                    recoverable=('the burner ' + view['burner'] + ' calls redirectHeldBurn(burn id, wallet, nonce, proof) on '
+                                 'the burn router, with a wallet whose key signs the redirect message') if can else None)
+    out.update(wallet=S.b58encode(verdict['wallet']), redirected=verdict['target'] == 'redirect',
+               redirectNonce=verdict['redirect'], destination=verdict['destination'],
+               recipientTokenAccountExists=node.token_balance(
+                   S.associated_token_address(verdict['wallet'], node.config.mint)) is not None)
     return out
-
-
-HELD_DESTINATION = ('held: the address this burn would be paid for is not a wallet. Nothing is certified, approved or '
-                    'paid, and the amount stays in the vault. ')
-
-HELD = ('held: no wallet address is known that hashes to the 20-byte recipient of this burn. An exit made through '
-        'the burn router always has one; a burn made directly on the token is paid once a wallet for its 20 bytes '
-        'is announced on the registry. A recipient that is not a wallet commitment (an Ethereum address, a token '
-        'account) can never be paid')

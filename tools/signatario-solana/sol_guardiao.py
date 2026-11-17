@@ -31,6 +31,18 @@ parent reads from an Ethereum vault is read here from the vault's accounts on th
                       approval of a large release is visible for `release_delay` before any token moves, and a
                       guardian pause voids it. The ids keep the parent's prefixes, so the parent pauses the vault.
 
+  DESTINATIONS (new)  every approval and every payment is also held against the recipient rule of sol_recipient.py
+                      (round 17; review 330, R330-SOL-3P-2), read from this guardian's own L2 and Solana nodes:
+                      - its recipient must be the burn's own destination or the destination of the burner's latest
+                        `redirectHeldBurn`, each with a VALID PROOF of the destination key in the router's log.
+                        Otherwise `release-mismatch:unproven-<tag>`, hard: only signers who skipped the rule can
+                        produce it, and a pause voids an approval that is not paid yet.
+                      - the wallet behind it must be a wallet on Solana at `finalized` (absent, or a System account
+                        without data). Otherwise `release-destination:<tag>`. This one is SOFT (an alert to the
+                        operator, no pause) unless `pause_on_destination` is true: the holder of a destination's
+                        key can turn its own address into a mint AFTER the signers read it, at no cost, and a hard
+                        finding would let anyone buy a 72 h pause of the vault and the token that way.
+
 Vault pause (`vault_pause: true`): this guardian signs the pause authorization for pause number `pause_count + 1`
 with its secp256k1 keystore (`sol_keystore` / `sol_password_file`, default the L2 guardian keystore) and delivers
 it with `sol_fee_payer`, an Ed25519 key that only pays the fee. Both steps are sol_vault.py commands; the pause
@@ -41,7 +53,8 @@ for its nonce, and the signers certify it again after the pause (see docs/SOLANA
 
 Config: the parent's keys for the L2 side (`kind: "stable"`, `provenance: true`, `l2_rpc`, `l2_chain_id`, `token`,
 `keystore`, `password_file`, `state`, ...) plus `vault` (the vault's 20-byte id, `sourceVault` of the token),
-`sol_rpc`, `vault_config`, and for `vault_pause` the keys above. `eth_rpc` and `eth_chain_id` are not used.
+`sol_rpc`, `vault_config`, `burn_router` and `burn_router_code_keccak` (the pinned router), optional
+`router_from_block`, `pause_on_destination` (false), and for `vault_pause` the keys above. `eth_rpc` and `eth_chain_id` are not used.
 
 Independence: unlike the parent, this file shares solana_lib.py and sol_half.Node (encodings, account layouts,
 the pin checks) with the signer tools. It does not call the signer or the relayer. Development tool; UNAUDITED.
@@ -58,6 +71,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / 'guardiao'))
 import solana_lib as S  # noqa: E402
 from sol_half import Node  # noqa: E402
+import sol_recipient  # noqa: E402
 import guardiao  # noqa: E402
 from guardiao import Guardian, Unverifiable, addr, b32, uint  # noqa: E402
 
@@ -68,7 +82,14 @@ class SolGuardian(Guardian):
         if self.kind != 'stable' or not self.provenance:
             raise SystemExit('the Solana guardian needs kind "stable" and `provenance: true`')
         self.sol_cfg = {'sol_rpc': self.cfg['sol_rpc'], 'vault_config': self.cfg['vault_config']}
-        self._nodes, self._records = {}, []
+        if not (self.cfg.get('burn_router') and self.cfg.get('burn_router_code_keccak')):
+            raise SystemExit('the Solana guardian needs `burn_router` and `burn_router_code_keccak`: approvals and payments '
+                             'are compared with the proofs in the router\'s log')
+        self.router_cfg = {'l2_rpc': self.cfg['l2_rpc'], 'burn_router': str(self.cfg['burn_router']).lower(),
+                           'burn_router_code_keccak': self.cfg['burn_router_code_keccak'],
+                           'l2_chain_id': int(str(self.cfg['l2_chain_id']), 0), 'token': str(self.cfg['token']).lower(),
+                           'router_from_block': self.cfg.get('router_from_block') or 0}
+        self._nodes, self._records, self._senders, self._paid_checked = {}, [], None, {}
 
     # ── this guardian's Solana node ─────────────────────────────────────────
     def node(self, commitment='finalized'):
@@ -90,7 +111,7 @@ class SolGuardian(Guardian):
             raise Unverifiable(f'Solana RPC: {e}') from e
 
     def round(self):
-        self._nodes = {}
+        self._nodes, self._senders = {}, None
         self.check_retention()
         return super().round()
 
@@ -235,12 +256,38 @@ class SolGuardian(Guardian):
                                  {'reason': 'vault release without a matching L2 burn' if paid else
                                   'vault approval without a matching L2 burn (not paid yet: a pause voids it)', **shown}))
                 continue
-            if (shown['burn_id'], shown['recipient'], shown['amount']) != (b['burn_id'], b['eth_recipient'], b['amount']):
+            if (shown['burn_id'], shown['amount']) != (b['burn_id'], b['amount']):
                 findings.append(('hard', f'release-mismatch:{tag}', 0,
                                  {'reason': 'vault release differs from its L2 burn' if paid else
                                   'vault approval differs from its L2 burn (not paid yet: a pause voids it)',
                                   'release': shown, 'burn': b}))
                 continue
+            # The recipient rule (sol_recipient.py). A paid record that passed is not read again; an approval is
+            # judged every round until it is paid or voided.
+            verdict = self._paid_checked.get((r['nonce'], r['seq'])) if paid else None
+            if verdict is None:
+                verdict = self.recipient_verdict(b, r['recipient'], fin)
+                if paid and verdict == ('ok', None):
+                    self._paid_checked[(r['nonce'], r['seq'])] = verdict
+            kind, why = verdict
+            if kind == 'mismatch':
+                findings.append(('hard', f'release-mismatch:{tag}', 0,
+                                 {'reason': ('vault release' if paid else 'vault approval (not paid yet: a pause voids it)')
+                                  + ' names a recipient that is neither its L2 burn\'s nor its burner\'s redirect',
+                                  'release': shown, 'burn': b}))
+                continue
+            if kind == 'unproven':
+                findings.append(('hard', f'release-mismatch:unproven-{tag}', 0,
+                                 {'reason': ('vault release' if paid else 'vault approval (not paid yet: a pause voids it)')
+                                  + ' for a destination without a valid proof of its key in the router log: ' + why,
+                                  'release': shown, 'burn': b}))
+                continue
+            if kind == 'destination':
+                hard = bool(self.cfg.get('pause_on_destination')) and not paid
+                findings.append(('hard' if hard else 'soft', ('release-mismatch:destination-' if hard else 'release-destination:') + tag,
+                                 0, {'reason': ('vault release was paid' if paid else 'vault approval stands (a guardian pause '
+                                     'voids it; anyone may send the payment)') + ' for a destination that is not a wallet on '
+                                     'Solana: ' + why, 'release': shown, 'burn': b}))
             if paid:
                 released[b['burn_id']] = r['key']
             if fin is None or b['block'] > fin:
@@ -248,6 +295,30 @@ class SolGuardian(Guardian):
                                  {'reason': 'vault release of a burn not finalized on this guardian\'s L2',
                                   'release': shown, 'burn_block': b['block'], 'l2_finalized': fin}))
         return backing, released, findings
+
+    def recipient_verdict(self, b, recipient20, fin):
+        """('ok', None), ('mismatch', None), ('unproven', why) or ('destination', why) for a release recipient of the
+        burn `b`, by the rule of sol_recipient.py on this guardian's own nodes."""
+        if self.blind:  # the L2 does not answer this round: the router's log cannot be read, and the round must go on
+            return 'ok', None
+        def read():
+            if self._senders is None:
+                sol_recipient.check_router(self.router_cfg, self.node().a)
+                self._senders = {x['burn_id']: x['from'] for x in sol_recipient.l2_burns(
+                    self.l2, self.token, self.cfg.get('token_from_block', 0), 'latest')}
+            burn = {'burn_id': b['burn_id'], 'nonce': b['nonce'], 'amount': b['amount'], 'recipient': b['eth_recipient'],
+                    'from': self._senders.get(b['burn_id'])}
+            view = sol_recipient.exit_view(self.router_cfg, self.node().a, burn, hex(fin) if fin is not None else 'finalized')
+            wallet = sol_recipient.wallet_for_recipient(view, burn, recipient20)
+            if wallet is None:
+                if S.hx(recipient20) != b['eth_recipient']:
+                    return 'mismatch', None
+                original = view['original']
+                return 'unproven', (original['reason'] if original is not None else
+                                    'the burn was made directly on the token and its burner has not claimed it')
+            dest = sol_recipient.destination([self.node().rpc], wallet, self.node().a)
+            return ('destination', dest['hold']) if dest['hold'] else ('ok', None)
+        return self.sol(read)
 
     def chain_findings(self, b):
         n = self.node()
