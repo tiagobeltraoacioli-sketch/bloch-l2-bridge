@@ -76,6 +76,13 @@ single-use by consensus (rehearsal J).
   happened and where it went, not who asked.
 - Coins sent to the bare thread address name nobody and cannot be refunded by rule; they join the fee pool and reach
   the owner as surplus. Returning them is the owner's manual decision.
+- The refund request is the one signature a stranger hands to these tools. It is verified **in process**
+  (`btc_core.signer_of`: pure-Python recovery), never by a command-line verifier whose exit code could be made 0 by
+  text shaped like an option (the defect class of R331-XLM-1 on another route). Parsing is strict: exactly `0x` and
+  130 hex characters, v 27 or 28, low s; the address is decoded in process too. `--help`, `-h` plus 130 characters,
+  hex without `0x`, a high-s twin and thirty more shapes are refused (`test_btc_signer.py` `OptionShapedInputs`,
+  rehearsal J1b). The route's only subprocess is the signer's own `cast wallet sign --no-hash` over a digest it
+  computed itself, whose output is then checked in process against the operator's public key.
 
 ## 4. The vault state lives on Bitcoin: the thread
 
@@ -323,7 +330,7 @@ What is never paid: a direct burn whose burner never claims. Stated in `burn sta
 policy; release tarball sha256 `2f38996afaa74dfa469a23bf4727887133dfc09784df1f21ddf1c74d0dc82300`, `SHA256SUMS` with
 two builders' PGP signatures) and anvil 1.7.1 with the token deployed from the frozen creation code and the router
 over it. Seven operators with two throwaway keys each, in separate `cast` keystores (L2 mint key, Bitcoin vault key);
-the mint side is the unchanged `signatario.py`. 85 checks:
+the mint side is the unchanged `signatario.py`. 86 checks:
 
 - S: dust at the thread address from legacy, nested-segwit, segwit and taproot inputs, a fake marker and a coinbase,
   sent first and left there for the whole run; pool-drain attempts.
@@ -420,6 +427,7 @@ is never counted as paid, is payable exactly once, and that no encoding of the m
 | R325-BTC-2P-3 Info: estimate mode, signer without an estimate | Mode and target pinned in the signer; `fee-status` alert line (section 6). Rehearsal N3 |
 | R325-BTC-2P-5 Info: floating pragma | `pragma solidity 0.8.24;` |
 | R325-BTC-2P-6 Info: an anchor above the target | Enforced: deploy tool and every tool require exactly `poolTargetSats` (section 6). Rehearsal N1, N2 |
+| Coordinator, round 17: decisions taken from a CLI exit code or from request text passed as an argument (R331-XLM-1 class) | Not present in `tools/signatario-btc`. Hardened anyway: strict in-process parsing of the refund signature; the signed burn claim no longer exists (claims are L2 state). Section 3a; rehearsal J1b |
 
 ## 13. Review 325 (first pass) and what changed
 
