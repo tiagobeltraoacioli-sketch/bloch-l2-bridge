@@ -614,8 +614,31 @@ class GuardianVerdict(unittest.TestCase):
         self.assertIn('classic SPL Token program', why)
 
     def test_a_round_without_the_l2_does_not_fail_on_it(self):
+        # Restated in round 18 (agent 371): the property "a blind round does not fail on the recipient rule" is kept
+        # (no exception, no finding: 'unjudged' raises none); the verdict is no longer 'ok', which the cache of paid
+        # records took for a judgement (test_a_payment_first_seen_in_a_blind_round_is_judged_later).
         self.g.blind = True
-        self.assertEqual(self.verdict(self.l2.exit('fine')), ('ok', None))
+        kind, why = self.verdict(self.l2.exit('fine'))
+        self.assertEqual(kind, 'unjudged')
+        self.assertIn('next round', why)
+
+    def test_a_payment_first_seen_in_a_blind_round_is_judged_later(self):
+        """Round 18 (agent 371): a payment to a destination without a proof, first seen while the L2 does not
+        answer, must still be reported once the L2 answers again: the blind round's verdict is not cached."""
+        self.g._paid_checked = {}
+        unproven = self.l2.exit(text=S.b58encode(K.keyless_address('blind')), proof=bytes(65))
+        b, r = dict(unproven, eth_recipient=unproven['recipient']), {'nonce': unproven['nonce'], 'seq': 1,
+                                                                     'recipient': S.unhex(unproven['recipient'], 20)}
+        self.g.blind = True
+        self.assertEqual(self.g.judged_recipient(b, r, True, None)[0], 'unjudged')
+        self.g.blind, self.g._senders = False, None
+        self.assertEqual(self.g.judged_recipient(b, r, True, None)[0], 'unproven')
+        fine = self.l2.exit('fine-paid')
+        b2, r2 = dict(fine, eth_recipient=fine['recipient']), {'nonce': fine['nonce'], 'seq': 2, 'recipient': S.unhex(fine['recipient'], 20)}
+        self.g._senders = None
+        self.assertEqual(self.g.judged_recipient(b2, r2, True, None), ('ok', None))
+        self.assertIn((fine['nonce'], 2), self.g._paid_checked, 'a paid record found ok on the L2 is not read again')
+        self.assertNotIn((unproven['nonce'], 1), self.g._paid_checked)
 
 
 class Policy(unittest.TestCase):
