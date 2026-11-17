@@ -1039,6 +1039,7 @@ class Rehearsal:
             r2 = self.vault('execute', '--nonce', str(c['doc']['release']['nonce']), '--owner', S.b58encode(self.walletB.public), *self.pay)
             check(f'and approved and paid (tag {0 if how == "text" else 2})', r['ok'] and r2['ok'], approve=r, execute=r2)
         self.held_burns += [tx_mint, tx_own, tx_id, tx_keyless, tx_other, tx_listed]
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # the monitor and burn-status read at `finalized`
         s1 = self.state()
         check('the six held burns moved nothing on Solana: only the two proven exits were approved and paid',
               s1['totalLocked'] == s0['totalLocked'] - 2 * 10 * U and s1['approvalSeq'] == s0['approvalSeq'] + 2,
@@ -1185,6 +1186,7 @@ class Rehearsal:
         check('relay daemon: the redirected release is approved (recipient rule applied by sol_vault.py approve) and paid to the '
               'wallet the burner named, less 5 bps', bool(approve) and approve[0].get('ok') and approve[0].get('redirected')
               and paid == 10 * U - 5_000, approve=approve, paid=paid, log=lines[-6:])
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # burn-status reads at `finalized`
         r = self.vault('burn-status', *self.l2_args, '--burn', bid)
         row = (r.get('burns') or [{}])[0]
         check('burn-status: paid, to the redirected wallet', r['ok'] and row.get('state') == 'paid' and row.get('redirected') is True, answer=r)
