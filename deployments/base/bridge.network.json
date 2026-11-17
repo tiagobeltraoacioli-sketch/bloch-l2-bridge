@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures)."
+  },
   "network": {
     "id": "base",
     "name": "Base",
@@ -125,6 +130,7 @@
     }
   },
   "notes": [
+    "NOT LAUNCHABLE IN V1 (held): Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures). A page, a pool builder or the DEX gate must not offer this network; every bridge tool refuses it (tools/evm-nets/launch.py).",
     "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
     "Releases on this network need the five signers and the relayer to finish within about 51 s of each other (256 blocks); operators run the daemons at a 5 second interval here. If a round misses the window nothing is paid and it is repeated."
   ]

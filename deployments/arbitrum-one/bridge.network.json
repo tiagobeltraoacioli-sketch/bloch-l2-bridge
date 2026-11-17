@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": true,
+    "state": "launchable",
+    "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it."
+  },
   "network": {
     "id": "arbitrum-one",
     "name": "Arbitrum One",

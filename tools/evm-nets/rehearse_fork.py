@@ -2,9 +2,18 @@
 """End-to-end rehearsal of one EVM source network on a LOCAL anvil fork of it, with the real asset contract.
 
   python3 tools/evm-nets/rehearse_fork.py NETWORK [--rpc URL] [--port BASE] [--keep]
-  python3 tools/evm-nets/rehearse_fork.py NETWORK --measure SECONDS --interval N --block-time S
+  python3 tools/evm-nets/rehearse_fork.py NETWORK --measure SECONDS [--interval N] --block-time S
                                           [--stagger] [--join-delay S] [--anchor-max-age N] [--anchor-depth N]
+                                          [--production-budgets]
       one burn with the daemons running as daemons on a fork paced at S seconds per block: does the release land?
+      --interval defaults to the network's own (networks.json). --production-budgets: the signers run with the
+      network's hourly signing budget and refused-round retry instead of the rig's unlimited ones (review R329-EVM-6).
+
+Chain id of the fork (tools/evm-nets/launch.py). A launchable network rehearsed with its registry settings runs under
+its OWN chain id, so the daemons take the production path: launch check, anchor settings by chain id from the
+registry (the rig's configs omit them). A network that is NOT launchable (Base, BNB Smart Chain), and any run that
+changes the anchor settings on the command line, runs under a rehearsal chain id (900,000,000 + the network's id,
+`anvil --chain-id`): the tools refuse the real id, and nothing signed in such a run is valid on the network.
 
 NETWORK is a key of tools/evm-nets/networks.json. Two loopback anvils are started: a fork of the source network
 (read-only public RPC as the fork source, nothing is ever sent to it) and a plain one standing in for the Bloch L2
@@ -38,6 +47,8 @@ ROOT = HERE.parent.parent
 STABLE = ROOT / 'tools/signatario-stable'
 sys.path.insert(0, str(STABLE))
 import evm_anchor  # noqa: E402
+sys.path.insert(0, str(HERE))
+import launch  # noqa: E402
 
 BIN = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin'))
 CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
@@ -49,7 +60,7 @@ DELAY = 43200
 CAP, WINDOW, MIN_DEPOSIT, MIN_BURN = 100_000 * U, 10_000 * U, 11 * U, 10 * U
 FEE_BPS = 5
 results, gas, PROCS = [], {}, []
-OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0}
+OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False}
 
 
 def sh(*argv, ok=True, cwd=None):
@@ -83,7 +94,9 @@ def selector(error):
 class Rig:
     def __init__(self, name, spec, registry, work, rpc, port):
         self.name, self.spec, self.work = name, spec, work
-        self.chain = spec['chainId']
+        # The chain id the fork runs under: the network's own only when the tools would act for it with these settings.
+        self.registry_chain = not launch.refusal(spec['chainId']) and not OPTS['overrides']
+        self.chain = spec['chainId'] if self.registry_chain else launch.rehearsal_chain_id(spec['chainId'])
         self.salt = os.urandom(16).hex()
         fork = spec['fork']
         self.epoch = fork['slotsInAnEpoch']
@@ -91,15 +104,22 @@ class Rig:
         # Shanghai rules on the fork: the frozen bytecode is Shanghai-level, and under later rules anvil reads a system
         # contract's storage from the fork source for every block it mines (EIP-4788, EIP-2935), which a public
         # endpoint rate-limits.
-        self.history = False  # the EIP-2935 vault variant lives on its own branch, not on this line
-        self.eth = self.anvil(port, '--fork-url', rpc, '--slots-in-an-epoch', self.epoch, '--hardfork',
-                              'prague' if self.history else 'shanghai',
+        source = int(out(CAST, 'chain-id', '--rpc-url', rpc))
+        if source != spec['chainId']:
+            raise SystemExit(f'the fork source serves chain {source}, not {spec["chainId"]}')
+        self.eth = self.anvil(port, '--fork-url', rpc, '--slots-in-an-epoch', self.epoch, '--hardfork', 'shanghai',
                               '--retries', '12', '--fork-retry-backoff', '1500', '--timeout', '60000',
+                              *([] if self.registry_chain else ['--chain-id', self.chain]),
                               *(['--block-time', OPTS['block_time']] if OPTS['block_time'] else []))
         self.l2 = self.anvil(port + 1, '--chain-id', L2_CHAIN)
         got = int(out(CAST, 'chain-id', '--rpc-url', self.eth))
         if got != self.chain:
-            raise SystemExit(f'the fork source serves chain {got}, not {self.chain}')
+            raise SystemExit(f'the fork answers chain {got}, not {self.chain}')
+        if not self.registry_chain:
+            print(f'INFO {name} runs under the rehearsal chain id {self.chain}: '
+                  + ('its anchor settings were changed on the command line' if OPTS['overrides'] else
+                     'it is not launchable and every tool refuses its own id') + '; nothing signed here is valid on the network',
+                  flush=True)
         self.fork_block = int(out(CAST, 'block-number', '--rpc-url', self.eth))
         # Log scans start after the fork block, so that they never reach the fork source (public endpoints refuse or
         # rate-limit eth_getLogs). EVMNETS_FROM_FORK_BLOCK=1 restores the first runs' range, to reproduce their failures.
@@ -339,7 +359,13 @@ class Rig:
         (work / 'relayer.key').write_text(self.key['relayer'] + '\n')
         (work / 'relayer.key').chmod(0o600)
         self.cfgs, self.eth_cfgs = [], []
-        policy = {k: v for k, v in spec['signer'].items()}
+        # Under the network's own chain id the anchor settings come from the registry by chain id (the configs omit
+        # them, as an operator file may); under a rehearsal chain id they are this run's own keys.
+        shared = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin', 'deposit_cursor')
+        policy = {} if self.registry_chain else {k: spec['signer'][k] for k in shared if k in spec['signer']}
+        budgets = {'refused_retry': 0, 'max_release_signs_per_hour': 1000}
+        if OPTS['production_budgets']:
+            budgets = {} if self.registry_chain else {k: spec['signer'][k] for k in ('refused_retry', 'max_release_signs_per_hour')}
         for i, (addr, key, name) in enumerate(self.signers, 1):
             sh(CAST, 'wallet', 'import', f'k{i}', '--private-key', key, '--keystore-dir', work, '--unsafe-password', 'test-password')
             ks = str(work / f'k{i}')
@@ -364,9 +390,9 @@ class Rig:
                 'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
                 'eth_half_release': half + ['release', '--intent', '{intent}'],
                 'shared_dir': str(work / 'shared'), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
-                'vault_from_block': self.from_block, 'anchor_policy': policy.get('anchor_policy', 'finalized'),
-                'anchor_max_age': policy.get('anchor_max_age', 160),
-                'refused_retry': 0, 'max_release_signs_per_hour': 1000,
+                'vault_from_block': self.from_block,
+                **{k: policy[k] for k in ('anchor_policy', 'anchor_max_age') if k in policy}, **budgets,
+                **({} if self.registry_chain else {'rehearsal_network': self.name}),
                 'l2_relayer_key': str(work / 'relayer.key'), 'eth_relayer_key': str(work / 'relayer.key')}))
             self.cfgs.append(path)
             self.eth_cfgs.append(ecfg)
@@ -504,7 +530,7 @@ def flow(rig):
     # 4. burn and release
     r = rig.burn(300 * U, A['bob'])
     gas['token.burn'] = int(r['gasUsed'], 16)
-    if policy == 'probe' and not rig.history:
+    if policy == 'probe':
         # The Ethereum rule (anchor = the finalized block) cannot work here: finalized is outside the blockhash window.
         cfg = json.loads(rig.eth_cfgs[0].read_text())
         cfg.update(anchor_policy='finalized', db=str(rig.work / 'ethdb-ethereum-rule.json'))
@@ -515,20 +541,19 @@ def flow(rig):
         (rig.work / 'cfg-ethereum-rule.json').write_text(json.dumps(scfg))
         done = sh(sys.executable, STABLE / 'signatario.py', '--config', rig.work / 'cfg-ethereum-rule.json', 'release', '--burn-tx',
                   r['transactionHash'], '--out', rig.work / 'eth-rule.sig', ok=False)
+        # Under the network's own chain id the file is refused at start, because it contradicts the registry (review
+        # R329-EVM-3); under a rehearsal chain id the rule itself runs and fails on the finality lag.
         check('4 anchor: with the Ethereum rule (finalized anchor) the signer cannot sign on this network',
-              done.returncode != 0 and 'finality lags' in done.stdout, done.stdout[-400:] + done.stderr[-300:])
+              done.returncode != 0 and ('contradicts the network registry' if rig.registry_chain else 'finality lags') in done.stdout,
+              done.stdout[-400:] + done.stderr[-300:])
     signed = rig.sign_all()
     # The certificate ages 300 source blocks before the relayer sees it (more than the 256-block `blockhash` window).
     rig.mine(rig.eth, 300)
     rel = [e for e in rig.relay() if e.get('kind') == 'relay-release']
-    if rig.history:
-        check('4 anchor: a certificate 300 blocks old is still paid here (anchor read from the EIP-2935 history contract)',
-              rig.bal(rig.held, A['bob']) == net_of(300 * U), rel)
-    else:
-        check('4 anchor: a certificate older than the 256-block window pays nothing (fails safe); a new round is needed',
-              rig.bal(rig.held, A['bob']) == 0 and not rig.released(rig.burn_id(1)), rel)
-        signed = rig.sign_all()
-        rel = rig.relay()
+    check('4 anchor: a certificate older than the 256-block window pays nothing (fails safe); a new round is needed',
+          rig.bal(rig.held, A['bob']) == 0 and not rig.released(rig.burn_id(1)), rel)
+    signed = rig.sign_all()
+    rel = rig.relay()
     rel = [e for e in rel if e.get('kind') == 'relay-release' and e.get('tx')]
     check('4 release: the burn of 300 is paid on the source network, less 5 bps, in what the vault holds',
           rig.bal(rig.held, A['bob']) == net_of(300 * U) and rig.released(rig.burn_id(1)), (signed[-3:], rel))
@@ -762,7 +787,7 @@ def measure(rig, seconds, interval, stagger=False):
         p.kill()
         p.wait()
     head1 = int(rig.rpc(rig.eth, 'eth_blockNumber', []), 16)
-    rounds, relays, errors = {}, [], []
+    rounds, relays, errors, timings, alerts = {}, [], [], [], {}
     for mode, i, log in logs:
         for line in log.read_text(errors='replace').splitlines():
             if not line.startswith('{'):
@@ -776,9 +801,23 @@ def measure(rig, seconds, interval, stagger=False):
                     r['refused'] += 1
             elif e.get('kind') == 'relay-release':
                 relays.append({'t': round(e['t'] - t0), 'tx': bool(e.get('tx')), 'why': str(e.get('reason') or e.get('error') or e.get('id') or '')[:160]})
-            elif e.get('error') or e.get('kind') == 'alert':
+            elif e.get('kind') == 'timing' and e.get('total_s') is not None:
+                timings.append((e.get('total_s'), e.get('anchor_age_s') or 0, e.get('mode'), bool(e.get('signed'))))
+            elif e.get('kind') == 'alert':
+                alerts[e.get('id')] = alerts.get(e.get('id'), 0) + 1
+            elif e.get('error'):
                 errors.append(str(e)[:200])
-    summary = {'network': rig.name, 'vault': 'history' if rig.history else 'frozen', 'interval_s': interval,
+            if e.get('kind') == 'release' and e.get('held') or 'cannot be joined inside the window' in str(e.get('reason')) \
+                    or e.get('reason') == 'hourly signing budget':
+                key = 'held' if e.get('held') else 'budget' if e.get('reason') == 'hourly signing budget' else 'not-joined-window'
+                alerts['release:' + key] = alerts.get('release:' + key, 0) + 1
+    signed_t = [t for t in timings if t[3]]
+    summary = {'network': rig.name, 'chain_id': rig.chain, 'registry_settings_by_chain_id': rig.registry_chain,
+               'production_budgets': OPTS['production_budgets'], 'vault': 'frozen', 'interval_s': interval,
+               'timing': {'signatures_timed': len(signed_t), 'max_work_s': max([t[0] for t in signed_t] or [None]),
+                          'max_anchor_age_at_signature_s': max([t[1] for t in signed_t] or [None]),
+                          'window': launch.timing(rig.spec['chainId'])},
+               'alerts_and_holds': alerts,
                'daemons_staggered': stagger, 'work_before_each_signature_s': OPTS['join_delay'],
                'block_time_s': OPTS['block_time'], 'observed_block_time_s': round((time.time() - t0) / max(1, head1 - head0), 3),
                'signer': rig.spec['signer'], 'paid_after_s': paid_at, 'watched_s': round(time.time() - t0),
@@ -791,7 +830,7 @@ def measure(rig, seconds, interval, stagger=False):
 
 def main():
     args = sys.argv[1:]
-    registry = json.loads((HERE / 'networks.json').read_text())
+    registry = launch.registry()
     if not args or args[0] not in registry['networks']:
         raise SystemExit(__doc__ + f'\nnetworks: {", ".join(registry["networks"])}')
     name = args[0]
@@ -801,7 +840,9 @@ def main():
     OPTS['block_time'] = opt('--block-time')
     OPTS['from_fork_block'] = os.environ.get('EVMNETS_FROM_FORK_BLOCK') == '1'
     OPTS['join_delay'] = float(opt('--join-delay', 0))
+    OPTS['production_budgets'] = '--production-budgets' in args
     if opt('--anchor-max-age') or opt('--anchor-depth'):
+        OPTS['overrides'] = True
         spec = json.loads(json.dumps(spec))
         spec['signer'].update({k: int(opt(f)) for k, f in (('anchor_max_age', '--anchor-max-age'), ('anchor_depth', '--anchor-depth'))
                                if opt(f) and (k != 'anchor_depth' or spec['signer']['anchor_policy'] == 'probe')})
@@ -810,7 +851,7 @@ def main():
     try:
         rig = Rig(name, spec, registry, work, opt('--rpc', spec['rpc']), port)
         if opt('--measure'):
-            measure(rig, int(opt('--measure')), int(opt('--interval', 60)), '--stagger' in args)
+            measure(rig, int(opt('--measure')), int(opt('--interval', spec['signer']['interval_s'])), '--stagger' in args)
         else:
             flow(rig)
     finally:

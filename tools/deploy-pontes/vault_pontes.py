@@ -56,14 +56,26 @@ PROVENANCE_CONTRACT = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSource
 # Round 16 (agent 320): the same vault on other EVM source networks. `ethereum` in a config then names that network.
 # tools/evm-nets/networks.json gives, per chain id, the domain label and the asset. Ethereum (chain 1) is unchanged.
 PROVENANCE_CONTRACTS = (PROVENANCE_CONTRACT,)
+# Round 17 (reviews R329-EVM-1, R329-EVM-2): tools/evm-nets/launch.py holds the launch status of each of those networks;
+# a network that is not launchable is refused by validate, args and verify alike, with no flag to lift it, and the
+# registry pins the fee recipient and rates of every vault config of those networks. Chain 1 never reaches that module.
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
+    import launch  # noqa: E402
+except ImportError:  # a tree without tools/evm-nets: Ethereum only, as before round 16
+    launch = None
 
 
 def source_networks():
-    """chain id -> (source label, asset label, required token or None, vault contracts allowed)."""
+    """chain id -> (source label, asset label, required token or None, vault contracts allowed[, asset, unit token, fees])."""
     nets = {ETH_MAINNET: ('ethereum-mainnet', 'USDC', USDC_MAINNET, (CONTRACT, PROVENANCE_CONTRACT))}
-    path = Path(__file__).resolve().parents[1] / 'evm-nets/networks.json'
-    if path.exists():
-        for spec in json.loads(path.read_text())['networks'].values():
+    try:
+        registry = launch.registry() if launch else None
+    except launch.LaunchError:
+        registry = None  # every chain id of the registry is then refused by launch.refusal with the reason
+    if registry:
+        fees = (registry['feeRecipient'].lower(), registry['feeBps']['deposit'], registry['feeBps']['release'])
+        for spec in registry['networks'].values():
             asset = spec['asset']
             # An asset that is not six-decimal is held through its unit token, deployed first; the raw asset is refused.
             token = asset['address'].lower() if asset['decimals'] == 6 else None
@@ -71,7 +83,7 @@ def source_networks():
             # (tools/evm-nets/evm_nets.py verify-unit); until then no vault config over it validates.
             unit = str((asset.get('unit') or {}).get('address') or '').lower() or None
             nets[int(spec['chainId'])] = (spec['sourceDomainLabel'], spec['assetLabel'], token, (PROVENANCE_CONTRACT,),
-                                          asset['address'].lower(), unit)
+                                          asset['address'].lower(), unit, fees)
     return nets
 ZERO = '0x' + '00' * 20
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
@@ -121,6 +133,9 @@ def validate(cfg, rehearsal, token_cfg=None):
     refuse(isinstance(eth['rehearsal'], bool) and eth['rehearsal'] == rehearsal,
            'ethereum.rehearsal and the --rehearsal flag disagree')
     nets = source_networks()
+    if launch and not rehearsal and is_uint(eth['chainId'], lo=1) and eth['chainId'] != ETH_MAINNET:
+        why = launch.refusal(eth['chainId'])
+        refuse(why is None, why)
     refuse(eth['chainId'] == REHEARSAL_CHAIN if rehearsal else eth['chainId'] in nets,
            f'chainId must be {REHEARSAL_CHAIN}' if rehearsal else
            f'chainId must be {ETH_MAINNET}' + (f', or a source network of tools/evm-nets/networks.json: {sorted(set(nets) - {ETH_MAINNET})}'
@@ -151,6 +166,14 @@ def validate(cfg, rehearsal, token_cfg=None):
                'vault.provenance.fees.recipient is undecided (the protocol treasury on Ethereum), or set with both fees 0')
         if not rehearsal:
             refuse(not no_fee, 'mainnet charges a protocol fee (owner: the bridge must generate revenue); both rates are 0')
+        if net is not None and len(net) > 6:
+            # Review R329-EVM-2: on the registry's networks the fee is not a free field of the config. The recipient and
+            # both rates are the owner's input recorded in tools/evm-nets/networks.json; the vault makes them immutable.
+            want = net[6]
+            refuse(str(fe['recipient']).lower() == want[0] and (fe['depositBps'], fe['releaseBps']) == want[1:],
+                   f'vault.provenance.fees on chain {eth["chainId"]} must be recipient {want[0]}, depositBps {want[1]}, '
+                   f'releaseBps {want[2]} (the owner\'s fee address and rates, tools/evm-nets/networks.json); the config has '
+                   f'{str(fe["recipient"]).lower()}, {fe["depositBps"]}, {fe["releaseBps"]}')
     labels = (v['sourceDomainLabel'], v['nativeDomainLabel'], v['assetLabel'])
     refuse(all(isinstance(x, str) and x for x in labels), 'a vault domain label is undecided')
     refuse(v['sourceDomainLabel'] != v['nativeDomainLabel'], 'source and native domains must differ')

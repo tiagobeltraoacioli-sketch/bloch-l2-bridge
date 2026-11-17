@@ -5,6 +5,8 @@
   python3 signatario.py --config CFG.json remint  --deposit-id 0xID [--locked] --out SIG.json
   python3 signatario.py --config CFG.json combine --sig A.json --sig B.json [...] --out CALL.json
   python3 signatario.py --config CFG.json release --burn-tx 0xHASH [--burn-id 0xID] [--context CERT.json] --out CERT.json
+                                                  [--timing FILE]
+  python3 signatario.py --config CFG.json measure --timing FILE
 
 Message formats: INTERFACE-PONTE-STABLE-ETH-L2.md, section "L2" (S1-S4).
 
@@ -55,6 +57,15 @@ validUntil so the k certificates can be combined; the Ethereum half decides whet
 
 combine: anyone may run it; k partials for the same mint (or release) -> ordered signatures and the call.
 
+`--timing FILE` (round 17, review R329-EVM-4): where the seconds this release took are written, signed or refused:
+the rebuild (`reconstruct_s`, and `rebuild_s` with the private RPC's start), the L2 reads, the source half and the
+total from process start. `measure` runs only the work that precedes a signature (the rebuild and the start of the
+private RPC, nothing with `l2_source: rpc`) and writes the same file; it reads no burn and signs nothing. vigia.py
+passes `--timing` only for a network of tools/evm-nets/networks.json; without the option nothing is written.
+
+A `source_chain_id` other than 1 is checked against tools/evm-nets/launch.py first: a network that is not launchable
+is refused for every command (review R329-EVM-1). Chain 1 never loads that module.
+
 Any mismatch refuses with the reason and exit code 1. Keys are never on the command line.
 """
 import hashlib
@@ -72,6 +83,9 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l2_finality  # noqa: E402
+
+STARTED = time.time()
+TIMING = {}  # seconds of each stage of a release, written only with --timing (review R329-EVM-4)
 
 MAX_STATUS_AGE = 600  # seconds, as atestador.py
 REMINT_TYPEHASH_STR = 'Remint(bytes32 mintHash,uint64 generation,bool locked)'
@@ -180,6 +194,18 @@ class Ctx:
         self.token = c['token'].lower()
         self.l2_chain_id = int(c['l2_chain_id'])
         self.source_chain_id = int(c['source_chain_id'])
+        if self.source_chain_id != 1:
+            # Review R329-EVM-1: no mint, remint, release or combine for a network that is not launchable.
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
+                import launch
+            except ImportError:
+                refuse('tools/evm-nets/launch.py is missing: a source chain other than Ethereum cannot be checked against the '
+                       'launch registry', source_chain_id=self.source_chain_id)
+            why = launch.refusal(self.source_chain_id)
+            if why:
+                refuse('this network is not launchable: nothing is signed or combined for it',
+                       source_chain_id=self.source_chain_id, why=why)
         self.source_vault = c['source_vault'].lower()
         self.source_route = c['source_route'].lower()
         self.db_path = Path(c['db'])
@@ -594,6 +620,7 @@ def own_l2(ctx, work):
         # from. With `l2_pins` the pinned arguments above are the only ones used.
         net_args = [str(a) for a in c.get('network_args', [])]
     target = work / 'l2'
+    t0 = time.time()
     for _ in range(3):  # the follower may be rewriting its index
         done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),
                                '--l1-follower', str(follower / 'native'), *rule, *net_args],
@@ -605,6 +632,8 @@ def own_l2(ctx, work):
     else:
         refuse('reconstruct from L1 data failed', stderr=done.stderr.strip()[-1500:])
     rebuilt = json.loads(done.stdout)
+    TIMING.update(reconstruct_s=round(time.time() - t0, 3), native_blocks=rebuilt.get('native_blocks'),
+                  l2_blocks=rebuilt.get('settled'))
     if pins is not None:
         try:
             l2_finality.check_rebuild(rebuilt, status, pins)
@@ -645,6 +674,7 @@ def own_l2(ctx, work):
         proc.kill()
         proc.wait()
         raise
+    TIMING['rebuild_s'] = round(time.time() - t0, 3)
     return url, proc, status, rebuilt
 
 
@@ -759,10 +789,50 @@ def cmd_release(ctx, args):
     if ctx.cfg.get('work_dir'):
         Path(ctx.cfg['work_dir']).mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
+    timing = option(args, '--timing', '')
     try:
         release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id)
+        TIMING['signed'] = True
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        if timing:
+            write_timing(timing, 'join' if proposal_path else 'open', source)
+
+
+def write_timing(path, mode, source):
+    """The seconds this run took, for the daemon and the monitor. Never decides anything and never fails a signature."""
+    try:
+        doc = {'t': int(time.time()), 'mode': mode, 'l2_source': source, 'signed': bool(TIMING.get('signed')),
+               'total_s': round(time.time() - STARTED, 3), **{k: v for k, v in TIMING.items() if k != 'signed'}}
+        tmp = Path(str(path) + '.tmp')
+        tmp.write_text(json.dumps(doc) + '\n')
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def cmd_measure(ctx, args):
+    """Only the work that precedes a release signature: the rebuild and the private RPC's start. Signs nothing."""
+    timing = option(args, '--timing')
+    source = ctx.cfg.get('l2_source', 'rebuild')
+    if ctx.pins is not None and source != 'rebuild':
+        refuse(f'l2_source "{source}" trusts an RPC for finality: tests only, refused with l2_pins')
+    if ctx.cfg.get('work_dir'):
+        Path(ctx.cfg['work_dir']).mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix='signatario-stable-', dir=ctx.cfg.get('work_dir')))
+    proc = None
+    try:
+        if source == 'rebuild':
+            _, proc, _, _ = own_l2(ctx, work)
+        elif source != 'rpc':
+            refuse(f'unknown l2_source {source}')
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(work, ignore_errors=True)
+        write_timing(timing, 'measure', source)
+    print(json.dumps({'measured': True, 'l2_source': source, **TIMING}))
 
 
 def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
@@ -774,8 +844,10 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
             url, status, rebuilt = ctx.cfg['l2_rpc'], None, None
         else:
             refuse(f'unknown l2_source {source}')
+        t1 = time.time()
         release, l2 = finalized_burn(ctx, url, burn_tx, status, burn_id)
         mints = token_mints(ctx, url, l2['finalized_number'])
+        TIMING['l2_reads_s'] = round(time.time() - t1, 3)
     finally:
         if proc is not None:
             proc.kill()
@@ -808,7 +880,11 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
               'proposed_context': proposed, 'l2_mints': mints}
     intent_file = work / 'intent.json'
     intent_file.write_text(json.dumps(intent, indent=2) + '\n')
-    eth = ctx.eth_half('release', intent=str(intent_file))
+    t2 = time.time()
+    try:
+        eth = ctx.eth_half('release', intent=str(intent_file))
+    finally:
+        TIMING['source_half_s'] = round(time.time() - t2, 3)
 
     # the Ethereum half must have signed exactly this release with this L2 context
     got_rel = eth.get('release') or {}
@@ -862,7 +938,8 @@ def main():
     if not args or args[-1] in ('-h', '--help'):
         raise SystemExit(__doc__)
     ctx = Ctx(option(args, '--config'))
-    commands = {'mint': cmd_mint, 'remint': cmd_remint, 'combine': cmd_combine, 'release': cmd_release}
+    commands = {'mint': cmd_mint, 'remint': cmd_remint, 'combine': cmd_combine, 'release': cmd_release,
+                'measure': cmd_measure}
     if not any(c in args for c in commands):
         raise SystemExit(__doc__)
     cmd = next(c for c in args if c in commands)

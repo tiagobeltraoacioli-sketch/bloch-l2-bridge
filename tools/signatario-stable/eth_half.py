@@ -41,6 +41,13 @@ deposit's block to be that many blocks below `finalized` (a margin for networks 
 validator set). `deposit_cursor` (default false): `deposit` locates the log through a persisted index of the vault's
 `Deposited` logs instead of scanning the vault's whole history for each deposit (networks that make hundreds of
 thousands of blocks a day); every check on the log itself is unchanged. `probe` is refused on chain 1.
+
+Round 17 (reviews R329-EVM-1, R329-EVM-3). On a chain other than 1 this module asks tools/evm-nets/launch.py before
+anything else: a network that is not launchable is refused (no key, flag or environment variable lifts it), and for a
+network of tools/evm-nets/networks.json the four keys `anchor_policy`, `anchor_depth`, `anchor_max_age` and
+`finalized_margin` are the registry's, by chain id: a config that omits them gets the registry's values, a config that
+contradicts them is refused at start. A chain id that is neither 1 nor in the registry is a local rehearsal chain and
+keeps the keys of its config. Chain 1 never loads that module and reads exactly the keys it read before.
 """
 import fcntl
 import hashlib
@@ -132,6 +139,11 @@ class Eth:
         if chain != int(c['eth_chain_id']):
             refuse('this Ethereum node serves another chain', node=chain, config=int(c['eth_chain_id']))
         self.chain_id = chain
+        if chain != 1:
+            c = self.cfg = self.network_settings(chain, c)
+            self.anchor_max_age = int(c.get('anchor_max_age', 160))
+            if not 0 < self.anchor_max_age < BLOCKHASH_WINDOW:
+                refuse('network registry: anchor_max_age must be in (0, 256)')
         self.anchor_policy = c.get('anchor_policy', 'finalized')
         self.anchor_depth = int(c.get('anchor_depth', 2))
         self.finalized_margin = int(c.get('finalized_margin', 0))
@@ -145,6 +157,35 @@ class Eth:
         self.provenance = bool(c.get('provenance'))
         if self.provenance:
             use_provenance()
+
+    @staticmethod
+    def network_settings(chain, c):
+        """A chain other than Ethereum: the launch status, and the anchor settings every signer of the network shares
+        (tools/evm-nets/launch.py). Returns the config with the registry's values; refuses a network that is not
+        launchable and a config that contradicts the registry."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
+            import launch
+        except ImportError:
+            refuse('tools/evm-nets/launch.py is missing: a chain other than Ethereum cannot be checked against the launch '
+                   'registry, so nothing is attested or signed for it', chain_id=chain)
+        why = launch.refusal(chain)
+        if why:
+            refuse('this network is not launchable: nothing is attested or signed for it', chain_id=chain, why=why)
+        settings = launch.signer_settings(chain)
+        if settings is None:
+            return c  # a local rehearsal chain: its own keys
+        bad = launch.config_conflicts(chain, c, 'eth_half')
+        if bad:
+            refuse('config contradicts the network registry (tools/evm-nets/networks.json): remove these keys or set the '
+                   'registry values; every signer of a network must use the same anchor settings',
+                   chain_id=chain, conflicts=[{'key': k, 'config': v, 'registry': w} for k, v, w in bad])
+        c = dict(c)
+        for key in launch.ANCHOR_KEYS:
+            if key in settings:
+                c[key] = settings[key]
+        c.setdefault('deposit_cursor', settings.get('deposit_cursor', False))
+        return c
 
     # ── tools ────────────────────────────────────────────────────────────────
     def run(self, argv, what):
@@ -426,6 +467,7 @@ def cmd_release(eth, args):
 
     finalized = int(eth.block('finalized')['number'], 16)
     prop = intent.get('proposed_context')
+    measured = {}
     if eth.anchor_policy == 'probe':
         # What must be final: the deposits that back this burn. The anchor below is only a fork binding.
         if eth.provenance and not eth.word(eth.call('provenanceMatches(uint64,uint64,bytes32)', rel['mintCount'],
@@ -433,6 +475,7 @@ def cmd_release(eth, args):
             refuse('the deposits that back this burn are not finalized on the source network yet; retry later',
                    finalized_number=finalized, head_number=head)
         evm_number, default_hash = eth.evm_view(head, None)
+        measured = {'anchor_evm_number': evm_number}  # the anchor's age at this signature, in the EVM's own numbers
         if prop:
             number = uint(prop['sourceAnchorNumber'], 256, 'sourceAnchorNumber')
             anchor_hash = hex32(prop['sourceAnchorHash'], 'sourceAnchorHash')
@@ -499,7 +542,7 @@ def cmd_release(eth, args):
     if len(sig) != 132 or int(sig[66:130], 16) > 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0:
         refuse('signer produced a malformed or high-s signature')
     answer(True, signer=signer, release=rel, context=context, digest=digest, signature=sig,
-           eth_finalized_number=finalized, eth_head_number=head, **switch)
+           eth_finalized_number=finalized, eth_head_number=head, **measured, **switch)
 
 
 def main():

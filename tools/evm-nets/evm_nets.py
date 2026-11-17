@@ -8,11 +8,16 @@
   evm_nets.py verify-unit NETWORK --rpc URL --address A  read-only: the deployed unit token is exactly that code (then pin it
                                                          in networks.json; vault_pontes.py refuses any other vault.token)
 
-Per network: `busdc-vault.config.json` (vault_pontes.py; the Ethereum template with this network's chain id, labels and
-asset), `busdc-token.config.json` (deploy_pontes.py; this network's L2 token name and symbol), `bridge.network.json`
-(schema bloch.bridge.network.v1) and `ops/eth-half.template.json` (the signer's source half, with the network's anchor
-and finality settings). Every decision that is `null` / `TBD-owner` in the Ethereum templates stays undecided here:
-the committee is the same keys, so the owner fills each config with the same addresses. Nothing is deployed or sent.
+Per LAUNCHABLE network (tools/evm-nets/launch.py): `busdc-vault.config.json` (vault_pontes.py; the Ethereum template
+with this network's chain id, labels and asset), `busdc-token.config.json` (deploy_pontes.py; this network's L2 token
+name and symbol), `ops/eth-half.template.json` (the signer's source half), `ops/signer.template.json` and
+`ops/relayer.template.json` (signatario.py and vigia.py, with the network's anchor settings, pacing and budgets). Every
+decision that is `null` / `TBD-owner` in the Ethereum templates stays undecided here: the committee is the same keys,
+so the owner fills each config with the same addresses. Nothing is deployed or sent.
+
+Every network, launchable or not, gets `bridge.network.json` (schema bloch.bridge.network.v1) with its `launch` block,
+because that is the file the DEX and the pages read. A network that is not launchable gets NO deployment or operator
+file: `write` removes them, `check` fails while one exists, and `verify-unit` refuses (review R329-EVM-1).
 """
 import copy
 import json
@@ -20,6 +25,8 @@ from pathlib import Path
 import sys
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import launch  # noqa: E402
 ROOT = HERE.parent.parent
 DEP = ROOT / 'deployments'
 TOKEN_CREATION = '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7'
@@ -55,9 +62,6 @@ def vault_config(name, spec, registry, template):
     n['fees'] = (f'5 bps of each deposit and 5 bps of each release, paid on {spec["name"]} to {registry["feeRecipient"]} (the owner\'s '
                  'address for every EVM network, given 2026-11-16; a single externally owned address by the owner\'s choice). '
                  'A constructor argument: immutable once deployed.')
-    if spec.get('v1') is False:
-        n['NOT-IN-V1'] = ('NOT IN V1 - OWNER DECISION. Developer, reviewer and coordinator recommend leaving this network out of v1 '
-                          '(docs/BRIDGE-EVM-NETWORKS.md section 6, the owner brief). These files exist so that the option is real.')
     n['TBD-owner'] = ('source.revision; deployer.address; deployer.fundedBy.safe; the 7 release signers and 3 guardians (the SAME '
                       'addresses as in deployments/mainnet/busdc-vault-mainnet.config.json); confirm cap, windowLimit, switchDelay'
                       + ('; vault.token (the deployed unit token)' if unit else ''))
@@ -84,9 +88,58 @@ def eth_half(name, spec, template):
     for k in ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin', 'deposit_cursor'):
         if k in spec['signer']:
             c[k] = spec['signer'][k]
-    c['_about_anchor'] = spec['signer']['why']
+    c['_about_anchor'] = (spec['signer']['why'] + '. These four anchor keys are the registry\'s (tools/evm-nets/networks.json): '
+                          'eth_half.py takes them by chain id and refuses a file that contradicts them.')
     for k in ('keystore', 'password_file', 'db'):
         c[k] = c[k].replace('bloch-busdc-signer', f'bloch-busdc-{name}-signer')
+    return c
+
+
+def renamed(value, name):
+    """The Ethereum bridge's service names in a template, per network: one set of daemons, files and feeds per network."""
+    if isinstance(value, str):
+        return value.replace('bloch-busdc-', f'bloch-busdc-{name}-')
+    if isinstance(value, list):
+        return [renamed(v, name) for v in value]
+    if isinstance(value, dict):
+        return {k: renamed(v, name) for k, v in value.items()}
+    return value
+
+
+def signer_template(name, spec, template):
+    sig, tim = spec['signer'], launch.timing(spec['chainId'])
+    c = renamed(copy.deepcopy(template), name)
+    c['_about'] += (f' Round 17, {spec["name"]}: one signer daemon per network, with its own files, feed and source node. The keys '
+                    'from `anchor_policy` down are this network\'s (tools/evm-nets/networks.json); vigia.py takes the anchor keys by '
+                    'chain id and refuses a file that contradicts them.')
+    c['source_chain_id'] = c['eth_chain_id'] = spec['chainId']
+    c['eth_rpc'] = f'TBD-owner (this operator\'s own {spec["name"]} node)'
+    c['token'] = f'TBD-owner ({spec["l2"]["symbol"]} address on the L2, from its deployment record)'
+    c['source_vault'] = f'TBD-owner (the {spec["name"]} vault: vault_pontes.py verify, busdcEthereum.vault)'
+    c['vault_from_block'] = f'TBD-owner ({spec["name"]} block of the vault deployment)'
+    c['eth_signer'] = "TBD-owner (this operator's release address, one of the vault's 7 signers)"
+    c['anchor_policy'], c['anchor_max_age'] = sig['anchor_policy'], sig['anchor_max_age']
+    c['max_release_signs_per_hour'], c['refused_retry'] = sig['max_release_signs_per_hour'], sig['refused_retry']
+    c['timing_state'] = f'/var/lib/bloch-busdc-{name}-signer/timing.json'
+    c['_about_pacing'] = (f'{sig["pacing_why"]}. Run `vigia.py sign` without --interval (the network\'s {sig["interval_s"]} s is the '
+                          'default; a longer one is refused).')
+    c['_about_timing'] = (f'Review R329-EVM-4. The join window is {tim["window_s"]:.0f} s. Every release signature is timed into '
+                          f'timing_state; `release-window-budget` is alerted at {tim["alert_s"]:.0f} s of work or anchor age per '
+                          f'signature and the signer starts no round while its recent work exceeds {tim["hold_s"]:.0f} s '
+                          '(`release-window-hold`). Watch the file with tools/evm-nets/signer_timing.py check.')
+    return c
+
+
+def relayer_template(name, spec, template):
+    sig = spec['signer']
+    c = renamed(copy.deepcopy(template), name)
+    c['_about'] += f' Round 17, {spec["name"]}: one relayer per network, with its own gas keys, nonce record and files.'
+    c['source_chain_id'] = c['eth_chain_id'] = spec['chainId']
+    c['eth_rpc'] = f'TBD-owner (an RPC of {spec["name"]})'
+    c['anchor_policy'], c['anchor_max_age'] = sig['anchor_policy'], sig['anchor_max_age']
+    c['eth_max_gas_price_gwei'] = 'TBD-owner (the most this relayer pays per gas on the source network; proposed 5)'
+    c['_about_pacing'] = (f'Run `vigia.py relay` without --interval (the network\'s {sig["interval_s"]} s is the default; a longer '
+                          'one is refused): a certificate must land within 256 blocks of its anchor.')
     return c
 
 
@@ -102,6 +155,7 @@ def network_json(name, spec, registry, vcfg):
     doc = {
         'schema': 'bloch.bridge.network.v1',
         'status': 'unaudited-not-deployed',
+        'launch': dict(spec['launch']),
         'network': {'id': name, 'name': spec['name'], 'kind': 'evm', 'chainId': str(spec['chainId']),
                     'nativeCurrency': {'symbol': spec['nativeSymbol'], 'decimals': 18}},
         'asset': {
@@ -166,9 +220,9 @@ def network_json(name, spec, registry, vcfg):
     doc['deposit']['refusals'] = ['an amount below minDeposit or above maxDeposit, or one that would pass the cap',
                                   'an l2Recipient that is zero or longer than 20 bytes',
                                   'do not name a contract as l2Recipient unless it can move the token']
-    if spec.get('v1') is False:
-        doc['notes'].insert(0, 'NOT IN V1 - OWNER DECISION: the recommendation is to leave this network out of v1. A page must not '
-                               'offer it unless the owner decides otherwise.')
+    if not spec['launch']['v1']:
+        doc['notes'].insert(0, f'NOT LAUNCHABLE IN V1 ({spec["launch"]["state"]}): {spec["launch"]["reason"]} A page, a pool builder '
+                               'or the DEX gate must not offer this network; every bridge tool refuses it (tools/evm-nets/launch.py).')
     if unit:
         doc['release']['notes'].append('the page must send unwrap(to, units) for the user right after the release is paid, or show '
                                        'it as a required second step with the unit balance; a recipient that is an exchange deposit '
@@ -220,7 +274,8 @@ def rpc(url, method, params):
 
 def verify_unit(name, url, address, block='finalized'):
     """Read-only: is the contract at `address` exactly ScaledUnitToken over this network's asset? (review R325-EVM-2)"""
-    spec = json.loads((HERE / 'networks.json').read_text())['networks'][name]
+    spec = launch.registry()['networks'][name]
+    launch.require(spec['chainId'])  # review R329-EVM-1: nothing is validated for a network that is not launchable
     if int(rpc(url, 'eth_chainId', []), 16) != spec['chainId']:
         raise SystemExit('the RPC serves another chain')
     at = rpc(url, 'eth_getBlockByNumber', [block, False])['number']
@@ -236,47 +291,73 @@ def verify_unit(name, url, address, block='finalized'):
                                           'then evm_nets.py write'}
 
 
+DEPLOY_FILES = ('busdc-vault.config.json', 'busdc-token.config.json', 'ops/eth-half.template.json', 'ops/signer.template.json',
+                'ops/relayer.template.json')
+
+
 def derive():
-    registry = json.loads((HERE / 'networks.json').read_text())
+    """(files to write, files that must not exist). Raises launch.LaunchError when the registry cannot be trusted."""
+    registry = launch.registry()
     vt = json.loads((DEP / 'mainnet/busdc-vault-mainnet.config.json').read_text())
     tt = json.loads((DEP / 'mainnet/busdc-mainnet.config.json').read_text())
-    et = json.loads((DEP / 'mainnet/busdc-ops/eth-half.template.json').read_text())
-    files = {}
+    ops = {n: json.loads((DEP / f'mainnet/busdc-ops/{n}.template.json').read_text()) for n in ('eth-half', 'signer', 'relayer')}
+    files, absent = {}, []
     for name, spec in registry['networks'].items():
-        vcfg = vault_config(name, spec, registry, vt)
+        vcfg = vault_config(name, spec, registry, vt)  # also the source of the limits shown in bridge.network.json
+        files[DEP / name / 'bridge.network.json'] = dump(network_json(name, spec, registry, vcfg))
+        if launch.refusal(spec['chainId']):
+            absent += [DEP / name / f for f in DEPLOY_FILES]
+            continue
         files[DEP / name / 'busdc-vault.config.json'] = dump(vcfg)
         files[DEP / name / 'busdc-token.config.json'] = dump(token_config(name, spec, tt))
-        files[DEP / name / 'ops/eth-half.template.json'] = dump(eth_half(name, spec, et))
-        files[DEP / name / 'bridge.network.json'] = dump(network_json(name, spec, registry, vcfg))
-    return files
+        files[DEP / name / 'ops/eth-half.template.json'] = dump(eth_half(name, spec, ops['eth-half']))
+        files[DEP / name / 'ops/signer.template.json'] = dump(signer_template(name, spec, ops['signer']))
+        files[DEP / name / 'ops/relayer.template.json'] = dump(relayer_template(name, spec, ops['relayer']))
+    return files, absent
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
     if mode == 'list':
-        for name, spec in json.loads((HERE / 'networks.json').read_text())['networks'].items():
-            print(f'{name:14} chain {spec["chainId"]:6} {spec["asset"]["symbol"]} {spec["asset"]["address"]} '
+        for name, spec in launch.registry()['networks'].items():
+            print(f'{name:14} chain {spec["chainId"]:6} {spec["launch"]["state"]:10} {spec["asset"]["symbol"]} {spec["asset"]["address"]} '
                   f'{spec["asset"]["decimals"]} decimals -> {spec["l2"]["symbol"]:12} 256 blocks = {spec["measured"]["blockhashWindowSeconds"]} s')
     elif mode == 'unit-hash':
-        spec = json.loads((HERE / 'networks.json').read_text())['networks'][sys.argv[2]]
-        print(json.dumps({'network': sys.argv[2], 'expectedRuntimeCodeKeccak': keccak(unit_runtime(spec))}, indent=2))
+        spec = launch.registry()['networks'][sys.argv[2]]
+        print(json.dumps({'network': sys.argv[2], 'expectedRuntimeCodeKeccak': keccak(unit_runtime(spec)),
+                          'launch': spec['launch']['state']}, indent=2))
     elif mode == 'verify-unit':
         opt = lambda n: sys.argv[sys.argv.index(n) + 1]  # noqa: E731
         print(json.dumps(verify_unit(sys.argv[2], opt('--rpc'), opt('--address'),
                                      opt('--block') if '--block' in sys.argv else 'finalized'), indent=2))
     elif mode == 'write':
-        for path, text in derive().items():
+        files, absent = derive()
+        for path, text in files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
             print(f'wrote {path.relative_to(ROOT)}')
+        for path in absent:
+            if path.exists():
+                path.unlink()
+                print(f'removed {path.relative_to(ROOT)} (its network is not launchable)')
+            if path.parent.name == 'ops' and path.parent.is_dir() and not any(path.parent.iterdir()):
+                path.parent.rmdir()
     elif mode == 'check':
-        stale = [str(p.relative_to(ROOT)) for p, text in derive().items() if not p.exists() or p.read_text() != text]
-        if stale:
-            raise SystemExit('stale or missing (run evm_nets.py write): ' + ', '.join(stale))
-        print('ok: every deployments/<network>/ file is what networks.json and the Ethereum templates derive')
+        files, absent = derive()
+        stale = [str(p.relative_to(ROOT)) for p, text in files.items() if not p.exists() or p.read_text() != text]
+        present = [str(p.relative_to(ROOT)) for p in absent if p.exists()]
+        if stale or present:
+            raise SystemExit('; '.join(filter(None, [
+                stale and 'stale or missing (run evm_nets.py write): ' + ', '.join(stale),
+                present and 'deployment files of a network that is not launchable (run evm_nets.py write): ' + ', '.join(present)])))
+        print('ok: every deployments/<network>/ file is what networks.json and the Ethereum templates derive, and no network '
+              'that is not launchable has a deployment or operator file')
     else:
         raise SystemExit(__doc__)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except launch.LaunchError as e:
+        raise SystemExit(f'refused: {e}')

@@ -24,6 +24,8 @@ import network_json  # noqa: E402
 
 REGISTRY = json.loads((HERE / 'networks.json').read_text())
 NETS = REGISTRY['networks']
+# Round 17: only launchable networks have deployment files (tools/evm-nets/launch.py; tests in test_launch_r17.py).
+LIVE = {n: s for n, s in NETS.items() if s['launch']['v1']}
 CAST = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin')) / 'cast'
 
 
@@ -111,18 +113,23 @@ class SignerRules(unittest.TestCase):
                 self.assertLessEqual(s['anchor_depth'], 12, name)
 
     def test_bnb_is_marked_not_in_v1_and_its_unit_token_is_unpinned(self):
-        self.assertIs(NETS['bnb'].get('v1'), False)
+        self.assertEqual((NETS['bnb']['launch']['v1'], NETS['bnb']['launch']['state']), (False, 'out'))
+        self.assertNotIn('v1', NETS['bnb'])
         self.assertIsNone(NETS['bnb']['asset']['unit']['address'])
         doc = json.loads((ROOT / 'deployments/bnb/bridge.network.json').read_text())
-        self.assertTrue(doc['notes'][0].startswith('NOT IN V1'))
+        self.assertTrue(doc['notes'][0].startswith('NOT LAUNCHABLE IN V1 (out)'))
+        self.assertEqual(doc['launch'], NETS['bnb']['launch'])
         self.assertTrue(any('unwrap' in n for n in doc['release']['notes']))
 
 
 class Generated(unittest.TestCase):
     def test_committed_files_are_what_the_generator_derives(self):
-        for path, text in evm_nets.derive().items():
+        files, absent = evm_nets.derive()
+        for path, text in files.items():
             self.assertTrue(path.exists(), path)
             self.assertEqual(path.read_text(), text, f'{path} is stale: run evm_nets.py write')
+        for path in absent:
+            self.assertFalse(path.exists(), f'{path}: a network that is not launchable has no deployment file')
 
     def test_every_bridge_network_json_is_valid(self):
         for name in NETS:
@@ -164,7 +171,7 @@ class Generated(unittest.TestCase):
 
     def test_every_config_keeps_the_ethereum_limits_fee_and_committee_shape(self):
         eth = json.loads((ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json').read_text())['vault']
-        for name in NETS:
+        for name in LIVE:
             v = json.loads((ROOT / 'deployments' / name / 'busdc-vault.config.json').read_text())['vault']
             for key in ('cap', 'transferMode', 'policy', 'provenance'):
                 self.assertEqual(v[key], eth[key], (name, key))
@@ -174,7 +181,7 @@ class Generated(unittest.TestCase):
             self.assertEqual(v['provenance']['fees'], {'recipient': REGISTRY['feeRecipient'], 'depositBps': 5, 'releaseBps': 5})
 
     def test_no_generated_file_holds_a_decided_key_or_deployer(self):
-        for name in NETS:
+        for name in LIVE:
             v = json.loads((ROOT / 'deployments' / name / 'busdc-vault.config.json').read_text())
             self.assertIsNone(v['deployer']['address'])
             self.assertTrue(all(s['address'] is None for s in v['vault']['signers']['set']))
@@ -218,19 +225,14 @@ class VaultConfigs(unittest.TestCase):
             return self.tool(command, '--config', p)
 
     def test_committed_templates_are_refused_as_undecided(self):
-        for name in NETS:
+        for name in LIVE:
             rc, r = self.tool('validate', '--config', ROOT / 'deployments' / name / 'busdc-vault.config.json')
             self.assertEqual((rc, r['decision']), (1, 'refused'), name)
             self.assertIn('undecided', r['reason'])
 
     def test_filled_configs_validate_and_give_eleven_arguments(self):
-        for name, spec in NETS.items():
+        for name, spec in LIVE.items():
             rc, r = self.run_cfg(self.filled(name))
-            if spec['asset']['decimals'] != 6:
-                # R325-EVM-2: no vault config validates over a unit token that is not deployed, verified and pinned.
-                self.assertEqual(rc, 1, name)
-                self.assertIn('not deployed and pinned yet', r['reason'])
-                continue
             self.assertEqual((rc, r.get('decision')), (0, 'config-valid'), (name, r))
             rc, a = self.run_cfg(self.filled(name), 'args')
             self.assertEqual(len(a['constructorArgs']), 11, name)
@@ -244,13 +246,10 @@ class VaultConfigs(unittest.TestCase):
         c = self.filled('op-mainnet')
         c['vault']['sourceDomainLabel'] = 'ethereum-mainnet'
         self.assertIn('labels', self.run_cfg(c)[1]['reason'])
-        c = self.filled('bnb')
-        c['vault']['token'] = NETS['bnb']['asset']['address']
-        self.assertIn('unit token', self.run_cfg(c)[1]['reason'])
-        c = self.filled('base')
+        c = self.filled('op-mainnet')
         c['vault']['contract'] = 'contracts/usdt/ContextBoundSourceVault.sol:ContextBoundSourceVault'
         c['vault'].pop('provenance')
-        self.assertIn('vault.contract on chain 8453', self.run_cfg(c)[1]['reason'])
+        self.assertIn('vault.contract on chain 10', self.run_cfg(c)[1]['reason'])
         c = self.filled('linea')
         c['ethereum']['chainId'] = 5
         self.assertIn('chainId must be 1, or a source network', self.run_cfg(c)[1]['reason'])

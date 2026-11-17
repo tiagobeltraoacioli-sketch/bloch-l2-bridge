@@ -64,6 +64,33 @@
         "retired"
       ]
     },
+    "launch": {
+      "description": "Optional (round 17, EVM networks). Whether this route may be offered in bridge v1. Absent: the file makes no statement (the other bridges). A page, a pool builder or the DEX gate must treat `v1: false` as: do not offer this network, whatever `status` says.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v1",
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "v1": {
+          "type": "boolean"
+        },
+        "state": {
+          "description": "launchable: may launch in v1 once deployed. held: not deployable until the stated condition is met. out: not part of v1.",
+          "enum": [
+            "launchable",
+            "held",
+            "out"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "network": {
       "type": "object",
       "additionalProperties": false,
@@ -438,6 +465,10 @@
         "networkFee": {
           "description": "Who pays the source network's transaction fee of a release and by which rule (Bitcoin: taken from the user's amount).",
           "type": "string"
+        },
+        "releaseFlat": {
+          "description": "Optional (requested by the Tron bridge). A fixed amount taken from every release on top of releaseBps, in custody units.",
+          "$ref": "#/$defs/amountOrTbd"
         }
       }
     },
@@ -550,6 +581,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "router": {
+          "description": "Optional (requested by the Solana review; also Bitcoin and Stellar). The L2 address of the burn router a page must call instead of `burn` on the token; TBD-deploy before deployment.",
+          "$ref": "#/$defs/stringOrTbd"
         }
       }
     },

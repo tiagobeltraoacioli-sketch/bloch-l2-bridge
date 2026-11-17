@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": true,
+    "state": "launchable",
+    "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+  },
   "network": {
     "id": "linea",
     "name": "Linea",

@@ -1,11 +1,20 @@
 {
   "domain": "bloch.bridge.evm-networks.v1",
-  "notes": "Source networks of the round 16 EVM bridges. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge. `signer`: per-network settings of eth_half.py and vigia.py; on Base and BNB Smart Chain the 256-block window is 51 s and 115 s, so the daemons must run at `--interval 5` (docs/BRIDGE-EVM-NETWORKS.md section 4).",
+  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` and `feeBps` are the owner's fee address and rates (5 + 5 bps), which the deploy tools require of every vault config of these networks (R329-EVM-2). `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
   "feeRecipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+  "feeBps": {
+    "deposit": 5,
+    "release": 5
+  },
   "networks": {
     "arbitrum-one": {
       "name": "Arbitrum One",
       "chainId": 42161,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it."
+      },
       "rpc": "https://arb1.arbitrum.io/rpc",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "arbitrum-one",
@@ -29,7 +38,19 @@
         "anchor_max_age": 200,
         "finalized_margin": 0,
         "deposit_cursor": true,
-        "why": "depth 2 Ethereum block numbers (24 s of a 51 min window): ArbOS fills the value for a number only once it has seen the next one"
+        "why": "depth 2 Ethereum block numbers (24 s of a 51 min window): ArbOS fills the value for a number only once it has seen the next one",
+        "interval_s": 60,
+        "max_release_signs_per_hour": 6,
+        "refused_retry": 300,
+        "pacing_why": "window 200 x 12 s = 2,400 s (Ethereum block numbers): the Ethereum bridge pacing and budgets fit unchanged"
+      },
+      "timing": {
+        "anchorBlockSeconds": 12.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
       },
       "measured": {
         "blockTimeSeconds": 0.29,
@@ -50,6 +71,11 @@
     "base": {
       "name": "Base",
       "chainId": 8453,
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "reason": "Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures)."
+      },
       "rpc": "https://mainnet.base.org",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "base-mainnet",
@@ -73,7 +99,19 @@
         "anchor_max_age": 250,
         "finalized_margin": 0,
         "deposit_cursor": true,
-        "why": "depth 5 blocks (1 s of 51 s): 0.2 s blocks, so five blocks cost 2% of the window and cover a one-second reordering of the newest blocks"
+        "why": "depth 5 blocks (1 s of 51 s): 0.2 s blocks, so five blocks cost 2% of the window and cover a one-second reordering of the newest blocks",
+        "interval_s": 5,
+        "max_release_signs_per_hour": 18,
+        "refused_retry": 12,
+        "pacing_why": "window 250 x 0.2 s = 50 s: 5 s passes; a round lives 50 s, so the hourly budget is 18 rounds and a refused round is tried again after 12 s (not launchable: values for rehearsals only)"
+      },
+      "timing": {
+        "anchorBlockSeconds": 0.2,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
       },
       "measured": {
         "blockTimeSeconds": 0.2,
@@ -94,6 +132,11 @@
     "op-mainnet": {
       "name": "OP Mainnet",
       "chainId": 10,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+      },
       "rpc": "https://mainnet.optimism.io",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "op-mainnet",
@@ -117,7 +160,19 @@
         "anchor_max_age": 250,
         "finalized_margin": 0,
         "deposit_cursor": true,
-        "why": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate"
+        "why": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate",
+        "interval_s": 20,
+        "max_release_signs_per_hour": 6,
+        "refused_retry": 120,
+        "pacing_why": "window 250 x 2 s = 500 s: 20 s passes (two passes are 8% of the window); a refused round is tried again after a quarter of the window; six rounds an hour cover 50 minutes of consecutive misses"
+      },
+      "timing": {
+        "anchorBlockSeconds": 2.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
       },
       "measured": {
         "blockTimeSeconds": 2.0,
@@ -138,6 +193,11 @@
     "linea": {
       "name": "Linea",
       "chainId": 59144,
+      "launch": {
+        "v1": true,
+        "state": "launchable",
+        "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+      },
       "rpc": "https://rpc.linea.build",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "linea-mainnet",
@@ -161,7 +221,19 @@
         "anchor_max_age": 250,
         "finalized_margin": 0,
         "deposit_cursor": true,
-        "why": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet"
+        "why": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet",
+        "interval_s": 20,
+        "max_release_signs_per_hour": 8,
+        "refused_retry": 60,
+        "pacing_why": "window 250 x 1 s = 250 s at the fastest block pace (14 s a block when read on 2026-11-16: the window is then 58 min); 20 s passes; a refused round is tried again after a quarter of the window; eight rounds an hour"
+      },
+      "timing": {
+        "anchorBlockSeconds": 1.0,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
       },
       "measured": {
         "blockTimeSeconds": 9.0,
@@ -182,6 +254,11 @@
     "bnb": {
       "name": "BNB Smart Chain",
       "chainId": 56,
+      "launch": {
+        "v1": false,
+        "state": "out",
+        "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction."
+      },
       "rpc": "https://bsc-dataseed.bnbchain.org",
       "nativeSymbol": "BNB",
       "sourceDomainLabel": "bnb-smart-chain",
@@ -210,7 +287,19 @@
         "anchor_max_age": 250,
         "finalized_margin": 135,
         "deposit_cursor": true,
-        "why": "the finalized block itself (1 to 2 blocks back), the Ethereum rule"
+        "why": "the finalized block itself (1 to 2 blocks back), the Ethereum rule",
+        "interval_s": 5,
+        "max_release_signs_per_hour": 8,
+        "refused_retry": 28,
+        "pacing_why": "window 250 x 0.45 s = 112 s: 5 s passes (out of v1: values for rehearsals only)"
+      },
+      "timing": {
+        "anchorBlockSeconds": 0.45,
+        "alertFraction": 0.2,
+        "holdFraction": 0.5,
+        "recentMeasurements": 3,
+        "measurementTtlSeconds": 21600,
+        "remeasureSeconds": 300
       },
       "measured": {
         "blockTimeSeconds": 0.45,
@@ -226,8 +315,7 @@
         "meaning": "fast finality, two more blocks voted by two thirds of the validators",
         "typicalSeconds": 62,
         "worstCaseSeconds": 600
-      },
-      "v1": false
+      }
     }
   }
 }

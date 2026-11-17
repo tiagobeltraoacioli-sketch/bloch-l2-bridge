@@ -18,5 +18,5 @@
   "anchor_depth": 2,
   "finalized_margin": 0,
   "deposit_cursor": true,
-  "_about_anchor": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate"
+  "_about_anchor": "depth 2 blocks (4 s of 512 s): a one-block change of the sequencer's newest block does not void the certificate. These four anchor keys are the registry's (tools/evm-nets/networks.json): eth_half.py takes them by chain id and refuses a file that contradicts them."
 }

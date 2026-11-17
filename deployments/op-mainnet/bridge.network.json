@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": true,
+    "state": "launchable",
+    "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+  },
   "network": {
     "id": "op-mainnet",
     "name": "OP Mainnet",

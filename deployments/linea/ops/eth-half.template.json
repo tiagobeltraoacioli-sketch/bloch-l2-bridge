@@ -18,5 +18,5 @@
   "anchor_depth": 2,
   "finalized_margin": 0,
   "deposit_cursor": true,
-  "_about_anchor": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet"
+  "_about_anchor": "depth 2 blocks (2 to 18 s of at least 256 s), as OP Mainnet. These four anchor keys are the registry's (tools/evm-nets/networks.json): eth_half.py takes them by chain id and refuses a file that contradicts them."
 }

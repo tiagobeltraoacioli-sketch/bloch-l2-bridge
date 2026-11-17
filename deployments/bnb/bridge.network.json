@@ -1,6 +1,11 @@
 {
   "schema": "bloch.bridge.network.v1",
   "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": false,
+    "state": "out",
+    "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction."
+  },
   "network": {
     "id": "bnb",
     "name": "BNB Smart Chain",
@@ -133,7 +138,7 @@
     }
   },
   "notes": [
-    "NOT IN V1 - OWNER DECISION: the recommendation is to leave this network out of v1. A page must not offer it unless the owner decides otherwise.",
+    "NOT LAUNCHABLE IN V1 (out): Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction. A page, a pool builder or the DEX gate must not offer this network; every bridge tool refuses it (tools/evm-nets/launch.py).",
     "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
     "Releases on this network need the five signers and the relayer to finish within about 115 s of each other (256 blocks); operators run the daemons at a 5 second interval here. If a round misses the window nothing is paid and it is repeated."
   ]
