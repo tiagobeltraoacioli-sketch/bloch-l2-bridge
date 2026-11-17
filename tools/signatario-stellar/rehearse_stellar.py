@@ -1073,8 +1073,8 @@ def main_flow(r):
     burnm = bm['burn_id']
     balm, journal_m = r.balance(mallory), len(list((r.dir / 'journal').glob('*.json')))
     attempts = {}
-    for d in ('claims', 'hints'):
-        (r.dir / d).mkdir(exist_ok=True)
+    for old_dir in ('claims', 'hints'):
+        (r.dir / old_dir).mkdir(exist_ok=True)
     for name, act in (('an old claim file with "signature": "--help"',
                        lambda: (r.dir / 'claims' / f'{burnm[2:]}.json').write_text(
                            json.dumps({'stellar_address': mallory, 'signature': '--help'}))),

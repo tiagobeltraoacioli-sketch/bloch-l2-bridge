@@ -212,8 +212,16 @@ python3 tools/deploy-pontes/deploy_pontes.py verify --config deployments/stellar
 forge create contracts/stellar/StellarBurnRouter.sol:StellarBurnRouter --rpc-url L2_RPC_URL CAST_WALLET_ARGUMENTS --broadcast --constructor-args L2_TOKEN_ADDRESS
 ```
 
-The router has no power: it forwards a burn of the caller's own tokens and logs the Stellar address. Exits go
-through it; a burn made directly on the token is served only by the claim rule (`docs/STELLAR-BRIDGE.md` section 4b).
+The router has no power: it forwards a burn of the caller's own tokens and logs the Stellar address, and it keeps
+the set-once claim of a burn made directly on the token (`claimDirectBurn`; `docs/STELLAR-BRIDGE.md` section 4b).
+Exits go through it. Record its address and the keccak of its runtime code:
+
+```
+cast keccak $(cast code ROUTER_ADDRESS --rpc-url L2_RPC_URL)
+```
+
+Every signer, watcher and guardian pins both (`router`, `router_code_keccak`): the destination of every burn is
+read through this contract, so a tool that is pointed at another contract must refuse, and they do.
 
 ## 8. Pairing check
 
@@ -228,7 +236,7 @@ requires the token config's `stellar` section to be exactly the one the vault fi
 
 Each operator installs its configs (`docs/STELLAR-BRIDGE.md` section 10), pins `vault_wasm_hash` and
 `asset_contract` (`CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75`; a signer's half refuses any other on the
-public network), runs `pairing.py vault-check` itself against its own RPC, and proves its two
+public network), `router` and `router_code_keccak` (section 7), runs `pairing.py vault-check` itself against its own RPC, and proves its two
 keys by signing the test digests of `docs/BRIDGE-V3-KEY-CEREMONY.md`. The relayer account is funded:
 
 ```
@@ -284,5 +292,7 @@ python3 tools/evm-nets/network_json.py check deployments/stellar/bridge.network.
 - [ ] 7 signers and 3 guardians each proved their keys; guardians are not signers; operators are distinct.
 - [ ] Reserves monitor green; guardian check timer shorter than the release delay; rent alerts wired.
 - [ ] Every guardian knows that a pause voids the queue, that there is nothing else to sign, that a pause is never
-      signed in advance, and that exit 3 of the check means "alert a human", not "pause".
+      signed in advance, that exit 3 of the check means "a person is paged now", and that the check itself reports
+      a finding for a queued release it could not judge within `stall_deadline` (half the release delay).
+- [ ] The L2's normal finality lag measured and found well below half the release delay (the stall rule).
 - [ ] First minimum deposit and exit completed before the bridge is announced.

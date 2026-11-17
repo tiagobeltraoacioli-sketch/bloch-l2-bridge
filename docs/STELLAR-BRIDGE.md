@@ -4,7 +4,8 @@ Status: PROTOTYPE, UNAUDITED. Nothing is deployed. No real key signed anything. 
 audit before any real funds. Round 16 (agent 324, branch `codex/bridge-stellar-r16-20261116`), revised in round 17
 (agent 338, branch `codex/bridge-stellar-r17-20261117`) after the second independent review
 (`agents/331-bridge-stellar-review-r17.md`). The vault contract is unchanged since `ffdb9b5`; round 17 changed the
-tools, the deployment files and the documents.
+tools, the deployment files and the documents. Revision 4 (after the reviewer's third pass) also changed the L2
+exit router, a periphery contract with no power: it gained the set-once claim of a direct burn.
 
 Deployment and ceremony: `docs/STELLAR-BRIDGE-DEPLOY.md`. Published interface: `deployments/stellar/bridge.network.json`.
 
@@ -45,6 +46,12 @@ asset contract and every constructor value are pinned against the committed depl
 account must exist with its trustline before anything is deployed. The coordinator confirmed the guardian rule of
 section 4.
 
+Revision 4 (2026-11-17, round 17) answers the reviewer's third pass. The vault and its Wasm hash did not move. WHERE
+a burn is paid is now one rule over the final L2 (section 4b): the claim of a direct burn is a set-once transaction
+of the burner on the L2 router, and claim files, hint files, the re-pin rule and `SHARED/claims` are gone, so no two
+parties can hold different claims. The guardian check judges by block numbers and finality only; its two rules that
+compared L2 timestamps are replaced by a stall rule that bounds "cannot judge" for a queued release (section 4c).
+
 ## 2. Flow
 
 Units: Stellar classic assets have 7 decimals and the L2 token 6. The vault keeps its books in the token's units and
@@ -60,7 +67,8 @@ moves exactly 10 stroops per unit. A deposit that is not a multiple of 10 stroop
 3. Exit. The user approves `StellarBurnRouter` and calls `burnTo(amount, "G...")`. The unchanged token's burn names 20
    bytes, so the burn names a commitment: the low 20 bytes of `keccak256(bytes32("BLOCH-XLM-RECIPIENT-v1") ‖ strkey)`.
    The signers certify a payment only to an address with that commitment. Exits go through the router; a burn made
-   directly on the token is served only by the claim rule of section 4b.
+   directly on the token is never paid to the 20 bytes it names: it is paid only to the address its burner claims
+   on the router (section 4b).
 4. Release. After L2 finality 5 signers certify the burn, each with its own Stellar half, under the vault's current
    pause count. Anyone relays the certificate. The vault checks the committee by secp256k1 recovery, the pause
    count, the mint chain, the replay records, the bucket and the backing, takes 5 bps and pays the recipient (or
@@ -172,7 +180,7 @@ Every certificate (release, controls, unpause) and every guardian pause is an Et
 the key signs `keccak256("\x19Ethereum Signed Message:\n32" ‖ digest)`. The Soroban host computes that hash and
 recovers from it; nothing in the recovery path changed. The tools call `cast wallet sign` without `--no-hash`, so no
 tool path of this route signs bare 32 bytes with a bridge key. `cast` is used for nothing else: every signature a
-tool receives (its own keystore's, a partial from another operator, a burner's claim) is recovered in the tool's own
+tool receives (its own keystore's, a partial from another operator) is recovered in the tool's own
 process with the repository's secp256k1 and Keccak code (`stellar_net.recover_personal`, low s, `v` 27 or 28), and
 compared with the address it must belong to. The digest keeps its own domain: it starts with a
 `BLOCH-XLM-…` tag and binds the network id (sha256 of the passphrase) and the contract id. A signature over the bare
@@ -184,94 +192,117 @@ The frozen token's `burn(uint64,address)` takes any 20 bytes. The router makes t
 has the shape of the other routes' routers: `burnTo(uint64 amount, string stellarAddress)` and
 `StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress)`.
 
-A burn made directly on the token is served by this rule only:
+WHERE A BURN IS PAID: one rule, read from the FINAL L2 alone, the same for every signer, watcher and guardian
+(`stellar_net.burn_destination`; review 331, third pass, R331-XLM-3P-1):
 
-- If its 20 bytes are the commitment of a Stellar address the signers are given (a hint file, or the intent), it is
-  certified to that address, as before.
-- Otherwise it is held, and paid only when the ACCOUNT THAT BURNED signs a claim: an Ethereum personal message with
-  the text `stellar_half.py claim-text` prints, naming the L2 chain, the token, the burn id and one Stellar address.
-  Each signer takes the burner from the final `Burned` log it read from its own L2, never from the claim.
-- A router burn has the router as its burner and a contract cannot sign: router burns are paid only to the
-  committed address. A contract that burns directly towards 20 bytes that are no commitment cannot claim, and that
-  burn stays unpaid (the USDC stays in the vault; nobody else can take it). Integrations must not burn directly.
+- A burn made BY THE ROUTER is paid to the address the router checked, committed to and logged. The burn's 20 bytes
+  are that address's commitment; nothing else can be paid for it. A router burn cannot be claimed or redirected.
+- A burn made DIRECTLY ON THE TOKEN is never paid to the 20 bytes it names (they may be an Ethereum address, as on
+  bUSDC; even when they happen to be a commitment they are not used). It is paid to the one address the ACCOUNT THAT
+  BURNED claims with a transaction of its own on the router: `claimDirectBurn(uint64 burnNonce, string
+  stellarAddress)`. The router stores it under (caller, nonce), emits `DirectBurnClaimed(address indexed burner,
+  uint64 indexed burnNonce, bytes20 commitment, string stellarAddress)` and answers `claimOf(burner, nonce)`. The
+  claim is SET ONCE: a second call reverts, so a burn has at most one claim and it never changes. A claim by another
+  account sits under that account and is ignored. A contract that burned can claim. There is no timeout: until the
+  claim is final on the L2 the asset stays in the vault.
 
-How a claim is checked (review 331, R331-XLM-1). In revision 2 the three callers asked `cast wallet verify` and read
-its exit code; a claim file with `"signature": "--help"` made `cast` print its help and exit 0, and a stranger was
-paid another account's burn. Now there is one function, `stellar_net.verify_claim`, used by the half, the signer
-wrapper, the watcher and the guardian check:
+Why set once, and not "the latest claim before certification": with one immutable claim, "which claim" has one answer
+at every final block after it, so a signer, a watcher and a guardian that read different final blocks cannot
+disagree, and a release paid on the claim can never be contradicted later. A claim that could be changed would need
+every certificate to bind the version it used, which the vault's digest does not carry (the L2 block it names is the
+burn's). The price: a claim cannot be corrected, exactly like the address given to `burnTo`; and an exit held for
+another reason (a router burn to an address without a trustline) cannot be redirected: it waits for the trustline.
 
-- The claim is exactly `{"stellar_address": "G...", "signature": "0x" + 130 hex}`: an object with these two fields
-  and no other; the file is at most 4,096 bytes.
-- The signature is exactly 65 bytes; `v` is 27 or 28; `s` is in the lower half; `r` and `s` are in range. Anything
-  else (an option of a program, an empty string, 64 bytes, a number, the high-`s` twin) is refused before any
-  arithmetic.
-- The address is recovered IN PROCESS over the EIP-191 hash of the claim text, with the token and the chain id of
-  the caller's own configuration, and must equal the burner of the final `Burned` log.
-- No field of a claim is ever an argument of another program.
+How each party applies the rule:
 
-One claim per burn (R331-XLM-5). A signer's half remembers the release it signed for a burn and refuses another.
-The one exception, for a burn paid on a claim only: once the signature that half gave is dead (its `validUntil` has
-passed on the ledger clock, or the vault's pause count moved) and the vault still shows the burn open, the half may
-sign for the address of another claim of the same burner. A signer so never has two live signatures for one burn,
-two addresses can never both reach five, and operators who were handed different files converge on one without
-editing a database (rehearsed). Which of two claims the burner signed wins is not decided by the bridge: the
-operators agree on one file. The relayer daemon publishes the claim a quorum used under `SHARED/claims/`, where
-guardians and anyone else can read and verify it; it authenticates itself.
+- The signer (`signatario_stellar.py`) reads the destination from the same L2 view it read the burn from (its own,
+  rebuilt, final L2), at the same final block, with the router pinned by address and code, and puts it into the
+  intent. The half checks it again: a router address must hash to the burn's 20 bytes; a claim is read again from
+  the operator's own L2 RPC when one is configured and must agree. The half remembers the release it signed for a
+  nonce and a burn and refuses any other, without exception (the re-pin rule of revision 3 is gone).
+- The watcher accepts a partial for an address that is not the burn's commitment only if its own L2's router holds
+  that claim at its final block.
+- The guardian judges the address paid against the same rule and nothing else: it holds no claim file, and there is
+  no directory, channel or grace time for claims (R331-XLM-3P-1: in revision 3 a guardian handed a second valid
+  claim of the same burner read the honest release as a forgery and paused).
 
-Rehearsed: a direct burn to the user's own L2 address is refused without a claim, refused with a claim signed by
-another key, and paid to the claimed address with the burner's claim; six forged claim files (`--help`, `-h`, a
-stranger's signature, the burner's signature for another burn, an extra field, a 64-byte signature) certify
-nothing and pay nobody; two claims of one burner converge.
+History (R331-XLM-1, R331-XLM-5). Revision 2 took a claim as a file signed by the burner and "verified" it by the
+exit code of `cast wallet verify`; a file with `"signature": "--help"` paid a stranger. Revision 3 verified the file
+in process and let a signer move between two claims of one burner once its signature was dead. Revision 4 removes
+the files: there is nothing to forge, to hand over or to choose.
 
-## 4c. The guardian check: finding, or cannot judge (review 331, R331-XLM-3)
+Rehearsed: a direct burn is refused with no claim, with a claim on the router by another account, and while the
+burner's claim is not final; the burner's second claim reverts; with the final claim five signers certify and the
+claimed address is paid; an old claim file, an old hint file and a foreign router claim pay nobody (the reviewer's
+case A1); all three guardians judge the paid release ok; the watcher daemons carry a claimed burn (the reviewer's
+rig).
 
-Since revision 2 one guardian's pause is the whole reaction and it voids every queued exit, so the check must not
-pause on a view it cannot trust. In revision 2 it read the L2 at the guardian's own `finalized` block and called any
-burn it could not see there a forgery: a guardian whose follower had stalled would have read every honest release
-as forged and closed the vault for 72 hours. `guardiao_stellar.py check` now gives one of three answers for each
-release the vault paid or queued:
+## 4c. The guardian check: finding, or cannot judge (review 331, R331-XLM-3 and the third pass)
+
+One guardian's pause is the whole reaction and it voids every queued exit, so the check must not pause on a view it
+cannot trust; and it must not leave a forgery unjudged until it is paid. `guardiao_stellar.py check` gives one of
+three answers for each release the vault paid or queued:
 
 | Answer | When | Exit | The operator's unit |
 |---|---|---|---|
-| ok | the token's FINAL history holds the burn of that nonce with that id and amount, and the address paid is the one the burn commits to, or the one named by a claim signed by the account in the burn's own log | 0 | nothing |
-| finding | the release contradicts a final L2 view that is at or beyond it (list below) | 2 | signs `pause` |
-| cannot judge | the guardian's view does not reach the release, or cannot be trusted | 3 | alerts a human; does NOT pause |
+| ok | the token's FINAL history holds the burn of that nonce with that id and amount, and the address paid is the burn's destination by the rule of section 4b | 0 | nothing |
+| finding | the release contradicts the final L2, or the stall rule applies (below) | 2 | signs `pause` |
+| cannot judge | the guardian's final view does not reach the release yet, or cannot be trusted | 3 | pages a human AT ONCE; does not pause yet |
 
-A finding needs the guardian's L2 view to be at or beyond the L2 block the release names. That block is in the
-certificate's context (`native_finalized_number`, `native_finalized_hash`: the final block holding the burn); the
-guardian reads it from the arguments of the release transaction on its own Stellar RPC and checks them against the
-release id in the event. The view is the final block that ALL configured L2 sources (`l2_rpc`, `l2_rpc_others`)
-report with the same hash, on the pinned chain id, with the pinned token code when configured. Findings:
+The view is the final block that ALL configured L2 sources (`l2_rpc`, `l2_rpc_others`) report with the same hash, on
+the pinned chain id, with the pinned token and router code. The L2 block a release names is in the certificate's
+context (`native_finalized_number`, `native_finalized_hash`: the final block holding the burn); the guardian reads it
+from the arguments of the release transaction on its own Stellar RPC and checks them against the release id.
 
-- the final history holds another burn id for that nonce, or another amount (no freshness needed: finality does not
-  revert);
-- a router burn paid to another address than the router committed to (a router burn can never be claimed);
-- the burner's verified claim names another address than the one paid; or no claim signed by the burner was obtained
-  within `claim_grace` (default 30 minutes; a claim the guardian was not handed yet is "cannot judge" until then);
+Findings by the final history (block numbers and finality only; no clock of any kind):
+
+- the final history holds another burn id for that nonce, or another amount;
+- a router burn paid to another address than the router committed to;
+- a direct burn paid to another address than its burner's claim on the router;
 - the named block is final in the guardian's view and holds no such burn, or the final chain has another hash at
-  that height;
-- the named block is not reached, or could not be read (the release transaction is no longer in the RPC's window, or
-  the vault was called from inside another contract), but the L2 has since finalized a block whose timestamp is
-  later than the release by more than `l2_clock_skew` (120 s) and still has no such burn; or any later block exists
-  and not even a pending burn of that nonce does. So a forger cannot make every guardian "unable to judge" by naming
-  a block nobody will reach: honest signers only certify what was final before they signed.
+  that height.
 
-Cannot judge: the final block is behind the named one and no later block exists yet; a source does not answer,
+The stall rule (R331-XLM-3P-2). A release that is still QUEUED, that the guardian could not judge although its L2
+sources answer and agree, and that is older than `stall_deadline` on the Stellar ledger clock (the release event's
+ledger to the latest ledger) is a finding. Honest signers certify only what was final before they signed, so a final
+view that still does not reach a queued release after that time means one of two things, and both are reasons to
+pause before it is paid: the L2's finality stands still while releases land, or the release is forged in a way the
+final history cannot contradict yet (under the nonce of the forger's own pending burn; naming a block nobody will
+reach; through another contract, which hides the named block; for a direct burn with no claim). `stall_deadline`
+defaults to half the vault's `release_delay` (3,600 s with the proposed 7,200 s) and the tool refuses a larger value.
+
+No timestamp decides anything (R331-XLM-3P-3). Revision 3 had two "later block" rules that compared L2 block
+timestamps with the release time, and switched them off when the L2's newest block was ahead of the host clock: one
+block stamped two minutes ahead disabled them, and without that guard one such block would have produced false
+findings on a lagging guardian. Both rules and the host clock are gone. An L2 head stamped more than
+`l2_clock_alert_seconds` (120) ahead of the Stellar ledger clock is reported as its own alert (`alerts`, exit 4 when
+nothing else is wrong) for a person to look at; no verdict depends on it.
+
+Cannot judge: the final view is behind the burn, or behind the claim of a direct burn; a source does not answer,
 serves another chain, or the sources disagree; `require_two_l2_sources` is set and one source is configured; the
-token's code is not the pinned one; the L2 cannot serve the burn's log; the claim has not arrived.
+token's or the router's code is not the pinned one; the L2 cannot serve the burn's log.
 
-The trade-off, stated: a guardian that cannot see the L2 does not stop a real forgery by itself. During such an
-outage a forgery waits for another guardian (one is enough) or for a human who answers the alert within the release
-delay. The other choice lets one stalled follower close the vault and void every honest exit. Three guardians on
-three independent L2 followers, each with two sources, make both failures unlikely at once; exit 3 must page a
-person, not write a log line.
+Trade-offs, stated:
 
-Tested both directions: `test_stellar_tools.py` `GuardianCheck` (19 tests against fake sources: lagging and stalled
-views, failing and disagreeing sources, forgeries naming a final block, another history, a block nobody will reach,
-a call through another contract, a chain whose clock is ahead); the rehearsal: the reviewer's case A2 (a view one
-block before a real, paid burn: exit 3, no finding), a queued quorum forgery (exit 2), and two quorum forgeries
-that pay a stranger (a direct burn: exit 3 during the grace without the claim or with a forged one, exit 2 after
-it, exit 2 at once with the burner's real claim for another address; a router burn: exit 2 at once).
+1. The stall rule makes a guardian whose OWN follower stands still for longer than `stall_deadline`, while exits
+   are queued, pause: 72 hours closed unless 6 of 7 signers end it, every queued exit void and certified again. That
+   is the price of not letting a forgery through when finality really stands still; a second independent L2 source
+   does not remove it (the lower final block of the two is used). It follows that `release_delay` must be at least
+   twice the time the L2 normally needs to finalize a block, plus the check interval; if the L2's normal finality
+   lag came near half the delay, honest exits would be paused.
+2. "Cannot judge" is bounded only while the L2 sources answer and agree. A guardian whose every L2 source is down,
+   or whose sources disagree, pages and never pauses: a forgery then waits for another guardian (one is enough) or
+   for the person paged.
+3. A release that was PAID before it could be judged (no delay, or an amount below `large_release_threshold`) stays
+   exit 3: a pause would not bring it back. With a delay of 0, or a threshold above 0, the check is detection after
+   the fact for those releases.
+
+Tested: `test_stellar_tools.py` `GuardianCheck` (23 tests against fake sources, both directions); the rehearsal
+(the reviewer's case A2: a view one block before a real, paid burn: exit 3, no finding; a queued quorum forgery:
+exit 2; a direct burn and a router burn paid to a stranger; a queued forgery under the forger's own pending nonce:
+exit 3 at first, exit 2 by the stall rule after the deadline, still unpaid; the clock alert), in a run whose L2
+clock is days ahead of real time; and the reviewer's rig, whose L2 clock is the wall clock: its three checks that
+failed at `22ea9a4` pass.
 
 A pause is never signed in advance (R331-XLM-7): the vault accepts a signed pause until its `valid_until` or the
 next pause, so `guardiao_stellar.py pause` refuses `valid_seconds` above 3,600 (default 600).
@@ -283,7 +314,7 @@ outside placed on a command line. What was found and what replaced it:
 
 | Was | Where | Now |
 |---|---|---|
-| `cast wallet verify` of a claim, exit code | `stellar_half.py`, `signatario_stellar.py`, `guardiao_stellar.py` | `stellar_net.verify_claim`, in process |
+| `cast wallet verify` of a claim file, exit code | `stellar_half.py`, `signatario_stellar.py`, `guardiao_stellar.py` | revision 3: verified in process; revision 4: no claim file exists (section 4b) |
 | `cast wallet verify --no-hash` of a partial, exit code | `vigia_stellar.py` | `stellar_net.recover_hash`, in process; `signatario_stellar.py` also recovers the half's signature and every signature it combines |
 | `cast logs` + `cast abi-decode` with log data from the RPC as an argument | `stellar_half.py` (router log), `guardiao_stellar.py` | `stellar_net.L2`: JSON-RPC in process, every answer checked for its shape, ABI decoded in Python |
 | `cast call`, `cast block`, `cast chain-id`, `cast code`, `cast keccak` | `guardiao_stellar.py`, `reservas_stellar.py`, `pairing.py` | the same `L2` class |
@@ -414,8 +445,8 @@ Each operator additionally runs:
 - The signer: `signatario_stellar.py` (the Ethereum signer's code with three replaced functions) with
   `stellar_half.py` as its source half. Same key files: the `l2-mint-signer` key and the `eth-release-signer` key.
   Extra config: `network_passphrase`, `vault`, `vault_wasm_hash`, `asset_contract` (required: the pinned asset
-  contract), `view_account` (any existing account; views are simulated, never sent), and for direct-burn claims
-  `recipient_claims`.
+  contract), `view_account` (any existing account; views are simulated, never sent), `router` and
+  `router_code_keccak` (the pinned StellarBurnRouter: the destination of every burn is read through it).
 - The watcher: `vigia_stellar.py sign` per signer and `vigia_stellar.py relay` for the relayers. It executes queued
   releases that are due. It runs only in the shared-directory mode today (section 13). With `paid_file` it keeps
   the set of paid burns across restarts; a paid burn is not asked again (R331-XLM-4), so a pass costs one view per
@@ -424,9 +455,10 @@ Each operator additionally runs:
   no bridge key.
 - Guardians: `guardiao_stellar.py check` on a timer much shorter than the release delay (every 5 minutes for a
   2-hour delay), against the guardian's own L2 follower and, where it has one, a second independent source
-  (`l2_rpc_others`), with `l2_chain_id`, `token`, `router` and `token_code_keccak` pinned. Exit 2 is a finding: sign
-  `pause` and any relayer submits it. Exit 3 is "cannot judge": page a person and do NOT pause (section 4c). Any
-  other non-zero exit: the tool failed; alert. A pause is not a hold: it voids every queued release and every
+  (`l2_rpc_others`), with `l2_chain_id`, `token`, `router`, `router_code_keccak` and `token_code_keccak` pinned.
+  Exit 2 is a finding: sign `pause` and any relayer submits it. Exit 3 is "cannot judge": page a person at once; the
+  check itself turns it into a finding (exit 2) for a queued release after `stall_deadline` (section 4c). Exit 4:
+  an alert for a person (an L2 block stamped ahead), no pause. Any other non-zero exit: the tool failed; alert. A pause is not a hold: it voids every queued release and every
   certificate signed before it, the honest ones included, and they are certified again by the signers' own tools
   when the pause is over. One guardian is enough; there is nothing to co-sign and nothing to cancel. Never sign a
   pause in advance: a signed pause is usable by whoever holds it until it expires or the next pause.
@@ -438,12 +470,10 @@ Each operator additionally runs:
 - After a pause: nothing by hand. The watchers find every voided burn open again and certify it; the relayer
   queues it and executes it after the delay. If a forgery had taken a burn's nonce or id, the watcher alerts
   `release-held-nonce-or-id-taken` until a pause voids the forgery.
-- A direct burn with no known address: the burner signs the text of `stellar_half.py claim-text --burn-id ... --to
-  G...` with the account that burned. One operator receives the claim and sends the SAME file to all seven signers
-  and the three guardians, who place it in `recipient_claims/<burn id>.json` (section 4b); every tool verifies it
-  itself, so the channel needs no trust. If operators hold different claims of one burner, they agree on one file
-  and replace the others; the signers converge by themselves within the validity of their last signature (30
-  minutes by default). Nobody edits a signer's database.
+- A direct burn: nothing for an operator to do and nothing to distribute. The burner calls
+  `StellarBurnRouter.claimDirectBurn(burnNonce, "G...")` from the account that burned; once that is final on the L2
+  the signers certify it by themselves. A support answer to "I burned directly": make that one call; it cannot be
+  changed afterwards.
 - Unpause and controls: `comite_stellar.py`, 6 of 7 and 5 of 7.
 
 Users: a recipient needs a USDC trustline before the release; muxed (`M...`) addresses are not accepted.
@@ -459,11 +489,13 @@ New code an auditor must read first, in this order:
    `BridgedStablecoinV3`.
 3. `tools/signatario-stellar/stellar_half.py` (what a signer checks before it signs, the pinned asset, the re-pin
    rule) and `signatario_stellar.py` (the three replaced functions).
-4. `contracts/stellar/StellarBurnRouter.sol` (88 lines; strkey validation and the commitment) and the claim rule for
-   direct burns: `stellar_net.verify_claim`, `signature_bytes`, `personal_text`, and `bridge_feed.recover`.
+4. `contracts/stellar/StellarBurnRouter.sol` (strkey validation, the commitment, the set-once claim of a direct
+   burn) and the destination rule over it: `stellar_net.burn_destination`, `claim_of`, `router_exit_address`;
+   signatures: `signature_bytes` and `bridge_feed.recover`.
 5. `stellar_net.py`: `cli_value`, `_fn_args`, `VAULT_FUNCTIONS`, `RELAYABLE` (what may reach the `stellar` CLI), the
    `L2` class (what is accepted from an L2 RPC), `asset_contract_id`, `config_differences`.
-6. `guardiao_stellar.py` `judge`, `l2_view`, `claim_verdict` (when a guardian pauses and when it must not).
+6. `guardiao_stellar.py` `judge`, `l2_view`, `destination_verdict`, `deadline` and the stall rule in `check` (when a
+   guardian pauses and when it must not).
 7. `relay_stellar.py` (journal before publication), `vigia_stellar.py`, `source_stellar.py`, `pairing.py`.
 
 Reused byte-identical: `BridgedStablecoinV3` (L2 token) and every launch contract of the Ethereum bridge; the whole
@@ -474,8 +506,8 @@ of `tools/signatario-stable/` (`signatario.py`, `vigia.py`, `bridge_feed.py` are
 Questions for the auditor: the Stellar Asset Contract's behaviour for the real USDC issuer (authorization, clawback,
 trustline limits); archival and automatic restoration across protocol upgrades; resource limits of a release with 7
 signatures; the absence of an on-chain source anchor; the pause count and the void and re-certification rule; the
-guardian's later-block rules (they assume L2 block timestamps do not run ahead of real time and that an honest
-signer certifies only a burn that was final before it signed); the re-pin rule of the half.
+guardian's stall rule (it assumes that an honest signer certifies only a burn that was final before it signed, and
+that the L2 normally finalizes well within half the release delay); the set-once claim on the router.
 
 ## 12. Tests and results (final Wasm `ebe14e4b…f25e9`; revision 3, code at `8f1d0c4`)
 
@@ -534,21 +566,16 @@ the Python suites also on the Mac. The commit that carries this section differs 
 - Archival was exercised on protocol 29 only. A change of the archival rules in a later protocol needs a new check.
 - The guardian and shadow daemons of the Ethereum bridge (`tools/guardiao/`) are not adapted; `check` is a one-shot
   command run from a timer.
-- The claim rule for direct burns needs the burner to be an account that can sign. A contract that burns directly
-  towards 20 bytes that are no commitment is never paid. Claims travel between operators as files; the relayer
-  daemon publishes the one a quorum used under `SHARED/claims/`, but nothing gives the seven signers the same file
-  before they sign, and which of two claims of one burner wins is not decided by the bridge (section 4b). An on-L2
-  claim registry (one canonical claim per burn, readable by every signer and guardian from its own L2, as reviewer
-  331 suggested) would remove the files altogether; it is a new L2 contract and was not built in round 17.
-- The guardian check's later-block rules (section 4c) need the L2's block timestamps not to run ahead of real time.
-  On a chain whose clock is ahead (the rehearsal's anvil, whose clock is moved forward by days) they are switched
-  off by the check itself and a forgery that names an unreachable block is "cannot judge"; those rules are proven by
-  the offline suite against fake sources, not by the rehearsal. The check was never run against a Bloch L2 node.
-- A guardian whose L2 view is behind does not pause (section 4c): a real forgery during that guardian's outage
-  waits for another guardian or for a human.
+- A claim cannot be corrected (set once), and a held router exit cannot be redirected (section 4b). A claim that
+  could be changed needs the certificate to bind the claim's version: a change to the shared signer's context or to
+  the vault; not built.
+- The stall rule pauses when a guardian's own follower stands still past the deadline while exits are queued, and
+  it does not bound "cannot judge" when every L2 source is down or for a release already paid (section 4c,
+  trade-offs). The L2's real finality lag is not known here; the rule's default (half the release delay) must be
+  checked against it before launch. The check was never run against a Bloch L2 node.
 - `guardiao_stellar.py check` reads the release's L2 block from the release transaction on the guardian's Stellar
   RPC; outside the RPC's transaction window, or for a vault call made from inside another contract, only the
-  later-block rules apply. Putting the block into the vault's events would close this, and would move the Wasm
+  final history and the stall rule apply. Putting the block into the vault's events would close this, and would move the Wasm
   hash; not done.
 - The relayer does not restore an archived chain head a release needs (review 325, R325-XLM-7): after 30 days
   without a deposit a signer refuses until someone restores the entry by hand.
