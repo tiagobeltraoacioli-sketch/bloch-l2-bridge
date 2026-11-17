@@ -677,12 +677,15 @@ def active_units(man):
 
 
 def switch_to(inst, release, restart):
+    """Swap `current`, install that release's units and restart what ran. Returns the restart's exit code: a failed restart
+    (a release that dies at once) is reported to the caller, never raised, so an upgrade still rolls back."""
     swap(inst, 'current', release)
     man = current_manifest(inst)
     install_units(man, inst_dir(inst) / 'releases' / release)
     if restart:
-        systemctl('restart', *restart)
-    return man
+        systemctl('reset-failed', *restart, check=False)  # a start limit hit by the failed release must not block the old one
+        return systemctl('restart', *restart, check=False).returncode
+    return 0
 
 
 def template_lines(text):
@@ -720,22 +723,25 @@ def cmd_upgrade(args):
     write_release(man, files)
     tdir = P(man['layout']['etc']) / 'templates'
     t0 = time.time()
-    switch_to(inst, man['_release_id'], restart)
+    rc = switch_to(inst, man['_release_id'], restart)
     for name in man['configs']:
         shutil.copyfile(inst_dir(inst) / 'current/etc/templates' / name, tdir / name)
     level = 'OK'
-    if restart and not NO_SYSTEMD:
+    if rc:
+        level = 'CRIT'
+    elif restart and not NO_SYSTEMD:
         level = LEVELS_INV[health_wait(inst, t0)]
     rec['history'].append({'release': man['_release_id'], 'sha256': man['_bundle_sha256'], 'source_rev': man['source_rev'],
                            'ops_rev': man['ops_rev'], 'state_epoch': man['state_epoch'], 'at': int(t0), 'action': 'upgrade',
                            'health': level})
     if level != 'OK':
-        switch_to(inst, old_id, restart)
+        back = switch_to(inst, old_id, restart)
         for name in old['configs']:
             shutil.copyfile(old_rel / 'etc/templates' / name, tdir / name)
         rec['history'].append({'release': old_id, 'at': int(time.time()), 'action': 'auto-rollback'})
         save_record(inst, rec)
-        return out({'upgrade': 'rolled back', 'health': level, 'current': old_id, 'failed_release': man['_release_id']}, 2)
+        return out({'upgrade': 'rolled back', 'health': level, 'restart_failed': bool(rc), 'current': old_id,
+                    'failed_release': man['_release_id'], 'previous_restarted': back == 0}, 2)
     rec['previous'], rec['current'] = old_id, man['_release_id']
     swap(inst, 'previous', old_id)
     save_record(inst, rec)
@@ -767,12 +773,12 @@ def cmd_rollback(args):
         raise Refused(f'state epoch {pman["state_epoch"]} != current {cur["state_epoch"]}: the older code may not read this state')
     restart = active_units(cur)
     t0 = time.time()
-    switch_to(inst, prev, restart)
+    rc = switch_to(inst, prev, restart)
     tdir = P(cur['layout']['etc']) / 'templates'
     for name in pman['configs']:
         shutil.copyfile(inst_dir(inst) / 'current/etc/templates' / name, tdir / name)
-    level = 'OK'
-    if restart and not NO_SYSTEMD:
+    level = 'CRIT' if rc else 'OK'
+    if restart and not NO_SYSTEMD and not rc:
         level = LEVELS_INV[health_wait(inst, t0)]
     rec['previous'], rec['current'] = rec['current'], prev
     swap(inst, 'previous', rec['previous'])
