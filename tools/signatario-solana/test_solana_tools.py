@@ -298,6 +298,68 @@ class Recipients(unittest.TestCase):
         self.assertEqual(sol_recipient.wallet_of_text(' ' + FEE_WALLET + '\n'), self.wallet)
 
 
+    # Restated in round 18 (agent 371). The four tests of 32e124c below tested the round-16 discovery of a wallet
+    # (router log, registry announcement, operator hint file). Round 17 (336's WIP b2fa301) removed the registry and
+    # the hint files from the rule: an announcement or a file carries no proof of the key, and a held burn is now
+    # recovered by its burner's redirectHeldBurn with a proof. Each old property is kept against the new rule.
+
+    def l2(self):
+        import testkit
+        cluster = Cluster()
+        return cluster, testkit.L2(self, cluster)
+
+    def test_router_log_names_the_wallet(self):
+        cluster, l2 = self.l2()
+        burn = l2.exit('payee')
+        view = sol_recipient.exit_view(l2.cfg(), cluster.a, burn)
+        self.assertEqual((view['direct'], view['original']['wallet'], view['original']['problem']), (False, burn['wallet'], None))
+        self.assertEqual(sol_recipient.wallet_for_recipient(view, burn, S.unhex(burn['recipient'], 20)), burn['wallet'])
+
+    def test_a_log_that_does_not_hash_to_the_recipient_counts_for_nothing(self):
+        cluster, l2 = self.l2()
+        burn = l2.exit('payee')
+        log = next(x for x in l2.logs if x['address'] == l2.router and x['topics'][1] == burn['burn_id'])
+        data = bytearray(S.unhex(log['data']))
+        data[44:64] = S.account_id(S.pubkey(USDC_MINT))  # a curve point, but not the preimage of this burn's 20 bytes
+        log['data'] = S.hx(bytes(data))
+        view = sol_recipient.exit_view(l2.cfg(), cluster.a, burn)
+        self.assertEqual((view['original']['wallet'], view['original']['problem']), (None, 'no-router-log'))
+        self.assertIsNone(sol_recipient.wallet_for_recipient(view, burn, S.unhex(burn['recipient'], 20)))
+
+    def test_registry_announcement_of_a_token_account_is_not_a_wallet(self):
+        import testkit
+        cluster, l2 = self.l2()
+        token_account = S.pubkey(FEE_ATA)
+        self.assertFalse(sol_recipient.is_wallet(token_account, S.account_id(token_account)))
+        # an announcement is not read at all, even of a real wallet: the direct burn stays held without a redirect
+        wallet = testkit.wallet_of('announced')[1]
+        l2.logs.append({'address': '0x' + '33' * 20, 'blockNumber': hex(l2.block), 'transactionHash': '0x' + '00' * 32,
+                        'topics': [S.hx(S.keccak256(b'Announced(address,bytes32)')), '0x' + '00' * 12 + S.account_id(wallet).hex()],
+                        'data': S.hx(wallet)})
+        burn = l2.direct(S.account_id(wallet))
+        cfg = l2.cfg(recipient_registry='0x' + '33' * 20)
+        view = sol_recipient.exit_view(cfg, cluster.a, burn)
+        verdict = sol_recipient.decide(view, burn['burn_id'], sol_recipient.Holds(None), lambda w: sol_recipient.destination([], w))
+        self.assertEqual((verdict['hold'], verdict['target']), ('direct-burn', None))
+        # and a redirect to a token account's address is no wallet either
+        candidate = sol_recipient._candidate(S.b58encode(token_account), S.account_id(token_account), bytes(65), lambda t: 'x')
+        self.assertEqual(candidate['problem'], 'not-a-wallet-address')
+
+    def test_hint_file_and_unreachable_l2(self):
+        import testkit
+        cluster, l2 = self.l2()
+        wallet = testkit.wallet_of('hinted')[1]
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / S.hx(S.account_id(wallet))[2:]).write_text(S.b58encode(wallet) + '\n')
+            burn = l2.direct(S.account_id(wallet))
+            view = sol_recipient.exit_view(l2.cfg(recipient_hints=d), cluster.a, burn)
+            self.assertEqual((view['original'], view['redirect']), (None, None), 'a hint file names no destination')
+        with self.assertRaises(S.RpcError):  # "the L2 did not answer" is not "there is no wallet"
+            sol_recipient.exit_view(l2.cfg(l2_rpc='http://127.0.0.1:9'), cluster.a, l2.exit('payee'))
+        with self.assertRaises(S.RpcError):
+            sol_recipient.exit_view(l2.cfg(l2_rpc='http://127.0.0.1:9'), cluster.a, burn)
+
+
 class MintSigning(unittest.TestCase):
     """R325-SOL-3: a deposit is attested only when every configured endpoint shows the same record at `finalized`."""
 

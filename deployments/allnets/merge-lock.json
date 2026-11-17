@@ -71,12 +71,18 @@
     },
     "solana": {
       "branch": "codex/bridge-solana-r17-20261117",
-      "commit": "b2fa301f41b07a72017656c098f4c44b8441acae",
-      "agent": 336,
+      "commit": "886fd3ad8e09fbf402d9637997b169b45ee6cb14",
+      "agent": 371,
       "routes": [
         "solana"
       ],
-      "conflicts": []
+      "conflicts": [],
+      "history": [
+        {
+          "branch": "codex/bridge-solana-r17-20261117",
+          "commit": "b2fa301f41b07a72017656c098f4c44b8441acae"
+        }
+      ]
     },
     "stellar": {
       "branch": "codex/bridge-stellar-r17-20261117",

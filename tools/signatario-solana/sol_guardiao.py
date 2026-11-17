@@ -264,12 +264,7 @@ class SolGuardian(Guardian):
                 continue
             # The recipient rule (sol_recipient.py). A paid record that passed is not read again; an approval is
             # judged every round until it is paid or voided.
-            verdict = self._paid_checked.get((r['nonce'], r['seq'])) if paid else None
-            if verdict is None:
-                verdict = self.recipient_verdict(b, r['recipient'], fin)
-                if paid and verdict == ('ok', None):
-                    self._paid_checked[(r['nonce'], r['seq'])] = verdict
-            kind, why = verdict
+            kind, why = self.judged_recipient(b, r, paid, fin)
             if kind == 'mismatch':
                 findings.append(('hard', f'release-mismatch:{tag}', 0,
                                  {'reason': ('vault release' if paid else 'vault approval (not paid yet: a pause voids it)')
@@ -296,11 +291,25 @@ class SolGuardian(Guardian):
                                   'release': shown, 'burn_block': b['block'], 'l2_finalized': fin}))
         return backing, released, findings
 
+    def judged_recipient(self, b, r, paid, fin):
+        """The verdict of `recipient_verdict` for the release record `r` of burn `b`, with the cache of paid records:
+        only a verdict READ from the L2 and found 'ok' is remembered. A round without the L2 judges nothing
+        ('unjudged'), and what it could not judge is judged in the next round that reads the L2 (round 18: before,
+        the blind round's answer was cached as 'ok', and a payment first seen in a blind round was never judged)."""
+        key = (r['nonce'], r['seq'])
+        if paid and key in self._paid_checked:
+            return self._paid_checked[key]
+        verdict = self.recipient_verdict(b, r['recipient'], fin)
+        if paid and verdict == ('ok', None):
+            self._paid_checked[key] = verdict
+        return verdict
+
     def recipient_verdict(self, b, recipient20, fin):
-        """('ok', None), ('mismatch', None), ('unproven', why) or ('destination', why) for a release recipient of the
-        burn `b`, by the rule of sol_recipient.py on this guardian's own nodes."""
+        """('ok', None), ('mismatch', None), ('unproven', why), ('destination', why), or ('unjudged', why) in a round
+        without the L2, for a release recipient of the burn `b`, by the rule of sol_recipient.py on this guardian's
+        own nodes."""
         if self.blind:  # the L2 does not answer this round: the router's log cannot be read, and the round must go on
-            return 'ok', None
+            return 'unjudged', 'the L2 did not answer this round: the recipient rule is judged in the next round that reads it'
         def read():
             if self._senders is None:
                 sol_recipient.check_router(self.router_cfg, self.node().a)

@@ -168,6 +168,33 @@ class R330Sol1Destination(unittest.TestCase):
         for key in (cluster.a.config.mint, cluster.a.program_id, cluster.a.vault, cluster.a.tokens):
             self.assertIn('not a wallet', sol_recipient.destination([], key, cluster.a)['hold'])
 
+    def test_burn_status_names_the_hold_and_its_reason(self):
+        """Restated in round 18 (agent 371) for the exit rule of round 17: the wallet comes from the router's log with
+        a proof of its key, not from a hint file. The properties of the 32e124c test are kept one by one: a burn to
+        a mint is held as destination-not-a-wallet with the owner program in its reason and direct False; a burn
+        whose 20 bytes no wallet ever hashes to, made directly on the token, is held and direct True (its code is
+        now direct-burn: no destination at all, where 32e124c said no-wallet); a fresh wallet is waiting and its
+        token account does not exist; the paid page makes it paid."""
+        cluster = T.Cluster()
+        fake = T.Fake(cluster.answer)
+        self.addCleanup(fake.close)
+        d = Path(tempfile.mkdtemp())
+        node = sol_half.Node(cluster.files(d, fake.url))
+        l2 = K.L2(self, cluster)
+        mint = l2.exit('a mint')
+        cluster.accounts[mint['wallet']] = (S.TOKEN_PROGRAM, bytes(82))
+        held = sol_recipient.burn_status(node, l2.cfg(), mint)
+        self.assertEqual((held['state'], held['hold'], held['direct']), ('held', 'destination-not-a-wallet', False))
+        self.assertIn('classic SPL Token program', held['reason'])
+        nowallet = sol_recipient.burn_status(node, l2.cfg(), l2.direct(bytes.fromhex('77' * 20), burner='0x' + '99' * 20))
+        self.assertEqual((nowallet['state'], nowallet['hold'], nowallet['direct']), ('held', 'direct-burn', True))
+        self.assertTrue(nowallet['reason'])
+        fresh = l2.exit('a fresh wallet')
+        waiting = sol_recipient.burn_status(node, l2.cfg(), fresh)
+        self.assertEqual((waiting['state'], waiting['hold'], waiting['recipientTokenAccountExists']), ('waiting', None, False))
+        cluster.paid_page([fresh['nonce']])
+        self.assertEqual(sol_recipient.burn_status(node, l2.cfg(), fresh)['state'], 'paid')
+
     def test_the_tool_never_pays_or_creates_for_a_non_wallet(self):
         cluster = T.Cluster()
         fake = T.Fake(cluster.answer)
