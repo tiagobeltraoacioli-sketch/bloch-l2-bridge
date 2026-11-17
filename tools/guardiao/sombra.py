@@ -153,8 +153,17 @@ class Sombra:
             raise Unverifiable(f'{method} @ {redact(url)}: {out["error"]}')
         return out['result']
 
+    @staticmethod
+    def plain(*values):
+        """Positional values for a `cast` command line: one that starts with `-` would be read as an option (`--help`
+        exits 0 with the help text as its output), so it never reaches the command (agent 341, round 17)."""
+        out = [str(v) for v in values]
+        if any(v.startswith('-') for v in out):
+            raise Unverifiable('a value that would be read as a command-line option was refused')
+        return out
+
     def call(self, to, sig, *args, ok=True):
-        rc, out, err = self.run([self.cast, 'call', to, sig, *args, '--rpc-url', self.eth])
+        rc, out, err = self.run([self.cast, 'call', to, sig, *self.plain(*args), '--rpc-url', self.eth])
         if rc and ok:
             raise Unverifiable(f'call {sig}: {err[-300:]}')
         return (out.split()[0] if out else '') if rc == 0 else None
@@ -209,7 +218,7 @@ class Sombra:
             return True, 'prover state (no shadow verifier configured)'
         if not proof.get('public_values') or not proof.get('proof_bytes'):
             return False, f'no on-chain proof (mode {proof.get("mode")})'
-        blob = self.cast_out('abi-encode', 'f(bytes,bytes)', proof['public_values'], proof['proof_bytes'])
+        blob = self.cast_out('abi-encode', 'f(bytes,bytes)', *self.plain(proof['public_values'], proof['proof_bytes']))
         out = self.call(self.cfg['shadow_verifier'], 'verifyRelease(address,bytes32,bytes)(bytes4)',
                         self.vault, rid, blob, ok=False)
         if out is None:

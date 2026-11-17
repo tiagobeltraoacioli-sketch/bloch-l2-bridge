@@ -41,6 +41,9 @@ import tempfile
 import time
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'signatario-stable'))
+import sigverify  # noqa: E402  (signatures are recovered in this process: tools/signatario-stable/sigverify.py)
+
 MAX_STATUS_AGE = 600  # seconds, as atestador.py
 MINT_TYPEHASH_STR = 'Mint(uint32 gnbChainId,bytes32 lockTxid,uint32 lockVout,uint64 amount,address recipient)'
 DOMAIN_TYPEHASH_STR = 'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
@@ -270,7 +273,19 @@ def cmd_combine(ctx, args):
     for s in sigs[1:]:
         if {k: s[k] for k in fields} != first:
             refuse('the partial signatures are for different mints', differ=[k for k in fields if s[k] != first[k]])
-    by_signer = {s['signer']: s['signature'] for s in sigs}
+    # Each partial must be a signature WrappedGnB accepts (65 bytes, low s, v 27 or 28) that recovers, in this process, to
+    # its `signer` over the common digest; one signer counts once whatever its letter case (agent 341, round 17).
+    by_signer = {}
+    for i, s in enumerate(sigs):
+        try:
+            signer = sigverify.address20(s.get('signer'), 'signer')
+            signature = sigverify.signature65(s.get('signature'))
+            recovered = sigverify.recover(first['digest'], signature)
+        except sigverify.Malformed as e:
+            refuse(f'partial {i + 1} is not a signature the contract accepts: {e}', signer=s.get('signer'))
+        if recovered != signer:
+            refuse(f'partial {i + 1}: the signature does not recover to its signer', signer=signer, recovered=recovered)
+        by_signer.setdefault(signer, signature)  # one signer counts once; its first valid signature is used
     k = int(ctx.cfg['threshold'])
     if len(by_signer) < k:
         refuse(f'need {k} distinct signers, have {len(by_signer)}')
