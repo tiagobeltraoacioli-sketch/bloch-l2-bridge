@@ -1189,7 +1189,11 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # burn-status reads at `finalized`
         r = self.vault('burn-status', *self.l2_args, '--burn', bid)
         row = (r.get('burns') or [{}])[0]
-        check('burn-status: paid, to the redirected wallet', r['ok'] and row.get('state') == 'paid' and row.get('redirected') is True, answer=r)
+        # The burn committed to this same wallet, made directly on the token: the redirect names the wallet with a proof,
+        # so the paid record names the burn's own 20 bytes and `redirected` (a different recipient) is false.
+        check('burn-status: paid, to the wallet its burner named with a proof (the same 20 bytes as the burn: redirected false)',
+              r['ok'] and row.get('state') == 'paid' and row.get('paidFor') == S.hx(S.account_id(wallet))
+              and row.get('redirected') is False and row.get('redirects') == 1, answer=r)
         self.held_direct.remove(self.direct_ok)
 
     def run_exit_rule(self):
@@ -1340,6 +1344,10 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
         check('then paid to the redirected wallet', self.sol.balance(S.associated_token_address(k3.public, self.mint)) == 10 * U - 5_000)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        row = status(b2)
+        check('burn-status: paid to a DIFFERENT wallet than the burn named: redirected true, paidFor the new wallet',
+              row.get('state') == 'paid' and row.get('redirected') is True and row.get('paidFor') == S.hx(S.account_id(k3.public)), row=row)
         # An operator's explicit, logged release of its own latch (sol_half.py release-hold): recorded with the note,
         # and it does not make a burn payable that the rule still refuses (the keyless exit: no valid proof).
         keyless_burn = self.burn_id_of(self.held_proof[0])
