@@ -672,6 +672,28 @@ class GuardianPauseBlocked(unittest.TestCase):
         g.pause_vault(['release-mismatch:unproven-approval-2-22'])
         self.assertEqual(g.sent, ['vault-pause-blocked'], 'paged once, not every round')
 
+    def test_the_page_ends_when_no_hard_finding_asks_for_a_pause(self):
+        import guardiao
+        g = self.guardian(guardian_blocked_until=2000, paused_until=900)
+        g.pause_vault(['release-mismatch:unproven-approval-2-22'])
+        self.assertIn('vault-pause-blocked', g.state['problems'])
+        g.check_retention, g.blind, g.log = (lambda: None), False, (lambda **kv: None)
+        original = guardiao.Guardian.round
+        try:
+            guardiao.Guardian.round = lambda self: g.pause_vault(['still']) or 'round'  # the finding still stands
+            g.round()
+            self.assertIn('vault-pause-blocked', g.state['problems'])
+            guardiao.Guardian.round = lambda self: 'round'  # the finding resolved: nothing asks for a pause
+            g.round()
+            self.assertNotIn('vault-pause-blocked', g.state['problems'])
+            g.pause_vault(['again'])
+            g.blind = True
+            guardiao.Guardian.round = lambda self: 'round'
+            g.round()
+            self.assertIn('vault-pause-blocked', g.state['problems'], 'a round without the L2 resolves nothing')
+        finally:
+            guardiao.Guardian.round = original
+
     def test_already_paused_needs_no_page(self):
         g = self.guardian(paused_until=2000)
         g.pause_vault(['x'])

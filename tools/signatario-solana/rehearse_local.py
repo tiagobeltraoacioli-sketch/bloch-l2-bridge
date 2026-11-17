@@ -114,7 +114,8 @@ REQUIRED_CASES = {
     'mint-chain': 'an L2 mint chain the deposits do not back',
     'release-held-no-router-log': 'a router burn whose SolanaExit log the signer cannot find (its router_from_block is above the burn)',
     'deposit-record-changed': 'a deposit record a guardian read earlier is replaced after a Solana rollback (soft)',
-    'vault-pause-failed': 'a guardian pause the vault refuses (the cooldown after a committee unpause)',
+    'vault-pause-failed': 'a guardian pause that is sent and refused (a fee payer without SOL)',
+    'vault-pause-blocked': 'a hard finding while the guardian cannot pause (the cooldown after a committee unpause)',
 }
 REQUIRED_ELSEWHERE = {
     'release-held-redirect-destination': 'same code path as release-held-destination for the redirect key (test_exit_rule.Latch)',
@@ -1252,18 +1253,28 @@ class Rehearsal:
         self.sol.create_mint(self.payer, 'exit-rule-k1', self.payer.public)  # only the key holder can do this
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 1)
         s0 = self.state()
+        n1 = int(status(b1)['nonce'])
+
+        def record_of(nonce):
+            return self.vault('show', '--commitment', 'confirmed', '--release', str(nonce)).get('release')
         _, lines = self.daemon('sol_vigia.py', self.vigia_cfgs[0], 'relay', '--once')
+        # Per burn (restated in round 18 with reviewer 376's agreement): this burn has no release record; the vault-wide
+        # approval counter rises only by the approvals this pass made for OTHER burns (an honest one may be due).
+        others = [x for x in lines if x.get('kind') == 'relay-approve' and x.get('ok') and x.get('burn') != b1]
+        s1 = self.state()
         check('the relay daemon withholds the five-signature certificate (certificate-withheld-destination): no approval',
-              'certificate-withheld-destination' in alerts(lines, b1) and self.state()['approvalSeq'] == s0['approvalSeq'],
-              alerts=alerts(lines, b1), case='certificate-withheld-destination')
+              'certificate-withheld-destination' in alerts(lines, b1) and record_of(n1) is None
+              and not any(x.get('kind') == 'relay-approve' and x.get('burn') == b1 for x in lines)
+              and s1['approvalSeq'] == s0['approvalSeq'] + len(others),
+              alerts=alerts(lines, b1), others=len(others), case='certificate-withheld-destination')
         row = status(b1)
         check('burn-status reads it as held (destination-not-a-wallet)', row.get('state') == 'held' and row.get('hold') == 'destination-not-a-wallet', row=row)
         calls = list((WORK / 'shared' / 'release' / b1[2:]).glob('r-*/release.call'))
         check('the certificate file exists in the shared directory', len(calls) == 1, found=len(calls))
         ra = self.vault('approve', *self.l2_args, '--cert', str(calls[0]), *self.pay) if calls else {'ok': True}
         check('R330-SOL-3P-2 fixed: sol_vault.py approve refuses to deliver it WITHOUT any flag (the rule always applies)',
-              not ra['ok'] and 'not a wallet' in json.dumps(ra) and self.state()['approvalSeq'] == s0['approvalSeq'],
-              answer=ra, case='approve-refused-destination')
+              not ra['ok'] and 'not a wallet' in json.dumps(ra) and record_of(n1) is None
+              and self.state()['approvalSeq'] == s1['approvalSeq'], answer=ra, case='approve-refused-destination')
         code = self.raw_cert_approve(json.loads(calls[0].read_text())) if calls else 'no certificate'
         check('delivered raw, outside the tools, the vault approves it (it cannot know Solana ownership: the stated residual)',
               code is None, code=code)
@@ -1417,9 +1428,24 @@ class Rehearsal:
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         p1 = self.state()['pauseCount']
         code_g, ids, _ = guardian_ids(pausing_cfg)
-        check('a new hard finding inside the cooldown: the pause is refused by the vault and the guardian raises vault-pause-failed',
-              code is None and 'vault-pause-failed' in ids and self.state()['pauseCount'] == p1, exit=code_g, ids=ids,
-              case='vault-pause-failed')
+        # Run 5: the guardian knew the vault would refuse (the cooldown) and only wrote a vault-pause-skip line; since
+        # round 18 it pages vault-pause-blocked (test_exit_rule.GuardianPauseBlocked).
+        check('a new hard finding inside the committee cooldown: the guardian sends no pause and pages vault-pause-blocked',
+              code is None and 'vault-pause-blocked' in ids and self.state()['pauseCount'] == p1, exit=code_g, ids=ids,
+              case='vault-pause-blocked')
+        # A pause that is sent and refused: another guardian key (its one pause of this chain unused) whose fee payer
+        # holds no SOL, after the cooldown.
+        broke, broke_path = self.sol.keygen('guardian-fee-payer-without-sol')
+        failing_cfg = WORK / 'guardian-failing.json'
+        failing_cfg.write_text(json.dumps(dict(quiet, vault_pause=True, sol_keystore=str(WORK / 'keys' / 'guard1'),
+                                               sol_fee_payer=str(broke_path), state=str(WORK / 'guardian-failing-state.json'))))
+        self.wait_guardians_free()
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        p2 = self.state()['pauseCount']
+        code_g, ids, glines = guardian_ids(failing_cfg)
+        check('a pause that is sent and refused (its fee payer has no SOL): the vault is not paused and the guardian raises '
+              'vault-pause-failed', 'vault-pause-failed' in ids and self.state()['pauseCount'] == p2, exit=code_g, ids=ids,
+              log=[x for x in glines if str(x.get('kind', '')).startswith('vault-pause')][-2:], case='vault-pause-failed')
         # The guardian watches above (without vault pause) paused the L2 token's mints on their hard findings, as the
         # parent does; the later sections deposit and mint again, so the L2 clock is moved past that pause.
         l2_warp(259200 + 10)

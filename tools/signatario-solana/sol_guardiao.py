@@ -113,7 +113,12 @@ class SolGuardian(Guardian):
     def round(self):
         self._nodes, self._senders = {}, None
         self.check_retention()
-        return super().round()
+        self._pause_wanted = False
+        out = super().round()
+        if not self._pause_wanted and not self.blind:
+            # no hard finding asked for a vault pause in a round that read everything: the page of a blocked pause ends
+            self.clear_problem('vault-pause-blocked')
+        return out
 
     def check_retention(self):
         """R330-SOL-3. A paid record is compared with its burn only while it exists, so this watch must complete a
@@ -413,6 +418,7 @@ class SolGuardian(Guardian):
             return {'ok': False, 'reason': (err or out).strip()[-300:]}
 
     def pause_vault(self, reasons):
+        self._pause_wanted = True
         n, v, now = self.vault_view()
         count = v['pause_count']
         me = n.config.guardians.index(S.unhex(self.eth_me(), 20))
