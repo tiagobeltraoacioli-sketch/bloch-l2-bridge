@@ -516,7 +516,7 @@ class Timing(unittest.TestCase):
 
     def sample(self, total, age=0, mode='join', **more):
         return {'t': int(time.time()), 'mode': mode, 'signed': mode != 'measure', 'ok': True, 'total_s': total, 'rebuild_s': max(0, total - 1),
-                'source_half_s': 1.0, 'anchor_age_s': age, **more}
+                **({} if mode == 'measure' else {'source_half_s': 1.0}), 'anchor_age_s': age, **more}
 
     def test_no_measurement_yet_measures_first_and_then_decides(self):
         v = self.signer()
