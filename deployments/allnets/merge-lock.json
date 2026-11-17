@@ -65,15 +65,16 @@
     },
     "tron": {
       "branch": "codex/bridge-tron-r17-20261117",
-      "commit": "577ca36e7892450cc642676b2675c1eed76e8dbd",
-      "agent": 332,
+      "commit": "8f23f3808b76f0fc28ea9243f9a16ef7f7fdcde4",
+      "agent": 370,
       "routes": [
         "tron"
       ],
-      "conflicts": [
+      "conflicts": [],
+      "history": [
         {
-          "path": "deployments/schema/bridge.network.schema.json",
-          "resolution": "schema owner's version (ours)"
+          "branch": "codex/bridge-tron-r17-20261117",
+          "commit": "577ca36e7892450cc642676b2675c1eed76e8dbd"
         }
       ]
     },

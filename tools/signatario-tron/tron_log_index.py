@@ -60,8 +60,10 @@ One writer per directory (review R325-TRX-2P-1):
 import bisect
 import concurrent.futures
 import fcntl
+import hashlib
 import json
 import os
+import socket
 import sys
 import time
 import urllib.request
@@ -75,7 +77,61 @@ import tronlib
 DEPOSITED = '0x86f22d28da637559602e716d294d9c661cb8177451cfdf19c194c0c79503c174'
 SEL_DEPOSIT_COUNT = '2dfdf0b5'
 SEL_DEPOSIT_MATCHES = 'c0b0718f'
-VERSION = 1
+VERSION = 2   # 2: the cursor binds the log file by its byte length and sha256 (review R342-TRX-2, -3)
+
+# Filesystems on which `flock` may not exclude a writer on another host, or on which file attributes are cached by the
+# client (review R342-TRX-2). The index refuses a directory on any of them: local disk only.
+NETWORK_FILESYSTEMS = ('nfs', 'nfs4', 'cifs', 'smb3', 'smbfs', '9p', 'afs', 'ceph', 'glusterfs', 'lustre', 'gpfs', 'ocfs2',
+                       'gfs2', 'davfs', 'beegfs', 'virtiofs', 'vboxsf', 'vmhgfs')
+
+
+def filesystem_type(directory, mounts_text=None):
+    """The type of the filesystem `directory` is on, from /proc/self/mounts (Linux), or None where there is none."""
+    if mounts_text is None:
+        try:
+            mounts_text = Path('/proc/self/mounts').read_text()
+        except OSError:
+            return None
+    path, best, kind = os.path.realpath(directory), -1, None
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        point = parts[1].replace('\\040', ' ')
+        inside = path == point or path.startswith(point.rstrip('/') + '/')
+        if inside and len(point) > best:
+            best, kind = len(point), parts[2]
+    return kind
+
+
+def refuse_shared_storage(directory, mounts_text=None):
+    """An index directory must be on a local filesystem: one writer per directory is enforced by `flock`, and on a
+    network or FUSE filesystem `flock` does not exclude a writer on another host (review R342-TRX-2)."""
+    kind = filesystem_type(directory, mounts_text)
+    if kind and (kind in NETWORK_FILESYSTEMS or kind.startswith('fuse')):
+        raise SystemExit(f'the log index directory {directory} is on a {kind} filesystem: local disk only (a lock there does '
+                         'not exclude a second host). Give the shim a directory on the operator\'s own disk')
+    return kind
+
+
+def fsync_directory(directory):
+    """A rename is durable only once the directory itself is on disk."""
+    fd = os.open(str(directory), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_replace(path, data):
+    """Write-then-rename (review R342-TRX-3): a kill or a power loss leaves either the old file or the new one, whole."""
+    tmp = path.with_name(path.name + '.tmp')
+    with open(tmp, 'wb') as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fsync_directory(path.parent)
 ANCHOR_EVERY, ANCHORS_KEPT = 100, 500
 
 
@@ -98,6 +154,7 @@ def lock_directory(directory):
     if held:
         held[1] += 1
         return key
+    refuse_shared_storage(key)
     f = open(os.path.join(key, 'LOCK'), 'a+')
     try:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -105,11 +162,11 @@ def lock_directory(directory):
         f.seek(0)
         holder = f.read(64).strip() or 'unknown'
         f.close()
-        raise SystemExit(f'the log index in {directory} is in use by another process (pid {holder}): one shim per index '
+        raise SystemExit(f'the log index in {directory} is in use by another process ({holder}): one shim per index '
                          'directory. Stop that process first, or give this shim a directory of its own')
     f.seek(0)
     f.truncate()
-    f.write(f'{os.getpid()}\n')
+    f.write(f'pid {os.getpid()} host {socket.gethostname()}\n')
     f.flush()
     _LOCKS[key] = [f, 1]
     return key
@@ -186,32 +243,45 @@ class LogIndex:
                           'action': 'the index is rebuilt from the first block of the vault',
                           'reason': why}), file=sys.stderr, flush=True)
         self._empty()
-        (self.dir / 'logs.jsonl').write_text('')
         try:
-            os.unlink(self.dir / 'cursor.json')
+            os.unlink(self.dir / 'cursor.json')     # first the cursor: an empty log file under an old cursor is a rebuild too
         except FileNotFoundError:
             pass
+        write_replace(self.dir / 'logs.jsonl', b'')
+        self._file = (0, hashlib.sha256())
         self._seen = self._stamp()
 
     def load(self):
         self._empty()
         cur = self.dir / 'cursor.json'
         if not cur.exists():
-            (self.dir / 'logs.jsonl').write_text('')
+            write_replace(self.dir / 'logs.jsonl', b'')
+            self._file = (0, hashlib.sha256())
             self._seen = None
             return
         try:
             c = json.loads(cur.read_text())
         except ValueError:
             return self.rebuild('the cursor file is not JSON')
-        same = (c.get('version'), c.get('chain_id'), c.get('vault'), c.get('from_block')) == \
-            (VERSION, self.chain_id, self.vault, self.from_block)
+        same = (c.get('chain_id'), c.get('vault'), c.get('from_block')) == (self.chain_id, self.vault, self.from_block)
+        if same and c.get('version') != VERSION:
+            return self.rebuild(f"the index files are of format {c.get('version')}, this code writes format {VERSION}")
         if not same:
             raise SystemExit(f'the log index in {self.dir} belongs to another vault, chain or start block; '
                              'give this shim its own empty directory')
         try:
-            lines = (self.dir / 'logs.jsonl').read_text().splitlines()[:c['lines']]
-            if len(lines) != c['lines']:
+            # The cursor binds the file: the first `bytes` bytes of logs.jsonl must hash to `sha256` and hold exactly
+            # `lines` lines (review R342-TRX-2). A file another writer appended to, cut, or edited under an intact
+            # cursor fails this, whatever its attributes say. Bytes after them were written after the cursor.
+            raw = (self.dir / 'logs.jsonl').read_bytes()
+            size, digest = int(c['bytes']), str(c['sha256'])
+            if len(raw) < size:
+                return self.rebuild(f'the log file holds {len(raw)} bytes, the cursor names {size}')
+            named = raw[:size]
+            if hashlib.sha256(named).hexdigest() != digest:
+                return self.rebuild('the log file is not the one the cursor names (its sha256 differs)')
+            lines = named.decode().splitlines()
+            if len(lines) != c['lines'] or (named and not named.endswith(b'\n')):
                 return self.rebuild(f"the log file holds {len(lines)} lines, the cursor names {c['lines']}")
             logs = [json.loads(x) for x in lines]
             numbers = [int(l['blockNumber'], 16) for l in logs]
@@ -231,10 +301,26 @@ class LogIndex:
                 or not self.from_block - 1 <= verified <= cursor:
             return self.rebuild('the logs on disk are not in block order below the cursor, or the cursor is not ahead of '
                                 'what it calls verified')
+        # Every log once, in chain order (review R342-TRX-2): strictly increasing (block, transaction, log index). This
+        # covers the logs the deposit recount does not: releases, pauses, control changes, fee sweeps.
+        try:
+            keys = [(int(l['blockNumber'], 16), int(l['transactionIndex'], 16), int(l['logIndex'], 16)) for l in logs]
+        except (ValueError, KeyError, TypeError) as e:
+            return self.rebuild(f'a log on disk has no position: {type(e).__name__}')
+        if any(a >= b for a, b in zip(keys, keys[1:])):
+            return self.rebuild('the logs on disk are not strictly in chain order (a log twice, or out of place)')
         self.logs, self.numbers = logs, numbers
         self.cursor, self.cursor_id, self.verified = cursor, cursor_id, verified
         self.deposits, self.anchors = len(nonces), anchors
-        (self.dir / 'logs.jsonl').write_text(''.join(x + '\n' for x in lines))  # drop lines written after the cursor
+        if len(raw) > size:
+            # drop lines written after the cursor by cutting the tail, never by rewriting the file (review R342-TRX-3)
+            with open(self.dir / 'logs.jsonl', 'r+b') as f:
+                f.truncate(size)
+                f.flush()
+                os.fsync(f.fileno())
+        h = hashlib.sha256()
+        h.update(named)
+        self._file = (size, h)
         self._seen = self._stamp()
 
     def in_step(self):
@@ -248,20 +334,29 @@ class LogIndex:
     def save(self, appended=()):
         if self._stamp() != self._seen:
             raise Broken('the index files changed under this writer; nothing was written, the next round reloads them')
+        size, h = self._file
         if appended:
-            with open(self.dir / 'logs.jsonl', 'a') as f:
-                f.write(''.join(json.dumps(l) + '\n' for l in appended))
+            data = ''.join(json.dumps(l) + '\n' for l in appended).encode()
+            with open(self.dir / 'logs.jsonl', 'r+b') as f:
+                f.seek(size)                      # at the byte the cursor names: anything beyond it is not the index
+                f.truncate()
+                f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
+            h = h.copy()
+            h.update(data)
+            size += len(data)
         tmp = self.dir / 'cursor.tmp'
         with open(tmp, 'w') as f:
             f.write(json.dumps({'version': VERSION, 'chain_id': self.chain_id, 'vault': self.vault,
                                 'from_block': self.from_block, 'cursor': self.cursor, 'cursor_id': self.cursor_id,
                                 'verified': self.verified, 'deposits': self.deposits, 'anchors': self.anchors,
-                                'lines': len(self.logs)}) + '\n')
+                                'lines': len(self.logs), 'bytes': size, 'sha256': h.hexdigest()}) + '\n')
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.dir / 'cursor.json')
+        fsync_directory(self.dir)
+        self._file = (size, h)
         self._seen = self._stamp()
 
     def truncate(self, last_kept):
@@ -278,7 +373,15 @@ class LogIndex:
         self.verified = min(self.verified, self.cursor)
         self.deposits = sum(1 for l in self.logs if l['topics'][:1] == [DEPOSITED])
         self.anchors = [a for a in self.anchors if a[0] <= self.cursor]
-        (self.dir / 'logs.jsonl').write_text(''.join(json.dumps(l) + '\n' for l in self.logs))
+        data = ''.join(json.dumps(l) + '\n' for l in self.logs).encode()
+        # Both files are replaced whole, the logs first (write-then-rename), then the cursor. A crash between the two
+        # leaves the old cursor over the new, shorter file: its byte length or sha256 no longer match, so the next
+        # start rebuilds; it never serves a wrong log (review R342-TRX-3). A rollback is rare; a start never rewrites.
+        write_replace(self.dir / 'logs.jsonl', data)
+        h = hashlib.sha256()
+        h.update(data)
+        self._file = (len(data), h)
+        self._seen = self._stamp()
         self.save()
 
     # ── reading the chain ────────────────────────────────────────────────────

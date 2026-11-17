@@ -131,7 +131,11 @@ class NothingOnDiskIsBelieved(unittest.TestCase):
         self.assertEqual((err, again.stats['rebuilds'], deposit_nonces(again), again.verified), ('', 0, [0, 1], 60))
         again.close()
 
-    def edit(self, d, logs=None, cursor=None):
+    def edit(self, d, logs=None, cursor=None, rebind=True):
+        """Damage as a writer that also rewrites the cursor coherently would leave it. Format 2 (round 18, R342-TRX-2):
+        such a writer also names the new byte length and sha256 (`rebind`), so the checks INSIDE the file are still the
+        ones tested here; with rebind=False the cursor's binding of the file is what must catch it."""
+        import hashlib
         p, c = Path(d) / 'logs.jsonl', Path(d) / 'cursor.json'
         lines = p.read_text().splitlines()
         cur = json.loads(c.read_text())
@@ -139,6 +143,9 @@ class NothingOnDiskIsBelieved(unittest.TestCase):
             lines = logs(lines)
             p.write_text(''.join(x + '\n' for x in lines))
             cur['lines'] = len(lines)
+            if rebind:
+                data = p.read_bytes()
+                cur['bytes'], cur['sha256'] = len(data), hashlib.sha256(data).hexdigest()
         if cursor:
             cursor(cur)
         c.write_text(json.dumps(cur) + '\n')
@@ -164,15 +171,26 @@ class NothingOnDiskIsBelieved(unittest.TestCase):
                 self.assert_rebuilt(chain, d, word)
 
     def test_a_truncated_or_torn_file_is_rebuilt_not_left_for_a_person(self):
+        # Restated in round 18: the cursor now binds the file by byte length and sha256, so a file shortened under an
+        # intact cursor is caught by that first; the round-17 checks behind it (line count, unreadable line) are kept
+        # and reached by a cursor rewritten coherently (rebind).
         with tempfile.TemporaryDirectory() as d:
             chain = self.built(d)
             p = Path(d) / 'logs.jsonl'
             p.write_text(p.read_text().splitlines()[0] + '\n')                       # a line lost; the cursor still names 2
+            self.assert_rebuilt(chain, d, 'the cursor names')
+        with tempfile.TemporaryDirectory() as d:
+            chain = self.built(d)
+            self.edit(d, logs=lambda l: l[:1], cursor=lambda c: c.update(lines=2))     # bytes rebound, the line count is not
             self.assert_rebuilt(chain, d, 'holds 1 lines, the cursor names 2')
         with tempfile.TemporaryDirectory() as d:
             chain = self.built(d)
             p = Path(d) / 'logs.jsonl'
             p.write_text(p.read_text()[:-40] + '\n')                                # the last line torn
+            self.assert_rebuilt(chain, d, 'the cursor names')
+        with tempfile.TemporaryDirectory() as d:
+            chain = self.built(d)
+            self.edit(d, logs=lambda l: l[:-1] + [l[-1][:-40]])                     # torn, and the cursor rebound to it
             self.assert_rebuilt(chain, d, 'cannot be read as an index')
         with tempfile.TemporaryDirectory() as d:
             chain = self.built(d)

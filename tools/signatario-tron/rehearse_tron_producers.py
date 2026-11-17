@@ -45,9 +45,10 @@ import tronlib  # noqa: E402
 
 U = R.U
 # The launch values of deployments/tron/busdt-trx-vault.config.json (the main rehearsal keeps its own smaller amounts):
-# a fixed release fee of 13 USDT, a minimum burn of 65 and a minimum deposit of 66.
-R.FLAT, R.MIN_DEPOSIT, R.MIN_BURN = 13 * U, 66 * U, 65 * U
-DEPOSITS, BURN = (100 * U, 150 * U), 70 * U
+# a fixed release fee of 14 USDT, a minimum burn of 70 and a minimum deposit of 71 (round 18: the worst case of review
+# R342-TRX-1, a release right after sweepFees(), 158,945 energy).
+R.FLAT, R.MIN_DEPOSIT, R.MIN_BURN = 14 * U, 71 * U, 70 * U
+DEPOSITS, BURN = (100 * U, 300 * U), 70 * U   # enough backing for the three releases of E2 and the two of E5
 check, out = R.check, R.out
 record = {'samples': [], 'energy': [], 'notes': {}}
 
@@ -273,11 +274,11 @@ def energies(net, amounts):
         done[label] = (ok, note(label, (d or {}).get('receipt') or {}) if d else None)
     e = {k: v[1] for k, v in done.items()}
     check('E2 three releases of 70 USDT through the daemons (5-of-7 certificate, relayed), on a vault with the launch values '
-          '(fixed fee 13, minimum burn 65, minimum deposit 66): each pays 70 less 5 bps less 13 = 56.965 USDT, and its energy '
-          'and bandwidth are recorded', all(v[0] for v in done.values()) and R.paid_of(BURN) == 56_965_000
-          and net.vint('releaseFlatFee()') == 13 * U and net.vint('l2MinBurn()') == 65 * U and net.vint('minDeposit()') == 66 * U, done)
-    low = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 65 * U, '0x' + '00' * 12 + net.a['alice'][2:])
-    check('E2b a deposit of 65 USDT (below the minimum of 66) is refused by the vault', low[0] is False, low)
+          '(fixed fee 14, minimum burn 70, minimum deposit 71): each pays 70 less 5 bps less 14 = 55.965 USDT, and its energy '
+          'and bandwidth are recorded', all(v[0] for v in done.values()) and R.paid_of(BURN) == 55_965_000
+          and net.vint('releaseFlatFee()') == 14 * U and net.vint('l2MinBurn()') == 70 * U and net.vint('minDeposit()') == 71 * U, done)
+    low = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 70 * U, '0x' + '00' * 12 + net.a['alice'][2:])
+    check('E2b a deposit of 70 USDT (below the minimum of 71) is refused by the vault', low[0] is False, low)
     fresh, holder, fresh_again = (e[k]['energy_total'] if e[k] else 0 for k in done)
     check('E3 a release to an address that never held USDT costs more energy than one to a holder (a new storage slot in the '
           'token: 15,000), and two fresh recipients cost the same within 0.1% (the very first release writes the vault\'s '
@@ -301,6 +302,42 @@ def energies(net, amounts):
     record['notes']['release_calls_into_the_token'] = 'one transfer and four balanceOf (vault before and after, recipient before and after)'
 
 
+def worst_case_search(net):
+    """R342-TRX-1 (review 342's demonstration, kept and widened in round 18): the fixed fee is computed from the WORST
+    release a relayer pays for. The vault's own storage writes depend on its state: `feesAccrued` has a slot of its own,
+    and `sweepFees()` (anyone may call it) sets it to zero, so the next release writes it from zero again (+15,000).
+    The search measures a release in each state that changes a storage write (fresh or holder recipient, right after a
+    sweep or not; E2 covers the states without a sweep) and checks that the config's basis is at least the most
+    expensive release measured in THIS run: the number that becomes immutable is the worst case, not a typical one."""
+    cfg = json.loads((HERE.parent.parent / 'deployments' / 'tron' / 'busdt-trx-vault.config.json').read_text())
+    basis = int(cfg['vault']['provenance']['fees']['basis']['measured']['releaseEnergyBase'])
+    found = {}
+    for label, to in (('vault.release to an address that never held USDT, right after sweepFees()', '0x' + 'f5' * 20),
+                      ('vault.release to a holder, right after sweepFees()', '0x' + 'f5' * 20)):
+        swept = net.ttx('mallory', net.vault, 'sweepFees()', label='vault.sweepFees (anyone)', fee_limit=200_000_000)
+        left = net.vint('feesAccrued()')
+        before = net.usdt_bal(to)
+        burn = net.burn(net.key['alice'], BURN, to)
+        net.sign_all()
+        d = net.settle_release(burn, timeout=120)
+        e = (d or {}).get('receipt') or {}
+        energy = (e.get('energy_total') or 0) - (e.get('energy_penalty') or 0)
+        ok = swept['ok'] and left == 0 and d is not None and net.usdt_bal(to) - before == R.paid_of(BURN)
+        record['energy'].append({'label': label, **{k: e.get(k) for k in ('energy_total', 'energy_penalty', 'bandwidth',
+                                                                           'bandwidth_burned_sun', 'fee_sun', 'result')}})
+        found[label] = (ok, energy)
+        print(f'     {label}: sweep ok {swept["ok"]}, feesAccrued after it {left}, release energy {energy}', flush=True)
+    releases = [(r['energy_total'] or 0) - (r.get('energy_penalty') or 0) for r in record['energy']
+                if str(r.get('label', '')).startswith('vault.release') and r.get('energy_total')]
+    worst = max(releases) if releases else 0
+    record['notes']['worst_case_search'] = {'basis': basis, 'worst_measured': worst, 'releases_measured': releases,
+                                            'cases': {k: v[1] for k, v in found.items()}}
+    check('E5 (R342-TRX-1) the worst-case search: releases right after sweepFees() (fresh and holder recipients) are paid, '
+          'and the config\'s basis (fees.basis.measured.releaseEnergyBase) is at least the most expensive release measured '
+          'in this run', all(v[0] for v in found.values()) and len(releases) >= 5 and 0 < worst <= basis,
+          {'basis': basis, 'worst': worst, 'releases': releases, 'cases': found})
+
+
 def main():
     if len(sys.argv) < 4:
         raise SystemExit(__doc__)
@@ -308,6 +345,7 @@ def main():
     try:
         amounts = producers(net)
         energies(net, amounts)
+        worst_case_search(net)
     finally:
         net.stop()
         failed = [n for n, ok in R.results if not ok]
