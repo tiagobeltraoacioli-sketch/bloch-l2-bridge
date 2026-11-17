@@ -193,7 +193,7 @@ def exit_text(data_hex):
         if length > 64 or offset + 32 + length > len(data):
             return None
         return data[offset + 32:offset + 32 + length].decode('ascii')
-    except (ValueError, IndexError, UnicodeDecodeError):
+    except (ValueError, IndexError, UnicodeDecodeError, TypeError):
         return None
 
 
@@ -204,15 +204,16 @@ def find_wallet(cfg, commitment, burn_id=None):
     url = cfg.get('l2_rpc')
     router, registry = cfg.get('burn_router'), cfg.get('recipient_registry')
     if url and router and burn_id:
+        burn_id = S.hx(S.unhex(burn_id, 32, 'burn id'))  # strict: this text goes into a JSON-RPC filter
         for entry in l2_logs(url, router, [topic(ROUTER_EVENT), burn_id], cfg.get('router_from_block') or 0):
-            wallet = wallet_of_text(exit_text(entry.get('data', '0x')))
+            wallet = wallet_of_text(exit_text(entry.get('data', '0x') if isinstance(entry, dict) else None))
             if is_wallet(wallet, commitment):
                 return wallet, 'router'
     if url and registry:
         for entry in l2_logs(url, registry, [topic(REGISTRY_EVENT), '0x' + '00' * 12 + hexed[2:]], cfg.get('registry_from_block') or 0):
             try:
                 wallet = bytes.fromhex(entry['data'][2:66])
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, TypeError):
                 continue
             if is_wallet(wallet, commitment):
                 return wallet, 'registry'

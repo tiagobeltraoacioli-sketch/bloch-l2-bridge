@@ -1,9 +1,24 @@
-//! Agent 330 (round 17, second pass of the Solana bridge review): demonstrations and attack cases against the
-//! fixed vault at f1c6289, on the built program in the in-process SVM. Reviewer's branch only.
+//! Review 330 (round 17, second pass of the Solana bridge review): its demonstrations and attack cases against
+//! the vault program, on the built program in the in-process SVM. Brought into the developer's line by agent 336.
 //!
-//! A test named `r330_sol_N_*` demonstrates finding R330-SOL-N of agents/330-bridge-solana-review-r17.md: it
-//! PASSES while the behaviour described in the finding is present. The tests named `attack_*` are attacks that
-//! the program refuses; they pass because the program holds.
+//! The program image did not change in round 17 (coordinator's decision: the fixes of R330-SOL-1 and R330-SOL-3
+//! are in the tools and the periphery; sha256 33f7027d...7316). Two of the reviewer's demonstrations therefore
+//! still describe what the PROGRAM does, and they are RESTATED rather than inverted, with the reason:
+//!
+//!   r330_sol_1_the_vault_pays_curve_points_that_are_not_wallets
+//!     -> program_boundary_r330_sol_1_the_vault_pays_whatever_wallet_bytes_were_certified
+//!        The program sees 32 bytes that hash to the burn's 20 and cannot read who owns an address it is not
+//!        given. The rule "the destination is a wallet" is the signers' (sol_recipient.destination, read at
+//!        `finalized`) and the router's (small-order points, the mint, the token programs). The test stays as
+//!        the statement of that boundary: an approval certified by five signers is paid.
+//!   r330_sol_3_zero_retention_closes_a_record_in_the_transaction_that_pays_it
+//!     -> program_boundary_r330_sol_3_zero_retention_is_valid_for_the_program
+//!        The program's bound on `record_retention` is an upper one only. The floor (259,200 s) is in the
+//!        mainnet policy of the tools and the deploy check (solana_lib.retention_floor, sol_vault.py validate,
+//!        init and verify), which refuse this configuration; tools/signatario-solana/test_r330_review.py.
+//!
+//! `r330_sol_6_*` (Info) is unchanged behaviour, now documented (docs/SOLANA-VAULT.md 11). The tests named
+//! `attack_*` are attacks that the program refuses; they pass because the program holds.
 
 mod common;
 use common::*;
@@ -24,10 +39,11 @@ fn identity_point() -> Address {
 /// R330-SOL-1 (program side). The vault pays the associated token account of ANY 32 bytes that hash to the burn's
 /// 20 bytes. Two addresses that are points of the curve and are not wallets: the address of the mint itself (a
 /// token-program account created at a keypair address, as Circle's USDC mint is), and the identity point, for
-/// which no key can exist. The router and the signers accept both (forge test R330SolanaBurnRouter, tool test
-/// test_r330_review.py, and the validator run); here: the program then pays them.
+/// which no key can exist. Since round 17 the router refuses both and the signers hold both (forge test
+/// R330SolanaBurnRouter, tool test test_r330_review.py, and the validator rehearsal); the program itself, given an
+/// approval for them, still pays: it is the last link and cannot know. Restated, see the head of this file.
 #[test]
-fn r330_sol_1_the_vault_pays_curve_points_that_are_not_wallets() {
+fn program_boundary_r330_sol_1_the_vault_pays_whatever_wallet_bytes_were_certified() {
     let mut rig = Rig::new();
     rig.deposit(500 * USDC, L2);
     let payer = rig.payer.pubkey();
@@ -47,10 +63,11 @@ fn r330_sol_1_the_vault_pays_curve_points_that_are_not_wallets() {
     rig.check_backing();
 }
 
-/// R330-SOL-3. `record_retention` 0 is a valid configuration (program and tool): the payment and the closing of
+/// R330-SOL-3. `record_retention` 0 is a valid configuration for the PROGRAM (the tools refuse it since round 17,
+/// see the head of this file): the payment and the closing of
 /// its record then share one transaction, and no observer ever reads a paid record (amount, recipient, burn).
 #[test]
-fn r330_sol_3_zero_retention_closes_a_record_in_the_transaction_that_pays_it() {
+fn program_boundary_r330_sol_3_zero_retention_is_valid_for_the_program() {
     let mut rig = Rig::with(|c| c.record_retention = 0);
     rig.deposit(5_000 * USDC, L2);
     let owner = rig.new_recipient();

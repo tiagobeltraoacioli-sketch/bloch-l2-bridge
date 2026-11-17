@@ -148,19 +148,31 @@ def _decompress(key):
 
 
 def _edwards_add(a, b):
-    (x1, y1), (x2, y2) = a, b
-    t = _D * x1 * x2 * y1 * y2 % _P
-    return ((x1 * y2 + x2 * y1) * pow(1 + t, _P - 2, _P) % _P, (y1 * y2 + x1 * x2) * pow(1 - t, _P - 2, _P) % _P)
+    """Extended coordinates (X, Y, Z, T) with x = X/Z, y = Y/Z, xy = T/Z; complete for a = -1 (RFC 8032, 5.1.4)."""
+    x1, y1, z1, t1 = a
+    x2, y2, z2, t2 = b
+    e, f = (y1 - x1) * (y2 - x2) % _P, (y1 + x1) * (y2 + x2) % _P
+    g, h = 2 * t1 * t2 * _D % _P, 2 * z1 * z2 % _P
+    return ((f - e) * (h - g) % _P, (h + g) * (f + e) % _P, (h - g) * (h + g) % _P, (f - e) * (f + e) % _P)
 
 
 def _edwards_mul(k, point):
-    out = (0, 1)
+    """k times an affine point (x, y); the result is affine again."""
+    out, q = (0, 1, 1, 0), (point[0], point[1], 1, point[0] * point[1] % _P)
     while k:
         if k & 1:
-            out = _edwards_add(out, point)
-        point = _edwards_add(point, point)
+            out = _edwards_add(out, q)
+        q = _edwards_add(q, q)
         k >>= 1
-    return out
+    inv = pow(out[2], _P - 2, _P)
+    return (out[0] * inv % _P, out[1] * inv % _P)
+
+
+def _edwards_sum(a, b):
+    """The sum of two affine points, affine."""
+    x, y, z, _ = _edwards_add((a[0], a[1], 1, a[0] * a[1] % _P), (b[0], b[1], 1, b[0] * b[1] % _P))
+    inv = pow(z, _P - 2, _P)
+    return (x * inv % _P, y * inv % _P)
 
 
 _BASE = _decompress((4 * pow(5, _P - 2, _P) % _P).to_bytes(32, 'little'))
@@ -175,7 +187,7 @@ def ed25519_verify(public, message, signature):
     if a is None or r is None or s >= _L:
         return False
     k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), 'little') % _L
-    return _edwards_mul(s, _BASE) == _edwards_add(r, _edwards_mul(k, a))
+    return _edwards_mul(s, _BASE) == _edwards_sum(r, _edwards_mul(k, a))
 
 
 # ── secp256k1 recovery (committee and guardian signatures are checked in process, never by a CLI's exit code) ───
