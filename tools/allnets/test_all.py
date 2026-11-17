@@ -8,6 +8,8 @@ never silently skipped and never counted as a pass):
   integration   registry check, test_registry, mergecheck over every merge, the never-merge and forbidden-path rules,
                 route-file identity (every path a line owns is byte-identical to that line's merged tip), test_routes
   forge         `forge test --offline` (whole tree), A239Metamorphic isolated on shanghai and cancun
+  artifacts     creation and runtime keccak of every contract: the frozen tree cc2511a and every line tip are built
+                from `git archive` of that commit and compared with this tree's build (tools/allnets/artifacts.py)
   offline       every `tools/*/test_*.py` unittest module from its own directory, and the offline script tests
   ethereum      the Ethereum bridge's anvil suites and daemon drills (agent 306's stages anvil1, anvil2, anvil3, extra)
   evmnets       tools/evm-nets tests, the reviewer's deploy-gate cases, the registry checks, network files
@@ -32,7 +34,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-STAGES = ('integration', 'forge', 'offline', 'ethereum', 'evmnets', 'forks', 'bitcoin', 'solana', 'tron', 'stellar', 'scripts')
+STAGES = ('integration', 'forge', 'artifacts', 'offline', 'ethereum', 'evmnets', 'forks', 'bitcoin', 'solana', 'tron', 'stellar', 'scripts')
 # Paths a route line owns: in the merged tree they must be byte-identical to the line's merged tip (the merge brought
 # them whole). Shared files (signatario-stable, deploy-pontes, the schema) are checked by mergecheck instead.
 OWNED = {
@@ -163,6 +165,30 @@ def stage_forge(r):
         r.suite('forge', f'metamorphic-{evm}', [r.forge, 'test', '--offline', '--isolate', '--evm-version', evm,
                                                 '--match-contract', 'A239Metamorphic'], env={'A239_ISOLATE': 'true'})
     r.suite('forge', 'forge-build', [r.forge, 'build', '--offline'])
+
+
+ART_SOURCES = {'evm-nets': ['contracts/evmnets', 'contracts/usdt'], 'bitcoin': ['contracts/btc'], 'tron': ['contracts/tron'],
+               'solana': ['contracts/solana'], 'stellar': ['contracts/stellar'], 'shared-tools': ['contracts/']}
+
+
+def stage_artifacts(r):
+    art = HERE / 'artifacts.py'
+    if not (ROOT / 'out').is_dir():
+        r.not_run('artifacts', 'artifacts', 'no out/ of this tree (run the forge stage first)')
+        return
+    merged = r.out / 'manifest-merged.json'
+    r.suite('artifacts', 'manifest-merged', ['sh', '-c', f'{sys.executable} {art} manifest {ROOT / "out"} > {merged}'], retry_busy=False)
+    lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
+    bases = [('freeze-cc2511a', 'cc2511a', [])] + [(n, e['commit'], ART_SOURCES.get(n, [])) for n, e in lock.items()]
+    for name, commit, sources in bases:
+        d = r.out / f'art-{name}'
+        build = (f'rm -rf {d} && mkdir -p {d} && git -C {ROOT} archive {commit} | tar -x -C {d} && '
+                 f'{r.forge} build --offline --root {d} > {d}.build.log 2>&1 && '
+                 f'{sys.executable} {art} manifest {d / "out"} > {d}.json')
+        row = r.suite('artifacts', f'build-{name}', ['sh', '-c', build], retry_busy=False)
+        if row['status'] == 'PASS':
+            r.suite('artifacts', f'compare-{name}', py(str(art), 'compare', f'{d}.json', str(merged),
+                    *(['--sources', *sources] if sources else [])), retry_busy=False)
 
 
 def stage_offline(r):
