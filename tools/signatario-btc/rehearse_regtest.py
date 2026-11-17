@@ -1139,6 +1139,86 @@ def run(rig):
     (rig.work / 'reserves-final.json').write_text(json.dumps(res, indent=1))
     note('final reserves line: ' + json.dumps(res))
 
+    # ── X. review 342 (round 17): attack cases. Each check states the property; FAIL = the finding is demonstrated ──
+    import btc_vault as _bv
+    who_k = alice_k if rig.balance(alice) >= rig.balance(bob) else bob_k
+    note(f'X: balances alice {rig.balance(alice)} bob {rig.balance(bob)} units')
+    # X1. A relayer WITHOUT a key sets an honest, claimed, payable burn aside. The burner named 10 sat/vB (the market
+    # plus a margin); the relayer names 11, which every signer accepts (here the band is the test ceiling of 200; on
+    # mainnet it is 1.5 times the estimate). The transaction pays nobody: a stray output of the relayer covers the fee.
+    victim = burn(who_k, 3_000, max_rate=10)
+    rig.l2_mine(3)
+    stray1 = rig.pay(thread_address, '0.00020000')
+    stray2 = rig.pay(thread_address, '0.00030000')
+    stray3 = rig.pay(thread_address, '0.00020000')
+    rig.mine(2)
+    r = rig.vault_tx(11, donations=[(stray1[0], stray1[1])], aside_through=victim['nonce'], signers=range(7), tag='x1-aside')
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    signed = sum(1 for c0, _ in r['signs'] if c0 == 0)
+    note(f"X1: propose {r['propose'][0]} set_aside {r['propose'][1].get('set_aside')} payouts {r['propose'][1].get('payouts')} "
+         f"signed by {signed} of 7; combine {r['combine'] and r['combine'][0]}; received {received(victim['address'])}; "
+         f"reserves {res.get('status')} set_aside_burns {res.get('set_aside_burns')}")
+    check('X1 (R342-BTC-1) a claimed burn that is payable at the market is not set aside by a keyless relayer naming a fee '
+          'rate one above its ceiling, in a transaction that pays no burn and sweeps no deposit',
+          not (r['combine'] and r['combine'][0] == 0 and r['propose'][1].get('set_aside') == [victim['nonce']]),
+          (r['propose'][1], reasons(r['signs'])))
+    # X2. The same relayer CANCELS a payout that is already in the mempool: the honest relayer pays victim2 at 10
+    # (pending, unconfirmed); the replacement at 20 sets it aside (it is "not payable at 20") and pays nobody.
+    victim2 = burn(who_k, 3_000, max_rate=10)
+    rig.l2_mine(3)
+    honest = rig.vault_tx(10, burns=[victim, victim2], tag='x2-honest')          # broadcast, not mined
+    in_pool = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode == 0
+    evil = rig.vault_tx(20, donations=[(stray2[0], stray2[1])], aside_through=victim2['nonce'], signers=range(7), tag='x2-replace')
+    replaced = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode != 0
+    rig.mine(1)
+    rig.l2_mine(3)
+    note(f"X2: honest payout in mempool {in_pool} (late {honest['propose'][1].get('late')}); replacement combine "
+         f"{evil['combine'] and evil['combine'][0]} signed by {sum(1 for c0, _ in evil['signs'] if c0 == 0)} of 7, set_aside "
+         f"{evil['propose'][1].get('set_aside')}; honest transaction evicted {replaced}; victims received "
+         f"{received(victim['address'])} / {received(victim2['address'])}")
+    check('X2 (R342-BTC-1) a payout pending in the mempool is not cancelled by a keyless relayer whose replacement sets the '
+          'burns aside and pays nobody',
+          not (in_pool and evil['combine'] and evil['combine'][0] == 0 and replaced
+               and received(victim['address']) == 0 and received(victim2['address']) == 0),
+          (evil['propose'][1], reasons(evil['signs'])))
+    r = rig.vault_tx(10, burns=[victim, victim2], tag='x2-late')    # the honest relayer pays both late, at their ceiling
+    rig.mine(1)
+    rig.l2_mine(3)
+    note(f"X2: afterwards both are paid late: combine {r['combine'] and r['combine'][0]} late {r['propose'][1].get('late')} "
+         f"received {received(victim['address'])} / {received(victim2['address'])}")
+    # X3. Five keys INSIDE the rules hide a burn: a rule-shaped transaction sets aside a burn that is payable (router
+    # burn, ceiling 200, transaction at 1 sat/vB). Honest signers would refuse; replay accepts (the chain cannot tell).
+    # Property: the reserves monitor reports it (as it reports a payout to a wrong key hash, R325-BTC-6).
+    hidden = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    rig.sync_index()
+    _node = _bv.Node(rig.btc_url, str(rig.cookie), 'bitcoin-regtest')
+    _tip = _bv.VaultView(vault, _node).load().tip_state()
+    built = pol.build_vault_tx(vault, _tip, [], [{'txid': stray3[0], 'vout': stray3[1], 'value': stray3[2]}], [], 1,
+                               aside_through=hidden['nonce'])
+    xtx = built['tx']
+    order = [i for i in sorted(range(7), key=lambda i: pubs[i])][:5]
+    xtx.witnesses = [[b''] + [c.der_sig(*c.sign(xtx.sighash(i, inp['script'], inp['value']), privs[k])[:2]) for k in order]
+                     + [inp['script']] for i, inp in enumerate(built['inputs'])]
+    sent = rig.bcli('sendrawtransaction', xtx.serialize().hex(), ok=False)
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    row = burn_status(hidden['nonce'])['burns'][0]
+    note(f"X3: rogue set-aside broadcast {sent.returncode == 0}; reserves exit {rc} status {res.get('status')} "
+         f"set_aside_burns {res.get('set_aside_burns')}; burn status row {row}")
+    check('X3 (R342-BTC-2) a payable burn set aside by five keys inside the rules is reported by the reserves monitor',
+          sent.returncode == 0 and (rc != 0 or res.get('status') != 'ok'), (sent.stderr[-300:], res))
+    r = rig.vault_tx(1, burns=[hidden], tag='x3-late')
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    check('X3b afterwards the honest signers pay the hidden burn late and the reserves are exact (the state is not damaged)',
+          r['combine'] and r['combine'][0] == 0 and received(hidden['address']) == 300_000 - 150 - 402 and rc == 0
+          and res['status'] == 'ok' and res['set_aside_count'] == 0, (r, res))
+
     # ── G. the limit an auditor must accept ──────────────────────────────────
     st = rig.status()
     tip_tx, *_ = c.parse_tx(bytes.fromhex(rig.b('getrawtransaction', st['tip'])))
