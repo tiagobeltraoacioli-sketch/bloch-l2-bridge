@@ -17,9 +17,9 @@
       ]
     },
     "evm-nets": {
-      "branch": "codex/bridge-evm-nets-r17-20261117",
-      "commit": "2f22b204f1f772d48da4a9fa4b598fa889dfe118",
-      "agent": 337,
+      "branch": "codex/bridge-evm-nets-r17-audit-20261117",
+      "commit": "9187656dd021848bf85b7102605af8720333787d",
+      "agent": 372,
       "routes": [
         "arbitrum-one",
         "op-mainnet",
@@ -27,10 +27,12 @@
         "base",
         "bnb"
       ],
-      "conflicts": [
+      "conflicts": [],
+      "rule": "Tree of 9187656 equals the tree of 2f22b20, already merged (git rev-parse 9187656^{tree} = 2f22b20^{tree}): recorded with -s ours, no content change.",
+      "history": [
         {
-          "path": "tools/deploy-pontes/vault_pontes.py",
-          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.ca43a63658c95de4"
+          "branch": "codex/bridge-evm-nets-r17-20261117",
+          "commit": "2f22b204f1f772d48da4a9fa4b598fa889dfe118"
         }
       ]
     },
