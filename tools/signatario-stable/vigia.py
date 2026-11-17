@@ -90,6 +90,20 @@ seconds (default 300), and when every live round was refused the signer may open
 A burn the token itself would refuse to pay (a transfer from the vault that reverts in `eth_call`, such as a blacklisted
 recipient) is parked: no rebuild, no slot, not asked of the feeds. It is checked again every pass and resumes if that changes.
 
+Networks other than Ethereum (rounds 16 and 17; tools/evm-nets/networks.json, tools/evm-nets/launch.py). With a source chain
+id other than 1 the daemon asks the launch registry at start: a network that is not launchable is refused in both modes, and
+no key, flag or environment variable lifts it (review R329-EVM-1). For a network of the registry `anchor_policy` and
+`anchor_max_age` are the registry's by chain id (a config that omits them gets them; one that contradicts them is refused at
+start, R329-EVM-3), `--interval`, `max_release_signs_per_hour` and `refused_retry` default to the network's pacing (an
+`--interval` longer than the network's is refused, R329-EVM-6), and every release signature is timed (R329-EVM-4): the signer
+passes `--timing` to signatario.py, keeps the last measurements in `timing_state` (default SHARED/.timing/<me>.json, which
+tools/evm-nets/signer_timing.py watches), logs `timing` lines, alerts `release-window-budget` when the work for one signature
+or the anchor's age at a signature reaches the network's alert fraction of its join window, and starts no round it cannot
+finish: while its recent work per signature exceeds the hold fraction of the window it opens and joins nothing
+(`release-window-hold`, critical; it measures again every `remeasureSeconds` with `signatario.py measure`, which signs
+nothing), and it does not join a round whose anchor would be older than the window by the time its own work is done. A
+chain id that is neither 1 nor in the registry is a local rehearsal chain and behaves as before. Chain 1 loads none of this.
+
 In both modes every reader verifies what it uses, against the chain. A partial counts only if its signature recovers to a current signer on the chain and the token or vault recomputes
 its digest from its fields; a round counts only with such a certificate and a validUntil the Ethereum half could
 accept; `done`, `executed` and `sent` are only records, and the chain decides. A forged file is ignored: it costs
@@ -245,6 +259,173 @@ class Vigia:
         self.signers_checked = False
         if self.cfg.get('feed'):
             self.feed = bridge_feed.BridgeFeed(self.cfg, self.token_version, self.eth_now, log)
+        self.network_settings()
+
+    # ── networks other than Ethereum (tools/evm-nets/launch.py) ───────────────
+    timing, pace, timing_samples, held_logged, last_measure = None, None, None, 0, 0
+
+    def network_settings(self):
+        """Launch status, the anchor settings all signers of a network share, its pacing and its timing limits. Nothing
+        is loaded for chain 1 (the Ethereum bridge) nor for a config that names no source chain."""
+        chains = {int(str(self.cfg[k]), 0) for k in ('source_chain_id', 'eth_chain_id') if self.cfg.get(k) is not None}
+        chains.discard(1)
+        if not chains:
+            return
+        try:
+            sys.path.insert(0, str(HERE.parent / 'evm-nets'))
+            import launch
+        except ImportError:
+            raise SystemExit('tools/evm-nets/launch.py is missing: a source chain other than Ethereum cannot be checked '
+                             'against the launch registry; refusing to sign or relay')
+        for chain in sorted(chains):
+            why = launch.refusal(chain)
+            if why:
+                raise SystemExit(f'refusing to sign or relay: {why}')
+        if len(chains) != 1:
+            raise SystemExit(f'source_chain_id and eth_chain_id name different chains: {sorted(chains)}')
+        chain = chains.pop()
+        settings = launch.signer_settings(chain)
+        if settings is None:
+            # A local rehearsal chain: the keys of its own config, as before. `rehearsal_network` (honoured only on that
+            # network's rehearsal chain id, never on a real one) adds the network's timing limits to the rehearsal.
+            name = self.cfg.get('rehearsal_network')
+            spec = launch.registry()['networks'].get(name) if name else None
+            if spec is not None and chain == launch.rehearsal_chain_id(spec['chainId']):
+                self.pace = {'interval_s': int(spec['signer']['interval_s'])}
+                self.timing = launch.timing(spec['chainId'], anchor_max_age=self.anchor_max_age)
+                self.load_timing()
+            return
+        bad = launch.config_conflicts(chain, self.cfg, 'vigia')
+        if bad:
+            raise SystemExit('the config contradicts the network registry (tools/evm-nets/networks.json); remove these keys '
+                             'or set the registry values, every signer of a network must share them: '
+                             + ', '.join(f'{k} is {v!r}, the registry says {w!r}' for k, v, w in bad))
+        self.cfg['anchor_policy'] = settings['anchor_policy']
+        self.cfg['anchor_max_age'] = self.anchor_max_age = int(settings['anchor_max_age'])
+        self.signs_per_hour = int(self.cfg.get('max_release_signs_per_hour', settings['max_release_signs_per_hour']))
+        self.refused_retry = int(self.cfg.get('refused_retry', settings['refused_retry']))
+        self.pace = {'interval_s': int(settings['interval_s'])}
+        self.timing = launch.timing(chain)
+        self.load_timing()
+
+    def load_timing(self):
+        self.timing_path = Path(self.cfg.get('timing_state', self.shared / '.timing' / f'{self.me}.json'))
+        try:
+            doc = json.loads(self.timing_path.read_text())
+            self.timing_samples = [x for x in doc['samples'] if isinstance(x, dict) and isinstance(x.get('t'), int)][-50:]
+        except (OSError, ValueError, KeyError, TypeError):
+            self.timing_samples = []
+
+    def recent_work(self):
+        """This signer's work per release signature by its own recent measurements: the largest total of the last few
+        runs that reached the source half (or measured the rebuild alone), None when none is recent enough."""
+        t, now = self.timing, time.time()
+        done = [x for x in self.timing_samples if now - x['t'] <= t['measurement_ttl_s'] and isinstance(x.get('total_s'), (int, float))
+                and ((x.get('mode') == 'measure' and x.get('ok') is True) or 'source_half_s' in x)]
+        return max((x['total_s'] for x in done[-t['recent']:]), default=None)
+
+    def save_timing(self, held=False):
+        t = self.timing
+        doc = {'signer': self.me, 'network': t['network'], 'window_s': t['window_s'], 'alert_s': t['alert_s'], 'hold_s': t['hold_s'],
+               'updated': int(time.time()), 'recent_work_s': self.recent_work(), 'held': bool(held),
+               'samples': self.timing_samples[-50:]}
+        try:
+            self.timing_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.timing_path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(doc) + '\n')
+            os.replace(tmp, self.timing_path)
+        except OSError as e:
+            log(kind='timing', error=f'cannot write {self.timing_path}: {e}')
+
+    def timing_args(self):
+        if not self.timing:
+            return []
+        self.timing_path.parent.mkdir(parents=True, exist_ok=True)
+        last = self.timing_path.with_name(f'.last-{self.me}.json')
+        last.unlink(missing_ok=True)
+        return ['--timing', last]
+
+    def take_timing(self, burn=None, rnd=None, res=None):
+        """Record what signatario.py measured for the run that just ended; alert at the network's fraction of its window."""
+        if not self.timing:
+            return
+        t = self.timing
+        try:
+            sample = json.loads(self.timing_path.with_name(f'.last-{self.me}.json').read_text())
+        except (OSError, ValueError):
+            return
+        if burn:
+            sample.update(burn=burn, round=rnd)
+        try:  # the anchor's age when this signer signed, in the number space the vault's blockhash window uses
+            eth, ctx = res['eth'], res['context']
+            age = int(eth.get('anchor_evm_number', eth['eth_head_number'])) - int(ctx['sourceAnchorNumber'])
+            sample.update(anchor_age_blocks=age, anchor_age_s=round(age * t['block_s'], 3))
+        except (KeyError, TypeError, ValueError):
+            pass
+        self.timing_samples = (self.timing_samples + [sample])[-50:]
+        worst = max(sample.get('total_s') or 0, sample.get('anchor_age_s') or 0)
+        log(kind='timing', network=t['network'], window_s=t['window_s'], fraction=round(worst / t['window_s'], 4),
+            **{k: sample[k] for k in ('mode', 'signed', 'total_s', 'rebuild_s', 'reconstruct_s', 'l2_reads_s', 'source_half_s',
+                                      'anchor_age_blocks', 'anchor_age_s', 'native_blocks', 'l2_blocks', 'burn', 'round')
+               if k in sample})
+        if worst >= t['alert_s']:
+            log(kind='alert', severity='warning', id='release-window-budget', network=t['network'], seconds=worst,
+                alert_s=t['alert_s'], window_s=t['window_s'], total_s=sample.get('total_s'), rebuild_s=sample.get('rebuild_s'),
+                anchor_age_s=sample.get('anchor_age_s'),
+                reason=f'one release signature used {worst:.1f} s of this network\'s {t["window_s"]:.0f} s join window '
+                       f'(alert at {t["alert_fraction"]:.0%}): bound the rebuild before it reaches {t["hold_fraction"]:.0%}')
+        self.save_timing()
+
+    def measure_work(self):
+        rc, res = self.signatario('measure', *self.timing_args())
+        self.last_measure = time.time()
+        if rc:
+            log(kind='timing', measured=False, reason=res.get('reason'))
+        self.take_timing()
+
+    def window_allows(self, b, proposal=None):
+        """May this signer start a certificate now? Not while its own recent work per signature exceeds the hold fraction of
+        the network's join window, and not for a round whose anchor would be past the window when that work is done."""
+        t = self.timing
+        if t is None:
+            return True
+        work = self.recent_work()
+        since = time.time() - self.last_measure
+        if (work is None and since >= min(t['interval_s'], t['remeasure_s'])) \
+                or (work is not None and work > t['hold_s'] and since >= t['remeasure_s']):
+            self.measure_work()  # no recent measurement, or held: measure again (a rebuild, no signature)
+            work = self.recent_work()
+        if work is None:
+            log(kind='release', burn=b['burn_id'], nonce=b.get('nonce'), signed=False, held=True,
+                reason='no measurement of this signer\'s work per signature yet: nothing is started')
+            return False
+        if work > t['hold_s']:
+            if time.time() - self.held_logged >= 60:
+                self.held_logged = time.time()
+                log(kind='alert', severity='critical', id='release-window-hold', network=t['network'], recent_work_s=work,
+                    hold_s=t['hold_s'], window_s=t['window_s'], burn=b['burn_id'],
+                    reason=f'this signer needs {work:.1f} s per release signature, above {t["hold_fraction"]:.0%} of the '
+                           f'{t["window_s"]:.0f} s join window: it opens and joins no round until a measurement is below it')
+            self.save_timing(held=True)
+            return False
+        if proposal is not None:
+            try:
+                number = int(json.loads(Path(proposal).read_text())['context']['sourceAnchorNumber'])
+                if self.cfg.get('anchor_policy') == 'probe':
+                    import evm_anchor
+                    now_number = evm_anchor.evm_view(lambda m, a: self.rpc(self.cfg['eth_rpc'], m, a), 'latest', number)[0]
+                else:
+                    now_number = int(self.rpc(self.cfg['eth_rpc'], 'eth_blockNumber', []), 16)
+                age_s = (now_number - number) * t['block_s']
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as e:
+                log(kind='release', burn=b['burn_id'], signed=False, reason=f'the round anchor age cannot be read: {e}')
+                return False
+            if age_s + work > t['window_s']:
+                log(kind='release', burn=b['burn_id'], nonce=b.get('nonce'), signed=False, joined=False, anchor_age_s=round(age_s, 1),
+                    recent_work_s=work, window_s=t['window_s'],
+                    reason='this round cannot be joined inside the window: its anchor would be too old when this signer\'s work is done')
+                return False
+        return True
 
     # ── feed ─────────────────────────────────────────────────────────────────
     def eth_now(self):
@@ -385,6 +566,13 @@ class Vigia:
                     (b['mint_count'], b['minted_total'], b['mint_head']):
                 return False
             number = int(ctx['sourceAnchorNumber'])
+            if self.cfg.get('anchor_policy') == 'probe' and int(self.cfg.get('eth_chain_id', 0)) != 1:
+                # Networks whose `blockhash` window is not the finalized block by number (evm_anchor.py, eth_half.py).
+                import evm_anchor
+                rpc = lambda method, params: self.rpc(self.cfg['eth_rpc'], method, params)  # noqa: E731
+                evm_number, got, _ = evm_anchor.evm_view(rpc, 'latest', number)
+                return 0 < evm_number - number <= self.anchor_max_age and int(got, 16) != 0 \
+                    and got == str(ctx['sourceAnchorHash']).lower()
             head = int(self.eth_block('latest')['number'], 16)
             if not 0 <= head - number <= self.anchor_max_age:
                 return False
@@ -960,8 +1148,11 @@ class Vigia:
                 if self.over_budget(d, charge=False):
                     log(kind='release', burn=burn_id, nonce=b['nonce'], signed=False, reason='hourly signing budget')
                     return
+                if not self.window_allows(b, proposal):
+                    return
                 rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--context', proposal,
-                                          '--out', mine)
+                                          '--out', mine, *self.timing_args())
+                self.take_timing(burn_id, rnd.name, res)
                 if rc:
                     mine.unlink(missing_ok=True)
                     (rnd / f'.refused-{self.me}').write_text('')
@@ -973,12 +1164,15 @@ class Vigia:
                 return
             if join_only or self.opened >= self.max_new_rounds:
                 return
+            if not self.window_allows(b):
+                return
             if self.over_budget(d):
                 log(kind='release', burn=burn_id, nonce=b['nonce'], signed=False, reason='hourly signing budget')
                 return
             self.opened += 1
             tmp = d / f'.{self.me}.new.json'
-            rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--out', tmp)
+            rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--out', tmp, *self.timing_args())
+            self.take_timing(burn_id, bridge_feed.round_name(res) if rc == 0 else None, res)
             if rc == 0:
                 rnd = d / bridge_feed.round_name(res)
                 rnd.mkdir(exist_ok=True)
@@ -1722,7 +1916,10 @@ def main():
     mode = 'sign' if 'sign' in args else 'relay' if 'relay' in args else None
     if mode is None:
         raise SystemExit(__doc__)
-    interval = int(option(args, '--interval', '60'))
+    interval = int(option(args, '--interval', str(v.pace['interval_s'] if v.pace else 60)))
+    if v.pace and interval > v.pace['interval_s']:
+        raise SystemExit(f'--interval {interval} is longer than this network allows ({v.pace["interval_s"]} s, '
+                         'tools/evm-nets/networks.json): a slower daemon misses the release window')
     if mode == 'relay':  # fail at start, not at the first send
         for side in ('l2', 'eth'):
             v.relayer_wallet(side)

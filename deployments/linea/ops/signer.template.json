@@ -1,0 +1,80 @@
+{
+  "_about": "One per signer operator (7). signatario.py + vigia.py sign. Values marked TBD-owner come from the owner's decisions and the deployment records (docs/BUSDC-MAINNET-V2.md). Paths follow the follower-rpc package (install.sh). Round 17, Linea: one signer daemon per network, with its own files, feed and source node. The keys from `anchor_policy` down are this network's (tools/evm-nets/networks.json); vigia.py takes the anchor keys by chain id and refuses a file that contradicts them.",
+  "signer": "TBD-owner (1..7)",
+  "signer_name": "TBD-owner (operator name, unique)",
+  "l2_pins": "mainnet-v2",
+  "l2_chain_id": 700770,
+  "l2_source": "rebuild",
+  "l2_rpc": "TBD-owner (an L2 RPC for mint pre-checks at latest; release never trusts it)",
+  "follower": "/var/lib/bloch-l2-mainnet-follower",
+  "follower_bin": "/opt/bloch/l2-mainnet/bloch-l2-native-follower",
+  "produce": "/opt/bloch/l2-mainnet/bloch-l2-produce-dev",
+  "settled_rpc": "/opt/bloch/l2-mainnet/bloch-l2-settled-rpc",
+  "max_status_age": 600,
+  "l1_rpc_urls": [
+    "http://80.240.16.185:8080",
+    "http://199.247.22.8:8080"
+  ],
+  "work_dir": "/var/lib/bloch-busdc-linea-signer/work",
+  "db": "/var/lib/bloch-busdc-linea-signer/signatario-db.json",
+  "token": "TBD-owner (bUSDC.linea address on the L2, from its deployment record)",
+  "token_code_keccak": "TBD-owner (runtimeCodeHash from the same record)",
+  "token_from_block": "TBD-owner (L2 deployment block from the same record)",
+  "source_chain_id": 59144,
+  "source_vault": "TBD-owner (the Linea vault: vault_pontes.py verify, busdcEthereum.vault)",
+  "source_route": "TBD-owner (vault_pontes.py verify: busdcEthereum.route)",
+  "vault_from_block": "TBD-owner (Linea block of the vault deployment)",
+  "threshold": 5,
+  "vault_threshold": 5,
+  "keystore": "/etc/bloch-busdc-linea-signer/l2-mint.keystore",
+  "password_file": "/etc/bloch-busdc-linea-signer/l2-mint.password",
+  "eth_signer": "TBD-owner (this operator's release address, one of the vault's 7 signers)",
+  "eth_rpc": "TBD-owner (this operator's own Linea node)",
+  "eth_chain_id": 59144,
+  "cast": "/opt/foundry/bin/cast",
+  "eth_half_deposit": [
+    "python3",
+    "/opt/bloch-bridge/tools/signatario-stable/eth_half.py",
+    "--config",
+    "/etc/bloch-busdc-linea-signer/eth-half.json",
+    "deposit",
+    "--deposit-id",
+    "{deposit_id}"
+  ],
+  "eth_half_release": [
+    "python3",
+    "/opt/bloch-bridge/tools/signatario-stable/eth_half.py",
+    "--config",
+    "/etc/bloch-busdc-linea-signer/eth-half.json",
+    "release",
+    "--intent",
+    "{intent}"
+  ],
+  "max_valid_seconds": 3600,
+  "shared_dir": "/var/lib/bloch-busdc-linea-signer/signatures",
+  "feed": {
+    "_about": "docs/SIG-TRANSPORT.md. shared_dir is private to this operator. publish_dir is what bloch-busdc-linea-feed.service serves, world-readable.",
+    "publish_dir": "/var/lib/bloch-busdc-linea-feed/publish",
+    "status_file": "/var/lib/bloch-busdc-linea-signer/feed-status.json",
+    "peers": [
+      "TBD-owner (the other six operators' feeds, http://IP:8787; decided in docs/SIG-TRANSPORT.md)"
+    ],
+    "mint_signers": [
+      "TBD-owner (the token's 7 signers, checked against isSigner at start)"
+    ],
+    "release_signers": [
+      "TBD-owner (the vault's 7 signers, checked against isSigner at start)"
+    ],
+    "max_store_bytes": 268435456,
+    "min_free_bytes": 1073741824
+  },
+  "max_release_signs_per_hour": 8,
+  "refused_retry": 60,
+  "round_margin": 600,
+  "provenance": true,
+  "anchor_policy": "probe",
+  "anchor_max_age": 250,
+  "timing_state": "/var/lib/bloch-busdc-linea-signer/timing.json",
+  "_about_pacing": "window 250 x 1 s = 250 s at the fastest block pace (14 s a block when read on 2026-11-16: the window is then 58 min); 20 s passes; a refused round is tried again after a quarter of the window; eight rounds an hour. Run `vigia.py sign` without --interval (the network's 20 s is the default; a longer one is refused).",
+  "_about_timing": "Review R329-EVM-4. The join window is 250 s. Every release signature is timed into timing_state; `release-window-budget` is alerted at 50 s of work or anchor age per signature and the signer starts no round while its recent work exceeds 125 s (`release-window-hold`). Watch the file with tools/evm-nets/signer_timing.py check."
+}

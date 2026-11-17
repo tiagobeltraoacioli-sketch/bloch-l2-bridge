@@ -1,0 +1,145 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": false,
+    "state": "out",
+    "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction."
+  },
+  "network": {
+    "id": "bnb",
+    "name": "BNB Smart Chain",
+    "kind": "evm",
+    "chainId": "56",
+    "nativeCurrency": {
+      "symbol": "BNB",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "USDC",
+    "name": "Binance-Peg USD Coin",
+    "decimals": 18,
+    "id": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+    "issuer": "Binance (peg token)",
+    "issuerNative": false,
+    "issuerPowers": [
+      "upgrade",
+      "mint",
+      "burn"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading on https://bsc-dataseed.bnbchain.org: symbol, decimals, proxy slots (scratchpad/a320/onchain-*.txt)",
+        "date": "2026-11-16"
+      },
+      {
+        "source": "Circle lists no USDC on BNB Smart Chain (same page); this is the Binance-Peg token, owner decision pending. Binance's collateral page could not be read by a script",
+        "date": "2026-11-16",
+        "note": "NOT issuer-native"
+      }
+    ],
+    "unit": {
+      "adapter": "TBD-deploy",
+      "decimals": 6,
+      "assetUnitsPerUnit": "1000000000000",
+      "note": "contracts/evmnets/ScaledUnitToken.sol: fixed rate, no fee, no owner"
+    }
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDC (BNB Chain)",
+    "symbol": "bUSDC.bnb",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "11000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "10000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient in unit tokens, which the recipient unwraps",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own BNB Smart Chain node reports as finalized (fast finality, two more blocks voted by two thirds of the validators) and at least 135 more blocks below it.",
+    "tag": "finalized",
+    "confirmations": 135,
+    "typicalSeconds": 62,
+    "worstCaseSeconds": 600,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "wrapAndDeposit(address vault, uint64 amount, bytes32 l2Recipient) on asset.unit.adapter",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "approve the unit token (asset.unit.adapter) for amount x 1000000000000 on the asset contract",
+      "call wrapAndDeposit(vault, amount, l2Recipient) on the unit token; amount is in 6-decimal units",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "unit tokens (6 decimals), the burned amount less 0.05%; the recipient calls unwrap(to, units) on the unit token to receive Binance-Peg USD Coin",
+    "notes": [
+      "the recipient must be able to call unwrap: do not name a contract that cannot",
+      "the page must send unwrap(to, units) for the user right after the release is paid, or show it as a required second step with the unit balance; a recipient that is an exchange deposit address or a contract that cannot call unwrap must be refused by the page"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://bscscan.com/tx/{tx}",
+      "address": "https://bscscan.com/address/{address}",
+      "block": "https://bscscan.com/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "NOT LAUNCHABLE IN V1 (out): Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction. A page, a pool builder or the DEX gate must not offer this network; every bridge tool refuses it (tools/evm-nets/launch.py).",
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
+    "Releases on this network need the five signers and the relayer to finish within about 115 s of each other (256 blocks); operators run the daemons at a 5 second interval here. If a round misses the window nothing is paid and it is repeated."
+  ]
+}

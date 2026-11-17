@@ -48,8 +48,8 @@ for name in ('signer.template.json', 'relayer.template.json'):
 r = json.loads((ops / 'relayer.template.json').read_text())
 check('relayer.template.json: relay_role is an owner input (refused until set)', str(r.get('relay_role', '')).startswith('TBD-owner'),
       r.get('relay_role'))
-check('relayer.template.json: gas ceilings 50 / 300 gwei (config defaults)',
-      (r.get('l2_max_gas_price_gwei'), r.get('eth_max_gas_price_gwei')) == (50, 300))
+check('relayer.template.json: gas ceilings 50 gwei on the L2 (default) and 2 gwei on Ethereum (fee schedule of 2026-11-17)',
+      (r.get('l2_max_gas_price_gwei'), r.get('eth_max_gas_price_gwei')) == (50, 2))
 check('relayer.template.json: same-nonce release replacement after 300 s', r.get('eth_replace_after_s') == 300)
 
 # Owner decision 2026-11-02 (agent 175, agent 194): guardians pause the vault on an evidenced forged mint; signers' Ethereum

@@ -1,0 +1,138 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "launch": {
+    "v1": true,
+    "state": "launchable",
+    "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it."
+  },
+  "network": {
+    "id": "arbitrum-one",
+    "name": "Arbitrum One",
+    "kind": "evm",
+    "chainId": "42161",
+    "nativeCurrency": {
+      "symbol": "ETH",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "id": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "issuer": "Circle",
+    "issuerNative": true,
+    "issuerPowers": [
+      "blacklist",
+      "pause",
+      "upgrade"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading on https://arb1.arbitrum.io/rpc: symbol, decimals, proxy slots (scratchpad/a320/onchain-*.txt)",
+        "date": "2026-11-16"
+      },
+      {
+        "source": "https://developers.circle.com/stablecoins/usdc-contract-addresses (Circle's own address table)",
+        "date": "2026-11-16"
+      }
+    ]
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDC (Arbitrum)",
+    "symbol": "bUSDC.arb",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "21000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "20000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 0.5 gwei: while the network's gas price is above that the release waits"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own Arbitrum One node reports as finalized (its batch is in a finalized Ethereum block).",
+    "tag": "finalized",
+    "confirmations": 0,
+    "typicalSeconds": 1200,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient)",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "approve the vault for the amount on the USDC contract",
+      "call deposit(amount, l2Recipient) on the vault",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "0.5",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDC, the burned amount less 0.05%",
+    "notes": [
+      "a recipient blacklisted by the issuer cannot be paid until the issuer lifts it; the burn names the recipient and cannot be redirected",
+      "the relayer pays at most 0.5 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (20); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://arbiscan.io/tx/{tx}",
+      "address": "https://arbiscan.io/address/{address}",
+      "block": "https://arbiscan.io/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment."
+  ]
+}
