@@ -269,7 +269,7 @@ class Rehearsal:
         section('Solana: validator, mint, program')
         self.payer, self.payer_path = self.sol.keygen('payer')
         self.user, self.user_path = self.sol.keygen('user')
-        self.fee_owner, _ = self.sol.keygen('fee-owner')
+        self.fee_owner, self.fee_owner_path = self.sol.keygen('fee-owner')
         self.walletB, _ = self.sol.keygen('wallet-b')
         self.thief, _ = self.sol.keygen('thief')
         for k in (self.payer, self.user):
@@ -320,6 +320,21 @@ class Rehearsal:
         r = tool(HERE / 'sol_vault.py', 'validate', '--config', str(WORK / 'weak.config.json'), '--rpc', SOL_URL)
         check('SOL-2: a configuration whose pause does not outlast a certificate is refused by the tool', not r['ok'], answer=r)
         self.weak = S.VaultIx(S.Addresses(self.program.public, weak_cfg))
+        # R330-SOL-3: outside a rehearsal the retention has a floor (this file's 30 s is far below it).
+        strict = json.loads(json.dumps(doc))
+        strict['solana']['rehearsal'] = False
+        (WORK / 'strict.config.json').write_text(json.dumps(strict))
+        r = tool(HERE / 'sol_vault.py', 'validate', '--config', str(WORK / 'strict.config.json'), '--rpc', SOL_URL)
+        check('R330-SOL-3: the same configuration without the rehearsal flag is refused: recordRetention below the floor of 259,200 s',
+              not r['ok'] and any('below the floor 259200' in x for x in r.get('problems', [])), answer=r)
+        r = tool(HERE / 'sol_vault.py', 'init', '--config', str(WORK / 'strict.config.json'), '--rpc', SOL_URL, *self.pay)
+        check('R330-SOL-3: and init refuses it too (the deploy check)',
+              not r['ok'] and any('below the floor 259200' in x for x in r.get('problems', [])), answer=r)
+        # R330-SOL-2: the flag is refused, not obeyed, with an endpoint that is not on loopback (nothing is connected to).
+        r = tool(HERE / 'sol_vault.py', 'validate', '--config', str(self.config_path), '--rpc', 'http://192.0.2.1:8899')
+        check('R330-SOL-2: `rehearsal: true` is refused for an endpoint that is not on loopback',
+              not r['ok'] and any('not on loopback' in x for x in r.get('problems', [])), answer=r)
+        self.setup_fee_account()
         # The program is still upgradeable: the tool refuses (its pin check), and the program itself refuses.
         r = self.vault('init', *self.pay)
         check('init refused by the tool while the program has an upgrade authority',
@@ -331,11 +346,73 @@ class Rehearsal:
         check('the program has no upgrade authority after --final', 'Authority: none' in shown, shown=shown)
         code, _ = self.sol.tx(self.payer, [self.weak.initialize(self.payer.public)])
         check('SOL-2: and by the program, whoever sends it (InvalidConfiguration)', code == 100, code=code)
-        r = self.vault('init', *self.pay)
-        check('init creates the vault at the address the configuration derives', r['ok'] and r.get('created') and r['vault'] == S.b58encode(self.a.vault), answer=r)
+        r = self.vault('init', '--fee-owner-proof', str(self.fee_proof), *self.pay)
+        check('init creates the vault at the address the configuration derives (fee account present, proof of the fee key shown)', r['ok'] and r.get('created') and r['vault'] == S.b58encode(self.a.vault), answer=r)
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         r = self.vault('verify')
         check('verify: program final and pinned, vault equals the file', r['ok'], answer=r)
+
+    def setup_fee_account(self):
+        """Owner input of review 330: the fee owner is in the vault's address for good, so before `init` its token
+        account must exist and be its own, and a signature made with its key is shown (sol_proof.py)."""
+        section('The fee owner before deployment: its token account and the proof of its key')
+        account = S.associated_token_address(self.fee_owner.public, self.mint)
+        r = self.vault('fee-account')
+        check('fee-account: the fee owner and its token account do not exist yet (as on mainnet-beta today)',
+              not r['ok'] and r.get('feeAccountExists') is False and r.get('feeOwnerExists') is False, answer=r)
+        r = self.vault('init', *self.pay)
+        check('init is refused while the fee owner\'s token account does not exist',
+              not r['ok'] and any('does not exist' in x for x in r.get('problems', [])), answer=r)
+        r = self.vault('create-fee-account', *self.pay)
+        check('create-fee-account creates it before the vault exists (anyone may pay)',
+              r['ok'] and r.get('created') and r.get('feeTokenAccount') == S.b58encode(account), answer=r)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        r = self.vault('fee-account')
+        check('fee-account: the account exists at finalized and is owned by the fee owner',
+              r['ok'] and r.get('feeAccountOwner') == S.b58encode(self.fee_owner.public), answer=r)
+
+        def set_owner(current, new):  # classic SPL Token SetAuthority, authority type 2 (AccountOwner)
+            ix = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(account, False, True), S.Meta(current.public, True)],
+                               bytes([6, 2, 1]) + new)
+            code, res = self.sol.tx(self.payer, [ix], extra=[current])
+            assert code is None, res
+            self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        set_owner(self.fee_owner, self.thief.public)
+        r = self.vault('init', *self.pay)
+        check('init is refused when the account at the fee owner\'s token address is owned by somebody else',
+              not r['ok'] and any('not owned by the fee owner' in x for x in r.get('problems', [])), answer=r)
+        set_owner(self.thief, self.fee_owner.public)
+        r = self.vault('fee-account')
+        check('after the ownership is restored the fee account is accepted again', r['ok'], answer=r)
+        # The proof of the key: the text of sol_proof.py, signed with the Solana CLI as the owner would, verified offline.
+        message = tool(HERE / 'sol_proof.py', 'fee-owner-message', '--config', str(self.config_path))['message']
+        solana = str(SOLBIN / 'solana')
+        good = out(solana, 'sign-offchain-message', message, '-k', str(self.fee_owner_path))
+        self.fee_proof = WORK / 'fee-owner-proof.json'
+        r = tool(HERE / 'sol_proof.py', 'verify', '--address', S.b58encode(self.fee_owner.public), '--message', message,
+                 '--signature', good, '--out', str(self.fee_proof))
+        check('the fee owner\'s signature (solana sign-offchain-message) verifies offline and the proof is written',
+              r['ok'] and r.get('envelope') == 'offchain-v0' and self.fee_proof.exists(), answer=r)
+        r = tool(HERE / 'sol_proof.py', 'check-fee-owner', '--config', str(self.config_path), '--proof', str(self.fee_proof))
+        check('check-fee-owner accepts the proof for this configuration', r['ok'], answer=r)
+        _, thief_path = self.sol.keygen('thief')
+        stolen = out(solana, 'sign-offchain-message', message, '-k', str(thief_path))
+        r = tool(HERE / 'sol_proof.py', 'verify', '--address', S.b58encode(self.fee_owner.public), '--message', message, '--signature', stolen)
+        check('a signature made with another key is refused', not r['ok'], answer=r)
+        for label, value in (('the text --help', '--help'), ('a signature cut short', good[:-2])):
+            r = tool(HERE / 'sol_proof.py', 'verify', '--address', S.b58encode(self.fee_owner.public), '--message', message, '--signature', value)
+            check(f'{label} in place of the signature is refused', not r['ok'], answer=r)
+        bad = WORK / 'fee-owner-proof-bad.json'
+        bad.write_text(json.dumps(dict(json.loads(self.fee_proof.read_text()), signature=stolen)))
+        r = self.vault('init', '--fee-owner-proof', str(bad), *self.pay)
+        check('init is refused with a proof signed by another key', not r['ok'] and 'not a signature of this message' in r.get('reason', ''), answer=r)
+        strict_doc = json.loads((WORK / 'strict.config.json').read_text())
+        strict_doc['vault']['policy']['recordRetention'] = 604800
+        strict_doc['vault']['guard'].update(pauseDuration=259200, pauseCooldown=259200)
+        (WORK / 'strict2.config.json').write_text(json.dumps(strict_doc))
+        r = tool(HERE / 'sol_vault.py', 'init', '--config', str(WORK / 'strict2.config.json'), '--rpc', SOL_URL, *self.pay)
+        check('outside a rehearsal init is refused without a proof of the fee owner\'s key',
+              not r['ok'] and '--fee-owner-proof is required' in r.get('reason', ''), answer=r)
 
     def setup_l2(self):
         section('L2 stand-in: the real token bytecode')
@@ -362,9 +439,11 @@ class Rehearsal:
                       'contracts/solana/SolanaRecipientRegistry.sol:SolanaRecipientRegistry')
             self.registry = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
         dep = out(FORGE, 'create', '--root', PROJECT, '--broadcast', '--rpc-url', L2_URL, '--private-key', self.deployer,
-                  'contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter', '--constructor-args', self.token)
+                  'contracts/solana/SolanaBurnRouter.sol:SolanaBurnRouter', '--constructor-args', self.token, S.hx(self.mint))
         self.router = next(l.split()[-1] for l in dep.splitlines() if 'Deployed to' in l).lower()
         l2_send(self.user_l2, self.token, 'approve(address,uint256)', self.router, str(2**255))
+        self.l2_args = ['--l2-rpc', L2_URL, '--token', self.token, '--router', self.router, '--registry', self.registry,
+                        '--l2-block', 'latest']
         code = out(CAST, 'keccak', out(CAST, 'code', self.token, '--rpc-url', L2_URL))
         # Two endpoints for mint signing (R325-SOL-3): the same validator under two names stands in for two nodes.
         self.sol_urls = [SOL_URL, SOL_URL.replace('127.0.0.1', 'localhost')]
@@ -612,6 +691,11 @@ class Rehearsal:
             path.write_text(json.dumps(dict(base, **change)))
             r = tool(HERE / 'sol_half.py', '--config', path, 'deposit', '--deposit-id', dep1['depositId'])
             check(f'SOL-3: a finalized deposit is not attested with {label} (fail closed)', not r['ok'], answer=r)
+        path = WORK / 'sol-remote-endpoint.json'
+        path.write_text(json.dumps(dict(base, sol_rpc=[SOL_URL, 'http://192.0.2.1:8899'])))
+        r = tool(HERE / 'sol_half.py', '--config', path, 'deposit', '--deposit-id', dep1['depositId'])
+        check('R330-SOL-2: a signer whose file says `rehearsal: true` and names an endpoint that is not on loopback is refused '
+              'before anything is read', not r['ok'] and 'not on loopback' in r.get('reason', ''), answer=r)
         r = self.half(0, 'deposit', '--deposit-id', dep1['depositId'])
         check('SOL-3: with two endpoints that agree it is attested', r['ok'] and r['solana']['endpoints_agreeing'] == 2, answer=r)
         # a forged attestation on the L2: the same mint signed by keys that are not the mint committee
@@ -645,9 +729,8 @@ class Rehearsal:
         paid = self.sol.balance(S.associated_token_address(wallet, self.mint)) - before
         check('the committed wallet is paid the burned amount less 5 bps', r['ok'] and paid == 50 * U - 25_000, paid=paid, answer=r)
         self.evidence['execute_release'] = {'units': r.get('units'), 'signature': r.get('signature')}
-        r = self.vault('sweep', *self.pay)
-        check('sweep refused while the fee owner has no associated token account', not r['ok'], answer=r)
         r = self.vault('create-fee-account', *self.pay)
+        check('create-fee-account sends nothing when the account exists', r['ok'] and r.get('already'), answer=r)
         r = self.vault('sweep', *self.pay)
         fees = 100_000 + 350_000 + 25_000
         check('the fees (deposit and release) reach the fee owner\'s associated token account',
@@ -655,7 +738,7 @@ class Rehearsal:
         s = self.state()
         check('backing: token balance equals locked plus fees not yet swept', s['tokenBalance'] == s['totalLocked'] + s['feesAccrued'], state=s)
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)  # the monitor reads at `finalized`
-        r = self.vault('reserves', '--l2-rpc', L2_URL, '--token', self.token, '--cast', CAST, '--l2-block', 'latest')
+        r = self.vault('reserves', *self.l2_args)
         check('reserves monitor: the L2 supply is covered by the locked backing', r['ok'] and r['lockedMinusSupply'] == 0, answer=r)
 
         section('Replayed releases')
@@ -715,39 +798,104 @@ class Rehearsal:
         check('the two held burns moved nothing on Solana: their 20 USDC stay locked in the vault',
               s0['totalLocked'] - s1['totalLocked'] == 10 * U and s1['approvalSeq'] == s0['approvalSeq'] + 1, before=s0, after=s1)
         self.held_burns = held
+        self.held_no_wallet, self.held_destination = [tx_eth, tx_ata], []
+
+    def burn_id_of(self, tx):
+        receipt = json.loads(out(CAST, 'receipt', tx, '--rpc-url', L2_URL, '--json'))
+        burned = S.hx(S.keccak256(b'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'))
+        return next(l['topics'][1].lower() for l in receipt['logs'] if l['topics'][0].lower() == burned)
+
+    def run_destinations(self):
+        """Review 330, R330-SOL-1, on the real validator with the real token bytecode, the router and the unchanged
+        signer. The reviewer's validator demonstration (the router burns for the mint address and for the identity
+        point, five signers certify, the vault pays) is inverted here: the router refuses what it can know, every
+        signer holds what the chain shows not to be a wallet, and nothing is approved or paid."""
+        section('R330-SOL-1: destinations that are curve points and not wallets (router, every signer, status, reserves)')
+        identity = bytes([1]) + bytes(31)
+        before_l2 = self.l2_balance()
+        for what, key in (('the address of the mint itself', self.mint), ('the identity point of the curve (no key can exist)', identity),
+                          ('a point of order 8', bytes.fromhex('26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05')),
+                          ('the classic token program', S.TOKEN_PROGRAM), ('the Token-2022 program', S.TOKEN_2022_PROGRAM),
+                          ('the associated-token program', S.ATA_PROGRAM)):
+            r = l2_send(self.user_l2, self.router, 'burnTo(uint64,string)', str(10 * U), S.b58encode(key), ok=False)
+            check(f'R330-SOL-1: the router refuses {what} and burns nothing', r['status'] != '0x1' and self.l2_balance() == before_l2)
+        # What the router cannot know: another mint, created at a keypair address (as Circle's USDC mint is). The
+        # router burns; the destination exists on Solana and is an account of the token program.
+        s0 = self.state()
+        other_mint = self.evil_mint
+        tx_mint = self.burn(10 * U, other_mint)
+        check('a burn through the router to an on-curve address the router cannot know (another mint) is burned on the L2',
+              before_l2 - self.l2_balance() == 10 * U)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        refusals = []
+        for i in range(7):
+            r = self.signatario(i, 'release', '--burn-tx', tx_mint, '--out', str(WORK / f'rel-x-mint-{i}.json'))
+            refusals.append(not r.get('signed') and 'is not a wallet' in json.dumps(r) and 'classic SPL Token program' in json.dumps(r))
+        check('R330-SOL-1: EACH of the seven signers, on its own read at finalized, holds that burn (the destination is an '
+              'account of the token program): nothing is certified', all(refusals) and len(refusals) == 7, refusals=refusals)
+        self.held_destination.append(tx_mint)
+        # A direct burn committed to the vault's own mint, announced on the registry: held by what the address is.
+        tx_own = self.burn_direct(10 * U, S.hx(S.account_id(self.mint)))
+        l2_send(self.user_l2, self.registry, 'announce(bytes32)', S.hx(self.mint))
+        l2_mine(2)
+        c = self.certify_release(tx_own, 'x-own-mint')
+        check('R330-SOL-1: a direct burn committed to the mint address, announced on the registry, is held (destination)',
+              'refused' in c and 'the mint this vault holds' in json.dumps(c['refused']), answer=c)
+        self.held_destination.append(tx_own)
+        # A direct burn committed to the identity point, announced: no key exists, so it is no wallet at all.
+        tx_id = self.burn_direct(10 * U, S.hx(S.account_id(identity)))
+        l2_send(self.user_l2, self.registry, 'announce(bytes32)', S.hx(identity))
+        l2_mine(2)
+        c = self.certify_release(tx_id, 'x-identity')
+        check('R330-SOL-1: a direct burn committed to the identity point, announced on the registry, is held (no wallet)',
+              'refused' in c and 'no wallet address is known' in json.dumps(c['refused']), answer=c)
+        self.held_no_wallet.append(tx_id)
+        self.held_burns += [tx_mint, tx_own, tx_id]
+        s1 = self.state()
+        check('the three held burns moved nothing on Solana: no approval, nothing paid, 30 USDC more stay locked than the L2 holds',
+              s1['totalLocked'] == s0['totalLocked'] and s1['approvalSeq'] == s0['approvalSeq'], before=s0, after=s1)
+        # The hold is visible, with its reason: burn status and reserves monitor.
+        r = self.vault('burn-status', *self.l2_args, '--burn', self.burn_id_of(tx_mint))
+        row = (r.get('burns') or [{}])[0]
+        check('burn-status: the burn to the other mint is HELD, reason: the destination is an account of the token program',
+              r['ok'] and row.get('state') == 'held' and row.get('hold') == 'destination-not-a-wallet'
+              and 'classic SPL Token program' in (row.get('reason') or '') and row.get('direct') is False, answer=r)
+        r = self.vault('burn-status', *self.l2_args, '--burn', self.burn_id_of(tx_id))
+        row = (r.get('burns') or [{}])[0]
+        check('burn-status: the direct burn to the identity point is HELD, reason: no wallet is known',
+              r['ok'] and row.get('state') == 'held' and row.get('hold') == 'no-wallet' and row.get('direct') is True, answer=r)
+        r = self.vault('burn-status', *self.l2_args, '--nonce', str(self.n1))
+        check('burn-status: the first exit of this rehearsal reads as paid',
+              r['ok'] and (r.get('burns') or [{}])[0].get('state') == 'paid', answer=r)
+        r = self.vault('reserves', *self.l2_args)
+        want = sorted(self.burn_id_of(t) for t in self.held_burns)
+        check('reserves monitor: the five held burns are listed with their reasons and explain the 50 USDC locked above the L2 supply',
+              r['ok'] and sorted(x['burn'] for x in r.get('held', [])) == want and r.get('heldTotal') == 50 * U
+              and r['lockedMinusSupply'] == 50 * U and all(x.get('reason') for x in r['held'])
+              and sorted(x['hold'] for x in r['held']) == ['destination-not-a-wallet'] * 2 + ['no-wallet'] * 3, answer=r)
+        # A wallet that was never funded is absent from the chain: it is certified (a fresh wallet looks like this),
+        # but no tool creates its token account until it is a funded System account.
+        fresh, _ = self.sol.keygen('fresh-wallet')
+        tx_fresh = self.burn(10 * U, fresh.public)
+        c = self.certify_release(tx_fresh, 'x-fresh')
+        check('a burn to a wallet that is absent from the chain (never funded) is certified', 'cert' in c, answer=c if 'cert' not in c else None)
+        n = str(c['doc']['release']['nonce'])
+        ra = self.vault('approve', '--cert', str(c['cert']), '--owner', S.b58encode(fresh.public), *self.pay)
+        rx = self.vault('execute', '--nonce', n, '--owner', S.b58encode(fresh.public), '--create-account', *self.pay)
+        check('R330-SOL-1: the tool does not create a token account for an address that is not a funded System account',
+              ra['ok'] and not rx['ok'] and 'not a funded System account' in rx.get('reason', ''), approve=ra, execute=rx)
+        self.sol.airdrop(fresh.public, 1)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        rx = self.vault('execute', '--nonce', n, '--owner', S.b58encode(fresh.public), '--create-account', *self.pay)
+        check('once the wallet is a funded System account at finalized, its token account is created and the exit is paid',
+              rx['ok'] and self.sol.balance(S.associated_token_address(fresh.public, self.mint)) == 10 * U - 5_000, execute=rx)
 
     def run_r330(self):
-        """Agent 330 (round 17, second pass of the review): cases on the real validator, with the unchanged signer and
-        the real token bytecode. Reviewer's branch only; run with --r330 (the developer's later sections are skipped)."""
-        section('R330-SOL-1: curve points that are not wallets, through the router, the signers and the vault')
-        identity = bytes([1]) + bytes(31)
-        for label, owner, what in (('mint', self.mint, 'the address of the mint itself (a token-program account at a keypair address)'),
-                                   ('identity', identity, 'the identity point of the curve (no private key can exist)')):
-            text = S.b58encode(owner)
-            before_l2 = self.l2_balance()
-            r = l2_send(self.user_l2, self.router, 'burnTo(uint64,string)', str(10 * U), text, ok=False)
-            l2_mine()
-            check(f'R330-SOL-1: the router burns for {what}', r['status'] == '0x1' and before_l2 - self.l2_balance() == 10 * U, answer=r)
-            if r['status'] != '0x1':
-                continue
-            c = self.certify_release(r['transactionHash'], f'r330-{label}')
-            check(f'R330-SOL-1: five signers certify that burn ({label}; found in the router log)',
-                  'cert' in c, answer=c if 'cert' not in c else None)
-            if 'cert' not in c:
-                continue
-            n = str(c['doc']['release']['nonce'])
-            ra = self.vault('approve', '--cert', str(c['cert']), *self.pay)
-            rx = self.vault('execute', '--nonce', n, '--owner', text, '--create-account', *self.pay)
-            ata = S.associated_token_address(owner, self.mint)
-            check(f'R330-SOL-1: the vault pays it into the associated token account of {what}',
-                  ra['ok'] and rx['ok'] and self.sol.balance(ata) == 10 * U - 5_000, approve=ra, execute=rx)
-            _, acc_owner, data, _ = self.sol.rpc.account(owner, 'confirmed')
-            if label == 'mint':
-                check('R330-SOL-1: that "wallet" is an account of the token program (a mint), not a system account',
-                      data is not None and acc_owner == S.TOKEN_PROGRAM, owner=S.b58encode(acc_owner) if acc_owner else None)
-            else:
-                check('R330-SOL-1: that "wallet" does not exist as an account and can never sign', data is None)
-
+        """Agent 330 (round 17, second pass of the review): its cases on the real validator, with the unchanged signer
+        and the real token bytecode; run with --r330 (the developer's later sections are skipped, so that their
+        amounts and bucket arithmetic are not disturbed). Its first section (R330-SOL-1: the router burns for the
+        mint address and the identity point, the signers certify, the vault pays) is inverted and runs in every
+        rehearsal as `run_destinations`; the two attack cases below are the reviewer's, unchanged."""
         section('R330: a paid record closed and kept alive with lamports in the same transaction')
         record = self.a.release_record(self.n1)
         transfer = S.Instruction(S.SYSTEM_PROGRAM, [S.Meta(self.payer.public, True, True), S.Meta(record, False, True)],
@@ -1216,8 +1364,15 @@ class Rehearsal:
         earlier = [d for d in self.deps[:-1] if (WORK / 'shared' / 'mint' / d['depositId'][2:]).exists()]
         check('sign daemons: deposits already minted were not signed again', not earlier, signed_again=len(earlier))
         held = sorted(x.get('burn') for x in first[0] if x.get('id') == 'release-held-no-wallet')
-        check('sign daemons: the two direct burns without a wallet are parked and alerted (release-held-no-wallet), nothing signed',
-              len(held) == 2 and not any(list((WORK / 'shared' / 'release' / h[2:]).glob('r-*')) for h in held), held=held)
+        check('sign daemons: the three direct burns without a wallet are parked and alerted (release-held-no-wallet), nothing signed',
+              held == sorted(self.burn_id_of(t) for t in self.held_no_wallet)
+              and not any(list((WORK / 'shared' / 'release' / h[2:]).glob('r-*')) for h in held), held=held)
+        dest = sorted(x.get('burn') for x in first[0] if x.get('id') == 'release-held-destination')
+        check('R330-SOL-1: sign daemons park and alert the two burns whose destination is not a wallet (release-held-destination, '
+              'with the reason), nothing signed',
+              dest == sorted(self.burn_id_of(t) for t in self.held_destination)
+              and all('not a wallet' in (x.get('reason') or '') for x in first[0] if x.get('id') == 'release-held-destination')
+              and not any(list((WORK / 'shared' / 'release' / h[2:]).glob('r-*')) for h in dest), held=dest)
         # SOL-4: the relayer closes the records it paid for once they have been paid for the retention (30 s here).
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
         sol_before = self.sol.rpc.call('getBalance', [S.b58encode(self.payer.public), {'commitment': 'confirmed'}])['value']
@@ -1393,7 +1548,7 @@ class Rehearsal:
               dep_new['nonce'] == dep['nonce'] and m.get('receipt', {}).get('status') == '0x1' and r['status'] == '0x1', mint=m, credit=r)
         self.deps.append(dep_new)
         self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
-        r = self.vault('reserves', '--l2-rpc', L2_URL, '--token', self.token, '--cast', CAST, '--l2-block', 'latest')
+        r = self.vault('reserves', *self.l2_args)
         check('reserves monitor: backing covers the L2 supply after the cancelled mint', r['ok'], answer=r)
 
         section('Rollback after attestation, worst case: nobody cancels and the unbacked mint credits')
@@ -1410,7 +1565,7 @@ class Rehearsal:
         check('signers no longer attest the vanished deposit', not r['ok'], answer=r)
         r = self.credit(dep)
         check('(worst case) the unbacked mint credits on the L2', r['status'] == '0x1')
-        r = self.vault('reserves', '--l2-rpc', L2_URL, '--token', self.token, '--cast', CAST, '--l2-block', 'latest')
+        r = self.vault('reserves', *self.l2_args)
         check('reserves monitor raises: the L2 supply exceeds the locked backing', not r['ok'] and r.get('lockedMinusSupply', 0) < 0, answer=r)
         self.wait_bucket(10 * U)
         burn = self.burn(10 * U, wallet)
@@ -1489,6 +1644,7 @@ def main():
         r.setup_l2()
         r.open_vault()
         r.run_honest()
+        r.run_destinations()
         if '--r330' in sys.argv:  # agent 330 (review): its own cases after the honest path, nothing else
             r.run_r330()
             evidence = r.evidence

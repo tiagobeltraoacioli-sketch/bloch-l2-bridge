@@ -22,6 +22,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -213,6 +214,94 @@ class R330Sol1Destination(unittest.TestCase):
         self.assertTrue(sol_vault.refuse_destination(node, fresh, S.account_id(fresh))['fundedSystemAccount'])
 
 
+class R330Sol1Relayer(unittest.TestCase):
+    """The relayer applies the rule itself: it does not deliver a certificate for a held burn, does not pay an
+    approval whose destination is not a wallet, and creates a token account only for a funded System account."""
+
+    def setUp(self):
+        import sol_vigia
+        self.sol_vigia = sol_vigia
+        self.cluster = T.Cluster()
+        self.fake = T.Fake(self.cluster.answer)
+        self.addCleanup(self.fake.close)
+        self.dir = Path(tempfile.mkdtemp())
+        self.sol_cfg = self.cluster.files(self.dir, self.fake.url)
+        self.wallet = keypair_address('relayed wallet')
+        self.burn = {'burn_id': S.hx(S.sha256(b'relayed burn')), 'nonce': 3, 'amount': 10**7,
+                     'recipient': S.hx(S.account_id(self.wallet)), 'mint_count': 2, 'mint_head': S.hx(self.cluster.state['head'])}
+        v = sol_vigia.SolVigia.__new__(sol_vigia.SolVigia)
+        v.sol_cfg, v.cfg = self.sol_cfg, {'sol_fee_payer': 'unused'}
+        v._nodes, v._destinations, v._wallets, v._held_logged, v.parked_logged = {}, {}, {self.burn['burn_id']: self.wallet}, set(), set()
+        v.sent = []
+        v.sol_vault = lambda command, *argv: v.sent.append((command, *argv)) or {'ok': True}
+        v.backup_due = lambda *a: True
+        v.burn_done = lambda d, burn_id: None
+        v.burn_of = lambda burn_id: self.burn
+        v.quorum_release = lambda d, burn_id: (self.dir / 'r-1', 5)
+        self.logs = []
+        patch = unittest.mock.patch.object(sol_vigia, 'log', lambda **fields: self.logs.append(fields))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.v = v
+
+    def put(self, owner, data):
+        self.cluster.accounts[self.wallet] = (owner, data)
+
+    def approval(self):
+        c = self.cluster
+        data = (bytes([3, S.LAYOUT_VERSION, 255, 1]) + c.a.vault + (3).to_bytes(8, 'little') + S.sha256(b'id') + S.account_id(self.wallet)
+                + (10**7).to_bytes(8, 'little') + S.unhex(self.burn['burn_id'], 32) + bytes(8) + (1).to_bytes(8, 'little')
+                + (1).to_bytes(8, 'little') + bytes(8) + bytes(8) + bytes([9]) * 32)
+        assert len(data) == S.RELEASE_LEN
+        c.accounts[c.a.release_record(3)] = (c.program, data)
+        c.state.update(approval_seq=1)
+        c.put_vault()
+
+    def test_the_sign_daemon_parks_and_alerts_with_the_reason(self):
+        self.put(S.TOKEN_PROGRAM, bytes(82))
+        self.assertTrue(self.v.unpayable(self.burn))
+        self.assertEqual([(x['id'], x['burn']) for x in self.logs], [('release-held-destination', self.burn['burn_id'])])
+        self.assertIn('classic SPL Token program', self.logs[0]['reason'])
+        self.v._destinations = {}
+        self.put(S.SYSTEM_PROGRAM, b'')
+        self.assertFalse(self.v.unpayable(self.burn))
+        self.v._wallets = {}
+        self.v.wallet_for = lambda b: None
+        self.assertTrue(self.v.unpayable(self.burn))
+        self.assertEqual(self.logs[-1]['id'], 'release-held-no-wallet')
+
+    def test_a_certificate_for_a_held_burn_is_not_delivered(self):
+        self.put(S.TOKEN_PROGRAM, token_account(S.pubkey(USDC_MINT), bytes([5]) * 32))
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.assertEqual(self.v.sent, [])
+        self.assertEqual([x['id'] for x in self.logs], ['certificate-withheld-destination'])
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.assertEqual(len(self.logs), 1, 'alerted once')
+
+    def test_an_approval_whose_destination_is_not_a_wallet_is_not_paid(self):
+        self.approval()
+        self.put(S.TOKEN_PROGRAM, bytes(82))
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.assertEqual(self.v.sent, [])
+        self.assertEqual([x['id'] for x in self.logs], ['approved-destination-not-a-wallet'])
+
+    def test_a_token_account_is_created_only_for_a_funded_system_account(self):
+        self.approval()
+        self.v.cfg['sol_create_recipient_account'] = True
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])  # the wallet is absent from the chain
+        self.assertEqual(self.v.sent, [])
+        self.assertEqual((self.logs[-1]['id'], self.logs[-1]['wallet_is_a_funded_system_account']), ('recipient-account-missing', False))
+        self.put(S.SYSTEM_PROGRAM, b'')
+        self.v._destinations, self.v._nodes = {}, {}
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.assertEqual(self.v.sent, [('execute', '--nonce', '3', '--owner', S.b58encode(self.wallet), '--create-account')])
+        self.v.sent.clear()
+        self.v.cfg['sol_create_recipient_account'] = False
+        self.v._destinations, self.v._nodes = {}, {}
+        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.assertEqual(self.v.sent, [], 'the default: the relayer never pays that rent')
+
+
 class R330Sol2(unittest.TestCase):
     """R330-SOL-2, the reviewer's demonstration, inverted: `solana.rehearsal: true` in the operator's own copy of
     the vault file no longer switches the two-endpoint rule and the router requirement off when the node answers
@@ -311,6 +400,37 @@ class R330Sol3Retention(unittest.TestCase):
         code, out = T.run(sol_vault.main_of, ['validate', '--config', str(d / 'v.json')])
         self.assertTrue(any('below the floor' in p for p in out['problems']), out)
         self.assertEqual(out['recordRetentionFloor'], 259200)
+
+    def guardian(self, retention, rehearsal=False, interval=60, last=None):
+        import sol_guardiao
+        g = sol_guardiao.SolGuardian.__new__(sol_guardiao.SolGuardian)
+        config = type('C', (), {'record_retention': retention, 'pause_duration': 259200})()
+        node = type('N', (), {'config': config, 'rehearsal': rehearsal})()
+        g.node = lambda *a: node
+        g.state = {} if last is None else {'verified_t': last}
+        g.alerts = []
+        g.log = lambda **fields: g.alerts.append(fields)
+        sol_guardiao.WATCH_INTERVAL = interval
+        self.addCleanup(setattr, sol_guardiao, 'WATCH_INTERVAL', None)
+        return g
+
+    def test_the_guardian_watch_refuses_a_retention_or_an_interval_that_leaves_records_unread(self):
+        import time
+        self.guardian(604800).check_retention()  # the proposed values: 60 s rounds, 7 days
+        with self.assertRaises(SystemExit) as e:
+            self.guardian(3600).check_retention()
+        self.assertIn('below the floor 259200', str(e.exception))
+        with self.assertRaises(SystemExit) as e:
+            self.guardian(604800, interval=141).check_retention()  # 4,320 rounds of 141 s are more than 7 days
+        self.assertIn('too slow', str(e.exception))
+        self.guardian(604800, interval=140).check_retention()
+        self.guardian(30, rehearsal=True, interval=3600).check_retention()  # a local rehearsal closes records after 30 s
+        g = self.guardian(604800, last=int(time.time()) - 604900)
+        g.check_retention()
+        self.assertEqual([a['id'] for a in g.alerts], ['watch-gap-exceeds-retention'])
+        g = self.guardian(604800, last=int(time.time()) - 3600)
+        g.check_retention()
+        self.assertEqual(g.alerts, [])
 
     def test_the_committed_mainnet_file_is_above_the_floor(self):
         doc = json.loads((HERE.parent.parent / 'deployments/solana/busdc-sol-vault.config.json').read_text())

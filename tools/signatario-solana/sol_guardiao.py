@@ -20,6 +20,11 @@ parent reads from an Ethereum vault is read here from the vault's accounts on th
                       A paid record closed after the retention leaves its bit in a paid page: the nonce must
                       still belong to a burn (`release-unknown:<nonce>`); its amount and recipient were checked
                       while the record existed, so a guardian must run at least once per `record_retention`.
+                      Review 330, R330-SOL-3: outside a rehearsal the vault's retention must be at least
+                      solana_lib.retention_floor (4,320 watch rounds, never less than a pause) and `watch` refuses
+                      an `--interval` so slow that 4,320 rounds of it exceed the vault's retention; a gap between
+                      two verified rounds longer than the retention is alerted (`watch-gap-exceeds-retention`):
+                      records closed inside that gap were not compared with their burns by this guardian.
   APPROVALS (new)     a STANDING approval (not paid, not voided) without a matching L2 burn ->
                       `release-unknown:approval-<nonce>-<seq>`; one that differs from its burn ->
                       `release-mismatch:approval-<nonce>-<seq>`. The Solana vault pays in two steps, so a wrong
@@ -86,7 +91,30 @@ class SolGuardian(Guardian):
 
     def round(self):
         self._nodes = {}
+        self.check_retention()
         return super().round()
+
+    def check_retention(self):
+        """R330-SOL-3. A paid record is compared with its burn only while it exists, so this watch must complete a
+        round at least once per `record_retention`. Outside a rehearsal: refuse a vault whose retention is below
+        the floor, refuse a watch interval the retention does not cover with the margin, and say so when the last
+        verified round is further back than the retention."""
+        n = self.node()
+        retention, floor = n.config.record_retention, S.retention_floor(n.config.pause_duration)
+        if n.rehearsal:
+            return
+        if retention < floor:
+            raise SystemExit(f'the vault\'s recordRetention {retention} s is below the floor {floor} s: paid records could be '
+                             'closed before this watch reads them (review 330, R330-SOL-3)')
+        if WATCH_INTERVAL is not None and S.RETENTION_WATCH_ROUNDS * WATCH_INTERVAL > retention:
+            raise SystemExit(f'--interval {WATCH_INTERVAL} is too slow for a recordRetention of {retention} s: at most '
+                             f'{retention // S.RETENTION_WATCH_ROUNDS} s ({S.RETENTION_WATCH_ROUNDS} rounds per retention)')
+        last = self.state.get('verified_t')
+        if isinstance(last, int) and time.time() - last > retention:
+            self.log(kind='alert', severity='soft', id='watch-gap-exceeds-retention', last_verified=last, retention=retention,
+                     reason='this guardian completed no round for longer than the record retention: release records paid '
+                            'and closed in that time were not compared with their burns here; check them from the '
+                            'transaction history (docs/SOLANA-BRIDGE-OPERATOR-RUNBOOK-DELTA.md)')
 
     def eth_me(self):
         if self._eth_me is None:
@@ -324,7 +352,16 @@ class SolGuardian(Guardian):
             self.problem('vault-pause-failed', str(sent.get('reason') or sent.get('error_name'))[-200:])
 
 
+WATCH_INTERVAL = None  # seconds between rounds of `watch` (None for a single `check`)
+
+
 def main():
+    global WATCH_INTERVAL
+    args = sys.argv[1:]
+    if 'watch' in args:
+        WATCH_INTERVAL = int(args[args.index('--interval') + 1]) if '--interval' in args else S.GUARDIAN_WATCH_INTERVAL
+        if WATCH_INTERVAL < 1:
+            raise SystemExit('--interval must be at least 1 second')
     guardiao.Guardian = SolGuardian  # the parent's main loop, with this class
     guardiao.main()
 
