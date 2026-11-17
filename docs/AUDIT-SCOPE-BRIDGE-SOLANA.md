@@ -174,4 +174,7 @@ hexadecimal pattern (`vigia.py`) or that come from the operator's own source hal
 ## 5. Not in this note
 
 Results of the end-to-end rehearsal on `solana-test-validator` and the reproducibility of the program binary are
-reported by agent 322 in `agents/322-bridge-solana-r16.md`, not here.
+reported by agent 322 in `agents/322-bridge-solana-r16.md`, by the reviewers in section 3 of
+`agents/325-bridges-review-r16.md` and in `agents/330-bridge-solana-review-r17.md`, and for the round-17 line by
+agent 336 in `agents/336-bridge-solana-r17.md`, not here. The line counts of section 1 are those of round 16; the
+files changed in round 17 are listed in section 4.1.

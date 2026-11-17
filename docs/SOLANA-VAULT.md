@@ -4,7 +4,8 @@ Status: **UNAUDITED. Nothing is deployed. Not for real funds before its own exte
 
 Program source: `solana/bloch-sol-vault/` (native Rust, `solana-program` 5.2.0). This document describes the code
 at commit `e4d9018` of branch `codex/bridge-solana-r16-20261116`; where the code and this text differ, the code is
-right and this text is the defect.
+right and this text is the defect. The program has not changed since review 325 (image sha256 `33f7027d…7316`);
+round 17 (review 330) changed the burn router, the tools and sections 3.9, 11 and 13 of this text.
 
 The vault is the Solana port of `ProvenanceSourceVault` (`contracts/usdt/ProvenanceSourceVault.sol`) in its launch
 configuration: committee mode, provenance mode 1. A program-owned classic SPL token account holds the deposited
