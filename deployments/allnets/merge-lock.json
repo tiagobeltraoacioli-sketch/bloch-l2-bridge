@@ -41,6 +41,20 @@
           "resolution": "schema owner's version (ours)"
         }
       ]
+    },
+    "tron": {
+      "branch": "codex/bridge-tron-r17-20261117",
+      "commit": "577ca36e7892450cc642676b2675c1eed76e8dbd",
+      "agent": 332,
+      "routes": [
+        "tron"
+      ],
+      "conflicts": [
+        {
+          "path": "deployments/schema/bridge.network.schema.json",
+          "resolution": "schema owner's version (ours)"
+        }
+      ]
     }
   }
 }

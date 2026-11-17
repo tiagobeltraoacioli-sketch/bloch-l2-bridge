@@ -1,0 +1,143 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "network": {
+    "id": "tron",
+    "name": "TRON",
+    "kind": "tvm",
+    "chainId": "728126428",
+    "nativeCurrency": {
+      "symbol": "TRX",
+      "decimals": 6
+    }
+  },
+  "asset": {
+    "symbol": "USDT",
+    "name": "Tether USD",
+    "decimals": 6,
+    "id": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    "issuer": "Tether",
+    "issuerNative": true,
+    "issuerPowers": [
+      "blacklist",
+      "pause",
+      "upgrade",
+      "seize",
+      "burn"
+    ],
+    "verified": [
+      {
+        "source": "on-chain reading through https://api.trongrid.io (/wallet/getcontract, /walletsolidity/triggerconstantcontract): contract name TetherToken, name() Tether USD, symbol() USDT, decimals() 6, paused() false, deprecated() false, basisPointsRate() 0; a simulated transfer returns ABI false on success (scratchpad/a323/usdt-onchain/)",
+        "date": "2026-11-16"
+      },
+      {
+        "source": "https://tether.to/en/supported-protocols/ (Tether's own list; recorded in docs/USDT-NETWORK-INTEGRATION.md on 2026-09-14, not fetched again on 2026-11-16)",
+        "date": "2026-09-14"
+      },
+      {
+        "source": "https://www.circle.com/blog/circle-is-discontinuing-support-for-usdc-on-the-tron-blockchain and https://developers.circle.com/stablecoins/usdc-contract-addresses",
+        "date": "2026-11-16",
+        "note": "why USDT and not USDC: Circle stopped minting USDC on TRON on 2024-02-21 (\"Effective immediately we will no longer mint USDC on TRON\") and its contract address table lists no TRON entry"
+      }
+    ]
+  },
+  "custody": {
+    "type": "tvm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/tron/TronSourceVault.sol:TronSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDT (Tron)",
+    "symbol": "bUSDT.trx",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "100000000000",
+    "window": "10000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "66000000",
+    "maxDeposit": "10000000000",
+    "l2MinBurn": "65000000",
+    "l2MaxBurn": "10000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient. A release also pays a FIXED fee of 13 USDT (13000000 units, vault releaseFlatFee()) on top of releaseBps: a burn of A pays out A - floor(A * 5 / 10000) - 13000000. The schema has no field for a fixed fee; frontends must read it here or from the vault",
+    "networkFee": "the depositor pays the deposit transaction in TRX (114,428 energy for a first deposit and about 83,000 after it on a stock private TVM, before USDT's dynamic-energy factor on mainnet, plus an approval: an ESTIMATE of 25 TRX in all at mainnet's factor, not measured there); the relayer pays the release transaction: 257,499 energy and 1,563 bytes on mainnet when it stakes nothing and the recipient never held USDT (27.3 TRX at 100 sun per energy; computed from a measured release and mainnet's own token costs), which the fixed release fee covers 1.5 times"
+  },
+  "finality": {
+    "rule": "A deposit is attested only when the signer's own java-tron node serves it from the solidified state (/walletsolidity): its block has been confirmed by more than 70% of the 27 block producers (19).",
+    "tag": "solidified",
+    "confirmations": 19,
+    "typicalSeconds": 60,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers never read the head for a deposit, so a deposit that leaves the head chain before solidification is never attested. Solidified blocks do not revert while fewer than a third of the block producers are faulty. If a solidified deposit vanished anyway, its mint is still inside the 12 hour L2 delay: 2 of the 3 guardians cancel it on the L2 (or pause the L2 token when they cannot), so it is never credited. The vault itself is paused by a guardian on a reserves shortfall or on evidence of a forged mint, not on a missing deposit alone. A mint that did credit holds later releases instead of paying them (the vault pays only burns made under its own deposit chain)."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient)",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "approve the vault for the amount on the USDT contract (TRC-20 approve)",
+      "call deposit(amount, l2Recipient) on the vault",
+      "after the block is solidified (about a minute) and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token",
+      "a deposit while the issuer has blacklisted the vault or replaced (deprecated) the token: the vault refuses it (TokenUnsafe)",
+      "a deposit while the token is paused or while the issuer charges a transfer fee: the transaction reverts (a deposit must deliver its whole amount)"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "recipientEncoding": "the 20-byte form of the TRON address: Base58Check-decode the T... address, check its checksum, drop the leading 0x41 byte",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDT (TRC-20), the burned amount less 0.05% and less the fixed 13 USDT (the smallest exit is 65 USDT, so the fixed fee is at most 20% of an exit); if the issuer charges its own transfer fee (0 today, at most 20 bps and 50 USDT) the recipient also bears that",
+    "notes": [
+      "USDT on TRON pays a recipient the issuer has blacklisted (the funds are then frozen at that address by the issuer, not by the bridge)",
+      "while the issuer has blacklisted the vault or paused the token, no release can be paid; burns stay payable and are paid when the condition ends. An issuer transfer fee does not stop exits (the recipient bears it); it stops deposits",
+      "the recipient needs no TRX and no activated account to receive USDT"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://tronscan.org/#/transaction/{tx}",
+      "address": "https://tronscan.org/#/address/{address}",
+      "block": "https://tronscan.org/#/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment.",
+    "TRON addresses: custody.address, asset.id and fee.recipient are Base58Check (T...). committee addresses are the 20-byte 0x form of the same keys; the T... form of a key is Base58Check(0x41 || those 20 bytes).",
+    "The L2 token's sourceChainId is 728126428 and its sourceVault is the vault's 20-byte address."
+  ]
+}
