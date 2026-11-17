@@ -13,7 +13,7 @@ Every block is one command. Replace the words in capitals. No block carries a co
 | The 7 `l2-mint-signer` and 3 `l2-token-guardian` addresses with their operators | `deployments/stellar/busdc-xlm-token.config.json`: `signers.set`, `guardians.set` |
 | The release delay (section 5 of the design document): PROPOSED 2 hours on every release; at most half the pause cooldown | vault config `release_delay`, `large_release_threshold`; token config `stellar.releaseDelay`, `stellar.largeReleaseThreshold` |
 | Confirmation of the limits (cap 100,000 USDC, 10,000 a day, minimum deposit 11, minimum burn 10) | both configs |
-| The fee address, funded and with a USDC trustline (section 2) | already filled: `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA` |
+| The fee address, funded and with a USDC trustline: the fee-account ceremony of section 2, run FIRST. Every later step refuses without it | already filled: `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA` |
 | A fresh Stellar deployer account with about 30 XLM, and a relayer account with about 20 XLM | CLI identities `deployer`, `relayer` |
 | An own Stellar RPC (stellar-rpc with captive core) | `STELLAR_RPC_URL` |
 
@@ -45,40 +45,59 @@ python3 ../tools/signatario-stellar/wasm_imports.py target/wasm32v1-none/release
 
 It must exit 0: the Wasm imports no function that replaces or deploys code.
 
-## 2. The fee address (owner input)
+## 2. The fee-account ceremony (owner input; first step, before anything is deployed)
 
-On 2026-11-16 21:04 UTC the account `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA` does not exist on the
-public network (Horizon answers 404). Fees accrue in the vault from the first deposit, but `sweep_fees` fails until
-the account exists and trusts USDC. Nothing else depends on it; no fee is lost meanwhile.
+On 2026-11-17 00:35 UTC the account `GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA` does not exist on the
+public network (Horizon answers 404; also on 2026-11-16 at 21:04 and 23:50 UTC). The vault would be deployed with an
+immutable fee address that cannot be paid: fees would accrue and `sweep_fees` would fail until the account exists and
+trusts USDC. So the account is made ready first, and the tools enforce it: `pairing.py preflight` (section 4),
+`pairing.py vault-check` (section 5) and `deploy_pontes.py run` and `verify` (section 6) all refuse while the account
+or its USDC trustline is missing.
 
-Two operations, both by the owner:
+The ceremony has three steps, all by the owner. It proves three things: the account exists, it can receive USDC, and
+the owner controls its key (only that key can sign step 2, so a trustline on the account is the proof; no secret is
+shown to anyone and nothing is signed off-chain).
 
-1. Create Account, from any funded account (a withdrawal of XLM from an exchange to the address does the same):
-   destination the fee address, starting balance 3 XLM.
+Step 1. Fund: Create Account from any funded account (a withdrawal of XLM from an exchange to the address does the
+same). Destination the fee address, starting balance 3 XLM.
 
 ```
 stellar tx new create-account --source-account FUNDER --destination GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA --starting-balance 30000000
 ```
 
-2. Change Trust, signed by the fee address's own key: asset `USDC`, issuer
-   `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` (Circle).
+Step 2. Trustline, signed by the fee address's OWN key (`FEE_IDENTITY` is the CLI identity or hardware wallet that
+holds it): asset `USDC`, issuer `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` (Circle; sources in
+`deployments/stellar/busdc-xlm-vault.config.json`, `asset.source`). If this step cannot be signed, the key is not
+under the owner's control: stop, and choose another fee address before anything is deployed (the address is
+immutable in the vault).
 
 ```
 stellar tx new change-trust --source-account FEE_IDENTITY --line USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
 ```
 
-Minimum balance: 1.5 XLM stay locked while the trustline exists: (2 base entries + 1 trustline) x 0.5 XLM base reserve
-(`base_reserve_in_stroops` 5,000,000, read from the public network at ledger 65,515,406). The Change Trust itself
-costs 0.00001 XLM. Funding with 3 XLM leaves room for later operations. Below 1.5 XLM the trustline cannot be
-created.
+Step 3. Read it back from the owner's own RPC (section 3 sets the two variables; `xlm-pre.json` is
+`{"stellar_rpc": "YOUR_OWN_STELLAR_RPC_URL", "network_passphrase": "Public Global Stellar Network ; September 2015"}`).
+It must answer `"decision": "ready-to-deploy-the-vault"`; it refuses with the reason when the account does not exist,
+has no trustline for exactly this asset, or the trustline is not authorized.
 
-Check:
+```
+python3 tools/signatario-stellar/pairing.py preflight --config xlm-pre.json --vault-config deployments/stellar/busdc-xlm-vault.config.json
+```
+
+(Before the committee addresses are filled in section 4 this command stops at "signers: undecided"; the account
+part can be read alone with the public explorer or the command below.)
 
 ```
 curl -s https://horizon.stellar.org/accounts/GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNA
 ```
 
-The answer must list a balance with `asset_code` USDC and `asset_issuer` GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN.
+The answer must list a balance with `asset_code` USDC and `asset_issuer` GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN,
+`signers` with only the account's own key, and `thresholds` that key meets alone.
+
+Minimum balance: 1.5 XLM stay locked while the trustline exists: (2 base entries + 1 trustline) x 0.5 XLM base reserve
+(`base_reserve_in_stroops` 5,000,000, read from the public network at ledger 65,515,406). The Change Trust itself
+costs 0.00001 XLM. Funding with 3 XLM leaves room for later operations. Below 1.5 XLM the trustline cannot be
+created.
 
 ## 3. Network settings for the session
 
@@ -90,18 +109,32 @@ export STELLAR_RPC_URL=YOUR_OWN_STELLAR_RPC_URL
 export STELLAR_NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
 ```
 
-## 4. Fill and review the vault configuration
+## 4. Fill and review the vault configuration; preflight
 
 Edit `deployments/stellar/busdc-xlm-vault.config.json`: the 7 signers, the 3 guardians, `source.revision`,
 `source.wasmSha256`, the deployer account, and the confirmed `release_delay` and `large_release_threshold`. Two
 people review the file. The object under `vault.config` is the constructor argument, verbatim, and can never change
-after the deployment.
+after the deployment. This file is what every later check compares the deployed vault with.
+
+The asset is pinned in the file (`asset`: code, issuer, contract, with its sources) and `vault.config.token` must be
+that contract. The vault contract itself accepts any asset contract with 7 decimals, so this pin and the checks
+below are what keep a typo, a testnet id or a look-alike `USDC:G<other issuer>` out.
+
+```
+python3 tools/signatario-stellar/pairing.py preflight --config xlm-pre.json --vault-config deployments/stellar/busdc-xlm-vault.config.json
+```
+
+It must answer `ready-to-deploy-the-vault`. It checks the file by itself (complete; committee 5 of 7 with 6 to
+unpause and 3 guardians; labels; window 86,400 s; fee 5 + 5 bps; the delay at most half the cooldown; the asset
+contract id derived from the asset and the network equals the file's, and is Circle's USDC), then on the network: the
+RPC serves the public network, the asset contract exists and is a Stellar Asset Contract, and the fee account holds
+the trustline (section 2). Do not deploy if it refuses.
 
 ```
 python3 -c "import json; c=json.load(open('deployments/stellar/busdc-xlm-vault.config.json'))['vault']['config']; assert 'TBD-owner' not in json.dumps(c); print(json.dumps(c))" > vault-config.json
 ```
 
-## 5. Deploy the vault
+## 5. Deploy the vault and compare it with the file
 
 ```
 stellar contract deploy --wasm stellar/target/wasm32v1-none/release/bloch_stellar_vault.wasm --source-account deployer -- --config "$(cat vault-config.json)"
@@ -110,15 +143,29 @@ stellar contract deploy --wasm stellar/target/wasm32v1-none/release/bloch_stella
 The last line printed is the vault's contract address (`C...`). Record it and the transaction hash.
 
 Write `xlm.json` for the read-only tools: `{"stellar_rpc": "...", "network_passphrase": "...", "vault": "C...",
-"vault_wasm_hash": "ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9", "view_account": "ANY_EXISTING_G_ACCOUNT"}`.
+"vault_wasm_hash": "ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9",
+"asset_contract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75", "view_account": "ANY_EXISTING_G_ACCOUNT"}`.
 
 ```
-python3 tools/signatario-stellar/pairing.py args --config xlm.json --token-config deployments/stellar/busdc-xlm-token.config.json
+python3 tools/signatario-stellar/pairing.py vault-check --config xlm.json --vault-config deployments/stellar/busdc-xlm-vault.config.json
 ```
 
-It prints `stellarSection`: copy `vault`, `route`, `vaultWasmHash`, `vaultSigners` and `vaultGuard.guardians` into the
-`stellar` section of `deployments/stellar/busdc-xlm-token.config.json`, and check that every other value it prints
-equals the one already in the file (release delay, fee address, thresholds, limits).
+It must answer `vault-equals-the-deployment-file`: the deployed Wasm hash is the file's, EVERY field of the vault's
+`config()` equals the file's `vault.config` (the asset contract, the three labels, cap, window limit, window seconds,
+minimum deposit, minimum burn, signers, thresholds, guardians, pause duration and cooldown, large-release threshold,
+release delay, fee address, both fee rates), and the vault's route and chain genesis recompute from the FILE's
+values. Any difference is listed by field. If it refuses, this vault is abandoned (it is still closed and holds
+nothing): correct the cause and deploy a new one. No control is opened and no token is deployed over a vault that
+failed this check.
+
+```
+python3 tools/signatario-stellar/pairing.py args --config xlm.json --vault-config deployments/stellar/busdc-xlm-vault.config.json --token-config deployments/stellar/busdc-xlm-token.config.json
+```
+
+It runs the same comparison again and prints `stellarSection`, built from the reviewed vault file (not copied from
+the vault): put it into `deployments/stellar/busdc-xlm-token.config.json` as its `stellar` section. Only `vault`,
+`route`, `vaultWasmHash`, `vaultSigners` and `vaultGuard.guardians` are new; every other value must already be in the
+committed file with the same value (review the diff: it must touch those five keys only).
 
 ## 6. Deploy the L2 token with the deploy tool
 
@@ -139,8 +186,11 @@ python3 tools/deploy-pontes/deploy_pontes.py plan --config deployments/stellar/b
 python3 tools/deploy-pontes/deploy_pontes.py run --config deployments/stellar/busdc-xlm-token.config.json --plan deployments/stellar/busdc-xlm-token.plan.json --rpc L2_RPC_URL --source-rpc YOUR_OWN_STELLAR_RPC_URL
 ```
 
-The dry run must answer `dry-run` and `vaultUnused` with three zeros. It refuses a vault that was ever used, and a
-vault whose Wasm hash, route, cap, committee, guardians, release delay or fee address differ from the config.
+`validate` refuses a token config whose asset is not Circle's USDC, whose asset contract id is not the one derived
+from the asset and the network, or whose `route` is not the route its own values give (asset contract, labels,
+vault, cap). The dry run must answer `dry-run` and `vaultUnused` with three zeros. `run` and `verify` refuse a vault
+that was ever used, a vault that differs from the config in ANY constructor value (the asset contract first, by
+name; then every field, listed), and a fee account that does not exist or has no authorized USDC trustline.
 
 ```
 python3 tools/deploy-pontes/deploy_pontes.py run --config deployments/stellar/busdc-xlm-token.config.json --plan deployments/stellar/busdc-xlm-token.plan.json --rpc L2_RPC_URL --source-rpc YOUR_OWN_STELLAR_RPC_URL --broadcast --confirm CONFIG_SHA256 --write deployments/stellar/busdc-xlm-token.broadcast.json -- CAST_WALLET_ARGUMENTS
@@ -168,14 +218,17 @@ through it; a burn made directly on the token is served only by the claim rule (
 ## 8. Pairing check
 
 ```
-python3 tools/signatario-stellar/pairing.py check --config xlm.json --token-config deployments/stellar/busdc-xlm-token.config.json --l2-rpc L2_RPC_URL --token L2_TOKEN_ADDRESS
+python3 tools/signatario-stellar/pairing.py check --config xlm.json --vault-config deployments/stellar/busdc-xlm-vault.config.json --token-config deployments/stellar/busdc-xlm-token.config.json --l2-rpc L2_RPC_URL --token L2_TOKEN_ADDRESS
 ```
 
-It must print `"ok": true` with no differences.
+It must print `"ok": true` with no differences. It repeats the vault-check, reads the token over JSON-RPC, and
+requires the token config's `stellar` section to be exactly the one the vault file gives.
 
 ## 9. Operators
 
-Each operator installs its configs (`docs/STELLAR-BRIDGE.md` section 10), pins `vault_wasm_hash`, and proves its two
+Each operator installs its configs (`docs/STELLAR-BRIDGE.md` section 10), pins `vault_wasm_hash` and
+`asset_contract` (`CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75`; a signer's half refuses any other on the
+public network), runs `pairing.py vault-check` itself against its own RPC, and proves its two
 keys by signing the test digests of `docs/BRIDGE-V3-KEY-CEREMONY.md`. The relayer account is funded:
 
 ```
@@ -222,11 +275,14 @@ python3 tools/evm-nets/network_json.py check deployments/stellar/bridge.network.
 
 - [ ] External audit report received for the vault, the router and the tools; findings closed.
 - [ ] Wasm hash reproduced by two people on two machines.
-- [ ] Fee address exists and trusts USDC (section 2).
+- [ ] Fee-account ceremony done (section 2): the account is funded, holds the USDC trustline signed by its own key,
+      and `pairing.py preflight` answers `ready-to-deploy-the-vault`.
 - [ ] Release delay decided by the owner and written in both configs.
-- [ ] Vault configuration reviewed by two people before the deployment; read back after it (section 5).
+- [ ] Vault configuration reviewed by two people before the deployment; `pairing.py vault-check` answers
+      `vault-equals-the-deployment-file` after it (section 5), run by the owner and by each operator.
 - [ ] Token deployed by the deploy tool; `verify` answers `verified`; pairing check ok.
 - [ ] 7 signers and 3 guardians each proved their keys; guardians are not signers; operators are distinct.
 - [ ] Reserves monitor green; guardian check timer shorter than the release delay; rent alerts wired.
-- [ ] Every guardian knows that a pause voids the queue and that there is nothing else to sign.
+- [ ] Every guardian knows that a pause voids the queue, that there is nothing else to sign, that a pause is never
+      signed in advance, and that exit 3 of the check means "alert a human", not "pause".
 - [ ] First minimum deposit and exit completed before the bridge is announced.

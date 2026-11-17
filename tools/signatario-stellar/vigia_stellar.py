@@ -232,8 +232,11 @@ class VigiaStellar(V.Vigia):
         if nonce is None:
             return None
         status = self.chain_read(('stellar-burn-status', burn_id), lambda: self.net.burn_status(nonce, burn_id))
-        if status == 2 and self.burn_nonce.get(burn_id) is not None:
-            self.mark_paid(burn_id)   # only with a nonce this process read from its own L2 or a verified partial
+        if status == 2:
+            # The vault answers 2 only when its record under that nonce names this burn id and is paid, so the answer
+            # is true of the burn id whatever the source of the nonce (a nonce from an unverified file can only make
+            # the vault answer 0 or 3 for an unpaid burn).
+            self.mark_paid(burn_id)
         return status
 
     def released(self, burn_id):
