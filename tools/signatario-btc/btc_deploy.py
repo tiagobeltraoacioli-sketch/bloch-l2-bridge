@@ -223,7 +223,8 @@ def router_numbers(vault):
     """What BitcoinBurnRouter must state for this vault: the router's `quote` is then `btc_policy.release_payout`."""
     p = vault.policy
     return {'hrp': c.HRP[vault.network], 'unitSats': p['unitSats'], 'releaseFeeBps': p['releaseFeeBps'],
-            'chargeVbytes': vault.release_vb, 'dustSats': p['dustSats'], 'feeRateCeiling': p['maxFeerate']}
+            'chargeVbytes': vault.release_vb, 'dustSats': p['dustSats'], 'feeRateCeiling': p['maxFeerate'],
+            'feeRateFloor': p['burnFeerateFloor']}
 
 
 def cmd_router(args):
@@ -234,8 +235,8 @@ def cmd_router(args):
     n = router_numbers(vault)
     w = c.abi_word
     hrp = n['hrp'].encode()
-    enc = (w(bytes.fromhex(token[2:])) + w(7 * 32) + w(n['unitSats']) + w(n['releaseFeeBps']) + w(n['chargeVbytes'])
-           + w(n['dustSats']) + w(n['feeRateCeiling']) + w(len(hrp)) + hrp.ljust(32, b'\0'))
+    enc = (w(bytes.fromhex(token[2:])) + w(8 * 32) + w(n['unitSats']) + w(n['releaseFeeBps']) + w(n['chargeVbytes'])
+           + w(n['dustSats']) + w(n['feeRateCeiling']) + w(n['feeRateFloor']) + w(len(hrp)) + hrp.ljust(32, b'\0'))
     art = json.loads(Path(option(args, '--artifact')).read_text())
     creation = bytes.fromhex(art['bytecode']['object'].removeprefix('0x'))
     init = creation + enc

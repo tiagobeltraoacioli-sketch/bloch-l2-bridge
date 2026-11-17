@@ -26,8 +26,8 @@ transaction (`testmempoolaccept`) before any broadcast. A higher `--feerate` on 
 it conflicts with the earlier transaction by construction. UNAUDITED.
 
 Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc", "token", "token_from_block": n, "l2_chain_id": n,
-         "burn_router": address, "relayer_keystore", "relayer_password_file" (this relayer's key: it signs proposals,
-         it can move no coin), "cast": path}
+         "burn_router": address, "relayer_address", "relayer_keystore", "relayer_password_file" (this relayer's key:
+         it signs proposals, it can move no coin), "cast": path}
 """
 import json
 from pathlib import Path
@@ -94,22 +94,34 @@ def node_estimate(node):
     return None if not est or est.get('feerate') is None else max(1, int(float(est['feerate']) * 100_000 + 0.999999))
 
 
-def sign_proposal(cfg, vault, proposal):
-    """The relayer's own signature over the proposal (personal message), with the key signers have on their list."""
+def sign_proposal(cfg, vault, proposal, now=None):
+    """The relayer's own signature over the proposal (personal message), with the key signers have on their list.
+
+    One command: `cast wallet sign` over a text this tool computed (btc_core.proposal_text: a fixed prefix, the vault,
+    a sha256), never over anything a stranger supplied. Its output is then checked HERE, in process: it must recover
+    to the configured `relayer_address`; its exit code decides nothing."""
+    import time
     cast = cfg.get('cast', str(Path.home() / '.foundry/bin/cast'))
+    want = str(cfg.get('relayer_address', '')).lower()
+    if len(want) != 42 or not want.startswith('0x') or any(ch not in '0123456789abcdef' for ch in want[2:]):
+        fail('relayer_address must be the 0x address of this relayer\'s key (the one on the signers\' allow-lists)')
     if cfg.get('relayer_keystore'):
         wallet = ['--keystore', cfg['relayer_keystore'], '--password-file', cfg['relayer_password_file']]
     elif cfg.get('relayer_private_key_file') and vault.network != 'bitcoin-mainnet':
         wallet = ['--private-key', Path(cfg['relayer_private_key_file']).read_text().strip()]   # throwaway rehearsal keys only
     else:
         fail('no relayer key: set relayer_keystore and relayer_password_file (signers drop unsigned proposals)')
-    who = subprocess.run([cast, 'wallet', 'address', *wallet], capture_output=True, text=True)
-    sig = subprocess.run([cast, 'wallet', 'sign', *wallet, c.proposal_text(vault.vault_id, proposal)], capture_output=True, text=True)
-    if who.returncode or sig.returncode:
-        fail('the relayer key could not sign the proposal', stderr=(who.stderr + sig.stderr).strip()[-300:])
-    signed = {**proposal, 'relayer': who.stdout.strip().lower(), 'relayer_signature': sig.stdout.strip()}
-    if c.signer_of(c.proposal_text(vault.vault_id, signed), signed['relayer_signature']) != signed['relayer']:   # checked here, in process
-        fail('the relayer signature does not verify')
+    signed = {**proposal, 'issued': int(time.time() if now is None else now), 'relayer': want}
+    text = c.proposal_text(vault.vault_id, signed)
+    done = subprocess.run([cast, 'wallet', 'sign', *wallet, text], capture_output=True, text=True)
+    signed['relayer_signature'] = done.stdout.strip()
+    try:
+        ok = c.signer_of(text, signed['relayer_signature']) == want
+    except c.BadKey:
+        ok = False
+    if not ok:
+        fail('the relayer key did not produce a signature of relayer_address over the proposal',
+             stderr=done.stderr.strip()[-300:])
     return signed
 
 
