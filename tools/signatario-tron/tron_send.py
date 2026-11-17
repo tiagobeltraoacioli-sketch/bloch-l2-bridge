@@ -48,7 +48,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent / 'signatario-stable'))
 import tronlib  # noqa: E402
+import vigia  # noqa: E402  (private_file: one rule for key files across the routes)
 
 DEFAULT_FEE_LIMIT = 150_000_000
 ENERGY_MARGIN = (3, 2)  # the simulated energy times 3/2 must fit the fee limit
@@ -80,17 +82,29 @@ class Sender:
             if got != int(want):
                 raise Refused(f'the TRON node serves chain {got}, the config names {want}')
 
+    @staticmethod
+    def private(path, what):
+        """The rule of vigia.private_file (374's b4ff916, F381-1): a systemd credential (0440 or stricter, in
+        $CREDENTIALS_DIRECTORY, root or the service user) is accepted; elsewhere a regular file of the service user
+        with no group or other bit."""
+        try:
+            vigia.private_file(path, what)
+        except SystemExit as e:
+            raise Refused(f'{what} is readable by group or others, or not a private file of this user: {e}') from None
+        except OSError as e:
+            raise Refused(f'{what} {path}: {e.strerror}') from None
+        return path
+
     def wallet(self):
         if self.cfg.get('keystore'):
-            return ['--keystore', self.cfg['keystore'], '--password-file', self.cfg['password_file']]
+            return ['--keystore', self.private(self.cfg['keystore'], 'keystore'), '--password-file',
+                    self.private(self.cfg['password_file'], 'password_file')]
         path = self.cfg.get('private_key_file')
         if not path:
             raise Refused('no key: set keystore and password_file')
         if int(self.cfg.get('tron_chain_id', 0) or 0) == 728126428:
             raise Refused('a raw key file is refused on TRON mainnet: cast would carry the key in argv; use a keystore')
-        if os.stat(path).st_mode & 0o077:
-            raise Refused('the key file is readable by group or others')
-        return ['--private-key', Path(path).read_text().strip()]
+        return ['--private-key', Path(self.private(path, 'private_key_file')).read_text().strip()]
 
     def sender(self):
         return self.node.run(self.node.cast, 'wallet', 'address', *self.wallet()).lower()

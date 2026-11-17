@@ -191,11 +191,19 @@ class FakeNode(tronlib.Node):
 
 
 def sender(node, tmp, **cfg):
+    # round 18: tron_send now checks the keystore and its password file (vigia.private_file); the fake cast reads
+    # neither, so they are two private placeholder files instead of two names that do not exist
+    Path(tmp).mkdir(parents=True, exist_ok=True)
+    for name in ('ks', 'pw'):
+        f = Path(tmp) / name
+        if not f.exists():
+            f.write_text('placeholder')
+            os.chmod(f, 0o600)
     real = tronlib.Node
     tronlib.Node = lambda *a, **k: node
     try:
         return tron_send.Sender({'tron_node': 'http://fake.invalid', 'vault': VAULT, 'journal_dir': str(tmp),
-                                 'keystore': 'ks', 'password_file': 'pw', **cfg})
+                                 'keystore': str(Path(tmp) / 'ks'), 'password_file': str(Path(tmp) / 'pw'), **cfg})
     finally:
         tronlib.Node = real
 
