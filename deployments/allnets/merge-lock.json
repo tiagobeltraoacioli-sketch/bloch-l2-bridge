@@ -1,0 +1,14 @@
+{
+  "base": "cc2511a",
+  "lines": {
+    "shared-tools": {
+      "branch": "codex/bridge-signer-verify-r17-20261117",
+      "commit": "0f07e1065cfd3d3339ad700aef3c8aee2c17ad7c",
+      "agent": 341,
+      "routes": [
+        "ethereum"
+      ],
+      "conflicts": []
+    }
+  }
+}

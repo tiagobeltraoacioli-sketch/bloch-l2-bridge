@@ -93,6 +93,8 @@ class Monitor:
 
     def calldata(self, sig, *args):
         key = (sig, *map(str, args))
+        if any(a.startswith('-') for a in key[1:]):  # `cast` would read it as an option (`--help` exits 0): agent 341, round 17
+            raise Unverifiable(f'cast calldata {sig}: a value that would be read as a command-line option was refused')
         if key not in self._data:
             p = subprocess.run([self.cast, 'calldata', *key], capture_output=True, text=True)
             if p.returncode:

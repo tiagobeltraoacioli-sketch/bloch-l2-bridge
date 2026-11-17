@@ -54,6 +54,14 @@ validUntil so the k certificates can be combined; the Ethereum half decides whet
 `l2_source: "rpc"` (config) skips the rebuild and trusts `l2_rpc` for finalized: tests only.
 
 combine: anyone may run it; k partials for the same mint (or release) -> ordered signatures and the call.
+Every partial must carry a 20-byte `signer`, the common 32-byte `digest` and a 65-byte signature in the form the
+contracts accept (low s, v 27 or 28) that recovers, in this process, to that signer; one signer counts once whatever
+its letter case. A partial that fails is refused by name: it never counts toward k. (The fields are bound to the
+digest by the contract's own mintDigest / releaseDigest, which `vigia.py relay` reads before it calls combine.)
+
+Signatures are never judged by a command's exit code: `cast wallet verify` exits 0 on `-h...` and on signatures the
+contracts refuse (sigverify.py). A value that would reach a `cast` command line as an option (a leading `-`) is
+refused before the command runs (`Ctx.values`), so no chain, peer or file text can turn a command into `--help`.
 
 Any mismatch refuses with the reason and exit code 1. Keys are never on the command line.
 """
@@ -72,6 +80,7 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l2_finality  # noqa: E402
+import sigverify  # noqa: E402
 
 MAX_STATUS_AGE = 600  # seconds, as atestador.py
 REMINT_TYPEHASH_STR = 'Remint(bytes32 mintHash,uint64 generation,bool locked)'
@@ -204,14 +213,25 @@ class Ctx:
             refuse(f'{what or Path(str(argv[0])).name} failed', stderr=done.stderr.strip()[-1500:])
         return done.stdout.strip()
 
+    @staticmethod
+    def values(*values):
+        """Positional values for a `cast` command line. `cast` reads any argument that starts with `-` as an option
+        (`--help` and `-h` print the help and exit 0; `--file` reads a local file), so such a value is refused here,
+        before the command runs. Honest values are hex, unsigned integers, tuples and signatures: none starts with `-`."""
+        out = [str(v) for v in values]
+        for v in out:
+            if v.startswith('-'):
+                refuse('a value that would be read as a command-line option was refused', value=v[:80])
+        return out
+
     def keccak(self, hexdata):
-        return self.run([self.cast, 'keccak', hexdata], 'cast keccak').lower()
+        return self.run([self.cast, 'keccak', *self.values(hexdata)], 'cast keccak').lower()
 
     def keccak_text(self, text):
-        return self.run([self.cast, 'keccak', text], 'cast keccak').lower()
+        return self.run([self.cast, 'keccak', *self.values(text)], 'cast keccak').lower()
 
     def abi_encode(self, sig, *values):
-        return self.run([self.cast, 'abi-encode', sig, *[str(v) for v in values]], 'cast abi-encode').lower()
+        return self.run([self.cast, 'abi-encode', sig, *self.values(*values)], 'cast abi-encode').lower()
 
     def sha256_abi(self, sig, *values):
         return '0x' + hashlib.sha256(bytes.fromhex(self.abi_encode(sig, *values)[2:])).hexdigest()
@@ -230,7 +250,7 @@ class Ctx:
 
     def call(self, url, sig, *args, block='latest'):
         data = self.run([self.cast, 'calldata', sig.split(')(')[0] + ')' if ')(' in sig else sig,
-                         *[str(a) for a in args]], 'cast calldata')
+                         *self.values(*args)], 'cast calldata')
         return self.rpc(url, 'eth_call', [{'to': self.token, 'data': data}, block])
 
     def contract_version(self, url):
@@ -522,7 +542,23 @@ def cmd_combine(ctx, args):
         if s.get('kind') != kind or {f: s.get(f) for f in fields} != first:
             refuse('the partial signatures are for different messages',
                    differ=[f for f in fields if s.get(f) != first[f]])
-    by_signer = {s['signer']: s['signature'] for s in sigs}
+    # Each partial must be what the contract will accept: checked here, in this process (sigverify.py). The digest is
+    # the common one (compared above), so k partials that pass are k distinct keys over one message.
+    try:
+        digest = sigverify.word32(first['digest'], 'digest')
+    except sigverify.Malformed as e:
+        refuse(str(e), got=first['digest'])
+    by_signer = {}
+    for i, s in enumerate(sigs):
+        try:
+            signer = sigverify.address20(s.get('signer'), 'signer')
+            signature = sigverify.signature65(s.get('signature'))
+            recovered = sigverify.recover(digest, signature)
+        except sigverify.Malformed as e:
+            refuse(f'partial {i + 1} is not a signature the contract accepts: {e}', signer=s.get('signer'))
+        if recovered != signer:
+            refuse(f'partial {i + 1}: the signature does not recover to its signer', signer=signer, recovered=recovered)
+        by_signer.setdefault(signer, signature)  # one signer counts once; its first valid signature is used
     if len(by_signer) < k:
         refuse(f'need {k} distinct signers, have {len(by_signer)}')
     chosen = sorted(by_signer, key=lambda a: int(a, 16))[:k]
@@ -842,11 +878,17 @@ def release_in(ctx, work, burn_tx, out, proposal_path, source, burn_id=''):
     digest = ctx.release_digest(release, context)
     if hex32(eth.get('digest', ''), 'digest') != digest:
         refuse('the Ethereum half digest differs from the one recomputed here', eth=eth.get('digest'), local=digest)
-    sig = str(eth.get('signature', '')).lower()
-    eth_signer = ctx.cfg['eth_signer'].lower()
-    if len(sig) != 132 or subprocess.run([ctx.cast, 'wallet', 'verify', '--no-hash', '--address', eth_signer,
-                                          digest, sig], capture_output=True).returncode:
-        refuse('the Ethereum half signature does not recover to the pinned eth_signer', signer=eth_signer)
+    # Recovered here, with the vault's own rule (65 bytes, low s, v 27 or 28): never the exit code of a command, which
+    # is 0 for `-h...` and for signatures the vault refuses (agent 341, round 17; sigverify.py).
+    eth_signer = address(ctx.cfg['eth_signer'], 'eth_signer (config)')
+    try:
+        sig = sigverify.signature65(eth.get('signature'), 'the Ethereum half signature')
+        recovered = sigverify.recover(digest, sig)
+    except sigverify.Malformed as e:
+        refuse(f'the Ethereum half signature is not one the vault accepts: {e}', signer=eth_signer)
+    if recovered != eth_signer:
+        refuse('the Ethereum half signature does not recover to the pinned eth_signer', signer=eth_signer,
+               recovered=recovered)
 
     ctx.db['releases'][release['nativeBurn']] = core
     ctx.save_db()
