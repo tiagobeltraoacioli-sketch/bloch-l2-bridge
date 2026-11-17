@@ -109,6 +109,19 @@ RELEASED = 'Released(bytes32,bytes32,uint64,address,uint64,bytes32)'
 BURNED_V3 = 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)'
 
 
+def alert_argv(command, pid, detail):
+    """The argv of `alert_command` with {id} and {detail} filled in. The detail is text from outside (an RPC error, a
+    command's stderr, cut to its LAST 300 characters), so it can begin with `-`: an argument that the operator's
+    template did not start with `-` must not become an option of the pager program. Such an argument gets one leading
+    space (agent 341, round 17). Arguments of honest alerts are unchanged."""
+    out = []
+    for a in command:
+        a = str(a)
+        filled = a.replace('{id}', str(pid)).replace('{detail}', str(detail)[-300:])
+        out.append(' ' + filled if filled.startswith('-') and not a.startswith('-') else filled)
+    return out
+
+
 class LevelClosed(Exception):
     """-32001 from the settled RPC: its follower status is lost or invalid, so `safe` and `finalized` are unavailable.
     Not evidence of anything, and `latest` still answers, so the other checks carry on."""
@@ -232,7 +245,7 @@ class Guardian:
         """Runs `alert_command` once. Callers deduplicate: `problems` and `open` hold what was already sent."""
         command = self.cfg.get('alert_command')
         if command:
-            argv = [str(a).replace('{id}', pid).replace('{detail}', self.scrub(detail)[-300:]) for a in command]
+            argv = alert_argv(command, pid, self.scrub(detail))
             try:
                 done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
                 if done.returncode:
@@ -307,6 +320,8 @@ class Guardian:
 
     def call(self, url, to, sig, *args, block='latest'):
         key = (sig, *[str(a) for a in args])
+        if any(a.startswith('-') for a in key[1:]):  # `cast` would read it as an option (`--help` exits 0): agent 341, round 17
+            raise Unverifiable(f'cast calldata {sig}: a value that would be read as a command-line option was refused')
         if key not in self._calldata:
             self._calldata[key] = self.cast_out('calldata', *key)
         data = self._calldata[key]

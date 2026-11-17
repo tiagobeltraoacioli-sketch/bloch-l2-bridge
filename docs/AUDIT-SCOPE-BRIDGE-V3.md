@@ -192,6 +192,7 @@ The questions for the auditor on each are in its specification (sections 8 and 7
 | **eth_half** (Ethereum half of signatario) | `tools/signatario-stable/eth_half.py` (406, `9571c09`) | Ethereum release key (one of 7) | Pins the vault code, uses `finalized` only and recomputes the release digest. With `provenance: true` it refuses a burn whose chain the vault deposits do not back |
 | L2 finality rules | `tools/signatario-stable/l2_finality.py` (agent 230 re-pin) | none | Build pins (final L2 launch build), HF1 claim-finality, rebuild check |
 | Feed and signature transport | `bridge_feed.py` (445, `5299145`), `sigfeed.py` (517, `a68f42a`) | none | Compute the v2 digest and move partial signatures (`docs/SIG-TRANSPORT.md`) |
+| Signature checks (round 17) | `sigverify.py` (101, `0f07e10`) | none | Strict text forms and in-process recovery with `bridge_feed.py`'s secp256k1 and Keccak code, in the form the contracts accept (low s, `v` 27 / 28). Used by `signatario.py release` and `combine`, `vigia.py` and `key_inventory.py`: no signature is judged by a command's exit code |
 | **guardiao** | `tools/guardiao/guardiao.py` (1,383, `7fd93ad` G1-G5, agent 239 switch alerts) | L2 token guardian (one of 3), Ethereum vault guardian | Raises `mint:` provenance findings and votes cancels (`voteCancelMints`) in earliest-`readyAt` order, at most `cancel_batch` 32 per round (F129-A). Raises `mint-chain`. With `vault_pause_on_mint` on (the default) it pauses the vault. A round's RPC cost does not grow with the queue (F129-B) |
 | **sombra** | `tools/guardiao/sombra.py` (389, `7fd93ad` G3) | An Ethereum vault guardian key (one of 3) | Proof-path watcher; parses V3 burns; handles the D2 reorg fix |
 | **reservas** | `tools/reservas/reservas.py` (288, `7fd93ad` G3) | none | Backing monitor; reports `held` (exit 2) |
@@ -410,6 +411,8 @@ It is in scope only for the correctness of what it tells users.
 | R310-2P-3 | 310 (second pass) | Low | `preflight_signer.py --rehearsal-pins` ended `OK`, exit 0, on chain 700770 | Refreeze (`83a1dc1`): a rehearsal run ends `REHEARSAL`, exit 3 | `test_preflight_signer` `test_a_rehearsal_run_never_ends_ok` |
 | R310-2P-4 | 310 (second pass) | Info | A retirement tombstone waived the high-water-mark protection of its nonce for good | Refreeze (`83a1dc1`): it frees the nonce once, until the nonce is reserved again | `test_r310_review` `test_R310_2P_4_*` |
 | R310-2P-5 | 310 (second pass) | Info | The deployment anchor (header root, committee root) is trusted as a pair | Stated; `verifier_review.py mint-verifier` now refuses a single beacon endpoint unless recorded (`83a1dc1`) | `test_settlement_review` test 07 |
+| R341-1 | 332 and 341 (round 17; class of R331-XLM-1) | Low (liveness, no funds) | Signatures were judged by the exit code of `cast wallet verify`, which is 0 for `-h...` and for signatures the contracts refuse (high-s twin, `v` 0 / 1): `signatario.py release` (the half's signature, length test only), `vigia.py verified` (partials from SHARED: a stranger's high-s twin of an honest partial was counted and wedged the mint or the release in the local SHARED mode), `key_inventory.py`. `signatario.py combine` verified nothing. The vault and the token refused every such certificate | Round 17 (`0f07e10`): `sigverify.py`, recovery in process with the contract rule; `combine` refuses a partial that does not recover to its signer | `test_sigverify_r17`, `test_signer_verify_r17.py` |
+| R341-2 | 341 (round 17) | Low | Outside text could reach a command line as an option: values passed to `cast` (they failed closed, by each caller's comparison, not by a check) and the `{detail}` of `alert_command` in the guardian, the shadow and the reserves monitor (an RPC error text could become an option of the operator's pager program) | Round 17 (`0f07e10`, `8bc9ed8`): option-like values are refused before `cast` runs; an `alert_command` argument cannot become an option | `test_sigverify_r17` `OptionValues`, `AlertCommand` |
 
 Earlier history (reports 29, 54, 57 and 74, and `AUDIT.md`) is summarised in `docs/AUDIT-SCOPE.md` and `docs/BUSDC-MAINNET-V2.md` section 9.
 
@@ -472,6 +475,11 @@ These suites run as unittest modules, from their own tool directory:
 - in `tools/reservas`: `python3 -m unittest test_reservas_alerts`;
 - in `tools/guardiao`: `python3 -m unittest test_review2`;
 - in `tools/signatario-stable`: `test_review2`, `test_status_v3` and `test_sigfeed`, then `python3 rehearse_feed.py <repo>`.
+
+### Expected results at the round 17 tools refreeze (agent 341)
+
+As at the round 15 freeze below, plus offline `test_sigverify_r17` 25 and the anvil rehearsal
+`python3 tools/signatario-stable/test_signer_verify_r17.py .` 23/23: `docs/audit-rfp-r12/PHASE2-BRIDGE-TOOLS-REFREEZE-R17.md` section 4.
 
 ### Expected results at the round 15 freeze (agent 314, Mac, forge 1.7.1, Python 3.9)
 
