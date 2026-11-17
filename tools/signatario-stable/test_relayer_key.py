@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -80,12 +81,38 @@ class RelayerKey(unittest.TestCase):
 
     def test_password_file_from_systemd_credentials(self):
         creds = self.d / 'creds'
-        creds.mkdir()
+        # An explicit mode, never the process umask (agent 403, round 19): under umask 002 a plain mkdir() gives 0775,
+        # which private_file rightly refuses (F381-1); systemd makes this directory private to the service.
+        creds.mkdir(mode=0o700)
+        creds.chmod(0o700)
         (creds / 'l2-gas.password').write_text('pw\n')
         (creds / 'l2-gas.password').chmod(0o400)
         os.environ['CREDENTIALS_DIRECTORY'] = str(creds)
         self.addCleanup(os.environ.pop, 'CREDENTIALS_DIRECTORY', None)
         v = self.vigia(l2_chain_id=700770, **self.keystore_cfg('l2', 'credential:l2-gas.password'))
+        self.assertEqual(v.relayer_wallet('l2')[-1], str(creds / 'l2-gas.password'))
+
+    def test_a_credentials_directory_made_under_umask_002_is_refused(self):
+        # The rule itself, pinned (agent 403, round 19): a directory created with a plain mkdir() under umask 002 is
+        # 0775, and a group-writable $CREDENTIALS_DIRECTORY IS refused whatever the credential's own mode. Only the
+        # directory's mode differs from the accepted case, shown by the chmod at the end.
+        old = os.umask(0o002)
+        self.addCleanup(os.umask, old)
+        creds = self.d / 'creds'
+        creds.mkdir()
+        self.assertEqual(stat.S_IMODE(creds.stat().st_mode), 0o775)
+        (creds / 'l2-gas.password').write_text('pw\n')
+        (creds / 'l2-gas.password').chmod(0o400)
+        os.environ['CREDENTIALS_DIRECTORY'] = str(creds)
+        self.addCleanup(os.environ.pop, 'CREDENTIALS_DIRECTORY', None)
+        v = self.vigia(l2_chain_id=700770, **self.keystore_cfg('l2', 'credential:l2-gas.password'))
+        with self.assertRaises(SystemExit) as e:
+            v.relayer_wallet('l2')
+        self.assertIn('$CREDENTIALS_DIRECTORY must be a directory', str(e.exception))
+        self.assertIn('mode 0775', str(e.exception))
+        with self.assertRaises(SystemExit):
+            vigia.private_file(str(creds / 'l2-gas.password'), 'x')
+        creds.chmod(0o700)
         self.assertEqual(v.relayer_wallet('l2')[-1], str(creds / 'l2-gas.password'))
 
     def test_credential_without_load_credential_is_refused(self):

@@ -111,3 +111,13 @@ manifest unchanged.
 Round 18, R329-SHARED-2 (Low, reviewer 379; `807478f`): a group-readable credential must belong to gid 0 or the
 service's own primary group. `test_credentials_r18` 14 tests (1 failure before). Phase 2 manifest regenerated
 (the `vigia.py` row only).
+
+Round 19 (agent 403): test fixture only, no file of the Phase 2 list changed (manifest regenerated: byte-equal).
+`tools/signatario-stable/test_relayer_key.py::test_password_file_from_systemd_credentials` made its credentials
+directory with a plain `mkdir()`, so its mode followed the process umask: 0775 under umask 002 (the build host),
+which `vigia.py private_file` rightly refuses (the F381-1 rule: `$CREDENTIALS_DIRECTORY` must not be writable by
+group or others). The fixture now sets 0700 explicitly; the rule is unchanged. New test
+`test_a_credentials_directory_made_under_umask_002_is_refused` pins the rule: a directory made under umask 002 is
+0775 and IS refused by the relayer and by `private_file`, and the same directory is accepted after `chmod 0700`
+(it fails if the directory-mode condition is removed from `private_file`). `test_relayer_key`: 9 tests, 1 error
+under umask 002 before (OK under 022 and 077); 10 tests OK under umask 000, 002, 022 and 077 after.
