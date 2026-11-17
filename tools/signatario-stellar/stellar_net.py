@@ -469,10 +469,17 @@ class Net:
         state, entry, _ = self.record_state(name, value)
         return state, (scval(entry['dataJson']['contract_data']['val']) if entry is not None else None)
 
-    def events(self, start_ledger, limit=200):
-        """The vault's contract events from `start_ledger`, decoded: [{name, ledger, tx, topics, data}]."""
-        r = self.rpc('getEvents', {'startLedger': int(start_ledger), 'xdrFormat': 'json', 'pagination': {'limit': limit},
-                                   'filters': [{'type': 'contract', 'contractIds': [self.vault]}]})
+    def events(self, start_ledger, limit=200, cursor=None):
+        """ONE page of the vault's contract events from `start_ledger` (or after `cursor`), decoded:
+        ([{name, ledger, tx, topics, data}], latest ledger, oldest ledger). A page says nothing about what lies after
+        it: stellar-rpc scans a bounded number of ledgers per request (10,000) and answers an empty page at the end
+        of that range. Readers use `scan`, never this page alone."""
+        page = {'limit': limit, **({'cursor': cursor} if cursor else {})}
+        params = {'xdrFormat': 'json', 'pagination': page, 'filters': [{'type': 'contract', 'contractIds': [self.vault]}]}
+        if not cursor:
+            params['startLedger'] = int(start_ledger)
+        r = self.rpc('getEvents', params)
+        self._last_cursor = r.get('cursor')
         out = []
         for e in r.get('events') or []:
             topics = e.get('topicJson') or []
@@ -480,7 +487,31 @@ class Net:
             fields = {m['key']['symbol']: scval(m['val']) for m in data.get('map', [])} if isinstance(data, dict) else {}
             out.append({'name': scval(topics[0]) if topics else None, 'ledger': int(e['ledger']), 'tx': e.get('txHash'),
                         'topics': [scval(t) for t in topics[1:]], 'data': fields})
-        return out, int(r['latestLedger']), int(r['oldestLedger'])
+        return out, int(r['latestLedger']), int(r.get('oldestLedger', 0))
+
+    MAX_SCAN_REQUESTS = 100_000
+
+    def scan(self, start_ledger, limit=200):
+        """EVERY vault event from `start_ledger` to the RPC's latest ledger, following the RPC's cursor (round 18: a
+        reader that stopped on the first empty page saw nothing beyond the RPC's 10,000-ledger scan window, and one
+        that restarted at the next ledger after a full page lost the rest of that ledger). Returns (events, latest
+        ledger, the ledger the scan reached). Done only on an EMPTY page whose cursor is at or past the latest
+        ledger; a cursor missing, malformed or not moving forward is an error, never "no events"."""
+        out, cursor, last = [], None, None
+        for _ in range(self.MAX_SCAN_REQUESTS):
+            page, latest, _ = self.events(start_ledger, limit=limit, cursor=cursor)
+            nxt = getattr(self, '_last_cursor', None)
+            if not isinstance(nxt, str) or not re.fullmatch(r'[0-9]{1,20}-[0-9]{1,10}', nxt):
+                raise StellarError('the Stellar RPC answered getEvents without a usable cursor')
+            position = (int(nxt.split('-')[0]), int(nxt.split('-')[1]))
+            reached = position[0] >> 32
+            out += page
+            if not page and reached >= latest:
+                return out, latest, reached
+            if last is not None and position <= last:
+                raise StellarError('the Stellar RPC\'s getEvents cursor does not move forward')
+            last, cursor = position, nxt
+        raise StellarError('getEvents did not reach the latest ledger within the request bound')
 
 
 def scval(v):
