@@ -78,16 +78,29 @@
     },
     "tron": {
       "branch": "codex/bridge-tron-r17-20261117",
-      "commit": "8f23f3808b76f0fc28ea9243f9a16ef7f7fdcde4",
+      "commit": "8fb85608d9f49b2eb5eadd01fde5b1e508261062",
       "agent": 370,
       "routes": [
         "tron"
       ],
-      "conflicts": [],
+      "conflicts": [
+        {
+          "path": "tools/deploy-pontes/vault_pontes.py",
+          "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.2bc9208b0baaaef6"
+        },
+        {
+          "path": "tools/signatario-stable/signatario.py",
+          "resolution": "recorded resolution tools__signatario-stable__signatario.py.ba6ef6722a361168"
+        }
+      ],
       "history": [
         {
           "branch": "codex/bridge-tron-r17-20261117",
           "commit": "577ca36e7892450cc642676b2675c1eed76e8dbd"
+        },
+        {
+          "branch": "codex/bridge-tron-r17-20261117",
+          "commit": "8f23f3808b76f0fc28ea9243f9a16ef7f7fdcde4"
         }
       ]
     },
