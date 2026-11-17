@@ -457,6 +457,13 @@ class GuardianCheck(unittest.TestCase):
         with mock.patch.object(FakeL2, 'block', side_effect=sn.StellarError('down')):
             self.assertEqual(self.check()[0], 3)
 
+    def test_a_blind_guardian_alerts_even_with_no_release_to_judge(self):
+        self.assertEqual(self.check()[0], 0)
+        FakeL2.state['a']['chain'] = 1
+        code, out = self.check()
+        self.assertEqual((code, out['ok'], out['action'], out['releases_checked']),
+                         (3, False, 'alert-a-human-do-not-pause', 0))
+
     def test_two_sources_one_behind_use_the_lower_final_block(self):
         self.release(self.burn(1, 230, PAYEE), PAYEE)
         FakeL2.state['b'].update(fin=225)

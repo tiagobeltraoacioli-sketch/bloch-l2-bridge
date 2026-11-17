@@ -266,7 +266,7 @@ delay. The other choice lets one stalled follower close the vault and void every
 three independent L2 followers, each with two sources, make both failures unlikely at once; exit 3 must page a
 person, not write a log line.
 
-Tested both directions: `test_stellar_tools.py` `GuardianCheck` (20 cases against fake sources: lagging and stalled
+Tested both directions: `test_stellar_tools.py` `GuardianCheck` (19 tests against fake sources: lagging and stalled
 views, failing and disagreeing sources, forgeries naming a final block, another history, a block nobody will reach,
 a call through another contract, a chain whose clock is ahead); the rehearsal: the reviewer's case A2 (a view one
 block before a real, paid burn: exit 3, no finding), a queued quorum forgery (exit 2), and two quorum forgeries
@@ -482,7 +482,7 @@ signer certifies only a burn that was final before it signed); the re-pin rule o
 - Vault unit suite: 163 tests, 163 pass (SDK 29 test host, independent second implementation of every hash,
   randomized rate-limit and books properties): revision 2's 159 and the four tests of reviewer 331.
 - Router: 9 of 9 forge tests.
-- Tools, offline: `test_stellar_tools.py` 41 of 41; deploy tool `test_source_stellar.py` 15 of 15, and the existing
+- Tools, offline: `test_stellar_tools.py` 42 of 42; deploy tool `test_source_stellar.py` 15 of 15, and the existing
   deploy tool suites unchanged and passing.
 - The two rehearsals of revision 3 are recorded in the commit that closes this line (the one after this one).
 

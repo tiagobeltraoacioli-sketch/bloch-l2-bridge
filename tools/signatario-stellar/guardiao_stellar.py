@@ -32,8 +32,8 @@ check    read-only. Every release the vault paid or queued (its events in the RP
                    been handed yet.
 
          Exit 0: every release ok (or already voided by a pause). Exit 2: at least one FINDING: the operator's unit
-         runs `pause`. Exit 3: no finding, but at least one release could not be judged: the unit ALERTS A HUMAN and
-         does NOT pause. Any other exit: the tool failed: alert.
+         runs `pause`. Exit 3: no finding, but at least one release could not be judged, or the L2 view could not
+         be established at all (also when there is no release to judge): the unit ALERTS A HUMAN and does NOT pause. Any other exit: the tool failed: alert.
          The trade-off of exit 3, stated: a guardian that cannot see the L2 does not stop a real forgery by itself;
          that forgery waits for another guardian (one is enough) or for a human who answers the alert within the
          release delay. The other choice (pause whenever the burn is not seen) lets one stalled follower close the
@@ -306,13 +306,15 @@ class Guardian:
         findings = [f for f in findings if f not in done]
         unjudged = [f for f in unjudged if f not in done]
         fin = getattr(self, 'fin', None)
-        print(json.dumps({'ok': not findings and not unjudged, 'releases_checked': seen,
+        # A guardian that cannot read the L2 is blind even when there is no release to judge right now: alert.
+        blind = bool(view_problem)
+        print(json.dumps({'ok': not findings and not unjudged and not blind, 'releases_checked': seen,
                           'l2_finalized': fin and fin['number'], 'l2_finalized_hash': fin and fin['hash'],
                           'l2_sources': len(getattr(self, 'sources', [])), 'l2_view_problem': view_problem,
                           'findings': findings, 'cannot_judge': unjudged, 'voided': done,
-                          'action': 'pause' if findings else 'alert-a-human-do-not-pause' if unjudged else 'none'},
-                         indent=2))
-        raise SystemExit(2 if findings else 3 if unjudged else 0)
+                          'action': 'pause' if findings else 'alert-a-human-do-not-pause' if unjudged or blind
+                          else 'none'}, indent=2))
+        raise SystemExit(2 if findings else 3 if unjudged or blind else 0)
 
 
 def main():
