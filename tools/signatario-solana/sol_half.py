@@ -386,6 +386,14 @@ def cmd_release(cfg, intent_path):
     done = subprocess.run([cast, 'wallet', 'sign', '--no-hash', *wallet, S.hx(digest)], capture_output=True, text=True)
     if done.returncode:
         refuse('cast wallet sign failed', stderr=done.stderr.strip()[-800:])
+    # What the signing tool printed is checked here, in process, before it is handed on: it must be a signature of
+    # this digest by this keystore's key (the parent then asks `cast wallet verify`, whose exit code alone says little).
+    try:
+        made = S.secp256k1_recover(digest, S.unhex(done.stdout.strip(), 65, 'signature'))
+    except S.Refused:
+        made = None
+    if made is None or made != S.unhex(signer, 20):
+        refuse('the signing tool did not return a signature of this digest by this keystore')
     answer(True, signer=signer, release={k: (S.hx(rel[k]) if isinstance(rel[k], bytes) else rel[k]) for k in S.RELEASE_FIELDS},
            context={'validUntil': ctx['validUntil'], 'sourceAnchorNumber': ctx['sourceAnchorNumber'],
                     'sourceAnchorHash': S.hx(ctx['sourceAnchorHash']),

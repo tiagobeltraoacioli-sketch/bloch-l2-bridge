@@ -24,8 +24,12 @@ Transactions (need --fee-payer KEYPAIR.json, an Ed25519 key that only pays fees 
                        (sol_proof.py) shows a signature made with the fee owner's key
   create-fee-account   create the fee owner's associated token account (before `init`; the vault need not exist)
   deposit --keypair USER.json --amount N --l2-recipient 0x..   (a user's deposit; reference client and rehearsal)
-  approve --cert CERT.json             CERT = `signatario.py combine` output for a release
-  execute --nonce N --owner WALLET     pay an approved release to the wallet the burn committed to
+  approve --cert CERT.json [--owner WALLET]   CERT = `signatario.py combine` output for a release; its signatures
+                                       are recovered here before anything is sent; with --owner the wallet is
+                                       checked against the recipient rule first
+  execute --nonce N --owner WALLET [--create-account]   pay an approved release to the wallet the burn committed
+                                       to. Refused when the wallet is, at `finalized`, not absent and not a System
+                                       account without data; --create-account only for a funded System account
   close --nonce N                      close a release record paid longer ago than the retention: its rent returns
                                        to the account that paid it, and the nonce stays spent in the paid page
   pause-submit --cert F  controls-submit --sig F [--sig F ...]  unpause-submit --sig F [--sig F ...]
