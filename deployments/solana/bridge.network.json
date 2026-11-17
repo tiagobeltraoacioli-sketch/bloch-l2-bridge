@@ -140,5 +140,10 @@
     "The L2 side of an exit is SolanaBurnRouter.burnTo(uint64,string,uint64,bytes), the same shape as StellarBurnRouter and BitcoinBurnRouter; router address TBD-deploy. Its walletOf(string) and commitment(string) are view functions (they read the immutable mint).",
     "Solana-only vault value: recordRetention 604800 seconds (a paid release record may be closed after it; the paid page keeps the nonce spent).",
     "Solana-only tool rules since review 330: recordRetention has a floor of 259200 seconds outside a rehearsal; a vault file with rehearsal true is refused on mainnet-beta, devnet, testnet and for any endpoint that is not on loopback; init creates the fee owner's USDC associated token account when absent (idempotent; anyone may) and verifies it (canonical address, mint, owned by the fee owner); init also requires the fee owner's signed proof (route, cluster genesis hash, purpose, a date at most 30 days old)."
-  ]
+  ],
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "NOT LAUNCHABLE until the external audit (program, burn router, tools, the pure-Python signature verifiers) and the owner's key ceremony (fee-owner proof within 30 days of init, committee and guardian keys) are done. Residual of R330-SOL-1, stated: a destination's key holder can turn its own address into a mint after the signers read it, and five signers who skip the rule can approve anything the vault accepts (the relayer refuses to pay and the guardian raises release-destination / release-mismatch); a burn whose burner can no longer transact stays held. Open Infos of review 376: R330-SOL-4P-5 (exitHash is read by no tool) and R330-SOL-4P-8; proof not tested on a Ledger device. Tip eac2b35: rehearsal 255/0 default, 132/0 --r330."
+  }
 }
