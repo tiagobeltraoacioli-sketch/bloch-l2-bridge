@@ -76,6 +76,44 @@ class GuardianBlindRound(unittest.TestCase):
         self.assertIn((unproven['nonce'], 1), self.g._paid_checked)
 
 
+class RedirectAfterApproval(unittest.TestCase):
+    """R330-SOL-4P-3: an honest approval (or payment) for the burner's FIRST redirect becomes a hard guardian finding
+    (grace 0: the vault is paused) as soon as the same burner sends a second redirect."""
+
+    setUp = GuardianBlindRound.setUp
+    findings_for = GuardianBlindRound.findings_for
+
+    def verdict(self, burn, recipient20):
+        self.g._senders = None
+        return self.g.recipient_verdict(dict(burn, eth_recipient=burn['recipient']), recipient20, None)
+
+    def test_r376_sol_4p_3_a_second_redirect_turns_the_first_ones_approval_into_a_hard_finding(self):
+        held = self.l2.direct(S.account_id(K.wallet_of('typed by habit')[1]))  # any held burn: direct, or no valid proof
+        first = self.l2.redirect(held, 'first wallet, never creates its USDC account')
+        w1 = S.account_id(first['wallet'])
+        self.assertEqual(self.verdict(held, w1), ('ok', None), 'the signers certify and the relayer approves W1: honest')
+        # The approval stands while W1 has no associated token account (the burner never creates it; the relayer
+        # creates none by default). Then the burner sends a second redirect.
+        self.l2.redirect(held, 'second wallet')
+        self.assertEqual(self.verdict(held, w1), ('mismatch', None))
+        record = dict(held, nonce=held['nonce'])
+        b = dict(record, eth_recipient=held['recipient'])
+        unpaid = {'nonce': held['nonce'], 'seq': 1, 'state': 1, 'recipient': w1, 'amount': held['amount'],
+                  'native_burn': S.unhex(held['burn_id'], 32), 'key': 'record', 'ready_at': 0}
+        self.g.records = lambda: []
+        self.g.release_records = lambda: [unpaid]
+        self.node.token_balance = lambda address: {'mint': self.node.config.mint, 'owner': self.node.a.vault, 'amount': 10**12}
+        self.node.vault['void_through_seq'] = 0
+        self.g._senders = None
+        _, _, findings = self.g.eth_source([b], fin=None)
+        hard = [(f[0], f[1], f[2]) for f in findings if f[1].startswith('release-mismatch')]
+        self.assertEqual(hard, [('hard', f"release-mismatch:approval-{held['nonce']}-1", 0)],
+                         'DEFECT: any burner of a held burn makes the guardians pause the whole vault (72 h), repeatably')
+        # The same for a PAID record judged after the second redirect (a guardian restarted within the retention)
+        self.g._paid_checked = {}
+        self.assertEqual(self.findings_for(held, w1), [f"release-mismatch:{held['nonce']}"])
+
+
 class LatchFromOneEndpoint(unittest.TestCase):
     """R330-SOL-4P-2: one endpoint that shows a non-wallet once latches the hold for good, whatever the others say."""
 
