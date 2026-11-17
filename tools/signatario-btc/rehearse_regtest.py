@@ -20,8 +20,12 @@ Prints PASS/FAIL per check, a count at the end, exit 0 only if every check passe
   J refunds of unswept deposits    K router burns; direct burns are paid only on their burner's on-chain claim,
   never after a timeout (an account with a key, a contract account); what is never paid shows in `burn status` and
   in the reserves, and is set aside so it holds nobody
-  L the burner's fee ceiling: honoured by every signer, the burn waits above it, the charge is bounded
+  L the burner's fee ceiling: honoured by every signer, the burn waits above it IN ORDER (never set aside for that alone,
+    round 18) while later burns are paid past it, the charge is bounded
   N the anchor must hold exactly poolTargetSats; the signers' fee-status alert line
+  R round 18: signers serve only a listed relayer's fresh, signed proposals
+  X review 342's attack cases as regression tests: set-aside by a relayer's fee rate, a replacement that drops a pending
+    payout, five keys hiding a burn inside the rules (reserves held, honest signers hold, release by acknowledgement)
 The node runs with -acceptnonstdtxn=0: every vault transaction passes mainnet relay policy. Each signer has two keys in
 separate keystores: an L2 mint key and a Bitcoin vault key.
 """
@@ -439,8 +443,8 @@ def run(rig):
     # the exit door: BitcoinBurnRouter over the token, for this network's address prefix and this vault's payout numbers
     rc, rplan = rig.tool('btc_deploy.py', str(vault_path), 'router', '--token', rig.token, '--artifact', opt('--router-artifact'),
                          '--out', str(rig.work / 'router.initcode'))
-    rctor = sh(rig.cast, 'abi-encode', 'f(address,string,uint256,uint256,uint256,uint256,uint16)', rig.token, 'bcrt', '100', str(policy['releaseFeeBps']),
-               str(vault.release_vb), '546', '200').stdout.strip()
+    rctor = sh(rig.cast, 'abi-encode', 'f(address,string,uint256,uint256,uint256,uint256,uint16,uint16)', rig.token, 'bcrt', '100',
+               str(policy['releaseFeeBps']), str(vault.release_vb), '546', '200', str(policy['burnFeerateFloor'])).stdout.strip()
     rdep = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', deployer, '--json', '--create',
                          (rig.work / 'router.initcode').read_text().strip()).stdout)
     rig.router = rdep['contractAddress'].lower()
@@ -450,10 +454,23 @@ def run(rig):
     other_policy.write_text(json.dumps({**vault_cfg, 'policy': {**policy, 'maxFeerate': 150}}, indent=1))
     rc_o, rother = rig.tool('btc_deploy.py', str(other_policy), 'router-verify', '--token', rig.token, '--l2-rpc', rig.l2, '--router', rig.router)
     check('0 btc_deploy.py router: its constructor encoding equals cast abi-encode; router-verify reads the deployed router back '
-          '(unit 100, 10 bps, 402 vbytes, dust 546, ceiling 200) and gives the code hash the signers pin; a router for another '
+          '(unit 100, 10 bps, 402 vbytes, dust 546, ceiling 200, floor 2) and gives the code hash the signers pin; a router for another '
           'policy is refused',
           rc == 0 and rplan.get('constructorArgs') == rctor and rc_v == 0 and rver.get('runtimeCodeKeccak') == router_keccak
-          and rver['expected']['chargeVbytes'] == 402 and rc_o != 0 and 'feeRateCeiling' in rother.get('differences', {}), (rplan, rver, rother))
+          and rver['expected']['chargeVbytes'] == 402 and rver['expected']['feeRateFloor'] == 2 and rc_o != 0
+          and 'feeRateCeiling' in rother.get('differences', {}), (rplan, rver, rother))
+    # the relayer's own key (round 18, review 342): it signs proposals and can move no coin; every signer lists it
+    relayer_priv = int.from_bytes(secrets.token_bytes(32), 'big') % c.N
+    relayer = c.eth_address(c.pubkey(relayer_priv))
+    (keys_dir / 'relayer.key').write_text('0x%064x' % relayer_priv)
+    os.chmod(keys_dir / 'relayer.key', 0o600)
+
+    def relay_sign(proposal, priv=None):
+        """A hand-made proposal as a compromised RELAYER would send it: signed with the listed relayer key (or another)."""
+        body = {k: v for k, v in proposal.items() if k not in ('relayer', 'relayer_signature', 'issued')}
+        body = {**body, 'issued': int(time.time()), 'relayer': relayer}
+        r_, s_, v_ = c.sign(c.personal_digest(c.proposal_text(vault.vault_id, body)), relayer_priv if priv is None else priv)
+        return {**body, 'relayer_signature': '0x' + (r_.to_bytes(32, 'big') + s_.to_bytes(32, 'big') + bytes([27 + v_])).hex()}
     rig.mint_cfg, rig.half_cfg, rig.signer_cfg = [], [], []
     for i in range(7):
         half = rig.work / f'half{i}.json'
@@ -475,14 +492,16 @@ def run(rig):
                                       'password_file': str(keys_dir / f'vault{i}.pw'), 'pubkey': pubs[i].hex(),
                                       'journal': str(rig.work / f'signer{i}.journal.json'), 'cast': rig.cast,
                                       'burn_router': rig.router, 'burn_router_code_keccak': router_keccak,
-                                      'feerate_without_estimate': 200}))
+                                      'feerate_without_estimate': 200, 'relayers': [relayer], 'max_proposals_per_hour': 100_000,
+                                      'token_from_block': 0}))
         rig.mint_cfg.append(str(mint))
         rig.half_cfg.append(str(half))
         rig.signer_cfg.append(str(signer))
     rig.relay_cfg = str(rig.work / 'relay.json')
     Path(rig.relay_cfg).write_text(json.dumps({'vault': str(vault_path), 'btc_rpc': rig.btc_url, 'btc_cookie': str(rig.cookie),
                                                'l2_rpc': rig.l2, 'token': rig.token, 'token_from_block': 0,
-                                               'l2_chain_id': L2_CHAIN, 'burn_router': rig.router}))
+                                               'l2_chain_id': L2_CHAIN, 'burn_router': rig.router, 'cast': rig.cast,
+                                               'relayer_address': relayer, 'relayer_private_key_file': str(keys_dir / 'relayer.key')}))
     rig.advance(60)  # one clock from here on
 
     def dep_addr(who):
@@ -520,8 +539,8 @@ def run(rig):
     check('S2 pool drain (review R325-BTC-3): a 546-sat stray cannot be swept at a fee the pool would pay',
           r['propose'][0] != 0 and 'does not pay for its own input' in r['propose'][1].get('reason', ''), r['propose'][1])
     p = rig.work / 's-drain-forced.proposal.json'
-    p.write_text(json.dumps({'kind': 'btc-vault-proposal', 'version': 2, 'tip': a_txid, 'feerate': 200, 'deposits': [],
-                             'donations': [{'txid': hostile[0][0], 'vout': 0}], 'burns': [], 'tx': '00', 'txid': '00'}))
+    p.write_text(json.dumps(relay_sign({'kind': 'btc-vault-proposal', 'version': 3, 'tip': a_txid, 'feerate': 200, 'deposits': [],
+                             'donations': [{'txid': hostile[0][0], 'vout': 0}], 'burns': [], 'tx': '00', 'txid': '00'})))
     r = rig.sign_and_combine(p, range(5), 's-drain-forced')
     check('S3 the same proposal made by hand is refused by every signer', all_refuse(r['signs'], 'does not pay for its own input'),
           reasons(r['signs']))
@@ -694,9 +713,9 @@ def run(rig):
     rogue = c.Tx([(tip_txid, 0)], [(view_tip_value - 30_000_000, vault.thread_spk), (0, rogue_marker.encode()),
                                    (29_000_000, c.p2wpkh(bytes.fromhex(h160[2:])))])
     p = rig.work / 'b-forged-replay.proposal.json'
-    p.write_text(json.dumps({'kind': 'btc-vault-proposal', 'version': 2, 'tip': tip_txid, 'feerate': 1, 'deposits': [],
+    p.write_text(json.dumps(relay_sign({'kind': 'btc-vault-proposal', 'version': 3, 'tip': tip_txid, 'feerate': 1, 'deposits': [],
                              'donations': [], 'burns': [{'burn_tx': burn1['tx'], 'burn_id': burn1['id']}],
-                             'tx': rogue.stripped().hex(), 'txid': rogue.txid()}))
+                             'tx': rogue.stripped().hex(), 'txid': rogue.txid()})))
     r = rig.sign_and_combine(p, range(5), 'b-forged-replay')
     check('B10 forged replay: a hand-made transaction paying a paid burn again is refused by every signer',
           all_refuse(r['signs'], 'already paid'), reasons(r['signs']))
@@ -707,12 +726,12 @@ def run(rig):
     tx, *_ = c.parse_tx(bytes.fromhex(prop['tx']))
     stolen = c.Tx(tx.inputs, [tx.outputs[0], tx.outputs[1], (tx.outputs[2][0], c.p2wpkh(b'\x66' * 20))] + tx.outputs[3:])
     p = rig.work / 'b-forged-recipient.proposal.json'
-    p.write_text(json.dumps({**prop, 'tx': stolen.stripped().hex(), 'txid': stolen.txid()}))
+    p.write_text(json.dumps(relay_sign({**prop, 'tx': stolen.stripped().hex(), 'txid': stolen.txid()})))
     r1 = rig.sign_and_combine(p, range(5), 'b-forged-recipient')
     bigger = c.Tx(tx.inputs, [(tx.outputs[0][0] - 1_000_000, tx.outputs[0][1]), tx.outputs[1], (tx.outputs[2][0] + 1_000_000, tx.outputs[2][1])] + tx.outputs[3:])
-    p.write_text(json.dumps({**prop, 'tx': bigger.stripped().hex(), 'txid': bigger.txid()}))
+    p.write_text(json.dumps(relay_sign({**prop, 'tx': bigger.stripped().hex(), 'txid': bigger.txid()})))
     r2 = rig.sign_and_combine(p, range(5), 'b-forged-amount')
-    p.write_text(json.dumps({**prop, 'burns': [{'burn_tx': '0x' + 'ab' * 32, 'burn_id': burn3['id']}]}))
+    p.write_text(json.dumps(relay_sign({**prop, 'burns': [{'burn_tx': '0x' + 'ab' * 32, 'burn_id': burn3['id']}]})))
     r3 = rig.sign_and_combine(p, range(5), 'b-forged-burn')
     check('B11 forged releases refused by every signer: another recipient, a larger amount, a burn that does not exist',
           all_refuse(r1['signs'], 'not the one the rules build') and all_refuse(r2['signs'], 'not the one the rules build')
@@ -782,9 +801,9 @@ def run(rig):
     r1 = rig.vault_tx(1, deposits=[(d_carol[0], d_carol[1], erin)], tag='d-after')
     p = rig.work / 'd-forced.proposal.json'
     st = rig.status()
-    p.write_text(json.dumps({'kind': 'btc-vault-proposal', 'version': 2, 'tip': st['tip'], 'feerate': 1,
+    p.write_text(json.dumps(relay_sign({'kind': 'btc-vault-proposal', 'version': 3, 'tip': st['tip'], 'feerate': 1,
                              'deposits': [{'txid': d_carol[0], 'vout': d_carol[1], 'recipient': erin}], 'donations': [],
-                             'burns': [], 'tx': '00', 'txid': '00'}))
+                             'burns': [], 'tx': '00', 'txid': '00'})))
     r2 = rig.sign_and_combine(p, range(5), 'd-forced')
     check('D1 a deposit replaced (double-spent) before it confirmed is never swept or credited',
           r0['propose'][0] != 0 and r1['propose'][0] != 0 and all_refuse(r2['signs'], 'not an unspent output')
@@ -954,10 +973,30 @@ def run(rig):
     def forged_release(b, feerate, tag):
         """A hand-made proposal that pays burn `b` to the 20 bytes it names, bypassing the relayer's own refusal."""
         p = rig.work / f'{tag}.proposal.json'
-        p.write_text(json.dumps({'kind': 'btc-vault-proposal', 'version': 2, 'tip': rig.status()['tip'], 'feerate': feerate,
+        p.write_text(json.dumps(relay_sign({'kind': 'btc-vault-proposal', 'version': 3, 'tip': rig.status()['tip'], 'feerate': feerate,
                                  'deposits': [], 'donations': [], 'refunds': [], 'aside_through': 0, 'asides': [],
-                                 'burns': [{'burn_tx': b['tx'], 'burn_id': b['id']}], 'tx': '00', 'txid': '00'}))
+                                 'burns': [{'burn_tx': b['tx'], 'burn_id': b['id']}], 'tx': '00', 'txid': '00'})))
         return rig.sign_and_combine(p, range(5), tag)
+
+    def forged_aside(paid, aside, feerate, tag, donations=()):
+        """A hand-made proposal, signed with the listed relayer key, that pays `paid` and sets aside every unsettled burn up
+        to the last of `aside`, at the L2's finalized block: what a relayer bypassing its own refusals would send."""
+        import btc_vault as _bv
+        rig.sync_index()
+        tip = _bv.VaultView(vault, _bv.Node(rig.btc_url, str(rig.cookie), 'bitcoin-regtest')).load().tip_state()
+        fin = int(sh(rig.cast, 'block', 'finalized', '--field', 'number', '--rpc-url', rig.l2).stdout.strip())
+        items = [{'nonce': b['nonce'], 'units': b['units'], 'recipient': bytes(c.segwit_decode('bcrt', b['address'])[1])} for b in paid]
+        dons = [{'txid': d[0], 'vout': d[1], 'value': d[2]} for d in donations]
+        built = pol.build_vault_tx(vault, tip, [], dons, items, feerate, aside_through=aside[-1]['nonce'], aside_block=fin)
+        p = rig.work / f'{tag}.proposal.json'
+        ref = lambda b: {'burn_tx': b['tx'], 'burn_id': b['id'], 'nonce': b['nonce']}
+        p.write_text(json.dumps(relay_sign({'kind': 'btc-vault-proposal', 'version': 3, 'tip': tip['txid'], 'feerate': feerate,
+                                            'aside_through': aside[-1]['nonce'], 'aside_block': fin,
+                                            'asides': [ref(b) for b in aside], 'deposits': [],
+                                            'donations': [{'txid': d[0], 'vout': d[1]} for d in donations], 'refunds': [],
+                                            'burns': [ref(b) for b in paid], 'tx': built['tx'].stripped().hex(),
+                                            'txid': built['tx'].txid(), 'replaces': None})))
+        return rig.sign_and_combine(p, range(7), tag)
 
     bad = router_send(alice_k, 'burnTo(uint64,string,uint16)', '5000', alice, '200', ok=False)
     check('K1 the router refuses an Ethereum address as the Bitcoin destination: nothing is burned', bad is None)
@@ -1009,7 +1048,7 @@ def run(rig):
     check('K6 what is never paid is stated: `burn status` shows the burn as unclaimed with the reason and the 20 bytes that '
           'are not paid; the reserves monitor lists it (count, units, sats), the books still balance exactly and it says why',
           row.get('state') == 'unclaimed' and 'never paid to the 20 bytes' in row.get('why', '')
-          and row.get('named_20_bytes_not_paid') == named and st['never_paid_until_claimed']['nonces'] == [unclaimed['nonce']]
+          and row.get('named_20_bytes') == named and st['never_paid_until_claimed']['nonces'] == [unclaimed['nonce']]
           and rc == 0 and res['status'] == 'ok' and res['identity_books'] and res['identity_vault']
           and res['unclaimed_direct_burns']['count'] == 1 and res['unclaimed_direct_burns']['units'] == 2_000
           and res['unclaimed_direct_burns']['sats'] == 200_000 and res['unpaid_burn_units'] == 2_000
@@ -1032,7 +1071,7 @@ def run(rig):
           and r['propose'][1]['set_aside'] == [unclaimed['nonce']] and m['burn_base'] == nxt['nonce'] and m['aside_through'] == unclaimed['nonce']
           and received(nxt['address']) == 300_000 - 300 - (vault.payout_vb + vault.overhead_vb) and received(named_addr) == 0
           and rc == 0 and res['status'] == 'ok' and res['identity_books'] and res['set_aside_count'] == 1
-          and res['set_aside_burns'][0]['nonce'] == unclaimed['nonce'] and res['set_aside_burns'][0]['reason'] == 'unclaimed direct burn'
+          and res['set_aside_burns'][0]['nonce'] == unclaimed['nonce'] and res['set_aside_burns'][0]['rule'] == 'age'
           and res['unclaimed_direct_burns']['sats'] == 200_000 and row['state'] == 'unclaimed' and row['set_aside_in'] == r['propose'][1]['txid'],
           (r_bad['propose'][1], r['propose'][1], m, res, row))
     # a set-aside burn stays claimable for ever: Bob claims weeks later and is paid as a late payment, once
@@ -1059,7 +1098,11 @@ def run(rig):
     acct = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', alice_k, '--json', '--create',
                          acct_art['bytecode']['object']).stdout)['contractAddress'].lower()
     assert rig.send(alice_k, 'transfer(address,uint256)', acct, '4000')
-    data = sh(rig.cast, 'calldata', 'burn(uint64,address)', '4000', acct).stdout.strip()   # names ITSELF: an Ethereum address
+    # Restated in round 18 (review R342-BTC-3): a contract burner (which others may be able to drive) is paid only to the
+    # 20 bytes its burn named, after a claim for exactly those bytes; a claim of the same contract for another address
+    # is stored by the router and ignored by every signer. The contract here names a real P2WPKH key hash.
+    acct_named, acct_h160 = user_hash()
+    data = sh(rig.cast, 'calldata', 'burn(uint64,address)', '4000', acct_h160).stdout.strip()
     got = json.loads(sh(rig.cast, 'send', acct, 'exec(address,bytes)', rig.token, data, '--rpc-url', rig.l2, '--private-key', alice_k,
                         '--json').stdout)
     cburn = burn_log(got, 4_000, None)
@@ -1071,16 +1114,24 @@ def run(rig):
     data = sh(rig.cast, 'calldata', 'claimDirectBurn(uint64,string,uint16)', str(cburn['nonce']), acct_to, '50').stdout.strip()
     sh(rig.cast, 'send', acct, 'exec(address,bytes)', rig.router, data, '--rpc-url', rig.l2, '--private-key', alice_k, '--json')
     rig.l2_mine(3)
+    r_other = rig.vault_tx(1, burns=[cburn], tag='k-contract-claim-other')
+    row1 = burn_status(cburn['nonce'])['burns'][0]
+    data = sh(rig.cast, 'calldata', 'claimDirectBurn(uint64,string,uint16)', str(cburn['nonce']), acct_named, '50').stdout.strip()
+    sh(rig.cast, 'send', acct, 'exec(address,bytes)', rig.router, data, '--rpc-url', rig.l2, '--private-key', alice_k, '--json')
+    rig.l2_mine(3)
     r = rig.vault_tx(1, burns=[cburn], tag='k-contract-claim')
     rig.mine(1)
     rig.l2_mine(3)
     rc, res = rig.reserves()
-    check('K9 a burn made directly by a CONTRACT account (naming its own Ethereum address) is not paid after four days '
-          'either; the contract claims by calling the router and is then paid to the address claimed',
+    check('K9 a burn made directly by a CONTRACT account is not paid after four days either; a claim of that contract for '
+          'ANOTHER address than the 20 bytes its burn named is ignored (R342-BTC-3: nobody who can drive the contract '
+          're-points it); the claim for the named bytes is paid to them',
           sh(rig.cast, 'code', acct, '--rpc-url', rig.l2).stdout.strip() not in ('0x', '') and row0['from'] == acct
           and r0['propose'][0] != 0 and all_refuse(r_forced['signs'], 'never paid to the 20 bytes') and row0['state'] == 'unclaimed'
-          and r['combine'] and r['combine'][0] == 0 and received(acct_to) == 400_000 - 400 - (vault.payout_vb + vault.overhead_vb)
-          and rc == 0 and res['status'] == 'ok' and cburn['nonce'] in res['direct_burns_paid_to_their_claim'], (row0, r, res))
+          and r_other['propose'][0] != 0 and row1['state'] == 'unclaimed' and row1.get('contract_burner') is True
+          and r['combine'] and r['combine'][0] == 0 and received(acct_named) == 400_000 - 400 - (vault.payout_vb + vault.overhead_vb)
+          and received(acct_to) == 0 and rc == 0 and res['status'] == 'ok' and cburn['nonce'] in res['direct_burns_paid_to_their_claim'],
+          (row0, row1, r_other['propose'][1], r, res))
 
     # ── L. the burner bounds the miner charge (R325-BTC-2P-2) ─────────────────
     dusty = router_send(bob_k, 'burnTo(uint64,string,uint16)', '804', user_hash()[0], '200', ok=False)
@@ -1102,34 +1153,39 @@ def run(rig):
           states.get(capped['nonce']) == ('waiting-fee-rate', 2) and states.get(free['nonce']) == ('payable', 200)
           and r_rel['propose'][0] != 0 and 'highest rate the burner' in r_rel['propose'][1].get('reason', '')
           and all_refuse(r_forced['signs'], 'highest rate the burner'), (states, r_rel['propose'][1], reasons(r_forced['signs'])))
-    # the market stays at 5: the capped burn waits, and is set aside so that it holds nobody; the other exit is paid at 5
-    r = rig.vault_tx(5, burns=[free], aside_through=capped['nonce'], signers=[], broadcast=False, tag='l-aside')
-    # the same proposal with the fee rate lowered to 2 by hand: the capped burn is payable there, so it may not be set aside
-    prop = json.loads(Path(r['proposal']).read_text())
-    p = rig.work / 'l-aside-payable.proposal.json'
-    p.write_text(json.dumps({**prop, 'feerate': 2}))
-    r_cheat = rig.sign_and_combine(p, range(5), 'l-aside-payable')
-    r = rig.sign_and_combine(r['proposal'], range(5), 'l-aside', out=r)
+    # Restated in round 18 (review R342-BTC-1): the market stays at 5 and the capped burn WAITS IN ORDER. A ceiling that is
+    # merely below the market is no reason to set a burn aside (the relayer refuses to propose it and every signer
+    # refuses a hand-made one at 5, and at 2 where it is payable); the other exit is paid PAST it through the marker's
+    # bitmap. Later burns pay past a waiting one for 320 nonces; only then may it be set aside (rule 'blocked': unit
+    # tests test_btc_policy.SetAside, test_review_r17_342; not rehearsed here, it needs 320 burns).
+    r_aside = rig.vault_tx(5, burns=[free], aside_through=capped['nonce'], signers=[], broadcast=False, tag='l-aside')
+    r_cheat5 = forged_aside([free], [capped], 5, 'l-aside-forced')
+    r_cheat2 = forged_aside([free], [capped], 2, 'l-aside-payable')
+    r = rig.vault_tx(5, burns=[free], tag='l-past')
     rig.mine(1)
     rig.l2_mine(3)
     rc, res = rig.reserves()
-    check('L3 at 5 sat/vB the capped burn is set aside (reason: its fee ceiling) and the other exit is paid, charged 5 x 402; '
-          'signers refuse to set aside a burn that is payable at the proposed rate',
-          r['combine'] and r['combine'][0] == 0 and r['propose'][1]['set_aside'] == [capped['nonce']]
+    m = rig.status()['marker']
+    check('L3 at 5 sat/vB the capped burn is NOT set aside (relayer and every signer refuse, at 5 and at 2): it waits in order, '
+          'and the other exit is paid past it through the bitmap, charged 5 x 402; reserves exact',
+          r_aside['propose'][0] != 0 and 'do not allow this burn to be set aside' in r_aside['propose'][1].get('reason', '')
+          and all_refuse(r_cheat5['signs'], 'may not be set aside') and all_refuse(r_cheat2['signs'], 'may not be set aside')
+          and r['combine'] and r['combine'][0] == 0 and r['propose'][1]['set_aside'] == []
           and received(free['address']) == 200_000 - 200 - 5 * 402 and received(capped['address']) == 0
-          and all_refuse(r_cheat['signs'], 'may not be set aside') and rc == 0 and res['set_aside_count'] == 1
-          and res['set_aside_burns'][0]['reason'] == 'fee ceiling 2 sat/vB set by its burner' and res['unclaimed_direct_burns']['count'] == 0,
-          (r['propose'][1], reasons(r_cheat['signs']), res))
+          and m['burn_base'] < capped['nonce'] and free['nonce'] in m['paid']
+          and rc == 0 and res['status'] == 'ok' and res['set_aside_count'] == 0 and res['unpaid_burn_units'] == 2_000
+          and res['unclaimed_direct_burns']['count'] == 0,
+          (r_aside['propose'][1], reasons(r_cheat5['signs'])[:1], reasons(r_cheat2['signs'])[:1], r['propose'][1], m, res))
     r3 = rig.vault_tx(3, burns=[capped], tag='l-late-above')
     r = rig.vault_tx(2, burns=[capped], tag='l-late')
     rig.mine(1)
     rig.l2_mine(3)
     rc, res = rig.reserves()
-    check('L4 when a transaction at its ceiling can be made the capped burn is paid (late payment): it receives '
-          '200,000 - 200 - 2 x 402 sat, so its miner charge was bounded by the rate it named; reserves exact',
-          r3['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == [capped['nonce']]
+    check('L4 when a transaction at its ceiling can be made the capped burn is paid in order (no late payment, nothing was set '
+          'aside): it receives 200,000 - 200 - 2 x 402 sat, so its miner charge was bounded by the rate it named; reserves exact',
+          r3['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == []
           and received(capped['address']) == 200_000 - 200 - 2 * 402 and rc == 0 and res['status'] == 'ok'
-          and res['set_aside_count'] == 0 and res['unpaid_burn_units'] == 0, (r3['propose'][1], r, res))
+          and res['set_aside_count'] == 0 and res['unpaid_burn_units'] == 0 and res['rule_violations'] == [], (r3['propose'][1], r, res))
     fs = [rig.tool('btc_signer.py', rig.signer_cfg[i], 'fee-status') for i in range(2)]
     check('N3 fee-status: each signer reports the estimate mode it pins (target 2, economical) and either its ceiling (exit 0) '
           'or an alert that it has no estimate (exit 2)',
@@ -1139,6 +1195,116 @@ def run(rig):
     note('fee-status: ' + json.dumps(fs[0][1]))
     (rig.work / 'reserves-final.json').write_text(json.dumps(res, indent=1))
     note('final reserves line: ' + json.dumps(res))
+
+    # ── R. who may send a proposal (round 18: relayer allow-list, review 342) ─
+    import btc_vault as _bv
+    probe = rig.pay(thread_address, '0.00020000')
+    rig.mine(2)
+    r_ok = rig.vault_tx(1, donations=[(probe[0], probe[1])], tag='r-probe', signers=[], broadcast=False)   # the listed relayer's own
+    good = json.loads(Path(r_ok['proposal']).read_text()) if r_ok['propose'][0] == 0 else None
+    outsider = int.from_bytes(secrets.token_bytes(32), 'big') % c.N
+    cases = {}
+    if good is not None:
+        unsigned = {k: v for k, v in good.items() if k not in ('relayer', 'relayer_signature')}
+        stranger = relay_sign(good, priv=outsider)                          # names the listed relayer, signed by another key
+        for name, prop in (('unsigned', unsigned), ('stranger', stranger)):
+            q = rig.work / f'r-{name}.proposal.json'
+            q.write_text(json.dumps(prop))
+            cases[name] = rig.sign_and_combine(q, range(7), f'r-{name}')
+        body = {k: v for k, v in good.items() if k not in ('relayer', 'relayer_signature', 'issued')}
+        body = {**body, 'issued': int(time.time()) - 3_600, 'relayer': relayer}
+        r_, s_, v_ = c.sign(c.personal_digest(c.proposal_text(vault.vault_id, body)), relayer_priv)
+        q = rig.work / 'r-stale.proposal.json'
+        q.write_text(json.dumps({**body, 'relayer_signature': '0x' + (r_.to_bytes(32, 'big') + s_.to_bytes(32, 'big') + bytes([27 + v_])).hex()}))
+        cases['stale'] = rig.sign_and_combine(q, range(7), 'r-stale')
+    check('R1 a signer works only for a listed relayer: a proposal without the relayer signature, one signed by another key '
+          'in the listed relayer\'s name, and a validly signed one issued an hour ago are dropped by all 7 before any node is read',
+          good is not None and all_refuse(cases['unsigned']['signs'], 'dropped') and all_refuse(cases['stranger']['signs'], 'not signed by the relayer')
+          and all_refuse(cases['stale']['signs'], 'not fresh'),
+          {k: reasons(v['signs'])[:1] for k, v in cases.items()})
+
+    # ── X. review 342 (round 17) attack cases, kept as regression tests (round 18) ──────────────────────────────
+    who_k = alice_k if rig.balance(alice) >= rig.balance(bob) else bob_k
+    note(f'X: balances alice {rig.balance(alice)} bob {rig.balance(bob)} units')
+    # X1. A relayer sets an honest, claimed, payable burn aside by naming a fee rate one above its ceiling. Round 17: the
+    # signers accepted it in a transaction that paid nobody (a stray covered the fee). Now: the rules refuse a set-aside
+    # without a paying item, and with one the signers refuse a burn whose ceiling is merely below the proposed rate.
+    victim = burn(who_k, 3_000, max_rate=10)
+    other = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    stray1 = rig.pay(thread_address, '0.00020000')
+    stray3 = rig.pay(thread_address, '0.00020000')
+    rig.mine(2)
+    r_relay = rig.vault_tx(11, donations=[(stray1[0], stray1[1])], aside_through=victim['nonce'], signers=[], broadcast=False, tag='x1-relay')
+    try:
+        forged_aside([], [victim], 11, 'x1-stray-only', donations=[stray1])
+        stray_only = 'built'
+    except pol.PolicyError as e:
+        stray_only = e.reason
+    r = forged_aside([other], [victim], 11, 'x1-aside')
+    rig.mine(1)
+    rig.l2_mine(3)
+    check('X1 (R342-BTC-1) a claimed burn payable at the market is not set aside by a relayer naming a fee rate one above its '
+          'ceiling: the relayer refuses, the rules refuse a set-aside that rides with a stray only, and all 7 signers refuse '
+          'it beside a paying burn',
+          r_relay['propose'][0] != 0 and 'travels only with' in stray_only and all_refuse(r['signs'], 'may not be set aside')
+          and received(victim['address']) == 0, (r_relay['propose'][1], stray_only, reasons(r['signs'])[:1]))
+    # X2. A replacement that drops a payout pending in the mempool is refused (rule 5b); the pending one confirms.
+    honest = rig.vault_tx(10, burns=[victim, other], tag='x2-honest')                 # broadcast, not mined
+    in_pool = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode == 0
+    evil = rig.vault_tx(20, burns=[other], signers=range(7), tag='x2-replace')
+    still = rig.bcli('getmempoolentry', honest['propose'][1].get('txid', '00'), ok=False).returncode == 0
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    check('X2 (R342-BTC-1) a replacement at a higher fee rate that drops a payout pending in the mempool is refused by all 7 '
+          'signers; the pending payout confirms and pays both burns at 10',
+          in_pool and still and (evil['propose'][0] != 0 or all_refuse(evil['signs'], 'keep every payout'))
+          and received(victim['address']) == 300_000 - 300 - 10 * 402 and rc == 0 and res['status'] == 'ok',
+          (evil['propose'][1], reasons(evil['signs'])[:1], res.get('status')))
+    # X3. Five keys INSIDE the rules hide a burn: a rule-shaped transaction sets aside a payable router burn (ceiling 200,
+    # transaction at 1 sat/vB), riding with a real payout of another burn (a set-aside with nothing paying is refused by
+    # the rules themselves). Replay accepts it (the chain cannot tell); the monitor and the honest signers must not.
+    hidden = burn(who_k, 3_000, max_rate=200)
+    carrier = burn(who_k, 3_000, max_rate=200)
+    rig.l2_mine(3)
+    rig.sync_index()
+    _tip = _bv.VaultView(vault, _bv.Node(rig.btc_url, str(rig.cookie), 'bitcoin-regtest')).load().tip_state()
+    fin = int(sh(rig.cast, 'block', 'finalized', '--field', 'number', '--rpc-url', rig.l2).stdout.strip())
+    built = pol.build_vault_tx(vault, _tip, [], [], [{'nonce': carrier['nonce'], 'units': 3_000,
+                                                      'recipient': bytes(c.segwit_decode('bcrt', carrier['address'])[1])}],
+                               1, aside_through=hidden['nonce'], aside_block=fin)
+    xtx = built['tx']
+    order = [i for i in sorted(range(7), key=lambda i: pubs[i])][:5]
+    xtx.witnesses = [[b''] + [c.der_sig(*c.sign(xtx.sighash(i, inp['script'], inp['value']), privs[k])[:2]) for k in order]
+                     + [inp['script']] for i, inp in enumerate(built['inputs'])]
+    sent = rig.bcli('sendrawtransaction', xtx.serialize().hex(), ok=False)
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    rule = [v['rule'] for v in res.get('rule_violations', []) if v['nonce'] == hidden['nonce']]
+    # the burner of the hidden burn confirms its ceiling (one router call): payable again; honest signers still HOLD (4e)
+    assert router_send(who_k, 'raiseMaxFeeRate(bytes32,uint16)', hidden['id'], '200')
+    rig.l2_mine(3)
+    r_hold = rig.vault_tx(1, burns=[hidden], signers=range(7), tag='x3-hold')
+    check('X3 (R342-BTC-2) a payable burn set aside by five keys inside the rules is reported by the reserves monitor '
+          '(held, exit 2, rule set-aside-outside-the-rule) and every honest signer holds before extending that thread (4e)',
+          sent.returncode == 0 and rc == 2 and res['status'] == 'held' and rule == ['set-aside-outside-the-rule']
+          and r_hold['propose'][0] == 0 and all_refuse(r_hold['signs'], 'breaks a rule that needs the L2'),
+          (sent.stderr[-300:], res.get('status'), res.get('rule_violations'), reasons(r_hold['signs'])[:1]))
+    # X3b. The operators investigate and acknowledge that one transaction by name; the hidden burn is then paid late, once.
+    for cfg_path in rig.signer_cfg + [rig.relay_cfg]:
+        cfg_ = json.loads(Path(cfg_path).read_text())
+        Path(cfg_path).write_text(json.dumps({**cfg_, 'acknowledged_violations': [xtx.txid()]}))
+    r = rig.vault_tx(1, burns=[hidden], tag='x3-late')
+    rig.mine(1)
+    rig.l2_mine(3)
+    rc, res = rig.reserves()
+    check('X3b after the operators acknowledge that transaction by its txid, the honest signers pay the hidden burn late (its '
+          'burner had called the router after the set-aside) and the reserves are exact, the violation listed apart',
+          r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == [hidden['nonce']]
+          and received(hidden['address']) == 300_000 - 300 - 402 and rc == 0 and res['status'] == 'ok'
+          and res['set_aside_count'] == 0 and [v['txid'] for v in res['acknowledged_violations']] == [xtx.txid()], (r, res))
 
     # ── G. the limit an auditor must accept ──────────────────────────────────
     st = rig.status()

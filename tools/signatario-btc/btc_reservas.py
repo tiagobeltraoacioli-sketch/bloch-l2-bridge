@@ -42,7 +42,7 @@ attested sweep is caught here during the token's mint delay. UNAUDITED.
 
 Config: {"vault": path, "btc_rpc", "btc_cookie", "l2_rpc" (must serve state at past blocks: set-asides are judged at
          their own L2 block), "token", "token_from_block": n, "tolerance_units": 0, "burn_router": address,
-         "max_wait_seconds": 21600}
+         "max_wait_seconds": 21600, "acknowledged_violations": [txids an operator investigated; still listed apart]}
 
 Not on the vault's books and reported apart: coins at deposit addresses that were never swept. They are spendable by
 the same five keys; each is refundable at its L2 recipient's signed request (btc_relay.py --refund).
@@ -173,6 +173,10 @@ def main():
                                        'why': btc_l2.UNCLAIMED + '; counted in unpaid_burn_units and in owed_sats'},
             'set_aside_burns': aside_lines[:200], 'set_aside_count': len(aside),
             'fee_rate_now': rate_now, 'stalled_payable_burns': stalled[:200], 'rule_violations': violations[:50]}
+    acknowledged = {str(x).lower() for x in cfg.get('acknowledged_violations', [])}
+    line['acknowledged_violations'] = [v for v in violations if v['txid'] in acknowledged][:50]
+    violations = [v for v in violations if v['txid'] not in acknowledged]
+    line['rule_violations'] = violations[:50]
     if violations:
         emit(2, **line, status='held', reason='the thread breaks an L2-side rule (a set-aside outside the rule, a late payment '
              'without its burner\'s call, or a payout above its burner\'s ceiling): five keys signed outside the rules',

@@ -60,7 +60,8 @@ Config: {"vault": path, "btc_rpc", "btc_cookie", "signatario_config": path of th
 the bBTC token (provenance true), "keystore", "password_file" (the operator's Bitcoin vault key, a key of its own),
 "pubkey": that key, compressed (hex), "burn_router": address, "burn_router_code_keccak": hex, "journal": path,
 "cast": path, "feerate_without_estimate": sat/vB ceiling on a private test network whose node has no estimate,
-"relayers": [addresses of the relayer keys this signer works for], "max_proposals_per_hour": per relayer, default 120}
+"relayers": [addresses of the relayer keys this signer works for], "max_proposals_per_hour": per relayer, default 120,
+"token_from_block": n, "acknowledged_violations": [txids of thread transactions an operator investigated (rule 4e)]}
 """
 import json
 import os
@@ -461,6 +462,10 @@ def cmd_sign(cfg, args):
                                              historical=False, skip=audited)
             except btc_l2.L2Error as e:
                 refuse(f'hold: {e}')
+            # an operator who investigated a violation releases the hold by naming its transaction in the config
+            # (`acknowledged_violations`: an explicit, logged act per transaction, never a switch for all of them)
+            acknowledged = {str(x).lower() for x in cfg.get('acknowledged_violations', [])}
+            bad = [x for x in bad if x['txid'] not in acknowledged]
             if bad:
                 refuse('hold: the vault thread breaks a rule that needs the L2 (five keys signed outside the rules); '
                        'page the operators and the guardians', violations=bad[:10])
