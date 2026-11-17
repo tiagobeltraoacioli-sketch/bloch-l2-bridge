@@ -4,10 +4,17 @@
   python3 tools/evm-nets/rehearse_fork.py NETWORK [--rpc URL] [--port BASE] [--keep]
   python3 tools/evm-nets/rehearse_fork.py NETWORK --measure SECONDS [--interval N] --block-time S
                                           [--stagger] [--join-delay S] [--anchor-max-age N] [--anchor-depth N]
-                                          [--production-budgets]
+                                          [--production-budgets] [--feed] [--work-config FILE]
       one burn with the daemons running as daemons on a fork paced at S seconds per block: does the release land?
       --interval defaults to the network's own (networks.json). --production-budgets: the signers run with the
       network's hourly signing budget and refused-round retry instead of the rig's unlimited ones (review R329-EVM-6).
+
+PROTOTYPE options of the Base signer branch (not reviewed). --feed: no shared directory; every signer has its own
+signature directory and serves it with `sigfeed.py serve`, the others and the relayer pull it (the production
+transport, docs/SIG-TRANSPORT.md), so the signers work in parallel. --work-config FILE: before each signature the
+signer really does the production work that precedes one, `signatario.py --config FILE measure` (l2_source rebuild
+over a real follower store with the real binaries), instead of a wait; if FILE has `"warm_dir": "PER-SIGNER"` each
+signer gets its own warm directory and a `vigia.py warm` daemon. The burn itself is still read from the stand-in L2.
 
 Chain id of the fork (tools/evm-nets/launch.py). A launchable network rehearsed with its registry settings runs under
 its OWN chain id, so the daemons take the production path: launch check, anchor settings by chain id from the
@@ -60,7 +67,8 @@ DELAY = 43200
 CAP, WINDOW, MIN_DEPOSIT, MIN_BURN = 100_000 * U, 10_000 * U, 11 * U, 10 * U
 FEE_BPS = 5
 results, gas, PROCS = [], {}, []
-OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False}
+OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False,
+        'feed': False, 'work_config': None}
 
 
 def sh(*argv, ok=True, cwd=None):
@@ -375,6 +383,22 @@ class Rig:
                                         'password_file': str(work / 'pw'), 'cast': CAST, 'provenance': True,
                                         'db': str(work / f'ethdb{i}.json'), **policy}))
             half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
+            if OPTS['work_config']:
+                # The real work before a signature: signatario.py measure over a real follower store (prototype branch).
+                wc = json.loads(Path(OPTS['work_config']).read_text())
+                wc.update(db=str(work / f'workdb{i}.json'), work_dir=str(work / f'work{i}'))
+                if wc.get('warm_dir') == 'PER-SIGNER':
+                    wc['warm_dir'] = str(work / f'warm{i}')
+                (work / f'work{i}.json').write_text(json.dumps(wc))
+                (work / 'work_half.py').write_text(
+                    'import os, subprocess, sys\n'
+                    'done = subprocess.run([sys.executable, sys.argv[1], "--config", sys.argv[2], "measure", "--timing", sys.argv[2] + ".timing"],'
+                    ' capture_output=True, text=True)\n'
+                    'if done.returncode:\n'
+                    '    print(done.stdout)\n'
+                    '    raise SystemExit(1)\n'
+                    'os.execv(sys.executable, [sys.executable] + sys.argv[3:])\n')
+                half = [sys.executable, str(work / 'work_half.py'), str(STABLE / 'signatario.py'), str(work / f'work{i}.json')] + half[1:]
             if OPTS['join_delay']:
                 # Stands in for the work a production signer does before its source half runs (the L2 rebuild from
                 # L1, `l2_source: rebuild`): the same wait before every signature, the opener's included.
@@ -389,13 +413,33 @@ class Rig:
                 'db': str(work / f'db{i}.json'), 'l2_source': 'rpc', 'work_dir': str(work), 'provenance': True,
                 'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
                 'eth_half_release': half + ['release', '--intent', '{intent}'],
-                'shared_dir': str(work / 'shared'), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
+                'shared_dir': str(work / (f's{i}/shared' if OPTS['feed'] else 'shared')), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
                 'vault_from_block': self.from_block,
                 **{k: policy[k] for k in ('anchor_policy', 'anchor_max_age') if k in policy}, **budgets,
                 **({} if self.registry_chain else {'rehearsal_network': self.name}),
                 'l2_relayer_key': str(work / 'relayer.key'), 'eth_relayer_key': str(work / 'relayer.key')}))
             self.cfgs.append(path)
             self.eth_cfgs.append(ecfg)
+        if OPTS['feed']:
+            self.feeds()
+
+    def feeds(self):
+        """One `sigfeed.py serve` per signer over its own publish directory; signers 1-5 sign, signer 7's config relays."""
+        base = OPTS['feed_port']
+        urls = {i: f'http://127.0.0.1:{base + i}' for i in range(1, 6)}
+        everyone = [a for a, _, _ in self.signers]
+        for i, path in enumerate(self.cfgs, 1):
+            c = json.loads(path.read_text())
+            c['feed'] = {'peers': [u for j, u in urls.items() if j != i], 'mint_signers': everyone, 'release_signers': everyone,
+                         'status_file': str(self.work / f's{i}/feed-status.json'), 'min_free_bytes': 0, 'fetch_deadline': 2, 'peer_budget': 4}
+            if i in urls:
+                pub = self.work / f's{i}/pub'
+                pub.mkdir(parents=True, exist_ok=True)
+                c['feed']['publish_dir'] = str(pub)
+                log = open(self.work / f'feed-{i}.log', 'w')
+                PROCS.append(subprocess.Popen([sys.executable, str(STABLE / 'sigfeed.py'), 'serve', '--root', str(pub), '--port',
+                                               str(base + i)], stdout=log, stderr=log))
+            path.write_text(json.dumps(c))
 
     # ── daemons ──────────────────────────────────────────────────────────────
     def vigia(self, i, mode):
@@ -769,6 +813,17 @@ def measure(rig, seconds, interval, stagger=False):
     head0 = int(rig.rpc(rig.eth, 'eth_blockNumber', []), 16)
     t0 = time.time()
     procs, logs = [], []
+    if OPTS['work_config'] and json.loads(Path(OPTS['work_config']).read_text()).get('warm_dir') == 'PER-SIGNER':
+        for i in range(1, 6):  # the warm daemons, one per signer: a verified rebuild kept ready beside each
+            wlog = rig.work / f'daemon-warm-{i}.out'
+            procs.append(subprocess.Popen([sys.executable, str(STABLE / 'vigia.py'), '--config', str(rig.work / f'work{i}.json'), 'warm',
+                                           '--interval', str(interval)], stdout=open(wlog, 'w'), stderr=subprocess.STDOUT))
+            PROCS.append(procs[-1])
+        deadline = time.time() + 600
+        while time.time() < deadline and not all((rig.work / f'warm{i}/CURRENT').exists() for i in range(1, 6)):
+            time.sleep(1)
+        print(f'INFO five warm rebuilds ready after {time.time() - t0:.1f} s', flush=True)
+        t0 = time.time()
     for n, (i, mode) in enumerate([(i, 'sign') for i in range(5)] + [(6, 'relay')]):
         if stagger and n:
             time.sleep(interval / 6)  # operators' daemons are not in phase: spread them evenly over one interval
@@ -841,6 +896,7 @@ def main():
     OPTS['from_fork_block'] = os.environ.get('EVMNETS_FROM_FORK_BLOCK') == '1'
     OPTS['join_delay'] = float(opt('--join-delay', 0))
     OPTS['production_budgets'] = '--production-budgets' in args
+    OPTS['feed'], OPTS['feed_port'], OPTS['work_config'] = '--feed' in args, port + 10, opt('--work-config')
     if opt('--anchor-max-age') or opt('--anchor-depth'):
         OPTS['overrides'] = True
         spec = json.loads(json.dumps(spec))

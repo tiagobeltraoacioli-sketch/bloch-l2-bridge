@@ -3,6 +3,12 @@
 
   python3 vigia.py --config CFG.json sign  [--once] [--interval 60]
   python3 vigia.py --config CFG.json relay [--once] [--interval 60]
+  python3 vigia.py --config CFG.json warm  [--once] [--interval 60]      PROTOTYPE, not reviewed (Base signer branch)
+
+`warm` (with `warm_dir` in the config) keeps a verified rebuild of the L2 ready beside the signer: each pass runs
+`signatario.py warm`, which rebuilds only when the newest warm rebuild no longer passes its checks against the follower as it
+is now. `sign` then spends no rebuild inside a release round. A release refused with "warm rebuild not ready" costs no
+hourly slot and marks no round refused: the same round is tried again on the next pass.
 
 Same shape as tools/signatario-gnb/vigia.py. The config is the signer's signatario.py config plus
 `shared_dir`, `eth_rpc`, `vault_from_block`, `token_from_block`, and for `relay` `eth_chain_id`,
@@ -1153,7 +1159,9 @@ class Vigia:
                 rc, res = self.signatario('release', '--burn-tx', b['tx'], '--burn-id', burn_id, '--context', proposal,
                                           '--out', mine, *self.timing_args())
                 self.take_timing(burn_id, rnd.name, res)
-                if rc:
+                if rc and res.get('reason') == 'warm rebuild not ready':
+                    mine.unlink(missing_ok=True)  # nothing was rebuilt and nothing is wrong with the round: next pass
+                elif rc:
                     mine.unlink(missing_ok=True)
                     (rnd / f'.refused-{self.me}').write_text('')
                     self.charge(d / '.join-refusals')
@@ -1180,6 +1188,9 @@ class Vigia:
             else:
                 tmp.unlink(missing_ok=True)
                 rnd = None
+                if res.get('reason') == 'warm rebuild not ready':  # no rebuild was spent: give the hourly slot back
+                    (d / '.signs').write_text(json.dumps(self.recent(d / '.signs')[:-1]))
+                    self.opened -= 1
             log(kind='release', burn=burn_id, nonce=b['nonce'], round=rnd.name if rnd else None,
                 opened=True, signed=rc == 0, reason=res.get('reason'))
 
@@ -1913,7 +1924,7 @@ class Vigia:
 def main():
     args = sys.argv[1:]
     v = Vigia(option(args, '--config'))
-    mode = 'sign' if 'sign' in args else 'relay' if 'relay' in args else None
+    mode = 'sign' if 'sign' in args else 'relay' if 'relay' in args else 'warm' if 'warm' in args else None
     if mode is None:
         raise SystemExit(__doc__)
     interval = int(option(args, '--interval', str(v.pace['interval_s'] if v.pace else 60)))
@@ -1925,7 +1936,12 @@ def main():
             v.relayer_wallet(side)
     while True:
         try:
-            v.sign_round() if mode == 'sign' else v.relay_round()
+            if mode == 'warm':
+                rc, res = v.signatario('warm')
+                log(kind='warm', ok=rc == 0, **{k: res[k] for k in ('warm', 'dir', 'why', 'rebuild_s', 'index_lines', 'l2_blocks',
+                                                                   'reason') if k in res})
+            else:
+                v.sign_round() if mode == 'sign' else v.relay_round()
         except Exception as e:  # noqa: BLE001 - a daemon keeps running; the next round retries
             log(kind=mode, error=f'{type(e).__name__}: {e}')
         if '--once' in args:

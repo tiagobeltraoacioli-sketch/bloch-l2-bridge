@@ -63,6 +63,31 @@ total from process start. `measure` runs only the work that precedes a signature
 private RPC, nothing with `l2_source: rpc`) and writes the same file; it reads no burn and signs nothing. vigia.py
 passes `--timing` only for a network of tools/evm-nets/networks.json; without the option nothing is written.
 
+PROTOTYPE, NOT REVIEWED (branch codex/bridge-evm-base-signer-r17-20261117; not on the audit line). `warm_dir` in the
+config takes the rebuild out of the release round:
+
+  python3 signatario.py --config CFG.json warm [--force]
+
+`warm` rebuilds the whole L2 from L1 exactly as a release does (the same binary, arguments and checks) into
+`warm_dir`, from a SNAPSHOT of the follower's block index taken first, and writes a manifest beside it: the reconstruct
+report, the SHA-256 of the index snapshot and its line count, the SHA-256 of the produce binary, the arguments, and a
+fingerprint of the rebuilt database. With `warm_dir` set, `release` and `measure` do not rebuild: they take the newest
+warm rebuild only if, checked again at that moment against the follower as it is NOW,
+  1. the produce binary on disk still has the manifest's hash (and the pinned one, as always);
+  2. the arguments are the ones this release would use;
+  3. the first N lines of the follower's index today hash to the manifest's value: the L1 prefix the rebuild consumed
+     is byte for byte the prefix of today's chain (a reorganised or replaced follower store fails here);
+  4. the report reproduces EVERY finalized settlement of today's follower status, hash and state root (the same
+     `check_rebuild` the full path runs, against the fresh status, not the one of the time of the rebuild): a
+     settlement finalized since the rebuild that the rebuild does not hold fails here, so nothing a later L1 block
+     finalized is taken on trust;
+  5. the rebuilt database is the one the manifest fingerprints (every file's SHA-256, or names and sizes with
+     `warm_db_check: "sizes"`).
+If any of these fails the release is refused at once with "warm rebuild not ready" (fail safe: no signature) until the
+next `warm` succeeds; it never falls back silently to an unverified view. Everything after the rebuild is unchanged:
+the private settled RPC is started over that database with a frozen copy of today's status, and the burn, its block,
+the finalized level and the settlement that covers it are read and checked as before.
+
 A `source_chain_id` other than 1 is checked against tools/evm-nets/launch.py first: a network that is not launchable
 is refused for every command (review R329-EVM-1). Chain 1 never loads that module.
 
@@ -621,24 +646,16 @@ def own_l2(ctx, work):
         net_args = [str(a) for a in c.get('network_args', [])]
     target = work / 'l2'
     t0 = time.time()
-    for _ in range(3):  # the follower may be rewriting its index
-        done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),
-                               '--l1-follower', str(follower / 'native'), *rule, *net_args],
-                              capture_output=True, text=True)
-        if done.returncode == 0:
-            break
-        shutil.rmtree(target, ignore_errors=True)
-        time.sleep(2)
+    if c.get('warm_dir'):
+        if getattr(ctx, 'warming', False):
+            return status, rule, net_args  # cmd_warm does the rebuild itself, from its index snapshot
+        target, rebuilt = warm_view(ctx, status, rule, net_args)
+        TIMING.update(cache='hit', verify_s=round(time.time() - t0, 3), native_blocks=rebuilt.get('native_blocks'),
+                      l2_blocks=rebuilt.get('settled'))
     else:
-        refuse('reconstruct from L1 data failed', stderr=done.stderr.strip()[-1500:])
-    rebuilt = json.loads(done.stdout)
-    TIMING.update(reconstruct_s=round(time.time() - t0, 3), native_blocks=rebuilt.get('native_blocks'),
-                  l2_blocks=rebuilt.get('settled'))
-    if pins is not None:
-        try:
-            l2_finality.check_rebuild(rebuilt, status, pins)
-        except l2_finality.NotFinal as e:
-            refuse(e.reason, **e.detail)
+        rebuilt = reconstruct(ctx, target, follower / 'native', rule, net_args, status)
+        TIMING.update(reconstruct_s=round(time.time() - t0, 3), native_blocks=rebuilt.get('native_blocks'),
+                      l2_blocks=rebuilt.get('settled'))
     status_copy = work / 'status.json'  # a frozen copy: the same finality view for every query
     status_copy.write_text(json.dumps(status))
     port = free_port()
@@ -676,6 +693,161 @@ def own_l2(ctx, work):
         raise
     TIMING['rebuild_s'] = round(time.time() - t0, 3)
     return url, proc, status, rebuilt
+
+
+def reconstruct(ctx, target, native, rule, net_args, status):
+    """`produce reconstruct` over the follower's L1 data at `native`, checked against the follower status. Returns the report."""
+    c = ctx.cfg
+    for _ in range(3):  # the follower may be rewriting its index
+        done = subprocess.run([c['produce'], 'reconstruct', '--target', str(target),
+                               '--l1-follower', str(native), *rule, *net_args],
+                              capture_output=True, text=True)
+        if done.returncode == 0:
+            break
+        shutil.rmtree(target, ignore_errors=True)
+        time.sleep(2)
+    else:
+        refuse('reconstruct from L1 data failed', stderr=done.stderr.strip()[-1500:])
+    rebuilt = json.loads(done.stdout)
+    check_report(ctx, rebuilt, status)
+    return rebuilt
+
+
+def check_report(ctx, rebuilt, status):
+    if ctx.pins is not None:
+        try:
+            l2_finality.check_rebuild(rebuilt, status, ctx.pins)
+        except l2_finality.NotFinal as e:
+            refuse(e.reason, **e.detail)
+
+
+# ── warm rebuild (PROTOTYPE, not reviewed) ───────────────────────────────────
+WARM_DOMAIN = 'bloch.bridge.warm-rebuild.v1'
+
+
+def sha256_lines(path, n):
+    """(SHA-256 of the first `n` lines of `path`, lines actually read)."""
+    h, got = hashlib.sha256(), 0
+    with open(path, 'rb') as f:
+        for line in f:
+            if got == n:
+                break
+            h.update(line)
+            got += 1
+    return h.hexdigest(), got
+
+
+def db_fingerprint(root, mode):
+    """Every file of the rebuilt database: relative name, size and (unless mode is `sizes`) the SHA-256 of its bytes."""
+    h = hashlib.sha256()
+    for p in sorted(x for x in Path(root).rglob('*') if x.is_file()):
+        h.update(f'{p.relative_to(root)}\0{p.stat().st_size}\0'.encode())
+        if mode != 'sizes':
+            h.update(bytes.fromhex(l2_finality.sha256_file(p)))
+    return h.hexdigest()
+
+
+def warm_stale(ctx, status, rule, net_args):
+    """(directory, manifest) of the newest warm rebuild and the reason it may NOT be used now (None if it may)."""
+    c = ctx.cfg
+    root = Path(c['warm_dir'])
+    try:
+        d = root / (root / 'CURRENT').read_text().strip()
+        if d.parent != root or not d.name.startswith('v-'):
+            return None, None, 'the CURRENT pointer names no warm rebuild'
+        m = json.loads((d / 'manifest.json').read_text())
+        report = m['report']
+        if m.get('domain') != WARM_DOMAIN:
+            return d, m, 'not a warm-rebuild manifest'
+        if m['produce_sha256'] != l2_finality.sha256_file(c['produce']):
+            return d, m, 'the produce binary changed since the warm rebuild'
+        if m['args'] != [str(a) for a in (*rule, *net_args)]:
+            return d, m, 'the rebuild arguments differ from this release\'s'
+        native = Path(c['follower']) / 'native'
+        if m['follower_native'] != str(native.resolve()):
+            return d, m, 'the warm rebuild read another follower store'
+        n = int(m['index_lines'])
+        digest, got = sha256_lines(native / 'index', n)
+        if got != n or digest != m['index_prefix_sha256'] or report.get('native_blocks') != n:
+            return d, m, 'the L1 prefix the warm rebuild consumed is not the prefix of the follower\'s chain today'
+        if ctx.pins is not None:
+            try:
+                l2_finality.check_rebuild(report, status, ctx.pins)
+            except l2_finality.NotFinal as e:
+                return d, m, f'the warm rebuild does not reproduce today\'s finalized settlements: {e.reason} {e.detail.get("l2_number", "")}'
+        else:
+            blocks = {b.get('number'): b for b in report.get('blocks') or []}
+            for st in status.get('finalized_settlements') or []:
+                b = blocks.get(st['l2_number'])
+                if b is None or l2_finality.strip0x(b.get('hash')) != l2_finality.strip0x(st.get('l2_hash')):
+                    return d, m, f'the warm rebuild does not hold finalized settlement {st["l2_number"]}'
+        mode = c.get('warm_db_check', 'content')
+        if m['db_fingerprint'].get(mode) != db_fingerprint(d / 'l2', mode):
+            return d, m, 'the rebuilt database differs from its manifest'
+        return d, m, None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return None, None, f'no usable warm rebuild: {type(e).__name__}: {e}'
+
+
+def warm_view(ctx, status, rule, net_args):
+    d, m, why = warm_stale(ctx, status, rule, net_args)
+    if why:
+        refuse('warm rebuild not ready', why=why, warm_dir=ctx.cfg['warm_dir'])
+    return d / 'l2', m['report']
+
+
+def cmd_warm(ctx, args):
+    """Rebuild the L2 from a snapshot of the follower's index into warm_dir, unless the newest warm rebuild is still usable."""
+    c = ctx.cfg
+    if not c.get('warm_dir'):
+        refuse('config: warm_dir is not set')
+    if c.get('l2_source', 'rebuild') != 'rebuild':
+        refuse('warm applies to l2_source rebuild only')
+    root = Path(c['warm_dir'])
+    root.mkdir(parents=True, exist_ok=True)
+    ctx.warming = True
+    with open(root / '.lock', 'w') as lock:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status, rule, net_args = own_l2(ctx, root)  # binaries, status and pins checked; no rebuild yet
+        d, m, why = warm_stale(ctx, status, rule, net_args)
+        if why is None and '--force' not in args:
+            print(json.dumps({'warm': 'current', 'dir': d.name, 'index_lines': m['index_lines'],
+                              'l2_blocks': m['report'].get('settled')}))
+            return
+        t0 = time.time()
+        build = Path(tempfile.mkdtemp(prefix='build-', dir=root))
+        try:
+            native = Path(c['follower']) / 'native'
+            # The rebuild reads THIS snapshot of the index, so the hash below is of exactly what it consumed.
+            (build / 'native').mkdir()
+            shutil.copyfile(native / 'index', build / 'native' / 'index')
+            os.symlink((native / 'blocks').resolve(), build / 'native' / 'blocks')
+            report = reconstruct(ctx, build / 'l2', build / 'native', rule, net_args, status)
+            n = report.get('native_blocks')
+            digest, got = sha256_lines(build / 'native' / 'index', n) if isinstance(n, int) else ('', -1)
+            live, live_got = sha256_lines(native / 'index', n) if isinstance(n, int) else ('', -2)
+            if got != n or (live, live_got) != (digest, got):
+                refuse('the follower rewrote its index during the warm rebuild; retry', native_blocks=n)
+            manifest = {'domain': WARM_DOMAIN, 'built_at': int(time.time()), 'rebuild_s': round(time.time() - t0, 3),
+                        'produce_sha256': l2_finality.sha256_file(c['produce']), 'args': [str(a) for a in (*rule, *net_args)],
+                        'follower_native': str(native.resolve()), 'index_lines': n, 'index_prefix_sha256': digest,
+                        'db_fingerprint': {mode: db_fingerprint(build / 'l2', mode) for mode in ('content', 'sizes')},
+                        'report': report}
+            shutil.rmtree(build / 'native')
+            (build / 'manifest.json').write_text(json.dumps(manifest) + '\n')
+            final = root / f'v-{int(time.time() * 1000)}-{n}'
+            os.replace(build, final)
+        except BaseException:
+            shutil.rmtree(build, ignore_errors=True)
+            raise
+        tmp = root / 'CURRENT.tmp'
+        tmp.write_text(final.name + '\n')
+        os.replace(tmp, root / 'CURRENT')
+        for old in sorted(x for x in root.glob('v-*') if x.is_dir() and x != final)[:-1]:  # keep one for a reader in flight
+            shutil.rmtree(old, ignore_errors=True)
+        print(json.dumps({'warm': 'rebuilt', 'dir': final.name, 'why': why, 'rebuild_s': manifest['rebuild_s'], 'index_lines': n,
+                          'l2_blocks': report.get('settled'), 'total_s': round(time.time() - t0, 3)}))
 
 
 def token_mints(ctx, url, fin_number):
@@ -941,7 +1113,7 @@ def main():
         raise SystemExit(__doc__)
     ctx = Ctx(option(args, '--config'))
     commands = {'mint': cmd_mint, 'remint': cmd_remint, 'combine': cmd_combine, 'release': cmd_release,
-                'measure': cmd_measure}
+                'measure': cmd_measure, 'warm': cmd_warm}
     if not any(c in args for c in commands):
         raise SystemExit(__doc__)
     cmd = next(c for c in args if c in commands)
