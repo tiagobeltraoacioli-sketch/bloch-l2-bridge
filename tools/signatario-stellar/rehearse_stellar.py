@@ -350,7 +350,8 @@ class Rig:
         if cfg:
             base = json.loads(path.read_text())
             path = self.dir / f'guard-{i}-{abs(hash(json.dumps(cfg, sort_keys=True))) % 10**8}.json'
-            path.write_text(json.dumps({**base, **cfg}))
+            # A changed view is another guardian's view: it keeps its own state (round 18: `seen_file`).
+            path.write_text(json.dumps({**base, 'seen_file': str(path.with_suffix('.seen.json')), **cfg}))
         return self.tool('guardiao_stellar.py', '--config', path, 'check')
 
     # ── L2 side ──────────────────────────────────────────────────────────────
@@ -963,6 +964,9 @@ def main_flow(r):
     ok2, cb = r.certify(txb, 'rb')
     rc, sa = r.submit(ca)
     rc2, sb = r.submit(cb)
+    if not (ok and ok2):
+        check('limits: two 6,000 releases certified and queued', False, [ca, cb])
+        raise SystemExit('the rate-limit section cannot continue without both certificates')
     ida, idb = sn.release_id(ca['call']['args']['item']).hex(), sn.release_id(cb['call']['args']['item']).hex()
     check('limits: two 6,000 releases certified and queued', ok and ok2 and rc == 0 and rc2 == 0
           and r.net.view('pending', id=ida) and r.net.view('pending', id=idb), [sa, sb])
@@ -1024,39 +1028,39 @@ def main_flow(r):
     check('clawback: once the vault is whole again the held release pays', rc == 0 and r.balance(payee) == bal + 100 * S - 500_000, sent)
 
     # 12. a recipient with no trustline
+    # Round 18 (R331-XLM-4P-1): no signer certifies a release to an address that cannot receive (it would be
+    # queued for ever where a delay applies), so the vault's own refusal is shown with a certificate signed here
+    # with the throwaway committee for the same real burn; the signers' hold is shown with their own tools.
     p2 = r.addr['payee2']
     tx = r.burn(50 * U, p2)
-    ok, cn = r.certify(tx, 'notl')
-    rc, sent = r.submit(cn)
-    check('trustline: a release to an account without a trustline fails and consumes nothing',
-          ok and rc and sent.get('status') == 'REFUSED' and r.net.view('burn_record', nonce=cn['call']['args']['item']['nonce']) is None, sent)
+    bn = r.burned(tx)
+    rc_hold, out_hold = r.signer(0, 'release', '--burn-tx', tx, '--out', r.dir / 'notl-0.json')
+    check('trustline: no signer certifies a release to an account without a trustline (held: "cannot receive")',
+          rc_hold and 'held:' in json.dumps(out_hold) and 'trustline' in json.dumps(out_hold), out_hold)
+    cn, _ = r.direct_release(bn['nonce'], p2, 50 * U, bn['mint_count'], [0, 1, 2, 3, 4], burn=bn['burn_id'][2:],
+                             minted_total=bn['minted_total'], block=(bn['block'], bn['block_hash'][2:]))
+    rc, sent = r.submit(cn, key='notl-hand')
+    check('trustline: the vault itself refuses a release to an account without a trustline and consumes nothing',
+          rc and sent.get('status') == 'REFUSED' and r.net.view('burn_record', nonce=bn['nonce']) is None, sent)
     notes['no_trustline_error'] = json.dumps(sent)[-300:]
     r.classic('change-trust', '--source-account', 'payee2', '--line', r.asset)
-    rc, sent = r.submit(cn)
-    check('trustline: after the recipient adds the trustline the same certificate pays',
-          rc == 0 and r.balance(p2) == 50 * S - 250_000, sent)
+    ok, cn2 = r.certify(tx, 'notl')
+    rc, sent = r.submit(cn2) if ok else (1, cn2)
+    check('trustline: after the recipient adds the trustline five signers certify the burn and it is paid once',
+          ok and rc == 0 and r.balance(p2) == 50 * S - 250_000 and r.submit(cn, key='notl-hand-2')[0] != 0, sent)
 
     # 12a. (round 18, brief 373) a HELD router exit, redirected by its own burner on the L2. The exit names an account
-    #      that cannot receive the asset (no trustline); its certificate fails at the vault and records nothing.
-    #      A stranger cannot redirect it; the burner names `payee`. A signer whose signature for the old address is
-    #      still live refuses the redirect; once those signatures are dead (short validity here), five certify the
-    #      redirect and it is paid once; every guardian judges the paid release ok; a redirect after the payment
-    #      changes nothing.
+    #      that cannot receive the asset (no trustline): no signer certifies it (R331-XLM-4P-1), so nothing is
+    #      queued. A stranger cannot redirect it; the burner names `payee`; five signers certify the redirect and it
+    #      is paid once; every guardian judges the paid release ok; a redirect after the payment changes nothing.
     held = r.identity('heldx')
-    saved = [r.half_cfg(i, valid_seconds=20) for i in range(5)]
     txh = r.burn(40 * U, held)
     bh = r.burned(txh)
-    okh, chh = r.certify(txh, 'held-0')
-    rc_h, sent_h = r.submit(chh) if okh else (1, chh)
-    for i in range(5):
-        (r.dir / f'half-{i}.json').write_text(saved[i])
+    rc_h, out_h = r.signer(0, 'release', '--burn-tx', txh, '--out', r.dir / 'held-0.json')
     stranger_redirect = r.redirect(ANVIL_KEYS[0], bh['nonce'], payee)
     redirected = r.redirect(ANVIL_KEYS[1], bh['nonce'], payee)
+    rc_nf, out_nf = r.signer(1, 'release', '--burn-tx', txh, '--out', r.dir / 'held-nf-1.json')   # not final yet
     r.mine()
-    rc_live, out_live = r.signer(0, 'release', '--burn-tx', txh, '--out', r.dir / 'held-live-0.json')
-    valid_until = int(chh['call']['args']['context']['valid_until']) if okh else 0
-    while r.now() <= valid_until:
-        time.sleep(2)
     balp = r.balance(payee)
     okr, chr_ = r.certify(txh, 'held-1')
     rc_r, sent_r = r.submit(chr_) if okr else (1, chr_)
@@ -1064,20 +1068,18 @@ def main_flow(r):
     late = r.redirect(ANVIL_KEYS[1], bh['nonce'], p2)
     r.mine()
     rc_late, out_late = r.signer(1, 'release', '--burn-tx', txh, '--out', r.dir / 'held-late-1.json')
-    check('held exit: a router exit to an account that cannot receive the asset is certified, refused by the vault '
-          'and records nothing (held, not lost)',
-          okh and rc_h and r.net.burn_status(bh['nonce'], sn.b32(bh['burn_id'])) == 0, sent_h)
-    check('held exit: only the exit\'s own burner can redirect it (a stranger\'s redirectHeldBurn reverts)',
-          not stranger_redirect and redirected, [stranger_redirect, redirected])
-    check('held exit: a signer whose signature for the old address is still live refuses the redirect (never two live '
-          'signatures for one burn)', rc_live and 'still live' in json.dumps(out_live), out_live)
-    check('held exit: once the old signatures are dead five signers certify the redirect (via "redirect") and it is '
-          'paid once, 40 less 5 bps; every guardian judges it ok; a redirect after the payment changes nothing',
+    check('held exit: no signer certifies a router exit to an account that cannot receive the asset (held, not lost; '
+          'nothing is queued)', rc_h and 'held:' in json.dumps(out_h)
+          and r.net.burn_status(bh['nonce'], sn.b32(bh['burn_id'])) == 0, out_h)
+    check('held exit: only the exit\'s own burner can redirect it (a stranger\'s redirectHeldBurn reverts); a redirect '
+          'counts only once it is final on the L2', not stranger_redirect and redirected and rc_nf
+          and 'held:' in json.dumps(out_nf), [stranger_redirect, redirected, out_nf])
+    check('held exit: five signers certify the final redirect (via "redirect") and it is paid once, 40 less 5 bps; '
+          'every guardian judges it ok; a redirect after the payment changes nothing',
           okr and rc_r == 0 and chr_.get('via') == 'redirect' and chr_.get('stellar_recipient') == payee
           and r.balance(payee) == balp + 40 * S - 200_000 and views_h == [0, 0, 0] and late and rc_late
           and 'already recorded' in json.dumps(out_late), [chr_, sent_r, views_h, out_late])
-    notes['held_redirect'] = {'burn_tx': txh, 'nonce': bh['nonce'], 'held_address': held, 'redirect': payee,
-                              'first_valid_until': valid_until}
+    notes['held_redirect'] = {'burn_tx': txh, 'nonce': bh['nonce'], 'held_address': held, 'redirect': payee}
 
     # 12b. a burn made directly on the token towards 20 bytes that are no commitment (the user's own L2 address, as
     #      on bUSDC): never paid to those bytes; paid only to the address its burner claims on the L2 router, a
@@ -1100,17 +1102,22 @@ def main_flow(r):
     check('direct burn: the burner\'s claim counts only once it is FINAL on the L2 (a signer refuses while it is not)',
           claimed and rc and 'never paid to the 20 bytes' in json.dumps(out), out)
     r.mine()
+    rc_first, out_first = r.signer(0, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-first-0.json')
     again = r.claim(ANVIL_KEYS[1], nonce_d, payee)   # round 18: a second claim before certification; the latest wins
     claim_block = int(r.cast('block-number', '--rpc-url', r.l2))
     r.mine()
+    rc_live, out_live = r.signer(0, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-live-0.json')
+    check('direct burn: a signer that signed the first claim refuses the newer one while its first signature is live '
+          '(never two live signatures for one burn)', rc_first == 0 and rc_live and 'still live' in json.dumps(out_live),
+          [out_first, out_live])
     check('direct burn: the burner may claim again before certification; the router keeps both, the latest is claimOf',
           again and r.l2call(r.router, 'claimOf(address,uint64)(string)', r.alice, str(nonce_d)).strip('"') == payee
           and int(r.l2call(r.router, 'claimCount(address,uint64)(uint256)', r.alice, str(nonce_d)).split()[0]) == 2)
     balp, bal2 = r.balance(payee), r.balance(p2)
-    ok, cd = r.certify(txd, 'direct')
+    ok, cd = r.certify(txd, 'direct', signers=range(1, 6))
     rc, sent = r.submit(cd) if ok else (1, cd)
-    check('direct burn: 5 signers certify the burner\'s LATEST final claim, each reading the router on its own final '
-          'L2; the claimed address is paid 60 less 5 bps, the earlier claim nothing',
+    check('direct burn: the five other signers certify the burner\'s LATEST final claim, each reading the router on its '
+          'own final L2; the claimed address is paid 60 less 5 bps, the earlier claim nothing',
           ok and rc == 0 and r.balance(payee) == balp + 60 * S - 300_000 and r.balance(p2) == bal2
           and cd.get('via') == 'claim' and cd.get('stellar_recipient') == payee, sent)
     late = r.claim(ANVIL_KEYS[1], nonce_d, p2)
@@ -1183,7 +1190,8 @@ def main_flow(r):
     #     must not read an honest, paid release as a forgery: it cannot judge (exit 3: alert, no pause).
     lag_block = int(json.loads(r.cast('receipt', txm, '--rpc-url', r.l2, '--json'))['blockNumber'], 16) - 1
     g1 = json.loads((r.dir / 'guard-1.json').read_text())
-    (r.dir / 'guard-lag.json').write_text(json.dumps({**g1, 'l2_finalized_tag': str(lag_block)}))
+    (r.dir / 'guard-lag.json').write_text(json.dumps({**g1, 'l2_finalized_tag': str(lag_block),
+                                                      'seen_file': str(r.dir / 'guard-lag.seen.json')}))
     rc_lag, out_lag = r.tool('guardiao_stellar.py', '--config', r.dir / 'guard-lag.json', 'check')
     rc_now, out_now = r.guard_check(1)
     check('R331-A2: a guardian check on an L2 view that is behind the burn reports no finding for an honest release: '
@@ -1470,9 +1478,10 @@ def main_flow(r):
     # Review 331, third pass, R331-XLM-3P-2: the forger burns the minimum itself and does NOT wait for finality; the
     # forged release takes that pending nonce, with another burn id and a large amount, and names an L2 block nobody
     # will reach. Rules on the final history cannot decide while finality has not passed the forger's burn. It is
-    # queued (above the threshold). The guardian pages at once (exit 3) and, once the release is older than the stall
-    # deadline (half the release delay: 15 s here) and still not judged, reports a finding (exit 2) while it is
-    # still in the queue. The L2's clock is days ahead in this run (R331-XLM-3P-3): no verdict depends on it.
+    # queued (above the threshold). The guardian pages at once (exit 3) and, once its final L2 block has stood still
+    # for longer than the stall deadline (half the release delay: 15 s here; round 18, R331-XLM-4P-3: the time
+    # without finality progress, not the release's age) and the release is still not judged, reports a finding
+    # (exit 2) while it is still in the queue. The L2's clock is days ahead in this run (R331-XLM-3P-3): no verdict depends on it.
     r.wait_bucket(1_200 * U)
     txp = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(10 * U), r.alice)['transactionHash']
     bp = r.burned(txp)
@@ -1482,15 +1491,14 @@ def main_flow(r):
     queued_at = r.now()
     rc_p0, out_p0 = r.guard_check(1)
     row0 = [x for x in out_p0.get('cannot_judge', []) if x['release'] == fid_p]
-    r.wait_until(queued_at + 17)
-    r.mine(2)                                               # the head moves; finality (64 blocks behind) does not reach it
+    r.wait_until(queued_at + 17)                            # no L2 block is made: finality stands still for 17 s
     rc_p1, out_p1 = r.guard_check(1)
     row1 = [x for x in out_p1.get('findings', []) if x['release'] == fid_p]
     still_queued = r.net.view('pending', id=fid_p) is not None and r.balance(mallory) == balm + stolen + 30 * S - 150_000
     rc_alert, out_alert = r.guard_check(2, l2_clock_alert_seconds=120, from_ledger=r.net.latest()['sequence'])
     check('guardian, stall rule (R331-XLM-3P-2): a queued forgery under the nonce of the forger\'s own pending burn, '
-          'naming an unreachable block, is "cannot judge" at first (paged) and a finding by the stall rule once it is '
-          'older than the deadline, while it is still queued and unpaid',
+          'naming an unreachable block, is "cannot judge" at first (paged) and a finding by the stall rule once L2 '
+          'finality has stood still for longer than the deadline, while it is still queued and unpaid',
           rc == 0 and len(row0) == 1 and out_p0.get('stall_deadline') == 15 and rc_p1 == 2 and len(row1) == 1
           and 'stall rule' in row1[0]['reason'] and still_queued, [sent, out_p0, out_p1])
     check('guardian, clock (R331-XLM-3P-3): the L2\'s blocks are stamped days ahead of the Stellar ledger clock in this '
@@ -1596,7 +1604,8 @@ def main():
             setup(*x, **k)
             ks = r.dir / 'keystores'
             for i in range(3):
-                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600}
+                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600,
+                     'seen_file': str(r.dir / f'guard-seen-{i}.json')}
                 if r.anvil_port:
                     # The clock alert is off here: this run moves the anvil's clock forward by days on purpose.
                     g.update(l2_rpc=r.l2, l2_finalized_tag='finalized', l2_chain_id=31337, l2_clock_alert_seconds=0)

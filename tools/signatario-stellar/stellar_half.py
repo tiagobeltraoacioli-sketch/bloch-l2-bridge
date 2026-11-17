@@ -51,7 +51,8 @@ Config (one JSON per signer): `stellar_rpc`, `network_passphrase`, `vault`, `vau
 `keystore`, `password_file`, `db`, `asset_contract`; optional `stellar_cli`, `stellar_config_dir`, `cast`, `stellar_rpc_others` (list),
 `vault_from_ledger`, `finality_ledgers` (12), `max_ledger_age` (60), `valid_seconds` (1800), `max_valid_seconds`
 (3600), `l2_rpc` (this operator's L2 RPC: when given, a claimed recipient or a redirect is read from it again and
-must agree), `asset_code` and `asset_issuer` (the classic asset of `asset_contract`; needed to pay a redirect).
+must agree), `asset_code` and `asset_issuer` (REQUIRED for a release: the classic asset of `asset_contract`;
+the half never signs for an address that cannot receive it, R331-XLM-4P-1).
 """
 import fcntl
 import json
@@ -258,6 +259,16 @@ class Half:
                             refuse('the exit is held (its address cannot receive the asset) and the redirect cannot '
                                    'receive it either: holding', problems=problems)
                         return redirect, 'redirect'
+                # R331-XLM-4P-1: never sign for an address that cannot receive. With a release delay the vault
+                # QUEUES a release and pins its recipient, so a certificate for such an address would queue an exit
+                # that can never execute and that no redirect or newer claim could change until a pause. Holding
+                # here keeps the burn open: the burner redirects it (router exit), claims again (direct burn), or
+                # the account adds its trustline, and the ordinary rule pays it.
+                problems = self.cannot_receive(recipient)
+                if problems:
+                    refuse('held: the address this exit is paid to cannot receive the asset on this ledger; the exit\'s '
+                           'burner may redirect it with StellarBurnRouter.redirectHeldBurn, or the account may add its '
+                           'trustline', recipient=recipient, problems=problems)
             elif via == 'claim':
                 if self.cfg.get('l2_rpc'):
                     again = sn.claim_of(sn.L2(self.cfg['l2_rpc']), named['router'], l2['from'],
@@ -265,6 +276,11 @@ class Half:
                     if again != recipient:
                         refuse('this operator\'s L2 RPC holds another claim (or none) for this burn at that final '
                                'block: holding', intent=recipient, own=again)
+                problems = self.cannot_receive(recipient)   # R331-XLM-4P-1, as for a router exit
+                if problems:
+                    refuse('held: the address the burner claimed cannot receive the asset on this ledger; the burner '
+                           'may claim again with StellarBurnRouter.claimDirectBurn, or the account may add its '
+                           'trustline', recipient=recipient, problems=problems)
             else:
                 refuse('the intent does not say how the recipient was read (router or claim)')
         except (sn.StellarError, KeyError, TypeError, ValueError) as e:
@@ -275,15 +291,15 @@ class Half:
         """[] when `address` can receive the vault's asset on this node's latest ledger; otherwise what is missing.
         A contract (`C...`) holds the asset without a trustline. An account needs to exist and to hold a trustline
         for `asset_code:asset_issuer` that the issuer authorized. Needs `asset_code` and `asset_issuer`, whose asset
-        contract must be the pinned `asset_contract`; without them nothing is redirected (fail closed)."""
+        contract must be the pinned `asset_contract`; without them nothing is signed (fail closed)."""
         c = self.cfg
         try:
             code, issuer = c['asset_code'], c['asset_issuer']
             if sn.asset_contract_id(self.net.passphrase, code, issuer) != c['asset_contract']:
                 raise ValueError('asset_code:asset_issuer is not the pinned asset_contract')
         except (KeyError, TypeError, ValueError, sn.StellarError) as e:
-            refuse('a redirect needs `asset_code` and `asset_issuer` of the pinned asset to tell whether the exit is '
-                   'held: holding', error=str(e))
+            refuse('a release needs `asset_code` and `asset_issuer` of the pinned asset to tell whether the address '
+                   'paid can receive it: holding', error=str(e))
         if sn.strkey_decode(address)[0] == 'contract':
             return []
         return sn.fee_account_problems(self.net, address, code, issuer)
