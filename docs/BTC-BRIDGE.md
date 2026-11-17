@@ -354,6 +354,8 @@ the mint side is the unchanged `signatario.py`. 86 checks:
 
 Unit and property tests: `python3 -m unittest test_btc_policy test_btc_deploy test_btc_signer` in
 `tools/signatario-btc/` (parser fuzz, pool invariant, refunds, reviewer 325's demonstrations turned around).
+Launch-pin finality path: `tools/signatario-btc/rehearse_launch_pins.py` (13 checks; needs a follower directory of
+a settled private L2, see known gap 6).
 Contract tests: `forge test --offline --match-path solidity-tests/BitcoinBurnRouter.t.sol` (12, one of them a fuzz:
 every burn the router accepts pays at least dust at its own ceiling).
 
@@ -394,8 +396,14 @@ is never counted as paid, is payable exactly once, and that no encoding of the m
    transactions would close it and were not tried.
 5. No daemon loop for bBTC (`vigia.py` is Ethereum-vault specific), no hint or request intake service, no systemd
    units. `tools/guardiao` is not wired to `btc_reservas.py guard`; the rehearsal casts the votes from its output.
-6. The L2 finality path with the launch pins (`l2_source: rebuild`) is reused code but was not exercised here: the
-   rehearsal uses anvil's `finalized` tag. A mainnet vault config is refused without the pins.
+6. The L2 finality path with launch-style pins (`l2_source: rebuild`): `rehearse_launch_pins.py` runs the signer's
+   own `verified_burns` with a pins object against a copy of a really settled private L2 (69 settlements with real
+   proofs): binaries checked, L2 rebuilt from L1 data, a real `Burned` log of the same token bytecode returned with
+   its settled-finality facts, the token read at the finalized block; seven refusals (13 checks). Still not
+   exercised: a bBTC burn on such an L2 (none exists; it needs new settled L2 blocks), so the vault-specific steps
+   after the finality path ran on anvil only; and the `mainnet-v2` pins, which pass only on signer hosts against
+   mainnet L1. The regtest rehearsal still uses anvil's `finalized` tag. A mainnet vault config is refused without
+   the pins.
 7. The guardian pause is read from the configured RPC for sweeps and refunds, and additionally from the verified L2
    only when a transaction pays burns (BTC-7 a, part).
 8. Every run replays the whole thread and runs `scantxoutset` (about a minute on mainnet, one at a time); no cache
