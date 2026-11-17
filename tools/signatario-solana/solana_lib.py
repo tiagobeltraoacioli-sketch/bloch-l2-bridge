@@ -8,6 +8,7 @@ over a keystore, as in tools/signatario-stable.
 """
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import stat
@@ -177,6 +178,64 @@ def ed25519_verify(public, message, signature):
     return _edwards_mul(s, _BASE) == _edwards_add(r, _edwards_mul(k, a))
 
 
+# ── secp256k1 recovery (committee and guardian signatures are checked in process, never by a CLI's exit code) ───
+_SP = 2**256 - 2**32 - 977
+_SN = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SG = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+       0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _secp_add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    (x1, y1), (x2, y2) = a, b
+    if x1 == x2:
+        if (y1 + y2) % _SP == 0:
+            return None
+        m = 3 * x1 * x1 * pow(2 * y1, _SP - 2, _SP) % _SP
+    else:
+        m = (y2 - y1) * pow(x2 - x1, _SP - 2, _SP) % _SP
+    x = (m * m - x1 - x2) % _SP
+    return x, (m * (x1 - x) - y1) % _SP
+
+
+def _secp_mul(k, point):
+    out = None
+    while k:
+        if k & 1:
+            out = _secp_add(out, point)
+        point = _secp_add(point, point)
+        k >>= 1
+    return out
+
+
+def secp256k1_recover(digest, signature):
+    """The 20-byte Ethereum-style address whose key signed the 32-byte `digest`, or None. `signature` is exactly
+    65 bytes r | s | v with v in (27, 28, 0, 1), 0 < r < n and 0 < s < n. Anything else is None: the caller
+    compares the address with the member it expects. Pure arithmetic: nothing is passed to another program."""
+    if not isinstance(digest, (bytes, bytearray)) or not isinstance(signature, (bytes, bytearray)):
+        return None
+    if len(digest) != 32 or len(signature) != 65:
+        return None
+    r, s, v = int.from_bytes(signature[:32], 'big'), int.from_bytes(signature[32:64], 'big'), signature[64]
+    if v in (27, 28):
+        v -= 27
+    if v not in (0, 1) or not 0 < r < _SN or not 0 < s < _SN:
+        return None
+    y = pow((pow(r, 3, _SP) + 7) % _SP, (_SP + 1) // 4, _SP)
+    if (y * y - pow(r, 3, _SP) - 7) % _SP:
+        return None
+    if y & 1 != v:
+        y = _SP - y
+    z, inv = int.from_bytes(digest, 'big') % _SN, pow(r, _SN - 2, _SN)
+    q = _secp_add(_secp_mul(s * inv % _SN, (r, y)), _secp_mul((-z * inv) % _SN, _SG))
+    if q is None:
+        return None
+    return keccak256(q[0].to_bytes(32, 'big') + q[1].to_bytes(32, 'big'))[12:]
+
+
 def find_program_address(seeds, program_id):
     for bump in range(255, -1, -1):
         h = sha256(b''.join(seeds) + bytes([bump]) + program_id + b'ProgramDerivedAddress')
@@ -265,8 +324,15 @@ PUBLIC_GENESIS = {MAINNET_GENESIS: 'mainnet-beta', 'EtWTRABZaYq6iMfeYKouRu166VU2
 
 
 def is_loopback(url):
-    host = (urllib.parse.urlsplit(str(url)).hostname or '').lower()
-    return host in ('localhost', '::1') or host.startswith('127.')
+    """True only for an http(s) URL whose host is `localhost` or a literal loopback IP address."""
+    try:
+        parts = urllib.parse.urlsplit(str(url))
+        host = (parts.hostname or '').lower()
+        if parts.scheme not in ('http', 'https') or not host:
+            return False
+        return host == 'localhost' or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def rehearsal(doc, urls=(), genesis=None):

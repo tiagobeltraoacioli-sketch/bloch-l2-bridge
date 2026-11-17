@@ -35,6 +35,12 @@ Review 325: `deposit` is answered only when EVERY configured endpoint shows the 
 `release` only when a wallet is known for the burn's 20-byte recipient (R325-SOL-1, sol_recipient.py), no paid
 page marks the nonce as paid, and the certificate could not predate the vault's last guardian pause (R325-SOL-2).
 
+Review 330: `release` is answered only when the address to be paid for is, at `finalized` on every configured
+endpoint, absent from the chain or a System account without data: a mint, a token account, a program or any
+account of another program is HELD, as is a small-order point (R330-SOL-1). `solana.rehearsal: true` in the
+vault file is refused, not obeyed, when the genesis hash is a public cluster's or an endpoint is not on
+loopback: the two-endpoint rule and the router requirement cannot be switched off there (R330-SOL-2).
+
 Config (one JSON per signer): `sol_rpc` (one URL, or a list of URLs of different operators; a deposit needs
 `sol_rpc_min` of them, default 2 on a public cluster and 1 in a rehearsal, and all listed must agree),
 `vault_config` (the deployments/solana/*.config.json file, with `program.id` and `program.elfSha256` filled),
@@ -98,6 +104,8 @@ class Node:
         if S.chain_id_of(genesis) != self.config.source_chain_id:
             raise S.Refused('this Solana node serves another cluster', node=S.b58encode(genesis),
                             config=doc['solana']['genesisHash'])
+        # R330-SOL-2: a rehearsal is decided by the cluster this node serves, not by the flag in the file.
+        self.rehearsal = S.rehearsal(doc, [self.url, *endpoints(cfg)], genesis)
         self.floor = None
         if check_pins:
             self.check_program()
@@ -216,7 +224,9 @@ def cmd_deposit(cfg, deposit_id):
     and one endpoint that fails, lags or disagrees stops the signature. Fail closed."""
     dep_id = S.unhex(deposit_id, 32, 'deposit id')
     urls = endpoints(cfg)
-    rehearsal = bool(json.loads(Path(cfg['vault_config']).read_text())['solana'].get('rehearsal'))
+    # R330-SOL-2: `rehearsal: true` is refused for a public cluster's genesis hash and for any endpoint that is not
+    # on loopback (here from the file; every Node below repeats it against the genesis hash its node reports).
+    rehearsal = S.rehearsal(json.loads(Path(cfg['vault_config']).read_text()), urls)
     need = int(cfg.get('sol_rpc_min', 1 if rehearsal else 2))
     if need < 1 or (not rehearsal and need < 2):
         refuse('sol_rpc_min below 2 on a public cluster: mint signing needs two independent endpoints')
@@ -305,13 +315,18 @@ def cmd_release(cfg, intent_path):
                mintHead=got['mintHead'], vault=S.hx(backing['head_after']) if backing else None)
 
     # The recipient must be a wallet (R325-SOL-1): held until one is known for these 20 bytes.
-    rehearsal = bool(node.doc['solana'].get('rehearsal'))
-    if not rehearsal and not (cfg.get('l2_rpc') and cfg.get('burn_router')):
+    if not node.rehearsal and not (cfg.get('l2_rpc') and cfg.get('burn_router')):
         refuse('`l2_rpc` and `burn_router` are required on a public cluster: without them no recipient can be checked')
     paid_to, found_in = sol_recipient.find_wallet(cfg, rel['recipient'], got['nativeBurn'])
+    direct = str((intent.get('l2') or {}).get('from', '')).lower() != str(cfg.get('burn_router', '')).lower()
     if paid_to is None:
-        direct = str((intent.get('l2') or {}).get('from', '')).lower() != str(cfg.get('burn_router', '')).lower()
-        refuse(sol_recipient.HELD, recipient=got['recipient'], burn=got['nativeBurn'], direct_burn=direct)
+        refuse(sol_recipient.HELD, hold='no-wallet', recipient=got['recipient'], burn=got['nativeBurn'], direct_burn=direct)
+    # ... and what the chain shows at that address must be a wallet (R330-SOL-1): read at `finalized` on every
+    # endpoint this signer configured; held unless absent or a System account without data. Fail closed.
+    dest = sol_recipient.destination([S.Rpc(u) for u in endpoints(cfg)], paid_to, a)
+    if dest['hold']:
+        refuse(sol_recipient.HELD_DESTINATION + dest['hold'], hold='destination-not-a-wallet', recipient=got['recipient'],
+               burn=got['nativeBurn'], wallet=S.b58encode(paid_to), destination=dest, direct_burn=direct)
 
     # Anchor and validity.
     finalized = node.rpc.slot('finalized')
@@ -377,7 +392,7 @@ def cmd_release(cfg, intent_path):
                     'nativeFinalizedNumber': ctx['nativeFinalizedNumber'],
                     'nativeFinalizedHash': S.hx(ctx['nativeFinalizedHash'])},
            digest=S.hx(digest), signature=done.stdout.strip().lower(), finalized_slot=finalized,
-           wallet=S.b58encode(paid_to), wallet_found_in=found_in)
+           wallet=S.b58encode(paid_to), wallet_found_in=found_in, destination=dest)
 
 
 def main():

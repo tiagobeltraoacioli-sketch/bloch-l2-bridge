@@ -10,10 +10,19 @@ Offline:
 Read-only (own node):
   verify               program final and pinned, vault equals the file, token account, mint, fee account
   show                 the vault's state            deposits [--from N]   deposit records at `finalized`
-  reserves --l2-rpc URL --token 0x..   backing against the L2 token's supply (exit 1 when broken)
+  reserves --l2-rpc URL --token 0x.. [--router 0x.. --registry 0x.. --hints DIR --from-block N]
+                       backing against the L2 token's supply (exit 1 when broken), and every burn that is not
+                       paid yet with its state; a HELD burn is listed with the reason it is held
+  burn-status --l2-rpc URL --token 0x.. (--burn 0xID | --nonce N | --all) [--router ... as above]
+                       the state of an L2 burn: paid, approved, waiting, or held and why
+  fee-account          the fee owner's address and associated token account at `finalized` (exit 1 unless the
+                       account exists, is a USDC account of the classic token program and is owned by the fee owner)
 Transactions (need --fee-payer KEYPAIR.json, an Ed25519 key that only pays fees and rent):
-  init                 create the vault (permissionless: its address is a function of the configuration)
-  create-fee-account   create the fee owner's associated token account
+  init [--fee-owner-proof PROOF.json]  create the vault (permissionless: its address is a function of the
+                       configuration). Refused unless the fee owner's associated token account exists at
+                       `finalized` and is owned by the fee owner; outside a rehearsal also unless PROOF.json
+                       (sol_proof.py) shows a signature made with the fee owner's key
+  create-fee-account   create the fee owner's associated token account (before `init`; the vault need not exist)
   deposit --keypair USER.json --amount N --l2-recipient 0x..   (a user's deposit; reference client and rehearsal)
   approve --cert CERT.json             CERT = `signatario.py combine` output for a release
   execute --nonce N --owner WALLET     pay an approved release to the wallet the burn committed to
@@ -37,6 +46,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import solana_lib as S  # noqa: E402
 from sol_half import Node, elf_digest  # noqa: E402
+import sol_proof  # noqa: E402
+import sol_recipient  # noqa: E402
 
 
 def opt(args, name, default=None, many=False):
@@ -99,17 +110,25 @@ def cast_sign(args, digest):
     done = subprocess.run([cast, 'wallet', 'sign', '--no-hash', *wallet, S.hx(digest)], capture_output=True, text=True)
     if who.returncode or done.returncode:
         raise S.Refused('cast failed', stderr=(who.stderr + done.stderr).strip()[-800:])
-    return who.stdout.strip().lower(), done.stdout.strip().lower()
+    signer, signature = who.stdout.strip().lower(), done.stdout.strip().lower()
+    # What the signing tool printed is checked here, in process: it must be a signature of this digest by that key.
+    if S.secp256k1_recover(digest, S.unhex(signature, 65, 'signature')) != S.unhex(signer, 20, 'signer'):
+        raise S.Refused('the signing tool did not return a signature of this digest by this keystore')
+    return signer, signature
 
 
-def pairs(records, members, what):
-    """(address, signature) pairs of partial signatures, each from a distinct member of the set."""
+def pairs(records, members, what, authorization):
+    """(address, signature) pairs of partial signatures, each from a distinct member of the set and each a
+    signature of `authorization` by that member: recovered in process from strictly parsed bytes."""
     by = {}
     for r in records:
         address = S.unhex(r['signer'], 20, 'signer')
         if address not in members:
             raise S.Refused(f'a partial is not signed by a {what}', signer=r['signer'])
-        by[address] = S.unhex(r['signature'], 65, 'signature')
+        signature = S.unhex(r['signature'], 65, 'signature')
+        if S.secp256k1_recover(S.eip191(authorization), signature) != address:
+            raise S.Refused('a partial signature does not recover to the signer it names', signer=r['signer'])
+        by[address] = signature
     return sorted(by.items())
 
 
@@ -147,9 +166,20 @@ def cmd_validate(args):
         if (doc.get(path[0]) or {}).get(path[1]) in (None, 'TBD-owner', 'TBD-deploy'):
             undecided.append('.'.join(path))
     config = S.Config.from_json(doc, allow_undecided=True)
-    mainnet = not doc['solana'].get('rehearsal')
-    problems = [] if undecided else config.problems(mainnet=mainnet)
-    if mainnet and doc['solana']['genesisHash'] != '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d':
+    problems = []
+    try:  # R330-SOL-2: the flag is refused, not obeyed, with a public cluster's genesis hash or a remote endpoint
+        mainnet = not S.rehearsal(doc, [opt(args, '--rpc')] if opt(args, '--rpc') else [])
+    except S.Refused as e:
+        mainnet = True
+        problems.append(e.reason)
+    if undecided:
+        # The policy values that do not depend on what is undecided are judged now (R330-SOL-3: the retention floor).
+        if mainnet and config.record_retention < S.retention_floor(config.pause_duration):
+            problems.append(f'mainnet policy: recordRetention {config.record_retention} is below the floor '
+                            f'{S.retention_floor(config.pause_duration)} s')
+    else:
+        problems += config.problems(mainnet=mainnet)
+    if mainnet and doc['solana']['genesisHash'] != S.MAINNET_GENESIS:
         problems.append('solana.genesisHash is not mainnet-beta while rehearsal is false')
     token_cfg = opt(args, '--token-config')
     if token_cfg:
@@ -158,7 +188,8 @@ def cmd_validate(args):
             if limits.get(theirs) != getattr(config, ours):
                 problems.append(f'L2 token {theirs} {limits.get(theirs)} differs from the vault {ours} {getattr(config, ours)}')
     ok = not undecided and not problems
-    out(ok, decision='ok' if ok else 'refused', undecided=undecided, problems=problems)
+    out(ok, decision='ok' if ok else 'refused', undecided=undecided, problems=problems,
+        recordRetentionFloor=S.retention_floor(config.pause_duration) if mainnet else None)
 
 
 def cmd_elf_sha256(args):
@@ -180,6 +211,9 @@ def cmd_verify(args):
     if mint is None or mint['decimals'] != 6:
         problems.append('the mint is not a classic 6-decimal mint')
     fee = node.token_balance(a.fee_account)
+    fee_state = fee_account_state(node.rpc, node.config, a, node.commitment)
+    problems += fee_state['problems']
+    problems += node.config.problems(mainnet=not node.rehearsal)  # the policy again, on the configuration ON CHAIN
     if tokens and tokens['amount'] < v['total_locked'] + v['fees_accrued']:
         problems.append('backing broken: the token balance is below locked plus fees')
     out(not problems, decision='ok' if not problems else 'refused', problems=problems, **a.summary(),
@@ -231,45 +265,154 @@ def cmd_deposits(args):
     out(True, finalizedSlot=finalized, depositCount=node.vault['deposit_count'], deposits=rows)
 
 
+def l2_uint(url, token, signature, block):
+    """One uint256 view of the L2 token, asked over JSON-RPC in process (no command line)."""
+    data = S.hx(S.keccak256(signature.encode())[:4])
+    try:
+        return int(sol_recipient.l2_call(url, token, data, block), 16)
+    except ValueError:
+        raise S.Refused('the L2 call failed', call=signature)
+
+
+def recipient_cfg(args):
+    """Where a burn's wallet is looked for (sol_recipient.find_wallet), from the command line. Every value is
+    parsed strictly here; none is handed to another program."""
+    cfg = {'l2_rpc': need(args, '--l2-rpc')}
+    for key, name in (('burn_router', '--router'), ('recipient_registry', '--registry')):
+        if opt(args, name) is not None:
+            cfg[key] = S.hx(S.unhex(opt(args, name), 20, name))
+    for key, name in (('router_from_block', '--from-block'), ('registry_from_block', '--from-block')):
+        cfg[key] = int(opt(args, name, '0'))
+    cfg['recipient_hints'] = opt(args, '--hints')
+    return cfg
+
+
+def burn_rows(args, node):
+    """Every `Burned` log of the token up to `--l2-block` (default finalized), with its state on Solana."""
+    cfg = recipient_cfg(args)
+    token = S.hx(S.unhex(need(args, '--token'), 20, '--token'))
+    block = opt(args, '--l2-block', 'finalized')
+    if block not in ('finalized', 'latest', 'safe'):
+        raise S.Refused('--l2-block is finalized, safe or latest')
+    burns = sol_recipient.l2_burns(cfg['l2_rpc'], token, int(opt(args, '--from-block', '0')), block)
+    return [sol_recipient.burn_status(node, cfg, b) for b in burns]
+
+
 def cmd_reserves(args):
     node = node_of(args, commitment='finalized')
     s = state_of(node)
-    cast = opt(args, '--cast', str(Path.home() / '.foundry/bin/cast'))
-    token, l2 = need(args, '--token'), need(args, '--l2-rpc')
-
-    def call(sig):
-        done = subprocess.run([cast, 'call', token, sig, '--rpc-url', l2, '--block', opt(args, '--l2-block', 'finalized')],
-                              capture_output=True, text=True)
-        if done.returncode:
-            raise S.Refused('the L2 call failed', call=sig, stderr=done.stderr.strip()[-400:])
-        return int(done.stdout.split()[0], 0)
-    supply, pending = call('totalSupply()(uint256)'), call('pendingSupply()(uint256)')
+    token, l2 = S.hx(S.unhex(need(args, '--token'), 20, '--token')), need(args, '--l2-rpc')
+    block = opt(args, '--l2-block', 'finalized')
+    if block not in ('finalized', 'latest', 'safe'):
+        raise S.Refused('--l2-block is finalized, safe or latest')
+    supply, pending = l2_uint(l2, token, 'totalSupply()', block), l2_uint(l2, token, 'pendingSupply()', block)
     problems = []
     if s['tokenBalance'] is None or s['tokenBalance'] < s['totalLocked'] + s['feesAccrued']:
         problems.append('the vault token balance is below locked plus fees')
     if supply > s['totalLocked']:
         problems.append('the L2 supply exceeds the locked backing')
+    # Burns that are not paid yet explain `lockedMinusSupply`; the held ones are named with their reason (R330-SOL-1).
+    rows = [r for r in burn_rows(args, node) if r['state'] != 'paid']
+    held = [r for r in rows if r['hold']]
     out(not problems, problems=problems, tokenBalance=s['tokenBalance'], totalLocked=s['totalLocked'],
         feesAccrued=s['feesAccrued'], l2Supply=supply, l2Pending=pending,
-        lockedMinusSupply=s['totalLocked'] - supply, contextSlot=s['contextSlot'])
+        lockedMinusSupply=s['totalLocked'] - supply, contextSlot=s['contextSlot'],
+        unpaidBurns=len(rows), unpaidTotal=sum(r['amount'] for r in rows),
+        heldBurns=len(held), heldTotal=sum(r['amount'] for r in held),
+        held=[{k: r.get(k) for k in ('burn', 'nonce', 'amount', 'recipient', 'wallet', 'direct', 'state', 'hold', 'reason')}
+              for r in held])
+
+
+def cmd_burn_status(args):
+    node = node_of(args, commitment='finalized')
+    rows = burn_rows(args, node)
+    if '--all' not in args:
+        burn, nonce = opt(args, '--burn'), opt(args, '--nonce')
+        if (burn is None) == (nonce is None):
+            raise S.Refused('pass --burn 0xID, --nonce N or --all')
+        want = S.hx(S.unhex(burn, 32, '--burn')) if burn is not None else None
+        rows = [r for r in rows if (r['burn'] == want if want else r['nonce'] == int(nonce))]
+        if not rows:
+            raise S.Refused('no such burn in the token logs up to this L2 block', burn=want, nonce=nonce)
+    out(True, burns=rows, held=sum(1 for r in rows if r['hold']))
+
+
+def fee_account_state(rpc, config, a, commitment='finalized'):
+    """The fee owner's address and its associated token account as this node shows them. The fee owner is part of
+    the vault's address for good and fees can only ever be swept to this one account, so `init` refuses unless
+    the account exists, is a classic token account of the vault's mint, and is OWNED BY THE FEE OWNER."""
+    problems = []
+    owner = sol_recipient.destination([rpc], config.fee_owner) if commitment == 'finalized' else {'hold': None}
+    if owner['hold']:
+        problems.append('the fee owner is not a wallet address: ' + owner['hold'])
+    info = rpc.account_info(a.fee_account, commitment)
+    account = None
+    if info is None:
+        problems.append("the fee owner's associated token account does not exist: run create-fee-account "
+                        f'({S.b58encode(a.fee_account)})')
+    elif info['owner'] != S.TOKEN_PROGRAM or len(info['data']) != 165:
+        problems.append("the account at the fee owner's associated token address is not a classic token account")
+    else:
+        account = S.decode_token_account(info['data'])
+        if account['mint'] != config.mint:
+            problems.append("the fee owner's associated token account is of another mint")
+        if account['owner'] != config.fee_owner:
+            problems.append("the fee owner's associated token account is not owned by the fee owner (its authority "
+                            f"was changed to {S.b58encode(account['owner'])}): fees swept there would not be the owner's")
+        if account['state'] != 1:
+            problems.append("the fee owner's associated token account is frozen or not initialized")
+    return {'problems': problems, 'feeOwner': S.b58encode(config.fee_owner), 'feeTokenAccount': S.b58encode(a.fee_account),
+            'feeOwnerExists': owner.get('exists'), 'feeAccountExists': info is not None,
+            'feeAccountOwner': S.b58encode(account['owner']) if account else None,
+            'feeAccountBalance': account['amount'] if account else None}
+
+
+def cmd_fee_account(args):
+    doc, config, program_id = offline(args, allow_undecided=True)
+    rpc = S.Rpc(need(args, '--rpc'))
+    if S.chain_id_of(rpc.genesis_hash()) != config.source_chain_id:
+        raise S.Refused('this Solana node serves another cluster')
+    state = fee_account_state(rpc, config, FeeAddresses(config), opt(args, '--commitment', 'finalized'))
+    out(not state['problems'], **state)
+
+
+class FeeAddresses:
+    """The one address of the fee side that does not need the program id (undecided before the ceremony)."""
+
+    def __init__(self, config):
+        self.fee_account = S.associated_token_address(config.fee_owner, config.mint)
 
 
 # ── transactions ────────────────────────────────────────────────────────────
 def cmd_init(args):
     doc, config, program_id = offline(args)
-    problems = config.problems(mainnet=not doc['solana'].get('rehearsal'))
-    if problems:
-        raise S.Refused('the configuration is refused', problems=problems)
     cfg = {'sol_rpc': need(args, '--rpc'), 'vault_config': need(args, '--config'), 'program_id': program_id}
     rpc = S.Rpc(cfg['sol_rpc'])
+    genesis = rpc.genesis_hash()
+    if S.chain_id_of(genesis) != config.source_chain_id:
+        raise S.Refused('this Solana node serves another cluster')
+    rehearsal = S.rehearsal(doc, [cfg['sol_rpc']], genesis)  # R330-SOL-2: decided by the cluster, not by the flag
+    problems = config.problems(mainnet=not rehearsal)
+    if problems:
+        raise S.Refused('the configuration is refused', problems=problems)
     a = S.Addresses(S.pubkey(program_id), config)
     _, owner, data, _ = rpc.account(a.vault, 'confirmed')
     if data is None:
+        # The fee owner is in the vault's address for good. Before anything is paid for: its associated token
+        # account exists at `finalized` and is the fee owner's, and (outside a rehearsal) a signature made with
+        # the fee owner's key is shown: a fee address nobody holds a key for would collect every fee for nobody.
+        fee = fee_account_state(rpc, config, a, 'finalized')
+        if fee['problems']:
+            raise S.Refused('the fee account is refused', **fee)
+        proof = opt(args, '--fee-owner-proof')
+        if proof is not None or not rehearsal:
+            if proof is None:
+                raise S.Refused('--fee-owner-proof is required outside a rehearsal: a signature of the fee owner over '
+                                'the text of `sol_proof.py fee-owner-message` (docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md)')
+            sol_proof.check_fee_owner_proof(json.loads(Path(proof).read_text()), doc)
         probe = Node.__new__(Node)  # the program pin and finality, before paying for anything
         probe.cfg, probe.rpc, probe.commitment, probe.a, probe.config, probe.floor = cfg, rpc, 'confirmed', a, config, None
         probe.elf_pin = ((doc.get('program') or {}).get('elfSha256') or '').lower()
-        if S.chain_id_of(rpc.genesis_hash()) != config.source_chain_id:
-            raise S.Refused('this Solana node serves another cluster')
         probe.check_program()
         payer = S.Keypair(need(args, '--fee-payer'))
         res = S.send_and_confirm(rpc, payer, [S.VaultIx(a).initialize(payer.public)])
@@ -280,11 +423,24 @@ def cmd_init(args):
 
 
 def cmd_create_fee_account(args):
-    node = node_of(args)
+    """Before `init`: the vault need not exist and the program id may still be undecided."""
+    doc, config, _ = offline(args, allow_undecided=True)
+    rpc = S.Rpc(need(args, '--rpc'))
+    if S.chain_id_of(rpc.genesis_hash()) != config.source_chain_id:
+        raise S.Refused('this Solana node serves another cluster')
+    a = FeeAddresses(config)
+    before = fee_account_state(rpc, config, a, 'confirmed')
+    if before['feeAccountExists']:
+        out(not before['problems'], already=True, **before)
+    owner = sol_recipient.destination([rpc], config.fee_owner)
+    if owner['hold']:
+        raise S.Refused('the fee owner is not a wallet address: ' + owner['hold'])
     payer = S.Keypair(need(args, '--fee-payer'))
-    ix = S.create_ata_instruction(payer.public, node.config.fee_owner, node.config.mint)
-    res = send(args, node, [ix], fee_payer=payer)
-    out(res['ok'], feeTokenAccount=S.b58encode(node.a.fee_account), **res)
+    res = S.send_and_confirm(rpc, payer, [S.create_ata_instruction(payer.public, config.fee_owner, config.mint)],
+                             commitment=opt(args, '--commitment', 'confirmed'))
+    after = fee_account_state(rpc, config, a, 'confirmed')
+    res.pop('ok', None)
+    out(res['err'] is None and not after['problems'], created=res['err'] is None, **after, **res)
 
 
 def cmd_deposit(args):
@@ -338,6 +494,12 @@ def cmd_approve(args):
     if standing is not None and standing['standing']:
         out(True, already=True, state=standing['state'], closed=bool(standing.get('closed')),
             sameRelease=None if standing.get('closed') else standing['release_id'] == S.release_id(rel))
+    # Every member of the committee the certificate names must have signed THIS digest: recovered in process.
+    for addr, sig in zip(cert['signers'], cert['signatures']):
+        if S.secp256k1_recover(S.eip191(authorization), S.unhex(sig, 65, 'signature')) != S.unhex(addr, 20, 'signer'):
+            raise S.Refused('a signature of the certificate does not recover to the signer it names', signer=addr)
+    if opt(args, '--owner') is not None:  # the wallet to be paid, when the caller knows it: the recipient rule
+        refuse_destination(node, S.pubkey(opt(args, '--owner')), rel['recipient'])
     if node.vault['last_pause_at'] and ctx['validUntil'] <= node.vault['last_pause_at'] + node.config.max_valid_seconds:
         raise S.Refused('this certificate is not newer than the last guardian pause: the vault refuses it for good '
                         '(StaleCertificate); the signers certify the burn again', validUntil=ctx['validUntil'],
@@ -353,6 +515,20 @@ def cmd_approve(args):
     out(res['ok'] and after is not None, nonce=rel['nonce'], readyAt=after['ready_at'] if after else None, **res)
 
 
+def refuse_destination(node, owner, commitment):
+    """The recipient rule of sol_recipient.py for a wallet named on the command line (R330-SOL-1): it hashes to
+    the burn's 20 bytes, is not a small-order point or a known non-wallet, and at `finalized` the address is absent
+    or a System account without data. Returns what the chain shows."""
+    if not sol_recipient.is_wallet(owner, commitment):
+        raise S.Refused('this address is not a wallet the burn committed to (another commitment, a point without a '
+                        'key, or an address known not to be a wallet)', commitment=commitment)
+    dest = sol_recipient.destination([node.rpc], owner, node.a)
+    if dest['hold']:
+        raise S.Refused(sol_recipient.HELD_DESTINATION + dest['hold'], hold='destination-not-a-wallet',
+                        wallet=S.b58encode(owner), destination=dest)
+    return dest
+
+
 def cmd_execute(args):
     node = node_of(args)
     nonce, owner = int(need(args, '--nonce')), S.pubkey(need(args, '--owner'))
@@ -363,12 +539,17 @@ def cmd_execute(args):
         out(True, already=True, closed=bool(record.get('closed')), paidAmount=record.get('paid_amount'), paidAt=record.get('paid_at'))
     if S.account_id(owner) != record['recipient']:
         raise S.Refused('this wallet is not the one the burn committed to', commitment=record['recipient'])
+    dest = refuse_destination(node, owner, record['recipient'])
     payer = S.Keypair(need(args, '--fee-payer'))
     ixs = []
     if node.token_balance(S.associated_token_address(owner, node.config.mint)) is None:
         if '--create-account' not in args:
             raise S.Refused('the wallet has no associated token account for this mint; its owner creates it, or '
                             'pass --create-account to pay its rent', wallet=S.b58encode(owner))
+        if not dest['fundedSystemAccount']:
+            raise S.Refused('--create-account is refused: the wallet is not a funded System account at finalized '
+                            '(absent from the chain: a wallet never used, or an address nobody holds a key for). Its '
+                            'owner creates the token account', wallet=S.b58encode(owner), destination=dest)
         ixs.append(S.create_ata_instruction(payer.public, owner, node.config.mint))
     ixs.append(S.VaultIx(node.a).execute_release(nonce, owner))
     res = send(args, node, ixs, fee_payer=payer)
@@ -415,7 +596,7 @@ def cmd_pause_submit(args):
         raise S.Refused('not a guardian pause for this vault')
     auth = S.guardian_pause_authorization(node.config.source_chain_id, node.a.vault20, node.a.route,
                                           int(cert['count']), int(cert['validUntil']))
-    ixs = [S.secp_instruction(auth, pairs([cert], node.config.guardians, 'guardian'), 0),
+    ixs = [S.secp_instruction(auth, pairs([cert], node.config.guardians, 'guardian', auth), 0),
            S.VaultIx(node.a).guardian_pause(int(cert['validUntil']))]
     res = send(args, node, ixs)
     after = node_of(args).vault
@@ -443,7 +624,7 @@ def cmd_controls_submit(args):
     m = same(records, ('deposits', 'releases', 'nonce', 'validUntil'))
     auth = S.controls_authorization(node.config.source_chain_id, node.a.vault20, node.a.route, m['deposits'],
                                     m['releases'], int(m['nonce']), int(m['validUntil']))
-    signers = pairs(records, node.config.signers, 'signer')[:node.config.threshold]
+    signers = pairs(records, node.config.signers, 'signer', auth)[:node.config.threshold]
     if len(signers) < node.config.threshold:
         raise S.Refused('not enough distinct signers', have=len(signers), need=node.config.threshold)
     ixs = [S.secp_instruction(auth, signers, 0),
@@ -472,7 +653,7 @@ def cmd_unpause_submit(args):
         raise S.Refused('not unpause partials for this vault')
     m = same(records, ('count', 'validUntil'))
     auth = S.unpause_authorization(node.config.source_chain_id, node.a.vault20, node.a.route, int(m['count']), int(m['validUntil']))
-    signers = pairs(records, node.config.signers, 'signer')[:node.config.switch_threshold]
+    signers = pairs(records, node.config.signers, 'signer', auth)[:node.config.switch_threshold]
     if len(signers) < node.config.switch_threshold:
         raise S.Refused('not enough distinct signers', have=len(signers), need=node.config.switch_threshold)
     ixs = [S.secp_instruction(auth, signers, 0), S.VaultIx(node.a).unpause(int(m['count']), int(m['validUntil']))]
@@ -494,11 +675,22 @@ def cmd_sweep(args):
 
 
 COMMANDS = {'address': cmd_address, 'elf-sha256': cmd_elf_sha256, 'validate': cmd_validate, 'verify': cmd_verify, 'show': cmd_show,
-            'deposits': cmd_deposits, 'reserves': cmd_reserves, 'init': cmd_init,
+            'deposits': cmd_deposits, 'reserves': cmd_reserves, 'burn-status': cmd_burn_status,
+            'fee-account': cmd_fee_account, 'init': cmd_init,
             'create-fee-account': cmd_create_fee_account, 'deposit': cmd_deposit, 'approve': cmd_approve,
             'execute': cmd_execute, 'close': cmd_close, 'pause-sign': cmd_pause_sign, 'pause-submit': cmd_pause_submit,
             'controls-sign': cmd_controls_sign, 'controls-submit': cmd_controls_submit,
             'unpause-sign': cmd_unpause_sign, 'unpause-submit': cmd_unpause_submit, 'sweep': cmd_sweep}
+
+
+def main_of(args):
+    """One command with its arguments: prints one JSON object and exits 0 (accepted) or 1 (refused)."""
+    try:
+        COMMANDS[args[0]](args[1:])
+    except S.Refused as e:
+        out(False, reason=e.reason, **e.detail)
+    except S.RpcError as e:
+        out(False, reason='Solana RPC failed', error=str(e))
 
 
 def main():
@@ -506,12 +698,7 @@ def main():
     if not args or args[0] not in COMMANDS:
         print(__doc__)
         raise SystemExit(2)
-    try:
-        COMMANDS[args[0]](args[1:])
-    except S.Refused as e:
-        out(False, reason=e.reason, **e.detail)
-    except S.RpcError as e:
-        out(False, reason='Solana RPC failed', error=str(e))
+    main_of(args)
 
 
 if __name__ == '__main__':

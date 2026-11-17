@@ -18,7 +18,14 @@ node, through sol_half.Node (program pin, cluster, vault equal to the configurat
                 (`release-held-provenance`), as in the parent.
   the recipient a burn is signed, and later paid, only when a WALLET is known for its 20-byte recipient
                 (sol_recipient.py: the burn router's log, a registry announcement or a hint). A burn without one
-                is parked and alerted (`release-held-no-wallet`).
+                is parked and alerted (`release-held-no-wallet`). A burn whose wallet is, on Solana at
+                `finalized`, not a wallet (a mint, a token account, a program, any account of another program:
+                review 330, R330-SOL-1) is parked and alerted (`release-held-destination`); the relayer applies
+                the same rule before it delivers a certificate (`certificate-withheld-*`) and before it pays
+                (`approved-destination-not-a-wallet`), and never creates a token account for an address that is
+                not a funded System account.
+  partials      a peer's signature is recovered in process (solana_lib.secp256k1_recover) from strictly parsed
+                bytes; nothing from an untrusted file reaches a command line.
   rent          a release record this relayer paid for is closed once it has been paid for the vault's
                 `record_retention`; its rent comes back and the paid page keeps the nonce spent.
   relay         two steps, as the vault has them: `approve` (the threshold certificate, any fee payer), then
@@ -65,7 +72,8 @@ class SolVigia(Vigia):
         super().__init__(cfg_path)
         self.sol_cfg = json.loads(Path(self.cfg['sol_half_config']).read_text())
         self.anchor_max_age = int(self.cfg.get('anchor_max_age', 9000))
-        self._nodes, self._records, self._wallets, self._burns_pass = {}, [], {}, None
+        self._nodes, self._records, self._wallets, self._burns_pass, self._destinations = {}, [], {}, None, {}
+        self._held_logged = set()
 
     # ── this operator's Solana node ─────────────────────────────────────────
     def node(self, commitment='finalized'):
@@ -76,7 +84,7 @@ class SolVigia(Vigia):
 
     def new_pass(self):
         super().new_pass()
-        self._nodes, self._burns_pass = {}, None
+        self._nodes, self._burns_pass, self._destinations = {}, None, {}
 
     def rounds(self, d, margin):
         """The parent's live rounds, without those the vault would refuse as older than its last guardian pause
@@ -210,20 +218,44 @@ class SolVigia(Vigia):
             self._wallets[key] = sol_recipient.find_wallet(self.recipient_cfg(), S.unhex(b['recipient'], 20), key)[0]
         return self._wallets[key]
 
+    def destination_of(self, b, wallet):
+        """What this operator's node(s) show at the address a burn would be paid for, at `finalized` (R330-SOL-1,
+        sol_recipient.destination): read once per burn and pass, on every endpoint of the Solana half's config."""
+        key = b['burn_id']
+        if key not in self._destinations:
+            self._destinations[key] = sol_recipient.destination([S.Rpc(u) for u in endpoints(self.sol_cfg)], wallet, self.node().a)
+        return self._destinations[key]
+
+    def hold_of(self, b):
+        """(hold id, reason) when the recipient rule holds this burn, else (None, None): no wallet is known for its
+        20 bytes, or the address to be paid for is not a wallet on Solana."""
+        wallet = self.wallet_for(b)
+        if wallet is None:
+            return 'release-held-no-wallet', sol_recipient.HELD
+        dest = self.destination_of(b, wallet)
+        if dest['hold']:
+            return 'release-held-destination', sol_recipient.HELD_DESTINATION + dest['hold']
+        return None, None
+
     def unpayable(self, b):
         """Held, not lost. (1) The burn was made under a mint chain this vault's deposits do not back: the vault
         refuses it (ProvenanceMismatch) whatever is signed. (2) No wallet is known for the burn's 20-byte recipient
-        (R325-SOL-1): the Solana half would refuse it. Neither costs a rebuild or a certificate; both are alerted."""
+        (R325-SOL-1), or (3) the address to be paid for is, on Solana at `finalized`, not a wallet: a mint, a token
+        account, a program, any account of another program (R330-SOL-1). The Solana half would refuse (2) and (3).
+        None costs a rebuild or a certificate; all are alerted with their reason."""
         if 'mint_head' not in b:
             return False
         n = self.node()
         backing = n.deposit(b['mint_count'] - 1) if 1 <= b['mint_count'] <= n.vault['deposit_count'] else None
         if backing is not None and S.hx(backing['head_after']) == b['mint_head']:
-            if self.wallet_for(b) is not None:
+            hold, reason = self.hold_of(b)
+            if hold is None:
                 return False
             if b['burn_id'] not in self.parked_logged:
-                log(kind='alert', severity='critical', id='release-held-no-wallet', burn=b['burn_id'], nonce=b.get('nonce'),
-                    recipient=b['recipient'], reason=sol_recipient.HELD)
+                wallet = self.wallet_for(b)
+                log(kind='alert', severity='critical', id=hold, burn=b['burn_id'], nonce=b.get('nonce'),
+                    recipient=b['recipient'], wallet=S.b58encode(wallet) if wallet else None, amount=b.get('amount'),
+                    reason=reason)
             return True
         if b['burn_id'] not in self.parked_logged:
             log(kind='alert', severity='critical', id='release-held-provenance', burn=b['burn_id'], mint_count=b['mint_count'],
@@ -272,11 +304,14 @@ class SolVigia(Vigia):
                    'nativeFinalizedHash': S.unhex(c['nativeFinalizedHash'], 32)}
             if item['route'] != a.route:
                 return None
-            want = S.hx(S.eip191(S.release_authorization(config.source_chain_id, a.vault20, item, ctx)))
-            if want != digest.lower():
+            want = S.eip191(S.release_authorization(config.source_chain_id, a.vault20, item, ctx))
+            if S.hx(want) != digest.lower():
                 return None
-            rc, _, _ = self.run([self.cast, 'wallet', 'verify', '--no-hash', '--address', signer, digest, sig])
-            return rec if rc == 0 else None
+            # The signature is recovered HERE, in process, from strictly parsed bytes, and compared with the signer
+            # the file names. No value of an untrusted file is handed to a command line, and no decision is read
+            # from another program's exit code (the parent asks `cast wallet verify`; see the report of agent 336).
+            recovered = S.secp256k1_recover(want, S.unhex(sig, 65, 'signature'))
+            return rec if recovered is not None and recovered == S.unhex(signer, 20, 'signer') else None
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, S.Refused, S.RpcError):
             return None
 
@@ -309,7 +344,19 @@ class SolVigia(Vigia):
             return  # paid at `confirmed`; `burn_done` records it once it is final
         if record is None or not record['standing']:
             live = self.quorum_release(d, burn_id)
-            if live is None or not self.backup_due('eth', f'release:{burn_id}'):
+            if live is None:
+                return
+            # The relayer applies the recipient rule itself before it delivers a certificate (R330-SOL-1): five
+            # signatures over a burn whose destination is not a wallet are not a reason to approve it.
+            hold, reason = self.hold_of(b)
+            if hold is not None:
+                if burn_id not in self._held_logged:
+                    self._held_logged.add(burn_id)
+                    log(kind='alert', severity='critical', id='certificate-withheld-' + hold.removeprefix('release-held-'),
+                        burn=burn_id, nonce=b['nonce'], recipient=b['recipient'], reason=reason)
+                return
+            self._held_logged.discard(burn_id)
+            if not self.backup_due('eth', f'release:{burn_id}'):
                 return
             rnd, _ = live
             res = self.sol_vault('approve', '--cert', rnd / 'release.call')
@@ -360,12 +407,22 @@ class SolVigia(Vigia):
                 reason='the vault holds an approval for a burn with no known wallet: honest signers do not certify one. '
                        'Not paid by this relayer')
             return
+        dest = self.destination_of(b, wallet)
+        if dest['hold']:
+            log(kind='alert', severity='critical', id='approved-destination-not-a-wallet', burn=burn_id, nonce=b['nonce'],
+                wallet=S.b58encode(wallet), reason=sol_recipient.HELD_DESTINATION + dest['hold'] + '. The vault holds an '
+                'approval for it: honest signers do not certify one. Not paid by this relayer (anyone may still send the '
+                'payment: a guardian pause voids the approval)')
+            return
         argv = ['--nonce', str(b['nonce']), '--owner', S.b58encode(wallet)]
         if n.token_balance(S.associated_token_address(wallet, n.config.mint)) is None:
-            if not self.cfg.get('sol_create_recipient_account'):
+            # Never pay rent for the token account of an address that is not a funded System account (R330-SOL-1):
+            # an address absent from the chain may be a wallet never used or a point nobody holds a key for.
+            if not self.cfg.get('sol_create_recipient_account') or not dest['fundedSystemAccount']:
                 log(kind='alert', severity='soft', id='recipient-account-missing', burn=burn_id, wallet=S.b58encode(wallet),
-                    reason='the wallet has no associated token account for the mint: its owner creates it, or set '
-                           'sol_create_recipient_account')
+                    wallet_is_a_funded_system_account=dest['fundedSystemAccount'],
+                    reason='the wallet has no associated token account for the mint: its owner creates it. This relayer '
+                           'creates one only with sol_create_recipient_account and only for a funded System account')
                 return
             argv.append('--create-account')
         if not self.backup_due('eth', f'execute:{burn_id}'):
