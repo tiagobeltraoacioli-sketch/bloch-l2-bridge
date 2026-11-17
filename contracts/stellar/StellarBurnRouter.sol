@@ -14,15 +14,18 @@ interface IStellarBridgedToken {
 ///         commitment (`recipient_commitment` in stellar/vault).
 ///         This contract holds no power: it checks that the address is a well-formed strkey (so a typo cannot burn
 ///         funds towards nothing), burns through the token, and publishes the address in a log for the relayers.
-///         It never holds tokens between calls, has no owner and no state.
+///         It never holds tokens between calls and has no owner.
 ///         EXITS GO THROUGH THIS ROUTER. Its interface has the shape of the other routes' routers
 ///         (`burnTo(uint64 amount, string address)` and an exit event with the burn id, the caller, the amount, the
-///         20 bytes the burn names and the address). A burn made directly on the token (`token.burn`) is served
-///         only by the stated rule of tools/signatario-stellar/stellar_half.py: the 20 bytes are the commitment of
-///         an address the signers are given, or the ACCOUNT THAT BURNED signs a claim (an Ethereum personal message
-///         naming the chain, the token, the burn id and one Stellar address). A contract cannot sign: a contract
-///         that burns directly towards 20 bytes that are no commitment cannot be paid. Integrations must not burn
-///         bUSDC.xlm directly.
+///         20 bytes the burn names and the address).
+///         A burn made DIRECTLY on the token (`token.burn`) is NEVER paid to the 20 bytes it names (they may be an
+///         Ethereum address, as on bUSDC). It is paid only after the ACCOUNT THAT BURNED calls `claimDirectBurn`
+///         here, naming one checked Stellar address for that burn nonce. The claim is set once and can never be
+///         changed, so for every burn there is at most one claim, the same for every reader of the finalized L2:
+///         the signers pay it and the guardians judge a release against it (they compare `msg.sender` here with the
+///         `from` of the token's `Burned` log; a claim by anyone else, or for a burn made through this router, is
+///         ignored). There is no timeout: until that call the asset stays in the vault. A contract that burned
+///         can claim (it is `msg.sender`). The only state of this contract is that table of claims.
 /// STATUS: PROTOTYPE, UNAUDITED. Not for deployment.
 contract StellarBurnRouter {
     IStellarBridgedToken public immutable token;
@@ -32,8 +35,16 @@ contract StellarBurnRouter {
         bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress
     );
 
+    /// The Stellar address `burner` claimed for the burn with nonce `burnNonce` it made directly on the token; the
+    /// empty string while it made no claim. Set once.
+    mapping(address burner => mapping(uint64 burnNonce => string stellarAddress)) public claimOf;
+
+    event DirectBurnClaimed(address indexed burner, uint64 indexed burnNonce, bytes20 commitment, string stellarAddress);
+
     error BadStrkey();
     error TransferFailed();
+    error BadNonce();
+    error AlreadyClaimed();
 
     constructor(IStellarBridgedToken token_) {
         if (address(token_).code.length == 0) revert BadStrkey();
@@ -84,5 +95,18 @@ contract StellarBurnRouter {
         if (!token.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         burnId = token.burn(amount, c);
         emit StellarExit(burnId, msg.sender, amount, bytes20(c), stellarAddress);
+    }
+
+    /// @notice Name the Stellar address a burn the caller made DIRECTLY on the token (not through `burnTo`) is paid
+    ///         to. Only the account that burned can make a claim the signers honour. Set once per (caller, burn
+    ///         nonce): a second call reverts, so the claim of a burn never changes. The address must be a valid
+    ///         strkey and, for an account, must hold a trustline for the asset before it can be paid. Without this
+    ///         call a direct burn is never paid.
+    function claimDirectBurn(uint64 burnNonce, string calldata stellarAddress) external {
+        address c = commitment(stellarAddress);
+        if (burnNonce == 0) revert BadNonce();
+        if (bytes(claimOf[msg.sender][burnNonce]).length != 0) revert AlreadyClaimed();
+        claimOf[msg.sender][burnNonce] = stellarAddress;
+        emit DirectBurnClaimed(msg.sender, burnNonce, bytes20(c), stellarAddress);
     }
 }

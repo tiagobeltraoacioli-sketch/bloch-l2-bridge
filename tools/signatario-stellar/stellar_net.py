@@ -8,9 +8,9 @@ the caller with `cast wallet sign 0x<digest>` (an Ethereum personal message, EIP
 compared with the vault's own view; the signature that comes back is recovered here, in process, before it is used.
 
 Rule for every tool of this route (review 331, R331-XLM-1): no decision is taken from the exit code of an external
-program, and no value that came from outside this operator (a claim file, a certificate, a call file, an RPC answer)
+program, and no value that came from outside this operator (a certificate, a call file, an RPC answer)
 is placed on a command line unless it passed a strict format check first. Signatures are verified in process
-(`recover_personal`, `verify_claim`), the L2 is read over JSON-RPC in process (`L2`), and the arguments of the
+(`recover_personal`), the L2 is read over JSON-RPC in process (`L2`), and the arguments of the
 `stellar` CLI are restricted to the vault's function names, plain argument names, and values that are numbers,
 booleans, hexadecimal strings or Stellar addresses (`Net._fn_args`): none can start with `-`.
 
@@ -85,8 +85,8 @@ class StellarError(Exception):
     """The network could not be read, or answered something this tool does not accept. Never a reason to sign."""
 
 
-class ClaimError(StellarError):
-    """A burner's claim that is malformed or not signed by the account that burned."""
+class SignatureError(StellarError):
+    """A value that is not a well-formed secp256k1 signature of the shape the tools accept."""
 
 
 # ── strkeys ─────────────────────────────────────────────────────────────────
@@ -206,13 +206,6 @@ def release_digest(passphrase, vault, rel, ctx):
     return keccak256(_domain('release_auth', passphrase, vault) + release_id(rel) + uint(ctx['valid_until'])
                      + uint(ctx['pause_count']) + uint(ctx['native_finalized_number'])
                      + b32(ctx['native_finalized_hash']))
-
-
-def claim_text(l2_chain_id, token, burn_id, to):
-    """The one line the burner of a direct L2 burn signs (Ethereum personal message) to name its Stellar address."""
-    strkey_decode(to)
-    return (f'Bloch bridge bUSDC.xlm claim: pay burn 0x{b32(burn_id).hex()} of token {str(token).lower()} on chain '
-            f'{int(l2_chain_id)} to Stellar address {to}')
 
 
 def personal(digest):
@@ -546,15 +539,15 @@ def address20(v, what='address'):
 # ── signatures, verified in process ─────────────────────────────────────────
 def signature_bytes(sig):
     """A signature exactly as `cast wallet sign` prints it: 0x and 130 hex characters (r, s, v), v 27 or 28, low s.
-    Returns the 65 bytes, or raises ClaimError. A value that is not a string of that exact shape never goes further."""
+    Returns the 65 bytes, or raises SignatureError. A value that is not a string of that exact shape never goes further."""
     if not isinstance(sig, str) or not SIGNATURE_RE.fullmatch(sig):
-        raise ClaimError('the signature is not 0x followed by exactly 130 hexadecimal characters')
+        raise SignatureError('the signature is not 0x followed by exactly 130 hexadecimal characters')
     raw = bytes.fromhex(sig[2:])
     r, s_ = int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:64], 'big')
     if raw[64] not in (27, 28):
-        raise ClaimError('the signature\'s v is not 27 or 28')
+        raise SignatureError('the signature\'s v is not 27 or 28')
     if not 0 < r < SECP_N or not 0 < s_ <= SECP_N // 2:
-        raise ClaimError('the signature\'s r or s is out of range (s must be in the lower half)')
+        raise SignatureError('the signature\'s r or s is out of range (s must be in the lower half)')
     return raw
 
 
@@ -569,49 +562,6 @@ def recover_hash(hash32, sig):
 def recover_personal(digest, sig):
     """The address whose key signed `digest` (32 bytes) as an Ethereum personal message, or None."""
     return recover_hash(personal(digest), sig)
-
-
-def personal_text(text):
-    """The EIP-191 hash of a text message, as `cast wallet sign "<text>"` and every wallet's personal_sign hash it."""
-    data = text.encode()
-    return keccak256(b'\x19Ethereum Signed Message:\n' + str(len(data)).encode() + data)
-
-
-def load_claim(path):
-    """A claim file as an object, or None when there is no such file. Raises ClaimError when it is unreadable."""
-    path = Path(path)
-    if not path.is_file():
-        return None
-    try:
-        raw = path.read_bytes()
-        if len(raw) > 4096:
-            raise ValueError('larger than 4096 bytes')
-        return json.loads(raw)
-    except (OSError, ValueError) as e:
-        raise ClaimError(f'the claim file is not readable JSON: {e}')
-
-
-def verify_claim(claim, burner, l2_chain_id, token, burn_id):
-    """The one check of a burner's claim for a direct burn, shared by the Stellar half, the signer, the watcher and
-    the guardian. `burner` is the account in the FINAL `Burned` log, read by the caller from its own L2; `token` and
-    `l2_chain_id` are the caller's own. Returns the Stellar address the claim names, or raises ClaimError.
-
-    The claim is exactly {"stellar_address": "G...", "signature": "0x" + 130 hex}: no other field, no other type. The
-    signature is recovered here (secp256k1, low s, v 27 or 28) over the EIP-191 hash of `claim_text` and must give
-    the burner. Nothing of the claim reaches a command line."""
-    if not isinstance(claim, dict) or set(claim) != {'stellar_address', 'signature'}:
-        raise ClaimError('a claim is an object with exactly the fields stellar_address and signature')
-    to = claim['stellar_address']
-    kind, _ = strkey_decode(to) if isinstance(to, str) else (None, None)
-    if kind is None:
-        raise ClaimError('the claim names no Stellar address')
-    if not isinstance(burner, str) or not ADDRESS_RE.fullmatch(burner) or int(burner, 16) == 0:
-        raise ClaimError('the burner is not known as a 20-byte address')
-    raw = signature_bytes(claim['signature'])
-    text = claim_text(l2_chain_id, address20(token, 'token'), burn_id, to)
-    if recover(personal_text(text), raw) != burner.lower():
-        raise ClaimError('the claim is not signed by the account that burned')
-    return to
 
 
 # ── Stellar Asset Contract ids ──────────────────────────────────────────────
@@ -639,7 +589,9 @@ def config_differences(expected, onchain):
             return str(v).lower().replace('0x', '')
         if k in ('token', 'fee_recipient'):
             return v
-        return int(v) if isinstance(v, (int, str)) and not isinstance(v, bool) and str(v).isdigit() else v
+        if isinstance(v, bool):
+            return ('bool', v)   # never equal to a number
+        return int(v) if isinstance(v, (int, str)) and str(v).isdigit() else v
     out = []
     for k in sorted(set(expected) | set(onchain) | set(CONFIG_FIELDS)):
         a = norm(k, expected.get(k)) if k in expected else '<absent>'
@@ -665,6 +617,7 @@ def fee_account_problems(net, fee_recipient, code, issuer):
 
 
 # ── the L2, read in process ─────────────────────────────────────────────────
+DIRECT_CLAIM_TOPIC = '0x' + keccak256(b'DirectBurnClaimed(address,uint64,bytes20,string)').hex()
 BURNED_TOPIC = '0x' + keccak256(b'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)').hex()
 STELLAR_EXIT_TOPIC = '0x' + keccak256(b'StellarExit(bytes32,address,uint64,bytes20,string)').hex()
 
@@ -853,3 +806,47 @@ def vault_file_problems(doc):
     except (KeyError, TypeError, AttributeError, StellarError) as e:
         out.append(f'the file is incomplete or malformed: {e}')
     return out
+
+
+# ── where a burn is paid: one rule, read from the FINAL L2, for signers, watchers and guardians ──────────────────
+def claim_of(l2, router, burner, nonce, number):
+    """The Stellar address `burner` claimed on the router for its direct burn `nonce`, as the router's storage holds
+    it at L2 block `number`; None while there is no claim. The router sets a claim once and never changes it
+    (contracts/stellar/StellarBurnRouter.sol `claimDirectBurn`), so this answer at a final block is THE claim."""
+    data = selector('claimOf(address,uint64)') + '00' * 12 + address20(burner, 'burner')[2:] + uint(nonce).hex()
+    text = abi_string(l2.call(router, data, number), 0)
+    if text is None:
+        raise StellarError('the router\'s claimOf answer is malformed')
+    if text == '':
+        return None
+    strkey_decode(text)
+    return text
+
+
+def router_exit_address(l2, router, burned):
+    """The Stellar address the router logged for a burn it made, in the burn's own block: the one string whose
+    commitment is the 20 bytes the burn names. None when the L2 does not serve that log."""
+    logs = l2.logs(router, [STELLAR_EXIT_TOPIC, burned['burn_id']], burned['block'], burned['block'])
+    for log in logs:
+        text = abi_string(log['data'], 2)   # data: (uint64 amount, bytes20 commitment, string address)
+        try:
+            if text and '0x' + recipient_commitment(text).hex() == burned['recipient']:
+                return text
+        except StellarError:
+            continue
+    return None
+
+
+def burn_destination(l2, router, burned, final_number):
+    """THE Stellar address a burn is paid to, from the final L2 alone: (address or None, 'router' | 'claim').
+
+    router   the burn was made by the router: the address the router checked, committed to and logged.
+    claim    the burn was made directly on the token: it is NEVER paid to the 20 bytes it names; it is paid to the
+             address its burner claimed on the router (set once), read at the final block `final_number`.
+    None means: not payable yet (no claim in the final L2, or the router's log cannot be served)."""
+    router = address20(router, 'router')
+    if burned['block'] > int(final_number):
+        raise StellarError('the burn is not in the final L2 block given')
+    if burned['from'] == router:
+        return router_exit_address(l2, router, burned), 'router'
+    return claim_of(l2, router, burned['from'], burned['nonce'], final_number), 'claim'

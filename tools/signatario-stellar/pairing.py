@@ -177,7 +177,7 @@ def main():
     try:
         l2 = sn.L2(a['--l2-rpc'])
         token = sn.address20(a['--token'], '--token')
-        at = l2.block('latest')['number']
+        at = l2.block('finalized')['number']   # a final block, as the deploy tool's `verify` reads
 
         def word(sig):
             return l2.call_word(token, sn.selector(sig), at)

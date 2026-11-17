@@ -171,6 +171,67 @@ contract R324StellarBurnRouterTest {
         require(!ok && token.balanceOf(ALICE) == 500 * U && token.burnNonce() == 0, "nothing burned");
     }
 
+    // ── round 17 (review 331, R331-XLM-3P-1): the claim of a direct burn is on the L2, set once ──────────────
+    function test_aDirectBurnIsClaimedOnceByItsBurner() public {
+        vm.prank(ALICE);
+        token.burn(uint64(50 * U), ALICE); // a direct burn towards 20 bytes that are no commitment
+        require(bytes(router.claimOf(ALICE, 1)).length == 0, "no claim yet");
+        vm.recordLogs();
+        vm.prank(ALICE);
+        router.claimDirectBurn(1, G_ADDR);
+        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(G_ADDR)), "claim stored");
+        R324Vm.Log[] memory logs = vm.getRecordedLogs();
+        require(logs.length == 1 && logs[0].emitter == address(router), "one log");
+        require(logs[0].topics[0] == keccak256("DirectBurnClaimed(address,uint64,bytes20,string)"), "topic");
+        require(address(uint160(uint256(logs[0].topics[1]))) == ALICE && uint256(logs[0].topics[2]) == 1, "indexed");
+        (bytes20 c, string memory to) = abi.decode(logs[0].data, (bytes20, string));
+        require(c == bytes20(router.commitment(G_ADDR)) && keccak256(bytes(to)) == keccak256(bytes(G_ADDR)), "data");
+        // set once: neither another address nor the same one again
+        vm.prank(ALICE);
+        (bool ok, bytes memory why) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, C_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.AlreadyClaimed.selector, "second claim");
+        vm.prank(ALICE);
+        (ok,) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, G_ADDR)));
+        require(!ok, "same claim again");
+        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(G_ADDR)), "claim unchanged");
+    }
+
+    function test_aClaimBelongsToItsCallerOnly() public {
+        vm.prank(ALICE);
+        token.burn(uint64(50 * U), ALICE);
+        address mallory = address(0xBAD);
+        vm.prank(mallory);
+        router.claimDirectBurn(1, C_ADDR); // a stranger's claim for the same nonce sits under the stranger's key
+        require(bytes(router.claimOf(ALICE, 1)).length == 0, "the burner's slot is untouched");
+        require(keccak256(bytes(router.claimOf(mallory, 1))) == keccak256(bytes(C_ADDR)), "stranger's own slot");
+        vm.prank(ALICE);
+        router.claimDirectBurn(1, G_ADDR); // and does not stop the burner
+        require(keccak256(bytes(router.claimOf(ALICE, 1))) == keccak256(bytes(G_ADDR)), "burner's claim");
+    }
+
+    function test_aClaimNeedsAValidAddressAndANonce() public {
+        vm.prank(ALICE);
+        (bool ok, bytes memory why) = address(router).call(
+            abi.encodeCall(router.claimDirectBurn, (1, "GAF2DTU23X5CFOPOUCUBTFJ5PKTSOV4GLZAJB5VMJW2JUA5KKYF5OLNB"))
+        );
+        require(!ok && bytes4(why) == StellarBurnRouter.BadStrkey.selector, "bad strkey");
+        vm.prank(ALICE);
+        (ok, why) = address(router).call(abi.encodeCall(router.claimDirectBurn, (0, G_ADDR)));
+        require(!ok && bytes4(why) == StellarBurnRouter.BadNonce.selector, "nonce 0");
+        vm.prank(ALICE);
+        (ok,) = address(router).call(abi.encodeCall(router.claimDirectBurn, (1, "")));
+        require(!ok && bytes(router.claimOf(ALICE, 1)).length == 0, "empty address");
+    }
+
+    function test_aRouterBurnHasNoClaimSlotOfTheUser() public {
+        vm.prank(ALICE);
+        token.approve(address(router), 200 * U);
+        vm.prank(ALICE);
+        router.burnTo(uint64(200 * U), G_ADDR);
+        // the burner of a router burn is the router, and the router never claims
+        require(bytes(router.claimOf(address(router), 1)).length == 0, "router has no claim");
+    }
+
     function testFuzz_randomStringsAreRefused(bytes32 a, bytes24 b) public {
         // 56 random bytes are a valid strkey with negligible probability.
         string memory s = string(abi.encodePacked(a, b));

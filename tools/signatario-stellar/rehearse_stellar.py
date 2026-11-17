@@ -17,14 +17,17 @@ release, each on its own half; the relayer pays it with the fee; replay refused;
 forgery is found by the guardian check and voided by ONE guardian pause, and the real burn of that nonce is certified
 again by the ordinary 5 signers with their own tools; 6-of-7 unpause; the pause chain; a false alarm (a pause while
 a REAL release is queued) and the same burn paid exactly once afterwards; limits; issuer freeze; issuer clawback; a
-recipient without a trustline; a direct burn to 20 bytes that are no commitment, paid only on the burner's signed
-claim (verified in process: a claim file whose "signature" is an option of an external program, or signed by
-another key, pays nobody; signers handed two different claims converge on one); a guardian whose L2 view is behind a
-real release cannot judge it and does not pause; a diverging and a stale Stellar view held; a deposit, an instant burn, a queued burn and a voided burn
+recipient without a trustline; a burn made directly on the token, never paid to the 20 bytes it names and paid only
+to the address its burner claims on the L2 router (`claimDirectBurn`, set once: a stranger's claim, an old claim
+file and a second claim of the burner change nothing); a guardian whose L2 view is behind a real release cannot
+judge it and does not pause; a diverging and a stale Stellar view held; a deposit, an instant burn, a queued burn and a voided burn
 carried by the watcher daemons (vigia_stellar.py) with nobody in the loop; the deploy tool's Stellar source checks
 against the live vault; the vault checked against its deployment file (another asset, another window, a fee account
-without a trustline are refused); the fee sweep; books; the cost of a release; and, last, two quorum forgeries that
-pay a stranger (a direct burn, a router burn), which the guardian check finds by itself.
+without a trustline are refused); the fee sweep; books; the cost of a release; and, last, three quorum forgeries (a
+direct burn and a router burn paid to a stranger; a queued release under the nonce of the forger's own pending burn,
+naming a block nobody reaches), which the guardian check finds by itself, the last one by its stall rule.
+The anvil's clock is moved forward by days in this run (the 12 h mint delay); the guardian check takes no decision
+from a timestamp, so nothing is switched off here.
 With `--repo DIR` (a git checkout of this repository at a clean revision) the L2 token is deployed by
 tools/deploy-pontes/deploy_pontes.py itself: validate, plan, dry run, broadcast, record, verify.
 `--only archival`: on a network whose ledger entries live only a few ledgers (a limits file with a small
@@ -313,6 +316,18 @@ class Rig:
                                       'block': int(l['blockNumber'], 16), 'block_hash': l['blockHash'].lower()})
         raise SystemExit('no Burned log in ' + tx)
 
+    def claim(self, key, nonce, to):
+        """`claimDirectBurn(nonce, to)` on the L2 router by `key`. Returns True when the transaction succeeded."""
+        d = self.run(['cast', 'send', self.router, 'claimDirectBurn(uint64,string)', str(nonce), to, '--private-key', key,
+                      '--rpc-url', self.l2, '--json'])
+        try:
+            return d.returncode == 0 and int(json.loads(d.stdout)['status'], 16) == 1
+        except (ValueError, KeyError):
+            return False
+
+    def mine(self, n=0x80):
+        self.cast('rpc', 'anvil_mine', hex(n), '--rpc-url', self.l2)
+
     def guard_check(self, i=0, **cfg):
         """guardiao_stellar.py check with guardian i's config, optionally changed."""
         path = self.dir / f'guard-{i}.json'
@@ -361,6 +376,7 @@ class Rig:
         self.alice = k['address'].lower()
         self.cast('rpc', 'anvil_setBalance', self.alice, hex(10**20), '--rpc-url', self.l2)
         self.code_keccak = self.cast('keccak', self.cast('code', self.l2token, '--rpc-url', self.l2))
+        self.router_keccak = self.cast('keccak', self.cast('code', self.router, '--rpc-url', self.l2))
 
     def deploy_with_tool(self):
         """The L2 token deployed by tools/deploy-pontes/deploy_pontes.py from the committed Stellar token config, filled
@@ -459,15 +475,11 @@ class Rig:
         return str(rec.get('address', p1['contract']['address'])).lower()
 
     def signer_configs(self, others=None):
-        hints = self.dir / 'hints'
-        hints.mkdir(exist_ok=True)
         ks = self.dir / 'keystores'
         for i in range(7):
             half = {**self.base, 'keystore': str(ks / f'vault{i}'), 'password_file': str(self.dir / 'pw'),
                     'db': str(self.dir / f'half-db-{i}.json'), 'finality_ledgers': 12, 'max_ledger_age': 60,
-                    'l2_rpc': self.l2 if self.anvil_port else None, 'router': getattr(self, 'router', None),
-                    'recipient_claims': str(self.dir / 'claims'), 'l2_chain_id': 31337,
-                    'l2_token': getattr(self, 'l2token', None)}
+                    'l2_rpc': self.l2 if self.anvil_port else None}
             if others and i in others:
                 half['stellar_rpc_others'] = others[i]
             (self.dir / f'half-{i}.json').write_text(json.dumps(half, indent=1))
@@ -480,6 +492,7 @@ class Rig:
                    'l2_source': 'rpc', 'db': str(self.dir / f'signer-db-{i}.json'),
                    'keystore': str(ks / f'mint{i}'), 'password_file': str(self.dir / 'pw'),
                    'eth_signer': self.keys['vault'][i][0], 'network_passphrase': PASSPHRASE, 'vault': self.vault,
+                   'router': self.router, 'router_code_keccak': self.router_keccak,
                    'eth_half_deposit': tpl + ['deposit', '--deposit-id', '{deposit_id}'],
                    'eth_half_release': tpl + ['release', '--intent', '{intent}']}
             (self.dir / f'signer-{i}.json').write_text(json.dumps(cfg, indent=1))
@@ -1007,123 +1020,93 @@ def main_flow(r):
           rc == 0 and r.balance(p2) == 50 * S - 250_000, sent)
 
     # 12b. a burn made directly on the token towards 20 bytes that are no commitment (the user's own L2 address, as
-    #      on bUSDC): held by the signers, paid only on a claim signed by the account that burned
+    #      on bUSDC): never paid to those bytes; paid only to the address its burner claims on the L2 router, a
+    #      transaction of the burner itself, set once (review 331, third pass: R331-XLM-3P-1)
     txd = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(60 * U), r.alice)['transactionHash']
-    r.cast('rpc', 'anvil_mine', '0x80', '--rpc-url', r.l2)
+    r.mine()
     r.wait_bucket(60 * U)
-    burned_topic = r.cast('keccak', 'Burned(bytes32,uint64,address,uint64,address,uint64,uint64,bytes32)')
-    burnd = [l['topics'][1] for l in json.loads(r.cast('receipt', txd, '--rpc-url', r.l2, '--json'))['logs']
-             if l['topics'][0] == burned_topic][0]
+    bdir = r.burned(txd)
+    burnd, nonce_d = bdir['burn_id'], bdir['nonce']
     rc, out = r.signer(0, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-0.json')
-    check('direct burn: with no claim no signer certifies it (held, not lost; nothing is paid to anyone)',
-          rc and 'no Stellar address is known' in json.dumps(out), out)
-    text = r.must([sys.executable, HERE / 'stellar_half.py', '--config', r.dir / 'half-0.json', 'claim-text',
-                   '--burn-id', burnd, '--to', p2])
-    (r.dir / 'claims').mkdir(exist_ok=True)
-    claim_file = r.dir / 'claims' / f'{burnd[2:]}.json'
-    claim_file.write_text(json.dumps({'stellar_address': p2, 'signature': r.cast('wallet', 'sign', '--private-key', ANVIL_KEYS[0], text)}))
+    check('direct burn: with no claim on the router no signer certifies it (held, not lost; nothing is paid to anyone)',
+          rc and 'never paid to the 20 bytes' in json.dumps(out), out)
+    stranger_ok = r.claim(ANVIL_KEYS[0], nonce_d, p2)     # another account claims that nonce: its own slot, not the burner's
+    r.mine()
     rc, out = r.signer(0, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-1.json')
-    check('direct burn: a claim signed by another key than the burner\'s is refused',
-          rc and 'not signed by the account that burned' in json.dumps(out), out)
-    claim_file.write_text(json.dumps({'stellar_address': p2, 'signature': r.cast('wallet', 'sign', '--private-key', ANVIL_KEYS[1], text)}))
+    check('direct burn: a claim made on the router by another account than the burner is not the burner\'s claim: still '
+          'no signer certifies', stranger_ok and rc and 'never paid to the 20 bytes' in json.dumps(out), out)
+    claimed = r.claim(ANVIL_KEYS[1], nonce_d, p2)
+    rc, out = r.signer(0, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-2.json')
+    check('direct burn: the burner\'s claim counts only once it is FINAL on the L2 (a signer refuses while it is not)',
+          claimed and rc and 'never paid to the 20 bytes' in json.dumps(out), out)
+    claim_block = int(r.cast('block-number', '--rpc-url', r.l2))
+    r.mine()
+    again = r.claim(ANVIL_KEYS[1], nonce_d, payee)
+    check('direct burn: the claim is set once: the burner\'s second claim, for another address, reverts on the L2',
+          not again and r.l2call(r.router, 'claimOf(address,uint64)(string)', r.alice, str(nonce_d)).strip('"') == p2)
     bal2 = r.balance(p2)
     ok, cd = r.certify(txd, 'direct')
     rc, sent = r.submit(cd) if ok else (1, cd)
-    check('direct burn: the burner signs the claim text (an Ethereum personal message naming the chain, the token, the '
-          'burn id and one Stellar address); 5 signers certify, the address is paid 60 less 5 bps',
-          ok and rc == 0 and r.balance(p2) == bal2 + 60 * S - 300_000, sent)
-    rc_with, out_with = r.guard_check(1)
-    hidden = claim_file.with_suffix('.hidden')
-    claim_file.rename(hidden)
-    rc_without, out_without = r.guard_check(1)
-    rc_late, out_late = r.guard_check(1, claim_grace=0)
-    hidden.rename(claim_file)
-    nonce_d = cd['call']['args']['item']['nonce'] if ok else None
-    check('direct burn: the guardian check accepts that release with the burner\'s signed claim (verified in process); '
-          'a guardian that was not handed the claim cannot judge it (exit 3: alert, no pause) for the grace time, and '
-          'reports a finding (exit 2) after it', ok and rc_with == 0 and rc_without == 3 and not out_without.get('findings')
-          and [x['nonce'] for x in out_without.get('cannot_judge', [])] == [nonce_d] and rc_late == 2
-          and [x['nonce'] for x in out_late.get('findings', [])] == [nonce_d], [out_with, out_without, out_late])
-    notes['direct_burn_claim'] = {'burn_tx': txd, 'burn_id': burnd, 'text': text}
+    check('direct burn: with the burner\'s final claim 5 signers certify, each reading the router on its own final L2; '
+          'the claimed address is paid 60 less 5 bps', ok and rc == 0 and r.balance(p2) == bal2 + 60 * S - 300_000
+          and cd.get('via') == 'claim', sent)
+    rc_now, out_now = r.guard_check(1)
+    rc_before, out_before = r.guard_check(1, l2_finalized_tag=str(claim_block - 1))
+    check('direct burn: the guardian check judges that release against the same claim on the router (ok); on a final '
+          'view from before the claim it cannot judge (exit 3: page, no pause; the release is paid, not queued)',
+          ok and rc_now == 0 and rc_before == 3 and not out_before.get('findings')
+          and [x['nonce'] for x in out_before.get('cannot_judge', [])] == [nonce_d]
+          and 'no claim' in out_before['cannot_judge'][0]['reason'], [out_now, out_before])
+    notes['direct_burn_claim'] = {'burn_tx': txd, 'burn_id': burnd, 'claimed': p2, 'claim_block': claim_block}
 
-    # ── review 331 (round 17): the reviewer's attack cases, now expected to PASS ─────────────────────────────────
-    # A1 (R331-XLM-1). A second direct burn by the same account. A stranger (no key of the burner) writes a claim file
-    #     whose "signature" is an option of an external verifier (`cast wallet verify ... --help` printed help, exit 0).
+    # ── review 331 (round 17): the reviewer's attack cases, expected to PASS ─────────────────────────────────────
+    # A1 (R331-XLM-1). A second direct burn by the same account. In revision 2 a stranger's claim FILE whose
+    #     "signature" was an option of an external verifier was paid. There are no claim files any more: whatever a
+    #     stranger writes into the old directories, and whatever it claims on the router under its own account, pays
+    #     nobody; only the burner's own router transaction names the destination.
     mallory = r.identity('mallory')
     r.classic('change-trust', '--source-account', 'mallory', '--line', r.asset)
     txm = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(70 * U), r.alice)['transactionHash']
-    r.cast('rpc', 'anvil_mine', '0x80', '--rpc-url', r.l2)
+    r.mine()
     r.wait_bucket(70 * U)
-    burnm = [l['topics'][1] for l in json.loads(r.cast('receipt', txm, '--rpc-url', r.l2, '--json'))['logs']
-             if l['topics'][0] == burned_topic][0]
-    forged_file = r.dir / 'claims' / f'{burnm[2:]}.json'
+    bm = r.burned(txm)
+    burnm = bm['burn_id']
     balm, journal_m = r.balance(mallory), len(list((r.dir / 'journal').glob('*.json')))
     attempts = {}
-    textm = r.must([sys.executable, HERE / 'stellar_half.py', '--config', r.dir / 'half-0.json', 'claim-text',
-                    '--burn-id', burnm, '--to', mallory])
-    stranger_sig = r.cast('wallet', 'sign', '--private-key', ANVIL_KEYS[0], textm)
-    real_sig_other_address = r.cast('wallet', 'sign', '--private-key', ANVIL_KEYS[1], text)   # the burner's, for 12b
-    for name, body in (('--help', {'stellar_address': mallory, 'signature': '--help'}),
-                       ('-h', {'stellar_address': mallory, 'signature': '-h'}),
-                       ('a stranger\'s key', {'stellar_address': mallory, 'signature': stranger_sig}),
-                       ('the burner\'s signature for another burn', {'stellar_address': mallory, 'signature': real_sig_other_address}),
-                       ('an extra field', {'stellar_address': mallory, 'signature': stranger_sig, 'x': 1}),
-                       ('64 bytes', {'stellar_address': mallory, 'signature': stranger_sig[:-2]})):
-        forged_file.write_text(json.dumps(body))
+    for d in ('claims', 'hints'):
+        (r.dir / d).mkdir(exist_ok=True)
+    for name, act in (('an old claim file with "signature": "--help"',
+                       lambda: (r.dir / 'claims' / f'{burnm[2:]}.json').write_text(
+                           json.dumps({'stellar_address': mallory, 'signature': '--help'}))),
+                      ('an old hint file naming the stranger',
+                       lambda: (r.dir / 'hints' / bm['recipient'][2:]).write_text(mallory)),
+                      ('a claim on the router by the stranger\'s own account',
+                       lambda: (r.claim(ANVIL_KEYS[0], bm['nonce'], mallory), r.mine()))):
+        act()
         okm, cm = r.certify(txm, 'r331a1-' + str(len(attempts)))
-        attempts[name] = {'certified': okm, 'reason': str(cm.get('reason'))[:160]}
+        attempts[name] = {'certified': okm, 'reason': str(cm.get('reason'))[:120]}
     rc_g, out_g = r.guard_check(1)
-    check('R331-A1: a claim file with no signature of the burner ("signature": "--help", "-h", a stranger\'s signature, '
-          'the burner\'s signature for another burn, an extra field, a short signature) is refused by every signer: '
-          'nothing is certified, nothing relayed, the stranger receives nothing',
-          all(not a['certified'] and 'claim for this burn is refused' in a['reason'] for a in attempts.values())
+    check('R331-A1: a stranger cannot name the destination of another account\'s direct burn: an old claim file '
+          '("signature": "--help"), an old hint file and a router claim under the stranger\'s own account certify '
+          'nothing, relay nothing, and the stranger receives nothing',
+          all(not a['certified'] and 'never paid to the 20 bytes' in a['reason'] for a in attempts.values())
           and r.balance(mallory) == balm and len(list((r.dir / 'journal').glob('*.json'))) == journal_m
-          and r.net.burn_status(int(r.burned(txm)['nonce']), burnm) == 0 and rc_g == 0,
-          {'attempts': attempts, 'guardian': out_g})
+          and r.net.burn_status(bm['nonce'], burnm) == 0 and rc_g == 0, {'attempts': attempts, 'guardian': out_g})
     notes['r331_a1'] = {'burn_tx': txm, 'burn_id': burnm, 'attempts': attempts,
                         'stranger_received_stroops': r.balance(mallory) - balm, 'guardian_check_exit': rc_g}
-    # R331-XLM-5. The burner signs two claims (first for `payee`, then for `payee2`); three operators hold the first
-    #     file, the others the second. No address reaches five; a signer that signed the first refuses the second
-    #     while its first signature can still be used, and signs it once that signature is dead. Nobody edits a
-    #     database. Signatures of this case live 90 s (`valid_seconds`), so the wait is short.
-    for i in range(7):
-        h = json.loads((r.dir / f'half-{i}.json').read_text())
-        (r.dir / f'half-short-{i}.json').write_text(json.dumps({**h, 'valid_seconds': 90}))
-        c = json.loads((r.dir / f'signer-{i}.json').read_text())
-        c['eth_half_release'] = [x.replace(f'half-{i}.json', f'half-short-{i}.json') for x in c['eth_half_release']]
-        (r.dir / f'signer-short-{i}.json').write_text(json.dumps(c))
-    short = lambda i, *argv: r.tool('signatario_stellar.py', '--config', r.dir / f'signer-short-{i}.json', *argv)  # noqa: E731
-
-    def claim_by_burner(to):
-        t = r.must([sys.executable, HERE / 'stellar_half.py', '--config', r.dir / 'half-0.json', 'claim-text',
-                    '--burn-id', burnm, '--to', to])
-        forged_file.write_text(json.dumps({'stellar_address': to, 'signature': r.cast('wallet', 'sign', '--private-key',
-                                                                                   ANVIL_KEYS[1], t)}))
-    claim_by_burner(payee)
-    first = [short(i, 'release', '--burn-tx', txm, '--out', r.dir / f'two-claims-a-{i}.json') for i in (0, 1, 2)]
-    claim_by_burner(p2)
-    rc3, out3 = short(3, 'release', '--burn-tx', txm, '--out', r.dir / 'two-claims-b-3.json')
-    rc0, out0 = short(0, 'release', '--burn-tx', txm, '--out', r.dir / 'two-claims-b-0.json')
-    check('two claims: three signers certify the burner\'s first claim, a fourth the second; a signer of the first '
-          'refuses the second while its first signature is alive (no address has five)',
-          all(x[0] == 0 and x[1]['eth']['stellar_recipient'] == payee for x in first) and rc3 == 0
-          and out3['eth']['stellar_recipient'] == p2 and rc0 == 1 and 'already signed another release' in json.dumps(out0),
-          [out0, out3])
-    r.wait_until(max(x[1]['context']['validUntil'] for x in first + [(rc3, out3)]) + 1)
+    # R331-XLM-5 / 3P-1. One claim per burn, on the L2: every signer and every guardian reads the same one. The
+    #     burner claims `payee2`; a second claim (for `payee`) reverts; all five certify the one claim.
+    first = r.claim(ANVIL_KEYS[1], bm['nonce'], p2)
+    r.mine()
+    second = r.claim(ANVIL_KEYS[1], bm['nonce'], payee)
     bal2, balp = r.balance(p2), r.balance(payee)
-    parts, ctx_file = [], None
-    for i in (3, 0, 1, 2, 4):
-        out = r.dir / f'two-claims-c-{i}.json'
-        argv = ['release', '--burn-tx', txm, '--out', out] + (['--context', ctx_file] if ctx_file else [])
-        rc, res = short(i, *argv)
-        parts += ['--sig', out] if rc == 0 else []
-        ctx_file = ctx_file or out
-    rc, cm = r.signer(0, 'combine', *parts, '--out', r.dir / 'two-claims-call.json')
-    rc2, sentm = r.submit(cm) if rc == 0 else (1, cm)
-    check('two claims: once those signatures are dead the same signers certify the second claim by themselves; the '
-          'burn is paid once, 70 less 5 bps, to the address of the claim all five now hold',
-          rc == 0 and rc2 == 0 and r.balance(p2) == bal2 + 70 * S - 350_000 and r.balance(payee) == balp
-          and r.balance(mallory) == balm and cm.get('claim', {}).get('stellar_address') == p2, sentm)
+    okm, cm = r.certify(txm, 'one-claim')
+    rc2, sentm = r.submit(cm) if okm else (1, cm)
+    views = [r.guard_check(i)[0] for i in range(3)]
+    check('one claim: the burner\'s claim is set once on the L2 (a second one reverts); five signers certify it, the '
+          'burn is paid once, 70 less 5 bps, and all three guardians judge the release ok against the same claim',
+          first and not second and okm and rc2 == 0 and r.balance(p2) == bal2 + 70 * S - 350_000
+          and r.balance(payee) == balp and r.balance(mallory) == balm and views == [0, 0, 0], [sentm, views])
     # A2 (R331-XLM-3). A guardian whose L2 node is behind (here: its "finalized" block is the one before that burn)
     #     must not read an honest, paid release as a forgery: it cannot judge (exit 3: alert, no pause).
     lag_block = int(json.loads(r.cast('receipt', txm, '--rpc-url', r.l2, '--json'))['blockNumber'], 16) - 1
@@ -1369,14 +1352,12 @@ def main_flow(r):
     notes['release_cost'] = {'envelope_bytes': len(__import__('base64').b64decode(j['envelope'])), 'fee': tx.get('fee'),
                              'soroban': tx.get('ext')}
 
-    # 16. Last, because it ends with a stranger paid: two QUORUM forgeries (five real release keys, used outside the
-    #     tools) that take a real burn's nonce, id and amount and pay another address. Under this rehearsal's
-    #     threshold (1,000) such a release is paid at once; with the proposed configuration (threshold 0) it would
-    #     sit in the queue for the delay. The guardian check finds both by itself (review 331: "the guardian check
-    #     must independently catch a release whose recipient is not the one the burner's verified claim or the
-    #     router names").
+    # 16. Last, because it ends with a stranger paid: QUORUM forgeries (five real release keys, used outside the
+    #     tools). Under this rehearsal's threshold (1,000) a small one is paid at once; with the proposed
+    #     configuration (threshold 0) every one would sit in the queue for the delay. The guardian check finds each
+    #     by itself, against the final L2 and nothing else.
     txf = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(80 * U), r.alice)['transactionHash']
-    r.cast('rpc', 'anvil_mine', '0x80', '--rpc-url', r.l2)
+    r.mine()
     r.wait_bucket(80 * U)
     bd = r.burned(txf)
     f, _ = r.direct_release(bd['nonce'], mallory, 80 * U, bd['mint_count'], [0, 1, 2, 3, 4], burn=bd['burn_id'][2:],
@@ -1384,41 +1365,70 @@ def main_flow(r):
     balm = r.balance(mallory)
     rc, sent = r.submit(f, key='forged-direct')
     stolen = r.balance(mallory) - balm
-    claim_f = r.dir / 'claims' / f"{bd['burn_id'][2:]}.json"
     rc_none, out_none = r.guard_check(2)
-    claim_f.write_text(json.dumps({'stellar_address': mallory, 'signature': '--help'}))
-    rc_help, out_help = r.guard_check(2)
-    rc_help_late, out_help_late = r.guard_check(2, claim_grace=0)
-    tf = r.must([sys.executable, HERE / 'stellar_half.py', '--config', r.dir / 'half-0.json', 'claim-text',
-                 '--burn-id', bd['burn_id'], '--to', p2])
-    claim_f.write_text(json.dumps({'stellar_address': p2, 'signature': r.cast('wallet', 'sign', '--private-key',
-                                                                             ANVIL_KEYS[1], tf)}))
+    (r.dir / 'claims' / f"{bd['burn_id'][2:]}.json").write_text(json.dumps({'stellar_address': mallory, 'signature': '--help'}))
+    r.claim(ANVIL_KEYS[0], bd['nonce'], mallory)          # the forger's own account "claims" for the stranger
+    r.mine()
+    rc_fake, out_fake = r.guard_check(2)
+    r.claim(ANVIL_KEYS[1], bd['nonce'], p2)               # the burner's claim, for its own address
+    r.mine()
     rc_real, out_real = r.guard_check(2)
     nf = bd['nonce']
-    check('guardian, direct burn: a quorum forgery pays a stranger for a real direct burn (five stolen keys, no tool). '
-          'A guardian holding no claim, or the forged "--help" claim, does not accept it: it cannot judge during the '
-          'grace time (exit 3) and reports a finding after it (exit 2); a guardian holding the burner\'s real claim '
-          'for another address reports a finding at once (exit 2)',
+    check('guardian, direct burn: a quorum forgery pays a stranger for a real, unclaimed direct burn (five stolen keys, '
+          'no tool). With no claim of the burner on the router the guardian does not accept it (exit 3: paged; it is '
+          'already paid, so no pause would help), whatever claim file or foreign router claim is offered; once the '
+          'burner\'s claim for its own address is final the release is a finding at once (exit 2)',
           rc == 0 and stolen == 80 * S - 400_000
           and rc_none == 3 and [x['nonce'] for x in out_none.get('cannot_judge', [])] == [nf]
-          and rc_help == 3 and 'not valid' in json.dumps(out_help.get('cannot_judge'))
-          and rc_help_late == 2 and [x['nonce'] for x in out_help_late.get('findings', [])] == [nf]
-          and rc_real == 2 and 'names another Stellar address' in json.dumps(out_real.get('findings')),
-          [sent, out_none, out_help, out_help_late, out_real])
+          and rc_fake == 3 and [x['nonce'] for x in out_fake.get('cannot_judge', [])] == [nf]
+          and rc_real == 2 and 'claimed on the router' in json.dumps(out_real.get('findings')),
+          [sent, out_none, out_fake, out_real])
     txr = r.burn(30 * U, payee)
     br = r.burned(txr)
     f, _ = r.direct_release(br['nonce'], mallory, 30 * U, br['mint_count'], [0, 1, 2, 3, 4], burn=br['burn_id'][2:],
                             minted_total=br['minted_total'], block=(br['block'], br['block_hash'][2:]))
     rc, sent = r.submit(f, key='forged-router')
-    (r.dir / 'claims' / f"{br['burn_id'][2:]}.json").write_text(json.dumps({'stellar_address': mallory, 'signature': '--help'}))
     rc_r, out_r = r.guard_check(0)
     check('guardian, router burn: a quorum forgery that pays a router burn to another address than the router '
-          'committed to is a finding at once (exit 2), whatever claim file is offered: a router burn cannot be claimed',
+          'committed to is a finding at once (exit 2): a router burn cannot be claimed',
           rc == 0 and rc_r == 2 and any(x['nonce'] == br['nonce'] and 'router' in x['reason']
                                         for x in out_r.get('findings', [])), [sent, out_r])
+    # Review 331, third pass, R331-XLM-3P-2: the forger burns the minimum itself and does NOT wait for finality; the
+    # forged release takes that pending nonce, with another burn id and a large amount, and names an L2 block nobody
+    # will reach. Rules on the final history cannot decide while finality has not passed the forger's burn. It is
+    # queued (above the threshold). The guardian pages at once (exit 3) and, once the release is older than the stall
+    # deadline (half the release delay: 15 s here) and still not judged, reports a finding (exit 2) while it is
+    # still in the queue. The L2's clock is days ahead in this run (R331-XLM-3P-3): no verdict depends on it.
+    r.wait_bucket(1_200 * U)
+    txp = r.l2send(ANVIL_KEYS[1], r.l2token, 'burn(uint64,address)', str(10 * U), r.alice)['transactionHash']
+    bp = r.burned(txp)
+    f, fid_p = r.direct_release(bp['nonce'], mallory, 1_200 * U, bp['mint_count'], [0, 1, 2, 3, 4],
+                                block=(10**9, '11' * 32))
+    rc, sent = r.submit(f, key='forged-pending')
+    queued_at = r.now()
+    rc_p0, out_p0 = r.guard_check(1)
+    row0 = [x for x in out_p0.get('cannot_judge', []) if x['release'] == fid_p]
+    r.wait_until(queued_at + 17)
+    r.mine(2)                                               # the head moves; finality (64 blocks behind) does not reach it
+    rc_p1, out_p1 = r.guard_check(1)
+    row1 = [x for x in out_p1.get('findings', []) if x['release'] == fid_p]
+    still_queued = r.net.view('pending', id=fid_p) is not None and r.balance(mallory) == balm + stolen + 30 * S - 150_000
+    rc_alert, out_alert = r.guard_check(2, l2_clock_alert_seconds=120, from_ledger=r.net.latest()['sequence'])
+    check('guardian, stall rule (R331-XLM-3P-2): a queued forgery under the nonce of the forger\'s own pending burn, '
+          'naming an unreachable block, is "cannot judge" at first (paged) and a finding by the stall rule once it is '
+          'older than the deadline, while it is still queued and unpaid',
+          rc == 0 and len(row0) == 1 and out_p0.get('stall_deadline') == 15 and rc_p1 == 2 and len(row1) == 1
+          and 'stall rule' in row1[0]['reason'] and still_queued, [sent, out_p0, out_p1])
+    check('guardian, clock (R331-XLM-3P-3): the L2\'s blocks are stamped days ahead of the Stellar ledger clock in this '
+          'run and every verdict above was reached all the same; with the alert on, a check with nothing else to '
+          'report exits 4 and names the offset', rc_alert == 4 and out_alert.get('ok') is True
+          and out_alert['alerts'][0]['kind'] == 'l2-clock-ahead' and out_alert['alerts'][0]['ahead_seconds'] > 3600,
+          out_alert)
     notes['guardian_forgeries'] = {'direct': {'burn': bd['burn_id'], 'stranger_received_stroops': stolen,
-                                              'exits': [rc_none, rc_help, rc_help_late, rc_real]},
-                                   'router': {'burn': br['burn_id'], 'exit': rc_r}}
+                                              'exits': [rc_none, rc_fake, rc_real]},
+                                   'router': {'burn': br['burn_id'], 'exit': rc_r},
+                                   'pending_nonce': {'release': fid_p, 'exits': [rc_p0, rc_p1],
+                                                     'clock_alert': out_alert.get('alerts')}}
 
 
 def archival_flow(r):
@@ -1512,10 +1522,10 @@ def main():
             setup(*x, **k)
             ks = r.dir / 'keystores'
             for i in range(3):
-                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600,
-                     'recipient_claims': str(r.dir / 'claims')}
+                g = {**r.base, 'keystore': str(ks / f'guard{i}'), 'password_file': str(r.dir / 'pw'), 'valid_seconds': 600}
                 if r.anvil_port:
-                    g.update(l2_rpc=r.l2, l2_finalized_tag='finalized', l2_chain_id=31337, claim_grace=3600)
+                    # The clock alert is off here: this run moves the anvil's clock forward by days on purpose.
+                    g.update(l2_rpc=r.l2, l2_finalized_tag='finalized', l2_chain_id=31337, l2_clock_alert_seconds=0)
                 (r.dir / f'guard-{i}.json').write_text(json.dumps(g, indent=1))
             (r.dir / 'reservas.json').write_text(json.dumps({**r.base, 'min_ttl_ledgers': 0}, indent=1))
         r.setup_stellar = setup_and_configs
@@ -1527,7 +1537,8 @@ def main():
                 for i in range(3):
                     p = r.dir / f'guard-{i}.json'
                     p.write_text(json.dumps({**json.loads(p.read_text()), 'token': r.l2token, 'router': r.router,
-                                             'token_code_keccak': r.code_keccak}, indent=1))
+                                             'token_code_keccak': r.code_keccak,
+                                             'router_code_keccak': r.router_keccak}, indent=1))
                 p = r.dir / 'reservas.json'
                 p.write_text(json.dumps({**json.loads(p.read_text()), 'l2_rpc': r.l2, 'token': r.l2token}, indent=1))
             r.setup_l2 = l2_and_configs

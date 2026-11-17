@@ -15,18 +15,20 @@ Replaced:
   1. the deposit id and the deposit's sender: a Stellar address (strkey) instead of an Ethereum address; the id is
      sha256 over the vault's Stellar fields with the nonce in its top 8 bytes (stellar_net.deposit_id);
   2. the release digest: the Soroban vault's (stellar_net.release_digest), signed as an Ethereum personal message,
-     over the vault's pause count and the Stellar recipient whose commitment is the burn's 20-byte recipient. The
-     half reports that address; it is accepted only if it hashes to the commitment read from the L2 burn, or, for
-     a burn made directly on the token, if the account that burned (as this signer read it from the L2) signed
-     the claim text naming it (stellar_net.claim_text). That signature is recovered in this process
-     (stellar_net.verify_claim); the half's own signature is recovered in this process too, before the shared
-     module looks at it. No value of a claim or of a certificate is handed to another program;
+     over the vault's pause count and the Stellar recipient. WHERE A BURN IS PAID is read here, from the same final
+     L2 view the burn itself was read from (this signer's own, rebuilt, L2), by one rule that the watcher and the
+     guardian use too (stellar_net.burn_destination): a burn made by the router is paid to the address the router
+     committed to and logged; a burn made directly on the token is never paid to the 20 bytes it names, only to
+     the address its burner claimed on the router (`claimDirectBurn`, set once), as the router's storage holds it
+     at the final block. There are no claim files and no hint files. The router is pinned by address and code
+     (`router`, `router_code_keccak`). The half's signature is recovered in this process before the shared module
+     looks at it;
   3. `combine` for a release: the arguments of the vault's `release` for the `stellar` CLI instead of an EVM call.
 
 The config is signatario.py's, with `provenance: true`, `source_chain_id` = the Stellar network id as a decimal
 integer, `source_vault` = the low 20 bytes of the vault's contract id, `eth_half_deposit` / `eth_half_release` =
-argv templates running stellar_half.py, `eth_signer` = this operator's vault release key, plus `network_passphrase`
-and `vault` (the C... address).
+argv templates running stellar_half.py, `eth_signer` = this operator's vault release key, plus `network_passphrase`,
+`vault` (the C... address), `router` (StellarBurnRouter on the L2) and `router_code_keccak` (its runtime code).
 """
 import json
 from pathlib import Path
@@ -54,45 +56,27 @@ class StellarCtx(S.Ctx):
                 S.refuse('source_vault is not the low 20 bytes of the vault contract id')
         except sn.StellarError as e:
             S.refuse(str(e))
+        try:
+            self.router = sn.address20(c.get('router'), 'router')
+            if not sn.WORD_RE.fullmatch(str(c.get('router_code_keccak'))):
+                raise sn.StellarError('router_code_keccak is not 32 bytes')
+        except sn.StellarError as e:
+            S.refuse(f'the Stellar route needs `router` and `router_code_keccak` (the pinned StellarBurnRouter): {e}')
         self.stellar_recipient = None
         self.pause_count = None
 
     def deposit_id(self, route, nonce, sender, amount, pq):
         return '0x' + sn.deposit_id(route, nonce, sender, amount, pq[26:]).hex()
 
-    def claim_holds(self, claim, burner, burn_id, recipient):
-        """The burner's signed claim for a direct burn: checked here again, in process, with the burner this signer
-        read from its own L2. True only if the claim names `recipient` and its signature recovers to `burner`."""
-        try:
-            if not isinstance(claim, dict):
-                return False
-            router = str(self.cfg.get('router') or '').lower()
-            if not isinstance(burner, str) or not sn.ADDRESS_RE.fullmatch(burner) or burner.lower() == router:
-                return False
-            bare = {k: claim.get(k) for k in ('stellar_address', 'signature')}
-            return sn.verify_claim(bare, burner, self.l2_chain_id, self.token, burn_id) == recipient
-        except (sn.StellarError, KeyError, ValueError, TypeError):
-            return False
-
-    def recipient_bound(self, recipient, commitment, claim, burner, burn_id):
-        try:
-            if '0x' + sn.recipient_commitment(recipient).hex() == commitment:
-                return True
-        except sn.StellarError:
-            return False
-        return self.claim_holds(claim, burner, burn_id, recipient)
-
     def eth_half(self, kind, **subs):
         out = super().eth_half(kind, **subs)
         if kind == 'release':
             recipient = out.get('stellar_recipient')
-            rel = out.get('release') or {}
-            commitment = S.address(rel.get('recipient', ''), 'recipient')
             intent = json.loads(Path(subs['intent']).read_text())
-            burner = (intent.get('l2') or {}).get('from')
-            if not self.recipient_bound(recipient, commitment, out.get('claim'), burner, rel.get('nativeBurn', '')):
-                S.refuse('the Stellar recipient neither hashes to the burn\'s recipient commitment nor is claimed by '
-                         'the account that burned', stellar_recipient=recipient, commitment=commitment)
+            mine = ((intent.get('l2') or {}).get('stellar') or {}).get('recipient')
+            if not isinstance(recipient, str) or recipient != mine:
+                S.refuse('the Stellar half answered with another recipient than the one this signer read from its '
+                         'final L2', half=recipient, own=mine)
             if out.get('vault_contract') != self.vault_contract:
                 S.refuse('the Stellar half answered for another vault', half=out)
             # The half's signature, recovered here: the shared module's own check then sees a value of a known shape.
@@ -152,6 +136,36 @@ def verified_deposit(ctx, deposit_id):
     return dep, nonce, amount, recipient
 
 
+_finalized_burn = S.finalized_burn
+
+
+def finalized_burn(ctx, url, burn_tx, status, burn_id_wanted=''):
+    """signatario.finalized_burn, then WHERE the burn is paid, read from the same L2 (`url`: this signer's own final
+    view) at the same final block: stellar_net.burn_destination. Refuses a burn that is not payable yet."""
+    release, l2 = _finalized_burn(ctx, url, burn_tx, status, burn_id_wanted)
+    try:
+        node = sn.L2(url)
+        final = node.block(l2['finalized_number'])
+        if final is None or final['hash'] != str(l2['finalized_hash']).lower():
+            S.refuse('the L2 changed its final block while the burn was read')
+        if node.code_keccak(ctx.router, final['number']) != str(ctx.cfg['router_code_keccak']).lower():
+            S.refuse('the router at the pinned address does not run the pinned code at the final block',
+                     router=ctx.router)
+        burned = {'burn_id': release['nativeBurn'], 'nonce': release['nonce'], 'from': str(l2['from']).lower(),
+                  'recipient': release['recipient'], 'block': l2['burn_block']}
+        recipient, via = sn.burn_destination(node, ctx.router, burned, final['number'])
+    except sn.StellarError as e:
+        S.refuse(f'where this burn is paid could not be read from the final L2: {e}')
+    if recipient is None:
+        S.refuse('a burn made directly on the token is never paid to the 20 bytes it names: it is paid when the account '
+                 'that burned calls StellarBurnRouter.claimDirectBurn, and that call is final on the L2 (no timeout; the '
+                 'asset stays in the vault)' if via == 'claim' else
+                 'the router\'s log for this burn could not be read from the final L2', burner=burned['from'],
+                 nonce=burned['nonce'])
+    l2['stellar'] = {'recipient': recipient, 'via': via, 'router': ctx.router}
+    return release, l2
+
+
 _combine = S.cmd_combine
 
 
@@ -163,7 +177,8 @@ def cmd_combine(ctx, args):
     fields = ('source_chain_id', 'source_vault', 'release', 'context', 'digest')
     first = {f: sigs[0][f] for f in fields}
     half = sigs[0].get('eth') or {}
-    recipient, pause_count, claim = half.get('stellar_recipient'), half.get('pause_count'), half.get('claim')
+    recipient, pause_count = half.get('stellar_recipient'), half.get('pause_count')
+    via = ((sigs[0].get('l2') or {}).get('stellar') or {}).get('via')
     for s in sigs[1:]:
         h = s.get('eth') or {}
         if s.get('kind') != 'stable-release' or {f: s.get(f) for f in fields} != first \
@@ -171,10 +186,15 @@ def cmd_combine(ctx, args):
             S.refuse('the partial signatures are for different messages',
                      differ=[f for f in fields if s.get(f) != first[f]])
     rel, c = first['release'], first['context']
-    burner = (sigs[0].get('l2') or {}).get('from')
-    if not ctx.recipient_bound(recipient, rel['recipient'], claim, burner, rel['nativeBurn']):
-        S.refuse('the Stellar recipient neither hashes to the release\'s recipient commitment nor is claimed by the '
-                 'account that burned')
+    # A router burn's recipient is bound to the burn by its commitment, which is checked here again. A direct burn's
+    # recipient is its burner's claim on the L2 router: each signer read it from its own final L2 before signing,
+    # and no L2 is read at combination, so there the five signatures over the digest are what binds it.
+    try:
+        sn.strkey_decode(recipient)
+        if via != 'claim' and '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
+            S.refuse('the Stellar recipient does not hash to the release\'s recipient commitment')
+    except sn.StellarError as e:
+        S.refuse(f'the partials name no Stellar recipient: {e}')
     ctx.stellar_recipient = recipient
     ctx.pause_count = S.uint(pause_count, 64, 'pause_count')
     if ctx.release_digest(rel, c) != first['digest']:
@@ -198,7 +218,7 @@ def cmd_combine(ctx, args):
         if sn.recover_hash(first['digest'], by_signer[a]) != str(a).lower():
             S.refuse('a partial signature does not recover to the signer it names', signer=a)
     result = {'kind': 'stellar-release', **first, 'stellar_recipient': recipient, 'pause_count': ctx.pause_count,
-              'claim': claim, 'signers': chosen,
+              'via': via, 'signers': chosen,
               'signatures': [by_signer[a] for a in chosen], 'to': ctx.vault_contract, 'call': call}
     out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
@@ -206,6 +226,7 @@ def cmd_combine(ctx, args):
 
 S.Ctx = StellarCtx
 S.verified_deposit = verified_deposit
+S.finalized_burn = finalized_burn
 S.cmd_combine = cmd_combine
 
 if __name__ == '__main__':

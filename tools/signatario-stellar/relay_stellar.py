@@ -20,7 +20,7 @@ certificate, signed under the new pause count, is journaled under its own key.
 A call file is data from someone else. Only the six calls anyone may submit are accepted, each with exactly its
 argument names (stellar_net.RELAYABLE); every value must be a number, a boolean, a hexadecimal string or a Stellar
 address (stellar_net.cli_value), so nothing in it can be read as an option by the `stellar` CLI; a journal key is
-letters, digits, `-` and `_` only. What the CLI prints is accepted only as a transaction envelope or a hash.
+letters, digits, `-` and `_` only, and does not start with `-`. What the CLI prints is accepted only as a transaction envelope or a hash.
 
 Config: `stellar_rpc`, `network_passphrase`, `vault`, `relayer` (the G... address that pays), `relayer_identity`
 (the `stellar` CLI identity that signs for it), `journal` (directory); optional `stellar_cli`, `stellar_config_dir`.
@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stellar_net as sn  # noqa: E402
 
 
-KEY = re.compile(r'[A-Za-z0-9_-]{1,80}')
+KEY = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]{0,79}')
 
 
 def out(ok, **fields):

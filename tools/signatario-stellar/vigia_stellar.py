@@ -34,7 +34,7 @@ only in the shared-directory mode and refuses a config with a `feed` block or `l
 adapted and reviewed before chain 700770 (docs/STELLAR-BRIDGE.md, "Not done").
 
 Config: the signer's signatario_stellar.py config plus `shared_dir`, `stellar_rpc`, `view_account`,
-`vault_wasm_hash`; optional `stellar_config_dir`, `vault_from_ledger`, `finality_ledgers` (12), `anchor_max_age`
+`vault_wasm_hash`, `router` (StellarBurnRouter on the L2: the claim of a direct burn is read from it); optional `stellar_config_dir`, `vault_from_ledger`, `finality_ledgers` (12), `anchor_max_age`
 (ledgers, default 160), `paid_file` (where the set of paid burn ids is kept across restarts; a liveness aid only: a
 burn listed there is not looked at again, so nothing is signed or paid because of it), `deposit_hints` (directory of JSON files named by the deposit nonce); for `relay` also
 `l2_chain_id`, the L2 gas key as in vigia.py, and relay_stellar.py's keys `relayer`, `relayer_identity`, `journal`.
@@ -317,13 +317,14 @@ class VigiaStellar(V.Vigia):
             if count != self.pause_count():
                 return None  # signed before a pause: dead
             if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
-                # A direct burn paid on the burner's claim: the claim travels with the partial and is verified here,
-                # in process, against the burner the partial states (each signer verified it against the burner it
-                # read from its own L2 before signing; signatario_stellar.py checks again when combining).
-                claim = half.get('claim') or {}
-                bare = {k: claim.get(k) for k in ('stellar_address', 'signature')}
+                # Not the address the burn commits to: then it must be THE claim of a direct burn, which this watcher
+                # reads itself from the router on its own L2 at its final block (stellar_net.claim_of; set once on
+                # the L2, so there is nothing to choose). The burner is the one the partial states; a wrong one only
+                # makes the router answer for another account, and the vault's signers each read their own L2.
+                l2 = sn.L2(self.cfg['l2_rpc'])
+                final = l2.block('finalized')
                 burner = (rec.get('l2') or {}).get('from')
-                if sn.verify_claim(bare, burner, self.cfg['l2_chain_id'], self.token, burn_id) != recipient:
+                if final is None or sn.claim_of(l2, self.cfg['router'], burner, int(rel['nonce']), final['number']) != recipient:
                     return None
             item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': recipient, 'amount': rel['amount'],
                     'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],
@@ -387,27 +388,8 @@ class VigiaStellar(V.Vigia):
         rc, sent = self.relay_stellar(call)
         if rc == 0:
             self.queued.add(sn.release_id(call['args']['item']).hex())
-        self.publish_claim(d, burn_id)
         V.log(kind='relay-release', burn=burn_id, round=rnd.name, tx=sent.get('hash'), status=sent.get('status'),
               error=sent.get('error'))
-
-    def publish_claim(self, d, burn_id):
-        """A burner's claim that a quorum signed for is copied to SHARED/claims/<burn id>.json, so guardians (and
-        anyone) can verify the same file the signers verified. The file is self-authenticating: every reader
-        recovers the signature itself."""
-        try:
-            for f in sorted(d.glob('r-*/*.json')):
-                claim = (json.loads(f.read_text()).get('eth') or {}).get('claim')
-                if isinstance(claim, dict) and sn.SIGNATURE_RE.fullmatch(str(claim.get('signature'))):
-                    out = self.shared / 'claims'
-                    out.mkdir(parents=True, exist_ok=True)
-                    target = out / f'{burn_id[2:]}.json'
-                    if not target.exists():
-                        target.write_text(json.dumps({'stellar_address': claim.get('stellar_address'),
-                                                      'signature': claim['signature']}) + '\n')
-                    return
-        except (OSError, ValueError, AttributeError):
-            return
 
     def execute_due(self):
         """Queued releases whose delay has passed are paid by anyone: here. Ids come from this process's own relays and

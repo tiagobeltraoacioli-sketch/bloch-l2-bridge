@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Agent 338 (round 17), review 331: the tools of the Stellar route, offline.
+"""Agent 338 (round 17), review 331 (second and third pass): the tools of the Stellar route, offline.
 
   python3 -m unittest -v test_stellar_tools        (no RPC, no cast, no stellar CLI, no network)
 
-R331-XLM-1  a claim is verified in process; `"signature": "--help"` and every other malformed claim is refused by the
-            half, the signer and the guardian, and no external program is run; no outside value reaches a command line.
-R331-XLM-3  the guardian check, both directions: a view that is behind the release cannot judge (exit 3, no pause); a
-            view at or beyond the release with no such burn is a finding (exit 2).
-R331-XLM-2  the asset contract id and the committed vault file.
-R331-XLM-4, -5, -7  the paid cache, the re-pin rule, the pause validity bound.
+R331-XLM-1     signatures are recovered in process; no outside value reaches a command line.
+R331-XLM-3P-1  WHERE a burn is paid is one rule read from the final L2 (stellar_net.burn_destination): the router's
+               commitment, or the burner's set-once claim on the router. The signer, the half and the guardian apply
+               it; nobody holds a claim file, so no two parties can hold different claims.
+R331-XLM-3, 3P-2, 3P-3  the guardian check: a view behind the release cannot judge (exit 3); the stall rule turns a
+               queued release that stays unjudged into a finding; no timestamp decides anything.
+R331-XLM-2     the asset contract id and the committed vault file.  R331-XLM-4, -7  the paid cache, the pause bound.
 """
 import contextlib
 import copy
@@ -19,7 +20,6 @@ import re
 from pathlib import Path
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 
@@ -66,152 +66,36 @@ def g_address(seed):
     return sn.strkey_encode('account', hashlib.sha256(seed).digest())
 
 
-BURNER_KEY, STRANGER_KEY = key(1), key(2)
-BURNER, STRANGER = address(BURNER_KEY), address(STRANGER_KEY)
+BURNER, STRANGER = address(key(1)), address(key(2))
 PAYEE, MALLORY = g_address(b'payee'), g_address(b'mallory')
 BURN = hashlib.sha256(b'burn').hexdigest()
 
 
-def claim_for(to, k=BURNER_KEY, burn=BURN, **kw):
-    text = sn.claim_text(CHAIN, TOKEN, burn, to)
-    return {'stellar_address': to, 'signature': sign(k, sn.personal_text(text), **kw)}
+def abi_string_answer(text):
+    data = text.encode()
+    return '0x' + (32).to_bytes(32, 'big').hex() + len(data).to_bytes(32, 'big').hex() + data.ljust(-(-len(data) // 32) * 32, b'\0').hex()
 
 
-class Claims(unittest.TestCase):
-    """R331-XLM-1: the one claim check (stellar_net.verify_claim)."""
-
-    def verify(self, claim, burner=BURNER):
-        return sn.verify_claim(claim, burner, CHAIN, TOKEN, BURN)
-
-    def test_a_claim_signed_by_the_burner_is_accepted(self):
-        self.assertEqual(self.verify(claim_for(PAYEE)), PAYEE)
-        upper = claim_for(PAYEE)
-        upper['signature'] = '0x' + upper['signature'][2:].upper()
-        self.assertEqual(self.verify(upper), PAYEE)
-
-    def test_an_option_of_an_external_verifier_is_not_a_signature(self):
-        for sig in ('--help', '-h', '--version', '-V', '', ' ', '--address', '0x', None, 0, True, [], {}):
-            with self.subTest(sig=sig):
-                with self.assertRaises(sn.ClaimError):
-                    self.verify({'stellar_address': MALLORY, 'signature': sig})
-
-    def test_malformed_claims_are_refused(self):
-        good = claim_for(PAYEE)
-        sig = good['signature']
-        cases = {
-            'another key': claim_for(PAYEE, STRANGER_KEY),
-            'another address than the signed one': {**good, 'stellar_address': MALLORY},
-            'an extra field': {**good, 'note': 'x'},
-            'a missing field': {'signature': sig},
-            'not an object': [PAYEE, sig],
-            '64 bytes': {**good, 'signature': sig[:-2]},
-            '66 bytes': {**good, 'signature': sig + '00'},
-            'no 0x': {**good, 'signature': sig[2:]},
-            'a trailing newline': {**good, 'signature': sig + '\n'},
-            'not hex': {**good, 'signature': '0x' + 'zz' * 65},
-            'the high-s twin': claim_for(PAYEE, high_s=True),
-            'v 0 or 1': claim_for(PAYEE, v_base=0),
-            'v 35': {**good, 'signature': sig[:-2] + '23'},
-            'r zero': {**good, 'signature': '0x' + '00' * 32 + sig[66:]},
-            'not a Stellar address': {**good, 'stellar_address': '--help'},
-            'another burn': claim_for(PAYEE, burn=hashlib.sha256(b'other').hexdigest()),
-        }
-        for name, claim in cases.items():
-            with self.subTest(case=name):
-                with self.assertRaises(sn.StellarError):
-                    self.verify(claim)
-
-    def test_the_burner_must_be_a_known_address(self):
-        for burner in ('', None, '--help', '0x' + '00' * 20, BURNER[2:]):
-            with self.assertRaises(sn.ClaimError):
-                self.verify(claim_for(PAYEE), burner)
-
-    def test_the_text_binds_chain_and_token(self):
-        good = claim_for(PAYEE)
-        with self.assertRaises(sn.ClaimError):
-            sn.verify_claim(good, BURNER, CHAIN + 1, TOKEN, BURN)
-        with self.assertRaises(sn.ClaimError):
-            sn.verify_claim(good, BURNER, CHAIN, '0x' + '71' * 20, BURN)
+class Signatures(unittest.TestCase):
+    """R331-XLM-1: what counts as a signature, and who signed."""
 
     def test_recover_matches_the_committee_format(self):
         digest = hashlib.sha256(b'a vault digest').digest()
         sig = sign(key(3), sn.personal(digest))
         self.assertEqual(sn.recover_personal(digest, sig), address(key(3)))
-        self.assertIsNone(sn.recover_personal(digest, '--help'))
+        self.assertEqual(sn.recover_personal(digest, '0x' + sig[2:].upper()), address(key(3)))
         self.assertIsNone(sn.recover_personal(digest, sign(key(3), sn.personal(digest), high_s=True)))
+        self.assertIsNone(sn.recover_personal(digest, sign(key(3), sn.personal(digest), v_base=0)))
 
-
-class HalfClaim(unittest.TestCase):
-    """R331-XLM-1 at its first caller: stellar_half.Half.claim. The configured `cast` is a program that leaves a
-    marker when it runs: it must never run."""
-
-    def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix='a338-'))
-        self.marker = self.dir / 'cast-was-run'
-        cast = self.dir / 'cast'
-        cast.write_text(f'#!/bin/sh\necho run >> {self.marker}\nexit 0\n')
-        cast.chmod(0o755)
-        (self.dir / 'claims').mkdir()
-        self.half = object.__new__(stellar_half.Half)
-        self.half.cfg = {'recipient_claims': str(self.dir / 'claims'), 'router': ROUTER, 'cast': str(cast)}
-        self.half.cast = str(cast)
-        self.intent = {'release': {'nativeBurn': '0x' + BURN}, 'l2': {'from': BURNER, 'chain_id': CHAIN, 'token': TOKEN}}
-
-    def claim(self, body, intent=None):
-        (self.dir / 'claims' / f'{BURN}.json').write_text(body if isinstance(body, str) else json.dumps(body))
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            try:
-                return self.half.claim(intent or self.intent)
-            except SystemExit as e:
-                return ('refused', e.code, json.loads(out.getvalue()))
-
-    def test_the_reviewers_forged_file_is_refused_and_no_program_runs(self):
-        for sig in ('--help', '-h'):
-            got = self.claim({'stellar_address': MALLORY, 'signature': sig})
-            self.assertEqual(got[:2], ('refused', 1))
-            self.assertIn('130 hexadecimal', got[2]['reason'])
-        self.assertFalse(self.marker.exists())
-
-    def test_a_real_claim_is_accepted_without_any_program(self):
-        got = self.claim(claim_for(PAYEE))
-        self.assertEqual((got['stellar_address'], got['burner']), (PAYEE, BURNER))
-        self.assertFalse(self.marker.exists())
-
-    def test_a_router_burn_a_stranger_and_garbage_are_refused(self):
-        router_intent = {**self.intent, 'l2': {**self.intent['l2'], 'from': ROUTER}}
-        self.assertEqual(self.claim(claim_for(PAYEE), router_intent)[0], 'refused')
-        self.assertEqual(self.claim(claim_for(MALLORY, STRANGER_KEY))[0], 'refused')
-        self.assertEqual(self.claim('not json')[0], 'refused')
-        self.assertEqual(self.claim('{"stellar_address": "' + MALLORY + '", "signature": "--help", "x": 1}')[0], 'refused')
-        self.assertEqual(self.claim('x' * 5000)[0], 'refused')
-        self.assertFalse(self.marker.exists())
-
-    def test_no_file_is_no_claim(self):
-        self.assertIsNone(self.half.claim(self.intent))
-
-
-class SignerClaim(unittest.TestCase):
-    """R331-XLM-1 at its second caller: signatario_stellar.StellarCtx.claim_holds / recipient_bound."""
-
-    def setUp(self):
-        import signatario_stellar as ST
-        self.ctx = object.__new__(ST.StellarCtx)
-        self.ctx.cfg = {'router': ROUTER, 'eth_signer': BURNER}
-        self.ctx.l2_chain_id, self.ctx.token, self.ctx.cast = CHAIN, TOKEN, '/nonexistent/cast'
-
-    def test_claims(self):
-        good = {**claim_for(PAYEE), 'burner': BURNER, 'text': 'x'}   # as the half reports it
-        self.assertTrue(self.ctx.claim_holds(good, BURNER, '0x' + BURN, PAYEE))
-        self.assertFalse(self.ctx.claim_holds(good, BURNER, '0x' + BURN, MALLORY))
-        self.assertFalse(self.ctx.claim_holds(good, STRANGER, '0x' + BURN, PAYEE))
-        self.assertFalse(self.ctx.claim_holds(good, ROUTER, '0x' + BURN, PAYEE))
-        for sig in ('--help', '-h', None):
-            forged = {'stellar_address': MALLORY, 'signature': sig, 'burner': BURNER}
-            self.assertFalse(self.ctx.claim_holds(forged, BURNER, '0x' + BURN, MALLORY))
-            self.assertFalse(self.ctx.recipient_bound(MALLORY, '0x' + '11' * 20, forged, BURNER, '0x' + BURN))
-        commitment = '0x' + sn.recipient_commitment(PAYEE).hex()
-        self.assertTrue(self.ctx.recipient_bound(PAYEE, commitment, None, ROUTER, '0x' + BURN))
+    def test_an_option_of_a_program_is_not_a_signature(self):
+        digest = hashlib.sha256(b'a vault digest').digest()
+        good = sign(key(3), sn.personal(digest))
+        for sig in ('--help', '-h', '--version', '', ' ', '0x', None, 0, True, [], {}, good[2:], good + '00', good[:-2],
+                    good + '\n', '0x' + 'zz' * 65, good[:-2] + '23', '0x' + '00' * 32 + good[66:]):
+            with self.subTest(sig=repr(sig)[:24]):
+                self.assertIsNone(sn.recover_personal(digest, sig))
+                with self.assertRaises(sn.SignatureError):
+                    sn.signature_bytes(sig)
 
 
 class CommandLines(unittest.TestCase):
@@ -238,6 +122,11 @@ class CommandLines(unittest.TestCase):
         with self.assertRaises(sn.StellarError):
             sn.Net._fn_args({'id': '--help'})
         self.assertEqual(sn.Net._fn_args({'nonce': 3, 'burn': 'ab'}), ['--nonce', '3', '--burn', 'ab'])
+
+    def test_a_journal_key_does_not_start_with_a_dash(self):
+        self.assertIsNone(relay_stellar.KEY.fullmatch('-rf'))
+        self.assertIsNone(relay_stellar.KEY.fullmatch('--help'))
+        self.assertIsNotNone(relay_stellar.KEY.fullmatch('release-3-p0'))
 
     def test_no_argument_can_start_with_a_dash(self):
         samples = [{'item': {'route': 'ab' * 32, 'nonce': 1, 'recipient': PAYEE, 'amount': 5}, 'signatures': ['cd' * 65]},
@@ -275,14 +164,18 @@ class CommandLines(unittest.TestCase):
             text = (HERE / name).read_text()
             subcommands = re.findall(r"cast,\s*'([\w-]+)'(?:,\s*'([\w-]+)')?", text)
             self.assertTrue(all(c == ('wallet', 'sign') for c in subcommands), f'{name}: {subcommands}')
-            for banned in ('shell=True', 'os.system', 'os.popen', "'--no-hash'"):
+            for banned in ('shell=True', 'os.system', 'os.popen', "'--no-hash'", 'recipient_claims', 'recipient_hints',
+                           'claim_grace', 'claim_text', 'verify_claim'):
                 self.assertFalse(banned in text, f'{name}: {banned}')
+        # the guardian takes no decision from the host clock or an L2 timestamp (review 331, R331-XLM-3P-3)
+        self.assertNotIn('import time', (HERE / 'guardiao_stellar.py').read_text())
         for name in ('signatario_stellar.py', 'vigia_stellar.py', 'relay_stellar.py', 'reservas_stellar.py', 'pairing.py'):
             self.assertNotIn('import subprocess', (HERE / name).read_text(), name)
 
 
-# ── the guardian check, against a fake vault and fake L2 sources ─────────────
+# ── fake L2 sources and a fake vault ─────────────────────────────────────────
 ROUTE = hashlib.sha256(b'route').hexdigest()
+ROUTER_CODE = '0x' + 'c1' * 32
 
 
 def block_hash(n, fork=b''):
@@ -290,7 +183,8 @@ def block_hash(n, fork=b''):
 
 
 class FakeL2:
-    """state[url] = {'chain', 'fin', 'head', 'burns': [...], 'time': {number: timestamp}, 'fork': bytes}"""
+    """state[url] = {'chain', 'fin', 'head', 'burns': [...], 'claims': {(burner, nonce): (address, block)},
+    'time': f(number), 'fork': bytes, 'router_code': hex}"""
     state = {}
 
     def __init__(self, url, timeout=30):
@@ -317,26 +211,40 @@ class FakeL2:
         return len(self.burns(number))
 
     def call(self, to, data, number):
-        assert data.startswith(sn.selector('burnIdOf(uint64)'))
+        if data.startswith(sn.selector('claimOf(address,uint64)')):
+            assert to == ROUTER
+            burner, nonce = '0x' + data[10 + 24:10 + 64], int(data[10 + 64:], 16)
+            address, at = self.s['claims'].get((burner, nonce), ('', 0))
+            return abi_string_answer(address if at <= number else '')
+        assert to == TOKEN and data.startswith(sn.selector('burnIdOf(uint64)'))
         nonce = int(data[10:], 16)
         got = [b for b in self.burns(number) if b['nonce'] == nonce]
         return '0x' + (got[0]['id'] if got else '00' * 32)
 
     def code_keccak(self, a, n):
-        return '0x' + 'c0' * 32
+        return self.s.get('router_code', ROUTER_CODE) if a == ROUTER else '0x' + 'c0' * 32
 
     def logs(self, address, topics, start, end):
         out = []
         for b in self.burns(end):
-            if '0x' + b['id'] == topics[1]:
-                data = '0x' + '%064x' % b['amount'] + '00' * 12 + b['recipient'][2:] + '%064x' % 1 + '%064x' % 1 + 'aa' * 32
-                out.append({'topics': [sn.BURNED_TOPIC, '0x' + b['id'], '0x%064x' % b['nonce'], '0x' + '00' * 12 + b['from'][2:]],
-                            'data': data, 'block': b['block'], 'block_hash': block_hash(b['block'])})
+            if b['block'] >= start and '0x' + b['id'] == topics[1]:
+                if address == TOKEN:
+                    data = ('0x' + '%064x' % b['amount'] + '00' * 12 + b['recipient'][2:] + '%064x' % 1 + '%064x' % 1
+                            + 'aa' * 32)
+                    out.append({'topics': [sn.BURNED_TOPIC, '0x' + b['id'], '0x%064x' % b['nonce'],
+                                           '0x' + '00' * 12 + b['from'][2:]],
+                                'data': data, 'block': b['block'], 'block_hash': block_hash(b['block'])})
+                elif address == ROUTER and b.get('logged'):
+                    text = b['logged'].encode()
+                    data = ('0x' + '%064x' % b['amount'] + b['recipient'][2:] + '00' * 12 + '%064x' % 96
+                            + '%064x' % len(text) + text.ljust(64, b'\0').hex())
+                    out.append({'topics': [sn.STELLAR_EXIT_TOPIC, '0x' + b['id']], 'data': data, 'block': b['block'],
+                                'block_hash': block_hash(b['block'])})
         return out
 
 
 class FakeVault:
-    events_list, pendings, invocations, now = [], {}, {}, 0
+    events_list, pendings, invocations, now, delay = [], {}, {}, 0, 7200
 
     def __init__(self, cfg):
         self.passphrase, self.vault = cfg['network_passphrase'], cfg['vault']
@@ -350,6 +258,8 @@ class FakeVault:
     def view(self, fn, **args):
         if fn == 'state':
             return {'pause_count': 0}
+        if fn == 'config':
+            return {'release_delay': FakeVault.delay}
         if fn == 'pending':
             return FakeVault.pendings.get(args['id'])
         raise AssertionError(fn)
@@ -364,37 +274,148 @@ class FakeVault:
         return FakeVault.invocations.get(tx)
 
 
-class GuardianCheck(unittest.TestCase):
-    """R331-XLM-3, both directions, and the guardian's own recipient check (R331-XLM-1, last paragraph)."""
-
+class Rig(unittest.TestCase):
     def setUp(self):
-        self.now = int(time.time())
-        FakeVault.events_list, FakeVault.pendings, FakeVault.invocations, FakeVault.now = [], {}, {}, self.now
-        # A live L2: block n was made 12 s after block n - 1; the head is 10 s old; 64 blocks are not yet final.
+        self.now = 1_800_000_000
+        FakeVault.events_list, FakeVault.pendings, FakeVault.invocations = [], {}, {}
+        FakeVault.now, FakeVault.delay = self.now, 7200
         clock = lambda n: self.now - 10 - (300 - n) * 12  # noqa: E731
-        FakeL2.state = {'a': {'chain': CHAIN, 'fin': 236, 'head': 300, 'burns': [], 'time': clock},
-                        'b': {'chain': CHAIN, 'fin': 236, 'head': 300, 'burns': [], 'time': clock}}
-        self.dir = Path(tempfile.mkdtemp(prefix='a338-g-'))
+        FakeL2.state = {u: {'chain': CHAIN, 'fin': 236, 'head': 300, 'burns': [], 'claims': {}, 'time': clock}
+                        for u in ('a', 'b')}
         self.cfg = {'stellar_rpc': 'x', 'network_passphrase': PASS, 'vault': VAULT, 'l2_rpc': 'a', 'l2_chain_id': CHAIN,
-                    'token': TOKEN, 'router': ROUTER, 'recipient_claims': str(self.dir)}
-        for target, fake in ((sn, 'Net'), (sn, 'L2')):
-            patch = mock.patch.object(target, fake, FakeVault if fake == 'Net' else FakeL2)
+                    'token': TOKEN, 'router': ROUTER, 'router_code_keccak': ROUTER_CODE}
+        for name, fake in (('Net', FakeVault), ('L2', FakeL2)):
+            patch = mock.patch.object(sn, name, fake)
             patch.start()
             self.addCleanup(patch.stop)
 
-    def burn(self, nonce, block, recipient, amount=50, frm=ROUTER, commit=True):
+    def burn(self, nonce, block, recipient=None, amount=50, direct=False):
+        """A router burn committed to `recipient`, or a direct burn by BURNER towards its own L2 address."""
         b = {'nonce': nonce, 'id': hashlib.sha256(b'burn %d' % nonce).hexdigest(), 'block': block, 'amount': amount,
-             'from': frm, 'recipient': '0x' + sn.recipient_commitment(recipient).hex() if commit else frm}
+             'from': BURNER if direct else ROUTER, 'logged': None if direct else recipient,
+             'recipient': BURNER if direct else '0x' + sn.recipient_commitment(recipient).hex()}
         for s in FakeL2.state.values():
             s['burns'].append(b)
         return b
 
-    def release(self, b, recipient, ledger=990, amount=None, event='released', named=True, names=None, tx=None):
+    def claim(self, nonce, to, block, burner=BURNER, only=('a', 'b')):
+        for u in only:
+            FakeL2.state[u]['claims'][(burner, nonce)] = (to, block)
+
+    def burned(self, b):
+        return {'burn_id': '0x' + b['id'], 'nonce': b['nonce'], 'from': b['from'], 'recipient': b['recipient'],
+                'block': b['block']}
+
+
+class Destination(Rig):
+    """R331-XLM-3P-1: where a burn is paid is ONE rule over the final L2, for every party."""
+
+    def test_a_router_burn_is_paid_to_the_address_the_router_logged_and_committed_to(self):
+        b = self.burn(1, 100, PAYEE)
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'router'))
+        b['logged'] = MALLORY   # a log whose string does not hash to the burn's 20 bytes names nobody
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'router'))
+
+    def test_a_direct_burn_is_paid_only_to_its_burners_claim_at_the_final_block(self):
+        b = self.burn(1, 100, direct=True)
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim'))
+        self.claim(1, PAYEE, 230)
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim'))
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 229), (None, 'claim'))  # not yet then
+        self.claim(1, MALLORY, 100, burner=STRANGER)   # a stranger's claim for that nonce is the stranger's own slot
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (PAYEE, 'claim'))
+
+    def test_a_direct_burn_is_never_paid_to_the_20_bytes_it_names(self):
+        b = self.burn(1, 100, direct=True)
+        b['recipient'] = '0x' + sn.recipient_commitment(MALLORY).hex()   # even when they are a commitment
+        self.assertEqual(sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236), (None, 'claim'))
+
+    def test_malformed_answers_are_errors_not_claims(self):
+        b = self.burn(1, 100, direct=True)
+        for answer in ('0x', '0x' + '00' * 31, abi_string_answer('--help'), abi_string_answer('G' + 'A' * 55),
+                       abi_string_answer('x' * 300)):
+            with mock.patch.object(FakeL2, 'call', return_value=answer), self.assertRaises(sn.StellarError):
+                sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 236)
+        with self.assertRaises(sn.StellarError):
+            sn.burn_destination(FakeL2('a'), ROUTER, self.burned(b), 99)   # a final block before the burn
+
+
+class SignerDestination(Rig):
+    """The signer reads the destination from the L2 view it read the burn from; the half checks it again."""
+
+    def setUp(self):
+        super().setUp()
+        import signatario_stellar as ST
+        self.ST = ST
+        self.ctx = object.__new__(ST.StellarCtx)
+        self.ctx.cfg = {'router': ROUTER, 'router_code_keccak': ROUTER_CODE}
+        self.ctx.router = ROUTER
+
+    def read(self, b):
+        release = {'nativeBurn': '0x' + b['id'], 'nonce': b['nonce'], 'recipient': b['recipient']}
+        l2 = {'from': b['from'], 'burn_block': b['block'], 'finalized_number': 236, 'finalized_hash': block_hash(236)}
+        out = io.StringIO()
+        with mock.patch.object(self.ST, '_finalized_burn', return_value=(release, l2)), contextlib.redirect_stdout(out):
+            try:
+                return self.ST.finalized_burn(self.ctx, 'a', '0x' + '00' * 32, None)[1]['stellar']
+            except SystemExit:
+                return json.loads(out.getvalue())['reason']
+
+    def test_router_burn_direct_unclaimed_and_claimed(self):
+        self.assertEqual(self.read(self.burn(1, 100, PAYEE)), {'recipient': PAYEE, 'via': 'router', 'router': ROUTER})
+        direct = self.burn(2, 110, direct=True)
+        self.assertIn('never paid to the 20 bytes', self.read(direct))
+        self.claim(2, PAYEE, 240)                                  # claimed, but not final yet
+        self.assertIn('never paid to the 20 bytes', self.read(direct))
+        self.claim(2, PAYEE, 236)
+        self.assertEqual(self.read(direct), {'recipient': PAYEE, 'via': 'claim', 'router': ROUTER})
+
+    def test_another_router_code_or_another_final_block_is_refused(self):
+        b = self.burn(1, 100, PAYEE)
+        FakeL2.state['a']['router_code'] = '0x' + 'ee' * 32
+        self.assertIn('pinned code', self.read(b))
+        FakeL2.state['a'].update(router_code=ROUTER_CODE, fork=b'another history')
+        self.assertIn('changed its final block', self.read(b))
+
+    def half(self, intent, **cfg):
+        h = object.__new__(stellar_half.Half)
+        h.cfg = cfg
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                return h.stellar_recipient(intent, bytes.fromhex(intent['release']['recipient'][2:]))
+            except SystemExit:
+                return json.loads(out.getvalue())['reason']
+
+    def test_the_half_checks_the_recipient_again(self):
+        b = self.burn(1, 100, PAYEE)
+        intent = {'release': {'nonce': 1, 'recipient': b['recipient']},
+                  'l2': {'from': ROUTER, 'finalized_number': 236, 'stellar': {'recipient': PAYEE, 'via': 'router', 'router': ROUTER}}}
+        self.assertEqual(self.half(intent), (PAYEE, 'router'))
+        intent['l2']['stellar']['recipient'] = MALLORY
+        self.assertIn('does not hash', self.half(intent))
+        for bad in ({}, {'recipient': '--help', 'via': 'router'}, {'recipient': PAYEE}, {'recipient': PAYEE, 'via': 'file'}):
+            intent['l2']['stellar'] = bad
+            self.assertIsInstance(self.half(intent), str)
+        d = self.burn(2, 110, direct=True)
+        self.claim(2, PAYEE, 200)
+        intent = {'release': {'nonce': 2, 'recipient': d['recipient']},
+                  'l2': {'from': BURNER, 'finalized_number': 236, 'stellar': {'recipient': PAYEE, 'via': 'claim', 'router': ROUTER}}}
+        self.assertEqual(self.half(intent), (PAYEE, 'claim'))                      # no l2_rpc: the signer's read stands
+        self.assertEqual(self.half(intent, l2_rpc='a'), (PAYEE, 'claim'))          # own RPC agrees
+        intent['l2']['stellar']['recipient'] = MALLORY
+        self.assertIn('holds another claim', self.half(intent, l2_rpc='a'))       # own RPC disagrees: hold
+
+
+class GuardianCheck(Rig):
+    """R331-XLM-3 and the third pass (3P-1, 3P-2, 3P-3), both directions."""
+
+    def release(self, b, recipient, ledger=990, amount=None, event='released', named=True, names=None):
         """A release event of the vault for the L2 burn `b` (or for fields that are no burn at all)."""
         item = {'route': ROUTE, 'nonce': b['nonce'], 'recipient': recipient, 'amount': amount or b['amount'],
                 'native_burn': b['id'], 'mint_count': 1, 'minted_total': 1, 'mint_head': 'aa' * 32}
         rid = sn.release_id(item).hex()
-        tx = tx or hashlib.sha256(rid.encode()).hexdigest()
+        tx = hashlib.sha256((rid + event).encode()).hexdigest()
         if named:
             n, h = names or (b['block'], block_hash(b['block']))
             FakeVault.invocations[tx] = {'contract': VAULT, 'function': 'release',
@@ -413,38 +434,39 @@ class GuardianCheck(unittest.TestCase):
             G.Guardian({**self.cfg, **cfg}).check()
         return e.exception.code, json.loads(out.getvalue())
 
-    def forged(self, nonce, block=None):
-        return {'nonce': nonce, 'id': hashlib.sha256(b'no such burn %d' % nonce).hexdigest(), 'block': block or 200,
-                'amount': 70}
+    def forged(self, nonce, block=200):
+        return {'nonce': nonce, 'id': hashlib.sha256(b'no such burn %d' % nonce).hexdigest(), 'block': block, 'amount': 70}
+
+    def stall(self, fin=229, head=229):
+        for s in FakeL2.state.values():
+            s.update(fin=fin, head=head)
 
     # honest releases
-    def test_an_honest_release_is_ok(self):
+    def test_an_honest_router_release_is_ok(self):
         self.release(self.burn(1, 100, PAYEE), PAYEE)
         code, out = self.check()
         self.assertEqual((code, out['findings'], out['cannot_judge'], out['releases_checked']), (0, [], [], 1))
 
     # direction 1: a guardian that lags must not read a real release as a forgery
     def test_a_guardian_whose_l2_is_behind_the_burn_cannot_judge_and_does_not_pause(self):
-        self.release(self.burn(1, 230, PAYEE), PAYEE, event='release_queued')
-        # this guardian's follower stopped at block 229 an hour ago; the release names block 230
-        stalled = lambda n: self.now - 3600 - (229 - n) * 12  # noqa: E731
-        FakeL2.state['a'].update(fin=229, head=229, time=stalled)
+        self.release(self.burn(1, 230, PAYEE), PAYEE, event='release_queued')   # queued 50 s ago
+        self.stall()
         code, out = self.check()
         self.assertEqual((code, out['findings'], out['action']), (3, [], 'alert-a-human-do-not-pause'))
-        self.assertIn('behind the release', out['cannot_judge'][0]['reason'])
+        self.assertIn('does not reach the release', out['cannot_judge'][0]['reason'])
+        self.assertEqual((out['cannot_judge'][0]['age_seconds'], out['stall_deadline']), (50, 3600))
 
     def test_the_reviewers_case_a_view_one_block_before_a_paid_burn(self):
         b = self.burn(2, 200, PAYEE)
         self.burn(1, 100, PAYEE)
-        self.release(b, PAYEE)
+        self.release(b, PAYEE, ledger=1)          # paid long ago: 4,995 s
         code, out = self.check(l2_finalized_tag='199')
-        self.assertEqual((code, out['findings']), (3, []))
-        code, out = self.check(l2_finalized_tag='200')
-        self.assertEqual(code, 0)
+        self.assertEqual((code, out['findings']), (3, []))     # paid, not queued: the stall rule does not apply
+        self.assertEqual(self.check(l2_finalized_tag='200')[0], 0)
 
     def test_sources_that_fail_or_disagree_or_serve_another_chain_cannot_judge(self):
         self.release(self.forged(1), MALLORY, names=(100, block_hash(100)))
-        self.assertEqual(self.check()[0], 2)   # one good source: a finding
+        self.assertEqual(self.check()[0], 2)
         FakeL2.state['b']['fork'] = b'another history'
         code, out = self.check(l2_rpc_others=['b'])
         self.assertEqual((code, out['findings']), (3, []))
@@ -452,8 +474,11 @@ class GuardianCheck(unittest.TestCase):
         FakeL2.state['b'].update(fork=b'', chain=1)
         self.assertEqual(self.check(l2_rpc_others=['b'])[0], 3)
         FakeL2.state['b'].update(chain=CHAIN)
-        self.assertEqual(self.check(l2_rpc_others=['b'])[0], 2)   # two agreeing sources: a finding again
+        self.assertEqual(self.check(l2_rpc_others=['b'])[0], 2)
         self.assertEqual(self.check(require_two_l2_sources=True)[0], 3)
+        FakeL2.state['a']['router_code'] = '0x' + 'ee' * 32
+        self.assertIn('router', self.check()[1]['l2_view_problem'])
+        FakeL2.state['a']['router_code'] = ROUTER_CODE
         with mock.patch.object(FakeL2, 'block', side_effect=sn.StellarError('down')):
             self.assertEqual(self.check()[0], 3)
 
@@ -461,8 +486,13 @@ class GuardianCheck(unittest.TestCase):
         self.assertEqual(self.check()[0], 0)
         FakeL2.state['a']['chain'] = 1
         code, out = self.check()
-        self.assertEqual((code, out['ok'], out['action'], out['releases_checked']),
-                         (3, False, 'alert-a-human-do-not-pause', 0))
+        self.assertEqual((code, out['ok'], out['action'], out['releases_checked']), (3, False, 'alert-a-human-do-not-pause', 0))
+
+    def test_a_blind_guardian_never_pauses_however_old_the_queued_release(self):
+        self.release(self.forged(1), MALLORY, ledger=1, event='release_queued', names=(10**12, block_hash(1)))
+        FakeL2.state['a']['chain'] = 1
+        code, out = self.check()
+        self.assertEqual((code, out['findings']), (3, []))     # the stated trade-off: this one waits for a person
 
     def test_two_sources_one_behind_use_the_lower_final_block(self):
         self.release(self.burn(1, 230, PAYEE), PAYEE)
@@ -470,12 +500,11 @@ class GuardianCheck(unittest.TestCase):
         code, out = self.check(l2_rpc_others=['b'])
         self.assertEqual((code, out['l2_finalized']), (3, 225))
 
-    # direction 2: a real forgery is found by a view that reaches the release
+    # direction 2: forgeries found by block numbers and finality alone
     def test_a_forgery_naming_a_final_block_is_a_finding(self):
         rid = self.release(self.forged(1), MALLORY, event='release_queued', names=(200, block_hash(200)))
         code, out = self.check()
-        self.assertEqual((code, out['action']), (2, 'pause'))
-        self.assertEqual(out['findings'][0]['release'], rid)
+        self.assertEqual((code, out['action'], out['findings'][0]['release']), (2, 'pause', rid))
         self.assertIn('holds no burn with this nonce', out['findings'][0]['reason'])
 
     def test_a_forgery_naming_a_block_of_another_history_is_a_finding(self):
@@ -483,32 +512,6 @@ class GuardianCheck(unittest.TestCase):
         code, out = self.check()
         self.assertEqual(code, 2)
         self.assertIn('not the final chain', out['findings'][0]['reason'])
-
-    def test_a_forgery_cannot_hide_behind_a_block_number_nobody_will_reach(self):
-        # made 1,000 s ago (ledger 800), naming a block far in the future, or reachable only through another contract
-        for kw in ({'names': (10**12, block_hash(1))}, {'named': False}):
-            FakeVault.events_list = []
-            self.release(self.forged(1), MALLORY, ledger=800, event='release_queued', **kw)
-            code, out = self.check()
-            self.assertEqual(code, 2, out)
-            self.assertIn('made after this release', out['findings'][0]['reason'])
-
-    def test_the_same_forgery_seconds_after_it_was_made_is_not_yet_judged_and_is_judged_later(self):
-        self.release(self.forged(1), MALLORY, ledger=1000, event='release_queued', names=(10**12, block_hash(1)))
-        self.assertEqual(self.check()[0], 3)       # no L2 block is later than the release yet
-        FakeVault.now -= 0                          # ... the L2 moves on: its head is now later than the release
-        for s in FakeL2.state.values():
-            s['time'] = lambda n: self.now + 200 - (300 - n) * 12
-        with mock.patch.object(G.time, 'time', return_value=self.now + 400):
-            code, out = self.check()
-        self.assertEqual(code, 2)
-        self.assertIn('not even a pending burn', out['findings'][0]['reason'])
-
-    def test_a_chain_whose_clock_is_ahead_gives_no_later_block_evidence(self):
-        self.release(self.forged(1), MALLORY, ledger=880, names=(10**12, block_hash(1)))
-        for s in FakeL2.state.values():
-            s['time'] = lambda n: self.now + 86400   # a test chain whose clock was moved forward
-        self.assertEqual(self.check()[0], 3)
 
     def test_another_burn_id_or_amount_for_a_final_nonce_is_a_finding(self):
         real = self.burn(1, 100, PAYEE)
@@ -528,79 +531,131 @@ class GuardianCheck(unittest.TestCase):
         code, out = self.check()
         self.assertEqual((code, [v['release'] for v in out['voided']]), (0, [rid]))
 
-    # the recipient: the router's address, or the burner's verified claim, and nothing else
+    # 3P-2: "cannot judge" is bounded for a queued release (the stall rule)
+    def test_3p2_a_forgery_under_the_forgers_own_pending_nonce_is_a_finding_at_the_deadline(self):
+        """Reviewer 331's case: the forger's own burn (nonce 1) is at the head, not final; the forged release takes
+        that nonce and names an unreachable block (or hides the block behind another contract). L2 finality stands
+        still while the head moves."""
+        for kw in ({'names': (10**9, '0x' + '11' * 32)}, {'named': False}):
+            FakeVault.events_list, FakeVault.pendings = [], {}
+            self.burn(1, 290, direct=True)                           # pending: above the final block 236
+            self.release(self.forged(1), MALLORY, ledger=990, event='release_queued', **kw)   # 50 s old
+            code, out = self.check(stall_deadline=100)
+            self.assertEqual((code, out['findings']), (3, []), kw)   # paged at once, no pause yet
+            FakeVault.events_list[0]['ledger'] = 970                 # ... 150 s old, finality where it was
+            for s in FakeL2.state.values():
+                s['head'] = 320                                      # the head moved on
+            code, out = self.check(stall_deadline=100)
+            self.assertEqual(code, 2, kw)
+            self.assertIn('stall rule', out['findings'][0]['reason'])
+            for s in FakeL2.state.values():
+                s.update(head=300, burns=[])
+
+    def test_3p2_by_default_the_deadline_is_half_the_release_delay_and_cannot_be_later(self):
+        self.release(self.forged(1), MALLORY, ledger=300, event='release_queued', named=False)   # 3,500 s old
+        self.assertEqual(self.check()[0], 3)
+        FakeVault.events_list[0]['ledger'] = 270                     # 3,650 s old: past 3,600
+        self.assertEqual(self.check()[0], 2)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            G.Guardian({**self.cfg, 'stall_deadline': 3601}).check()
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn('half the vault', json.loads(out.getvalue())['reason'])
+        FakeVault.delay = 0                                          # no queue: nothing waits, nothing to bound
+        self.assertEqual(self.check()[0], 3)
+
+    def test_3p2_the_price_a_guardian_whose_own_follower_stands_still_pauses_after_the_deadline(self):
+        self.release(self.burn(1, 230, PAYEE), PAYEE, ledger=200, event='release_queued')   # honest, 4,000 s old
+        self.stall()
+        code, out = self.check()
+        self.assertEqual(code, 2)                                    # the stated trade-off of the stall rule
+        self.assertIn('stall rule', out['findings'][0]['reason'])
+
+    def test_3p2_a_paid_release_is_not_paused_for(self):
+        self.release(self.burn(1, 230, PAYEE), PAYEE, ledger=200, event='released')
+        self.stall()
+        self.assertEqual(self.check()[0], 3)
+
+    # 3P-3: no timestamp decides
+    def test_3p3_a_block_stamped_far_ahead_changes_no_verdict_and_is_its_own_alert(self):
+        self.burn(1, 290, direct=True)
+        self.release(self.forged(1), MALLORY, ledger=970, event='release_queued', names=(10**9, '0x' + '11' * 32))
+        self.release(self.forged(2), MALLORY, ledger=995, event='release_queued', names=(100, block_hash(100)))
+        before = self.check(stall_deadline=100)
+        for s in FakeL2.state.values():
+            s['time'] = lambda n: self.now + 600                     # every block stamped 10 minutes ahead
+        after = self.check(stall_deadline=100)
+        self.assertEqual((before[0], after[0]), (2, 2))
+        self.assertEqual([f['release'] for f in before[1]['findings']], [f['release'] for f in after[1]['findings']])
+        self.assertEqual(len(after[1]['findings']), 2)
+        self.assertEqual((before[1]['alerts'], after[1]['alerts'][0]['kind'], after[1]['alerts'][0]['ahead_seconds']),
+                         ([], 'l2-clock-ahead', 600))
+
+    def test_3p3_with_nothing_else_wrong_the_alert_is_exit_4_and_can_be_switched_off(self):
+        self.release(self.burn(1, 100, PAYEE), PAYEE)
+        for s in FakeL2.state.values():
+            s['time'] = lambda n: self.now + 86400
+        code, out = self.check()
+        self.assertEqual((code, out['ok'], out['action']), (4, True, 'alert-a-human'))
+        self.assertEqual(self.check(l2_clock_alert_seconds=0)[0], 0)
+        for s in FakeL2.state.values():
+            s['time'] = lambda n: self.now - 10**6                   # a clock far behind: no verdict changes either
+        self.assertEqual(self.check()[0], 0)
+
+    # 3P-1: the recipient is judged against the one rule, never against a file
     def test_a_router_burn_paid_to_another_address_is_a_finding(self):
         self.release(self.burn(1, 100, PAYEE), MALLORY)
         code, out = self.check()
         self.assertEqual(code, 2)
         self.assertIn('router', out['findings'][0]['reason'])
 
-    def direct(self, recipient, ledger=990):
-        b = self.burn(1, 100, PAYEE, frm=BURNER, commit=False)
-        self.release(b, recipient, ledger=ledger)
-        return b
+    def test_3p1_a_direct_burn_paid_to_its_burners_claim_is_ok_for_every_guardian(self):
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150)
+        self.release(b, PAYEE)
+        for sources in ({}, {'l2_rpc_others': ['b']}, {'l2_rpc': 'b'}):
+            self.assertEqual(self.check(**sources)[0], 0)
+        # there is no second claim to be handed: a claim file in any directory changes nothing
+        self.assertEqual(self.check(recipient_claims='/nonexistent')[0], 0)
 
-    def write_claim(self, b, claim):
-        (self.dir / f"{b['id']}.json").write_text(json.dumps(claim))
-
-    def test_a_direct_burn_paid_on_the_burners_claim_is_ok(self):
-        b = self.direct(PAYEE)
-        self.write_claim(b, claim_for(PAYEE, burn=b['id']))
-        self.assertEqual(self.check()[0], 0)
-
-    def test_the_reviewers_attack_a_stranger_paid_on_a_forged_claim_is_caught_by_the_guardian(self):
-        b = self.direct(MALLORY, ledger=500)      # paid to the stranger long ago
-        self.write_claim(b, {'stellar_address': MALLORY, 'signature': '--help'})
+    def test_3p1_a_direct_burn_paid_to_another_address_than_the_claim_is_a_finding_at_once(self):
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150)
+        self.release(b, MALLORY, ledger=999)
         code, out = self.check()
         self.assertEqual(code, 2)
-        self.assertIn('no claim signed by the account that burned', out['findings'][0]['reason'])
-        self.assertIn('130 hexadecimal', out['findings'][0]['reason'])
-        self.write_claim(b, claim_for(MALLORY, STRANGER_KEY, burn=b['id']))   # signed, but not by the burner
-        self.assertEqual(self.check()[0], 2)
+        self.assertIn('claimed on the router', out['findings'][0]['reason'])
 
-    def test_a_verified_claim_for_another_address_is_a_finding_at_once(self):
-        b = self.direct(MALLORY)
-        self.write_claim(b, claim_for(PAYEE, burn=b['id']))
-        code, out = self.check()
-        self.assertEqual(code, 2)
-        self.assertIn('names another Stellar address', out['findings'][0]['reason'])
-
-    def test_a_claim_this_guardian_was_not_handed_is_cannot_judge_for_the_grace_then_a_finding(self):
-        self.direct(PAYEE, ledger=990)            # 50 s ago
-        code, out = self.check()
+    def test_3p1_a_direct_burn_paid_with_no_final_claim_is_cannot_judge_then_the_stall_rule(self):
+        b = self.burn(1, 100, direct=True)
+        self.release(b, MALLORY, ledger=990, event='release_queued')
+        code, out = self.check(stall_deadline=100)
         self.assertEqual((code, out['findings']), (3, []))
-        self.assertIn('obtain recipient_claims', out['cannot_judge'][0]['reason'])
-        self.assertEqual(self.check(claim_grace=10)[0], 2)
+        self.assertIn('no claim', out['cannot_judge'][0]['reason'])
+        self.claim(1, PAYEE, 250)                                    # a claim that is not final yet does not count
+        self.assertEqual(self.check(stall_deadline=100)[0], 3)
+        FakeVault.events_list[0]['ledger'] = 900
+        self.assertEqual(self.check(stall_deadline=100)[0], 2)
+        self.claim(1, MALLORY, 150)                                  # (the honest case: the claim final, and paid)
+        self.assertEqual(self.check(stall_deadline=100)[0], 0)
+
+    def test_3p1_sources_that_disagree_on_the_claim_cannot_judge(self):
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150, only=('a',))
+        self.claim(1, MALLORY, 150, only=('b',))
+        self.release(b, PAYEE)
+        code, out = self.check(l2_rpc_others=['b'])
+        self.assertEqual((code, out['findings']), (3, []))
+        self.assertIn('different answers', out['cannot_judge'][0]['reason'])
 
     # R331-XLM-7
     def test_a_pause_is_never_signed_for_more_than_an_hour(self):
         out = io.StringIO()
         with mock.patch.object(FakeVault, 'view', return_value={'pause_count': 0, 'route': ROUTE, 'guardians': []}), \
                 contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
-            G.Guardian({**self.cfg, 'valid_seconds': 86400, 'cast': '/nonexistent'}).pause(self.dir / 'p.json')
+            G.Guardian({**self.cfg, 'valid_seconds': 86400, 'cast': '/nonexistent'}).pause('/nonexistent/p.json')
         self.assertEqual(e.exception.code, 1)
         self.assertIn('never signed in advance', json.loads(out.getvalue())['reason'])
-
-
-class Pins(unittest.TestCase):
-    """R331-XLM-5: the re-pin rule of the Stellar half."""
-
-    def test_repin(self):
-        core = {'nonce': 4, 'recipient': PAYEE, 'amount': 9, 'burn': BURN, 'mint_count': 1, 'mint_head': 'aa'}
-        other = {**core, 'recipient': MALLORY}
-        dead = {'valid_until': 100, 'pause_count': 2, 'claimed': True}
-        new = {'valid_until': 900, 'pause_count': 2, 'claimed': True}
-        ok = stellar_half.repin_allowed
-        self.assertTrue(ok(core, other, dead, new, now=101))                       # the old signature expired
-        self.assertFalse(ok(core, other, dead, new, now=100))                      # still usable
-        self.assertFalse(ok(core, other, dead, new, now=50))
-        self.assertTrue(ok(core, other, dead, {**new, 'pause_count': 3}, now=50))  # a pause killed it
-        self.assertFalse(ok(core, other, {**dead, 'claimed': False}, new, now=101))   # a router burn: never
-        self.assertFalse(ok(core, other, dead, {**new, 'claimed': False}, now=101))
-        self.assertFalse(ok(core, other, None, new, now=101))                      # an entry from before this rule
-        self.assertFalse(ok(core, {**other, 'amount': 10}, dead, new, now=101))    # only the recipient may differ
-        self.assertFalse(ok(core, {**other, 'nonce': 5}, dead, new, now=101))
-        self.assertFalse(ok(core, other, {'claimed': True}, new, now=101))
 
 
 class Asset(unittest.TestCase):
