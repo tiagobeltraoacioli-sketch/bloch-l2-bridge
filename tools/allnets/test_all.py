@@ -43,6 +43,9 @@ OWNED = {
     'tron': ['tools/signatario-tron', 'contracts/tron', 'deployments/tron', 'solidity-tests/tron-ported'],
     'solana': ['tools/signatario-solana', 'contracts/solana', 'deployments/solana', 'solana'],
     'stellar': ['tools/signatario-stellar', 'contracts/stellar', 'deployments/stellar', 'stellar'],
+    'operator-pkg': ['ops', 'docs/OPERATOR-PACKAGES.md'],
+    'ceremony': ['deploy/ceremony', 'docs/BRIDGE-OWNER-CEREMONY.md', 'tools/deploy-pontes/ceremony_kit.py',
+                 'tools/deploy-pontes/test_ceremony_kit.py'],
     'evm-nets': ['tools/evm-nets', 'deployments/arbitrum-one', 'deployments/op-mainnet', 'deployments/linea',
                  'deployments/base', 'deployments/bnb'],
 }
