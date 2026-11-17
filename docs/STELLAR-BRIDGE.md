@@ -5,7 +5,9 @@ audit before any real funds. Round 16 (agent 324, branch `codex/bridge-stellar-r
 (agent 338, branch `codex/bridge-stellar-r17-20261117`) after the second independent review
 (`agents/331-bridge-stellar-review-r17.md`). The vault contract is unchanged since `ffdb9b5`; round 17 changed the
 tools, the deployment files and the documents. Revision 4 (after the reviewer's third pass) also changed the L2
-exit router, a periphery contract with no power: it gained the set-once claim of a direct burn.
+exit router, a periphery contract with no power: it gained the claim of a direct burn. Revision 5 (round 18, agent
+373) changed the router again (claims kept in order, the latest counts; a held exit is redirected by its burner)
+and the tools; the vault is still unchanged.
 
 Deployment and ceremony: `docs/STELLAR-BRIDGE-DEPLOY.md`. Published interface: `deployments/stellar/bridge.network.json`.
 
@@ -21,7 +23,7 @@ symbol `bUSDC.xlm`. One vault, one token, own cap and own books.
 |---|---|---|
 | Vault (Soroban, Rust; unchanged since `ffdb9b5`) | `stellar/vault/src/lib.rs` | 1,156 |
 | Vault unit tests (159 + reviewer 331's four) | `stellar/vault/src/test.rs` | 3,456 |
-| L2 exit router (periphery, no power; unchanged) | `contracts/stellar/StellarBurnRouter.sol` | 88 |
+| L2 exit router (periphery, no power; claims and redirects since revision 5) | `contracts/stellar/StellarBurnRouter.sol` | 166 |
 | Network layer, signer half, signer wrapper | `tools/signatario-stellar/stellar_net.py`, `stellar_half.py`, `signatario_stellar.py` | 855, 459, 212 |
 | Relayer, watcher daemons | `relay_stellar.py`, `vigia_stellar.py` | 156, 474 |
 | Guardian tool, reserves monitor, committee controls | `guardiao_stellar.py`, `reservas_stellar.py`, `comite_stellar.py` | 336, 112, 135 |
@@ -51,6 +53,13 @@ a burn is paid is now one rule over the final L2 (section 4b): the claim of a di
 of the burner on the L2 router, and claim files, hint files, the re-pin rule and `SHARED/claims` are gone, so no two
 parties can hold different claims. The guardian check judges by block numbers and finality only; its two rules that
 compared L2 timestamps are replaced by a stall rule that bounds "cannot judge" for a queued release (section 4c).
+
+Revision 5 (2026-11-17, round 18, agent 373, brief task 373) keeps the router transaction as the single source of a
+destination and changes what it may say: the LATEST final claim of a direct burn's burner before the vault records a
+release wins, none after; a held router exit (its address cannot receive the asset) is redirected by its own burner
+on the router the same way; a signer never holds two live signatures for one burn; the guardian accepts any naming
+of the burn's own burner and finds an address nobody else could have named at once (section 4b, 4c). The vault and
+its Wasm hash did not move.
 
 ## 2. Flow
 
@@ -193,49 +202,77 @@ has the shape of the other routes' routers: `burnTo(uint64 amount, string stella
 `StellarExit(bytes32 indexed burnId, address indexed from, uint64 amount, bytes20 commitment, string stellarAddress)`.
 
 WHERE A BURN IS PAID: one rule, read from the FINAL L2 alone, the same for every signer, watcher and guardian
-(`stellar_net.burn_destination`; review 331, third pass, R331-XLM-3P-1):
+(`stellar_net.burn_destination`; review 331, third pass, R331-XLM-3P-1; round 18, brief 373):
 
 - A burn made BY THE ROUTER is paid to the address the router checked, committed to and logged. The burn's 20 bytes
-  are that address's commitment; nothing else can be paid for it. A router burn cannot be claimed or redirected.
+  are that address's commitment. The router also records who called `burnTo` (`exitBurnerOf(nonce)`).
+- If that exit is HELD, that is, the address given to `burnTo` cannot receive the asset (a `G...` account that does
+  not exist, holds no trustline for the asset, or holds one the issuer has not authorized; the vault's transfer then
+  fails and nothing is recorded), the account that called `burnTo`, and only it, may name another address with
+  `redirectHeldBurn(uint64 burnNonce, string stellarAddress)` (event `HeldBurnRedirected(address indexed burner,
+  uint64 indexed burnNonce, uint256 version, bytes20 commitment, string stellarAddress)`; views `redirectOf`,
+  `redirectCount`, `redirectAt`). The signers pay the LATEST redirect final on the L2 instead, and only while the
+  exit is held on their own Stellar ledger; an exit whose address can receive is paid there whatever redirects exist.
+  A `C...` contract address always can receive (no trustline), so such an exit is never redirected.
 - A burn made DIRECTLY ON THE TOKEN is never paid to the 20 bytes it names (they may be an Ethereum address, as on
-  bUSDC; even when they happen to be a commitment they are not used). It is paid to the one address the ACCOUNT THAT
+  bUSDC; even when they happen to be a commitment they are not used). It is paid to the address the ACCOUNT THAT
   BURNED claims with a transaction of its own on the router: `claimDirectBurn(uint64 burnNonce, string
-  stellarAddress)`. The router stores it under (caller, nonce), emits `DirectBurnClaimed(address indexed burner,
-  uint64 indexed burnNonce, bytes20 commitment, string stellarAddress)` and answers `claimOf(burner, nonce)`. The
-  claim is SET ONCE: a second call reverts, so a burn has at most one claim and it never changes. A claim by another
-  account sits under that account and is ignored. A contract that burned can claim. There is no timeout: until the
-  claim is final on the L2 the asset stays in the vault.
+  stellarAddress)`. The router keeps every claim of that account for that nonce in order (`claimCount`, `claimAt`,
+  event `DirectBurnClaimed(address indexed burner, uint64 indexed burnNonce, bytes20 commitment, string
+  stellarAddress)` unchanged) and answers the latest with `claimOf(burner, nonce)`. A claim by another account sits
+  under that account and is ignored. A contract that burned can claim. There is no timeout: until a claim is final
+  on the L2 the asset stays in the vault. A held direct exit is redirected the same way: the burner claims again.
+- THE LATEST FINAL NAMING BEFORE CERTIFICATION WINS, NONE AFTER. "Certification" is the vault recording a release
+  for the burn (queued or paid: `burn_status` 1 or 2). From then on the vault refuses any other certificate for the
+  burn and every signer refuses to sign (`burn_status` is checked before anything else), so a later claim or
+  redirect changes nothing. A pause voids a queued release: the burn is open again and the latest naming applies.
+- Both histories are bounded (`MAX_NAMINGS` = 16 per burn; the same address twice in a row reverts), so a reader
+  always reads the whole history.
 
-Why set once, and not "the latest claim before certification": with one immutable claim, "which claim" has one answer
-at every final block after it, so a signer, a watcher and a guardian that read different final blocks cannot
-disagree, and a release paid on the claim can never be contradicted later. A claim that could be changed would need
-every certificate to bind the version it used, which the vault's digest does not carry (the L2 block it names is the
-burn's). The price: a claim cannot be corrected, exactly like the address given to `burnTo`; and an exit held for
-another reason (a router burn to an address without a trustline) cannot be redirected: it waits for the trustline.
+Why the rule stays deterministic although a naming can change (round 17 chose set once for this reason; brief 373
+asks for the latest naming, so the property is kept another way). The certificate does not bind the L2 block of
+the naming (the vault's digest names the burn's block), so two signers that read different final blocks while the
+burner names again could sign for two addresses. What prevents two addresses from both gathering a quorum is the
+signer's own database: `stellar_half.resign_allowed` lets a signer sign another release for a burn only if it
+differs in the recipient alone and the signer's earlier signature for that burn is DEAD for the vault (its
+`validUntil` is before the ledger close time, or a pause moved the count), and only while the vault shows the burn
+open. A signer therefore never holds two live signatures for one burn; a split round simply expires (at most
+`valid_seconds`, 30 minutes by default) and the signers then agree on the latest naming. The price: a burner who
+names again during a signing round delays the exit by up to that long.
 
 How each party applies the rule:
 
-- The signer (`signatario_stellar.py`) reads the destination from the same L2 view it read the burn from (its own,
-  rebuilt, final L2), at the same final block, with the router pinned by address and code, and puts it into the
-  intent. The half checks it again: a router address must hash to the burn's 20 bytes; a claim is read again from
-  the operator's own L2 RPC when one is configured and must agree. The half remembers the release it signed for a
-  nonce and a burn and refuses any other, without exception (the re-pin rule of revision 3 is gone).
-- The watcher accepts a partial for an address that is not the burn's commitment only if its own L2's router holds
-  that claim at its final block.
-- The guardian judges the address paid against the same rule and nothing else: it holds no claim file, and there is
-  no directory, channel or grace time for claims (R331-XLM-3P-1: in revision 3 a guardian handed a second valid
-  claim of the same burner read the honest release as a forgery and paused).
+- The signer (`signatario_stellar.py`) reads the destination (and, for a router exit, its latest redirect) from the
+  same L2 view it read the burn from (its own, rebuilt, final L2), at the same final block, with the router pinned
+  by address and code, and puts it into the intent. The half checks it again: a router address must hash to the
+  burn's 20 bytes; a claim or a redirect is read again from the operator's own L2 RPC when one is configured and
+  must agree; a redirect is used only if the router address cannot receive the asset on the half's ledger and the
+  redirect can (this needs `asset_code` and `asset_issuer`, which must recompute the pinned `asset_contract`; without
+  them nothing is redirected). Then `resign_allowed`.
+- The watcher combines a partial for an address that is not the burn's commitment only if its own L2's router holds
+  it as the LATEST claim (direct burn) or the LATEST redirect (router exit) at its final block.
+- The guardian accepts as paid any address the burn's own burner named (the address given to `burnTo`, checked by
+  its commitment; any redirect of that exit; any claim of a direct burn's burner), and nothing else; it holds no
+  claim file and there is no directory, channel or grace time for claims (section 4c). Accepting an EARLIER naming
+  is deliberate: which naming was the latest when the signers signed cannot be read back from the release, and a
+  release paid to an address the burner itself named is never a forgery (R331-XLM-3P-1: in revision 3 a guardian
+  handed a second valid claim of the same burner read the honest release as a forgery and paused). What five stolen
+  keys gain from it is the choice among the burner's own addresses.
 
-History (R331-XLM-1, R331-XLM-5). Revision 2 took a claim as a file signed by the burner and "verified" it by the
-exit code of `cast wallet verify`; a file with `"signature": "--help"` paid a stranger. Revision 3 verified the file
-in process and let a signer move between two claims of one burner once its signature was dead. Revision 4 removes
-the files: there is nothing to forge, to hand over or to choose.
+History (R331-XLM-1, R331-XLM-5, R331-XLM-3P-1). Revision 2 took a claim as a file signed by the burner and
+"verified" it by the exit code of `cast wallet verify`; a file with `"signature": "--help"` paid a stranger. Revision
+3 verified the file in process and let a signer move between two claims of one burner once its signature was dead.
+Revision 4 removed the files and made the claim a set-once router transaction. Revision 5 (round 18) keeps the
+router transaction as the only source, lets the latest final naming before certification win (claims and, for a
+held router exit, redirects), and brings back revision 3's dead-signature rule, now over on-chain namings only.
 
-Rehearsed: a direct burn is refused with no claim, with a claim on the router by another account, and while the
-burner's claim is not final; the burner's second claim reverts; with the final claim five signers certify and the
-claimed address is paid; an old claim file, an old hint file and a foreign router claim pay nobody (the reviewer's
-case A1); all three guardians judge the paid release ok; the watcher daemons carry a claimed burn (the reviewer's
-rig).
+Rehearsed (section 12a and 12b of the driver, and the reviewer's case A1): a direct burn is refused with no claim,
+with a claim on the router by another account, and while the burner's claim is not final; the burner claims twice
+before certification and five signers pay the latest; a claim after the payment makes no signer sign again; a
+router exit to an account without a trustline is held, a stranger cannot redirect it, a signer whose signature for
+the old address is live refuses the redirect, and after those signatures died five certify the redirect and it is
+paid once; all three guardians judge every paid release ok; an old claim file, an old hint file and a foreign router
+claim pay nobody.
 
 ## 4c. The guardian check: finding, or cannot judge (review 331, R331-XLM-3 and the third pass)
 
@@ -257,8 +294,13 @@ from the arguments of the release transaction on its own Stellar RPC and checks 
 Findings by the final history (block numbers and finality only; no clock of any kind):
 
 - the final history holds another burn id for that nonce, or another amount;
-- a router burn paid to another address than the router committed to;
-- a direct burn paid to another address than its burner's claim on the router;
+- an address paid that the burn's own burner never named, not even at the guardian's NEWEST block (the lowest head
+  of its agreeing sources): for a router burn neither the committed address nor a redirect of that exit; for a
+  direct burn no claim of its burner (round 18: also when the burner made no claim at all, which was "cannot judge"
+  before). Honest signers sign a naming only once it is final for them, and a final block is older than every
+  node's head; so this misfires only if every source of the guardian is behind by more than the L2's finality depth
+  (then a false pause: a liveness cost, no loss). An address the burner named in a block that is in the guardian's
+  newest blocks but not yet final there is "cannot judge" (bounded by the stall rule);
 - the named block is final in the guardian's view and holds no such burn, or the final chain has another hash at
   that height.
 
@@ -472,8 +514,12 @@ Each operator additionally runs:
   `release-held-nonce-or-id-taken` until a pause voids the forgery.
 - A direct burn: nothing for an operator to do and nothing to distribute. The burner calls
   `StellarBurnRouter.claimDirectBurn(burnNonce, "G...")` from the account that burned; once that is final on the L2
-  the signers certify it by themselves. A support answer to "I burned directly": make that one call; it cannot be
-  changed afterwards.
+  the signers certify it by themselves. A support answer to "I burned directly": make that call; a later call
+  replaces the address until the vault records the release, never after.
+- A held exit (the address given to `burnTo` has no trustline or does not exist): the account that called `burnTo`
+  calls `StellarBurnRouter.redirectHeldBurn(burnNonce, "G...")`, or adds the trustline. Signers need `asset_code`
+  and `asset_issuer` in the half config to pay a redirect. A signer that signed the old address pays the redirect
+  once its old signature is dead (up to `valid_seconds`).
 - Unpause and controls: `comite_stellar.py`, 6 of 7 and 5 of 7.
 
 Users: a recipient needs a USDC trustline before the release; muxed (`M...`) addresses are not accepted.
@@ -487,10 +533,12 @@ New code an auditor must read first, in this order:
    the digests in `impl Vault`.
 2. The hash pairing with the frozen token: `TAG_MINT_CHAIN`, the deposit head, the genesis, against
    `BridgedStablecoinV3`.
-3. `tools/signatario-stellar/stellar_half.py` (what a signer checks before it signs, the pinned asset, the re-pin
-   rule) and `signatario_stellar.py` (the three replaced functions).
-4. `contracts/stellar/StellarBurnRouter.sol` (strkey validation, the commitment, the set-once claim of a direct
-   burn) and the destination rule over it: `stellar_net.burn_destination`, `claim_of`, `router_exit_address`;
+3. `tools/signatario-stellar/stellar_half.py` (what a signer checks before it signs, the pinned asset, the
+   held-exit check and the dead-signature rule) and `signatario_stellar.py` (the three replaced functions).
+4. `contracts/stellar/StellarBurnRouter.sol` (strkey validation, the commitment, the claims of a direct burn and
+   the redirects of a held exit, both bounded histories) and the destination rule over it:
+   `stellar_net.burn_destination`, `claim_of`, `claims_of`, `redirects_of`, `router_exit_address`; the half's
+   `cannot_receive` and `resign_allowed`;
    signatures: `signature_bytes` and `bridge_feed.recover`.
 5. `stellar_net.py`: `cli_value`, `_fn_args`, `VAULT_FUNCTIONS`, `RELAYABLE` (what may reach the `stellar` CLI), the
    `L2` class (what is accepted from an L2 RPC), `asset_contract_id`, `config_differences`.
@@ -507,7 +555,9 @@ Questions for the auditor: the Stellar Asset Contract's behaviour for the real U
 trustline limits); archival and automatic restoration across protocol upgrades; resource limits of a release with 7
 signatures; the absence of an on-chain source anchor; the pause count and the void and re-certification rule; the
 guardian's stall rule (it assumes that an honest signer certifies only a burn that was final before it signed, and
-that the L2 normally finalizes well within half the release delay); the set-once claim on the router.
+that the L2 normally finalizes well within half the release delay); the latest-naming rule on the router and the
+dead-signature rule that keeps it from splitting a quorum (section 4b); the guardian's acceptance of any naming of
+the burn's own burner and its "newest block" finding rule (section 4c).
 
 ## 12. Tests and results (final Wasm `ebe14e4b…f25e9`; revision 3, code at `8f1d0c4`)
 
@@ -535,8 +585,9 @@ the Python suites also on the Mac. The commit that carries this section differs 
   refused; a vault deployed over a look-alike asset refused by vault-check, a signer's half and the reserves
   monitor); controls; limits; deposit and credit; finality margin; release with fee; replay; 11 forged
   certificates; delay; guardian check; pause, void and re-certification; 6-of-7 unpause; pause chain; false alarm;
-  rate limit; issuer freeze; clawback; missing trustline; direct burn and claim (the guardian without the claim
-  cannot judge, then reports a finding); reviewer 331's case A1 (six forged claim files pay nobody); two claims of
+  rate limit; issuer freeze; clawback; missing trustline; direct burn and claim (run `m2`; revision 5 reruns it as: two claims before
+  certification, the latest paid, a later claim ignored; a guardian whose final view is before the paid claim cannot
+  judge; section 12a: a held router exit redirected); reviewer 331's case A1 (six forged claim files pay nobody); two claims of
   one burner; case A2 (a guardian behind the burn cannot judge); case A3 (a release with 7 signatures simulates);
   diverging and stale views held; watcher daemons (deposit, instant release, queued release, voided release, the
   paid file); deploy tool source checks; fee sweep; books; cost; two quorum forgeries that pay a stranger, found by
@@ -566,9 +617,14 @@ the Python suites also on the Mac. The commit that carries this section differs 
 - Archival was exercised on protocol 29 only. A change of the archival rules in a later protocol needs a new check.
 - The guardian and shadow daemons of the Ethereum bridge (`tools/guardiao/`) are not adapted; `check` is a one-shot
   command run from a timer.
-- A claim cannot be corrected (set once), and a held router exit cannot be redirected (section 4b). A claim that
-  could be changed needs the certificate to bind the claim's version: a change to the shared signer's context or to
-  the vault; not built.
+- The certificate does not bind which naming (claim version or redirect) it paid; binding it needs a change to the
+  shared signer's context or to the vault; not built. Instead a signer never holds two live signatures for a burn
+  (`resign_allowed`), so a burner who names again during a signing round delays the exit by up to `valid_seconds`,
+  and five stolen keys may choose among the burner's own named addresses; the guardian cannot tell which naming was
+  the latest when the signers signed. Whether an exit was held when a redirect was paid is judged by each signer on
+  its own Stellar ledger at signing time; the guardian does not re-judge it.
+- The guardian's "newest block" finding rule misfires (a false pause, no loss) if every L2 source of that guardian
+  is behind by more than the L2's finality depth when it checks; with one source this is one lagging follower.
 - The stall rule pauses when a guardian's own follower stands still past the deadline while exits are queued, and
   it does not bound "cannot judge" when every L2 source is down or for a release already paid (section 4c,
   trade-offs). The L2's real finality lag is not known here; the rule's default (half the release delay) must be
@@ -583,5 +639,6 @@ the Python suites also on the Mac. The commit that carries this section differs 
   token config's `stellar` section gained `asset`, `labels`, `vaultWindowSeconds` and `vaultMinDeposit` in round 17.
 - A persistent holder of five signer keys can queue a forgery again after every pause (section 4). The pauses and the
   delay buy time only.
-- Muxed accounts are not supported. A recipient that never opens a trustline is never paid; there is no timeout or
-  redirect.
+- Muxed accounts are not supported. A recipient that never opens a trustline is never paid unless the exit's
+  burner redirects it (round 18); there is no timeout. A contract that called `burnTo` must itself be able to call
+  `redirectHeldBurn`, or its held exits stay held.
