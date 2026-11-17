@@ -112,7 +112,7 @@
             "tokenTransferFreshBase": 29650,
             "tokenBalanceOfBase": 935,
             "releaseBytes": 1563,
-            "source": "rehearse_tron_producers.py on a private network of three stock java-tron 4.8.2.4 producers, the vault built by TRON's own compiler (deployments/tron/vault-build.pin.json), the real TetherToken bytecode (agents/332-evidence/tron-producers-p*.json): vault.release with a 5-of-7 certificate to a recipient that never held USDT: 143,973 energy (143,905 for a second such recipient, 128,905 to a holder), 1,563 bytes; the token alone: transfer to a fresh address 29,650, balanceOf 935. A release calls the token five times: one transfer and four balanceOf. The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
+            "source": "rehearse_tron_producers.py on a private network of three stock java-tron 4.8.2.4 producers, the vault built by TRON's own compiler (deployments/tron/vault-build.pin.json), the real TetherToken bytecode (agents/332-evidence/tron-producers-p*.json): vault.release with a 5-of-7 certificate to a recipient that never held USDT: 143,973 energy, the highest of four such releases in two runs (143,905 to 143,973; 128,885 to 128,905 to a holder), 1,563 bytes; the token alone: transfer to a fresh address 29,650, balanceOf 935. A release calls the token five times: one transfer and four balanceOf. The same two token numbers are what TRON mainnet charges before its factor (simulated read-only on 2026-11-17: 130,285 and 4,062 energy with factor 34000)"
           },
           "chain": {
             "energyFeeSun": 100,

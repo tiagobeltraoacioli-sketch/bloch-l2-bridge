@@ -261,7 +261,7 @@ recipient that never held USDT (a new storage slot in the token).
 
 | Input | Value | Source |
 |---|---|---|
-| `E_release`: a whole `vault.release`, 5-of-7 certificate, fresh recipient | **143,973 energy** | measured: stock java-tron 4.8.2.4, three producers, the vault built by TRON's compiler, the real TetherToken bytecode (section 9a; `agents/332-evidence/`). A second fresh recipient: 143,905. A recipient that already holds USDT: 128,905 |
+| `E_release`: a whole `vault.release`, 5-of-7 certificate, fresh recipient | **143,973 energy** | measured: stock java-tron 4.8.2.4, three producers, the vault built by TRON's compiler, the real TetherToken bytecode (section 9a; `agents/332-evidence/`). The highest of four fresh-recipient releases in two runs (143,905 to 143,973; the certificate's bytes differ from run to run). A recipient that already holds USDT: 128,885 to 128,905 |
 | `bytes`: the release transaction | **1,563 bytes** | the same receipts |
 | `E_token`: what the release spends inside the token: 1 `transfer` to a fresh address + 4 `balanceOf` (the vault's and the recipient's balance, before and after) | 29,650 + 4 x 935 = **33,390 energy** | constant calls on the same network. TRON mainnet charges the same two numbers before its factor: simulated read-only on 2026-11-17, a transfer to a fresh address costs 130,285 energy of which 100,635 is penalty (base 29,650), `balanceOf` 4,062 of which 3,127 (base 935) |
 | `factor`: USDT's dynamic-energy factor | **34,000** (x 4.4) | mainnet `getcontractinfo` of USDT, `contract_state.energy_factor`; it equals the chain's maximum `getDynamicEnergyMaxFactor` 34,000, so it cannot rise without a governance vote |
@@ -692,13 +692,13 @@ What it shows (26 checks):
 | | Result |
 |---|---|
 | The solidified block lags the head by itself | 4 blocks behind in every sample; three witnesses alternate |
-| A deposit in the head is in the solidified STATE only once its block is solidified | every consistent reading of `/walletsolidity/triggerconstantcontract depositCount()` equals the number of deposits at or below the solidified block: 100 of 100 readings, 79 of them while `/wallet/` already counted one more |
+| A deposit in the head is in the solidified STATE only once its block is solidified | every consistent reading of `/walletsolidity/triggerconstantcontract depositCount()` equals the number of deposits at or below the solidified block: 98 of 98 readings in the final run, 77 of them while `/wallet/` already counted one more (100 and 79 in the run before) |
 | One producer stopped | the head keeps advancing on two producers; the solidified block does not move |
 | A deposit made meanwhile | head state 2 deposits, solidified state 1, for as long as the producer is down (40 readings over 30 s); `depositMatches` 1 at the head and 0 solidified; its receipt absent from the solidified API by id and by block |
 | The shim | `eth_call` at `finalized` reads 1, at `latest` 2; `eth_getLogs` to `finalized` holds deposit 0 only; the index is verified at the solidified block; **no wait, rescan, rollback or error** |
 | The daemons | the source half answers "not finalized"; after a round of all signers and the relayer only the solidified deposit is queued |
 | The producer returns | the deposit is solidified, indexed, attested and its mint queued, still with no rescan, rollback or error |
-| Energy | section 5's inputs: deposit 114,476 (first) and 83,044; release 143,973 / 143,905 (fresh recipients) and 128,905 (holder); 1,563 bytes; the token alone 29,650 / 14,650 / 935 |
+| Energy | section 5's inputs: deposit 114,476 (first) and 83,044; release 143,905 to 143,973 (fresh recipients, two runs) and 128,885 to 128,905 (holder); 1,563 bytes; the token alone 29,650 / 14,650 / 935 |
 
 So the reviewer's worry does not materialise on a real node: the count does not run ahead of the receipts, because
 both are read at the solidified level. Limits of this proof: three producers, not 27; no reorganisation of
@@ -773,8 +773,8 @@ with real keys on one.
    load, 27 producers, a maintenance-period change of the producer set, mainnet-size blocks. Not tested on Nile or
    Shasta (a testnet needs accounts and transactions: out of bounds for the agent).
 4. **The solidified API's state: shown on a real node in round 17** (section 9a, R325-TRX-2P-2):
-   `/walletsolidity/triggerconstantcontract` read the solidified state in 100 of 100 consistent readings, 79 of them
-   while the head state was ahead. A stock java-tron serves `/walletsolidity` on its own port (the solidity HTTP
+   `/walletsolidity/triggerconstantcontract` read the solidified state in 98 of 98 consistent readings of the final
+   run, 77 of them while the head state was ahead (100 of 100 and 79 in the run before). A stock java-tron serves `/walletsolidity` on its own port (the solidity HTTP
    port), not on the full node's: the shim's `--solidity` and every `tron_solidity` setting must name it.
 4a. **State "at a height" (R325-TRX-5, known issue, not fixed).** The shim answers a state read at a height at or
    below the solidified one with the CURRENT solidified state. That is sound for what the signer reads (immutable
