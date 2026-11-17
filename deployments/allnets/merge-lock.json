@@ -3,17 +3,12 @@
   "lines": {
     "shared-tools": {
       "branch": "codex/bridge-signer-verify-r17-20261117",
-      "commit": "056fea5aa38f431a5c80d0212d2c999138ad82ce",
+      "commit": "4c4cbbbee55ef89057a0407103ca087558a510c4",
       "agent": 374,
       "routes": [
         "ethereum"
       ],
-      "conflicts": [
-        {
-          "path": "docs/audit-rfp-r12/phase2-bridge.manifest.tsv",
-          "resolution": "recorded resolution docs__audit-rfp-r12__phase2-bridge.manifest.tsv.9eaf0af2cbd1a79b"
-        }
-      ],
+      "conflicts": [],
       "history": [
         {
           "branch": "codex/bridge-signer-verify-r17-20261117",
@@ -26,6 +21,10 @@
         {
           "branch": "codex/bridge-signer-verify-r17-20261117",
           "commit": "07433d8ac717a7bf3b5fdd656ce24c600c2140be"
+        },
+        {
+          "branch": "codex/bridge-signer-verify-r17-20261117",
+          "commit": "056fea5aa38f431a5c80d0212d2c999138ad82ce"
         }
       ]
     },
