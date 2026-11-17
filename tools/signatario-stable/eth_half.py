@@ -45,8 +45,8 @@ thousands of blocks a day); every check on the log itself is unchanged. `probe` 
 Round 17 (reviews R329-EVM-1, R329-EVM-3). On a chain other than 1 this module asks tools/evm-nets/launch.py before
 anything else: a network that is not launchable is refused (no key, flag or environment variable lifts it), and for a
 network of tools/evm-nets/networks.json the four keys `anchor_policy`, `anchor_depth`, `anchor_max_age` and
-`finalized_margin` are the registry's, by chain id: a config that omits them gets the registry's values, a config that
-contradicts them is refused at start. A chain id that is neither 1 nor in the registry is a local rehearsal chain and
+`finalized_margin` are the registry's, by chain id: a config that omits one the registry sets, or contradicts one, is
+refused at start (round 18; round 17 filled an omitted key). A chain id that is neither 1 nor in the registry is a local rehearsal chain and
 keeps the keys of its config. Chain 1 never loads that module and reads exactly the keys it read before.
 """
 import fcntl
@@ -162,7 +162,7 @@ class Eth:
     def network_settings(chain, c):
         """A chain other than Ethereum: the launch status, and the anchor settings every signer of the network shares
         (tools/evm-nets/launch.py). Returns the config with the registry's values; refuses a network that is not
-        launchable and a config that contradicts the registry."""
+        launchable, a config that misses a key the registry sets, and a config that contradicts the registry."""
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
             import launch
@@ -175,6 +175,11 @@ class Eth:
         settings = launch.signer_settings(chain)
         if settings is None:
             return c  # a local rehearsal chain: its own keys
+        missing = launch.config_missing(chain, c, 'eth_half')
+        if missing:
+            refuse('config misses keys the network registry sets (tools/evm-nets/networks.json): add them with the registry '
+                   'values; every signer of a network must state the same anchor settings', chain_id=chain,
+                   missing=[{'key': k, 'registry': settings[k]} for k in missing])
         bad = launch.config_conflicts(chain, c, 'eth_half')
         if bad:
             refuse('config contradicts the network registry (tools/evm-nets/networks.json): remove these keys or set the '

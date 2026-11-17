@@ -93,8 +93,8 @@ recipient) is parked: no rebuild, no slot, not asked of the feeds. It is checked
 Networks other than Ethereum (rounds 16 and 17; tools/evm-nets/networks.json, tools/evm-nets/launch.py). With a source chain
 id other than 1 the daemon asks the launch registry at start: a network that is not launchable is refused in both modes, and
 no key, flag or environment variable lifts it (review R329-EVM-1). For a network of the registry `anchor_policy` and
-`anchor_max_age` are the registry's by chain id (a config that omits them gets them; one that contradicts them is refused at
-start, R329-EVM-3), `--interval`, `max_release_signs_per_hour` and `refused_retry` default to the network's pacing (an
+`anchor_max_age` are the registry's by chain id (a config that omits or contradicts one is refused at start, R329-EVM-3;
+round 17 filled an omitted key), `--interval`, `max_release_signs_per_hour` and `refused_retry` default to the network's pacing (an
 `--interval` longer than the network's is refused, R329-EVM-6), and every release signature is timed (R329-EVM-4): the signer
 passes `--timing` to signatario.py, keeps the last measurements in `timing_state` (default SHARED/.timing/<me>.json, which
 tools/evm-nets/signer_timing.py watches), logs `timing` lines, alerts `release-window-budget` when the work for one signature
@@ -296,6 +296,11 @@ class Vigia:
                 self.timing = launch.timing(spec['chainId'], anchor_max_age=self.anchor_max_age)
                 self.load_timing()
             return
+        missing = launch.config_missing(chain, self.cfg, 'vigia')
+        if missing:
+            raise SystemExit('the config is missing keys the network registry sets (tools/evm-nets/networks.json); add them '
+                             'with the registry values, every signer of a network must state them: '
+                             + ', '.join(f'{k} missing, the registry says {settings[k]!r}' for k in missing))
         bad = launch.config_conflicts(chain, self.cfg, 'vigia')
         if bad:
             raise SystemExit('the config contradicts the network registry (tools/evm-nets/networks.json); remove these keys '

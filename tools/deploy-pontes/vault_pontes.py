@@ -74,7 +74,9 @@ def source_networks():
     except launch.LaunchError:
         registry = None  # every chain id of the registry is then refused by launch.refusal with the reason
     if registry:
-        for spec in registry['networks'].values():
+        # Review R329-EVM-3P-1: only the launchable networks are source networks here; a network that is not (Base,
+        # BNB Smart Chain) has no row a config could match, whatever form its chain id takes.
+        for spec in launch.launchable().values():
             fees = (registry['feeRecipient'].lower(), spec['feeBps']['deposit'], spec['feeBps']['release'])
             asset = spec['asset']
             # An asset that is not six-decimal is held through its unit token, deployed first; the raw asset is refused.
@@ -140,8 +142,11 @@ def validate(cfg, rehearsal, token_cfg=None):
     exact_keys(eth, ['chainId', 'rehearsal'], 'ethereum')
     refuse(isinstance(eth['rehearsal'], bool) and eth['rehearsal'] == rehearsal,
            'ethereum.rehearsal and the --rehearsal flag disagree')
+    # Review R329-EVM-3P-1: the chain id is a JSON integer before anything compares it. 8453.0 equals 8453 in Python
+    # and `true` equals 1, so a float or a boolean would match a row while skipping the launch check.
+    refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId must be a positive JSON integer')
     nets = source_networks()
-    if launch and not rehearsal and is_uint(eth['chainId'], lo=1) and eth['chainId'] != ETH_MAINNET:
+    if launch and not rehearsal and eth['chainId'] != ETH_MAINNET:
         why = launch.refusal(eth['chainId'])
         refuse(why is None, why)
     refuse(eth['chainId'] == REHEARSAL_CHAIN if rehearsal else eth['chainId'] in nets,
