@@ -132,11 +132,55 @@ class NamingsAtTheGuardian(T.GuardianCheck):
         self.assertEqual(self.check()[0], 2)
 
 
+class ForgeryWhileTheL2MovesAtItsLaunchCadence(T.GuardianCheck):
+    """R331-XLM-4P-4 (Medium, introduced by 349bae6). The fix of 4P-3 made the stall rule wait for the final L2 block
+    to STAND STILL, and the fix of 4P-2 (the height rule) waits for the final block to pass the first-seen head by
+    `height_margin` = 256 blocks. At the L2's launch cadence (one block per 1,800 s, deployments/mainnet
+    frontend.network.json `l2Idle.blockIntervalSeconds`; idle blocks skipped) 256 blocks are 128 h, while the
+    proposed release delay is 2 h. A five-key forgery under an unused nonce that names a block nobody reaches (or
+    goes through another contract) is then "cannot judge" at every guardian for the whole delay as long as the L2
+    keeps making blocks, which anyone can cause with ordinary L2 transactions: no guardian pauses, the forgery is
+    paid. At 87d8ed6 the same release was a finding once it was older than the deadline (3,600 s).
+    Fixed behaviour: a queued release that this guardian cannot judge because its view is behind is a finding before
+    it matures, whether or not finality moves (age rule restricted to `behind`, as 4P-3 asked), or a margin derived
+    from the block interval and the delay (and the tool refuses a margin x interval above the deadline)."""
+
+    def test_DEFECT_a_queued_forgery_is_never_a_finding_before_it_matures(self):
+        rid = self.release(self.forged(1), MALLORY, ledger=1000, event='release_queued',
+                           names=(10**9, '0x' + '11' * 32))
+        base = FakeVault.now
+        codes = []
+        slow = lambda self_, seq: {'sequence': seq, 'close_time': FakeVault.now - (1000 - seq) * 10}  # noqa: E731
+        patch = mock.patch.object(FakeVault, 'ledger', slow)   # 10 s ledgers: 7,200 s within the fake's range
+        patch.start()
+        self.addCleanup(patch.stop)
+        for t in range(0, 7200, 600):                         # the 2 h delay, one check every 10 minutes
+            FakeVault.now = base + t
+            FakeVault.events_list[0]['ledger'] = 1000 - t // 10   # the release is t seconds old on the ledger clock
+            for s in FakeL2.state.values():                   # one L2 block per 1,800 s, final behind the head
+                s.update(fin=236 + t // 1800, head=300 + t // 1800)
+            code, out = self.check()
+            codes.append(code)
+            self.assertEqual(out['findings'], [], t)
+        self.assertEqual(set(codes), {3})                     # paged only, never a pause, until it is payable
+        self.assertIn(rid, [f['release'] for f in out['cannot_judge']])
+
+    def test_with_the_L2_idle_the_stall_rule_does_catch_it(self):
+        self.release(self.forged(1), MALLORY, ledger=1000, event='release_queued', names=(10**9, '0x' + '11' * 32))
+        base = FakeVault.now
+        for t in (0, 3000, 3700):
+            FakeVault.now = base + t
+            FakeVault.events_list[0]['ledger'] = 1000 - t // 5
+            code, out = self.check()
+        self.assertEqual(code, 2)
+
+
 def load_tests(loader, tests, pattern):
     """Only the cases defined here (the base classes' own tests are the developer's and run in their own file)."""
     suite = unittest.TestSuite()
     for cls in (HalfSignsForAnAddressThatCannotReceive, StallRuleOnSomethingElseThanAStall,
-                PaidForgeryUnderAnUnreachableBlock, NamingsAtTheGuardian):
+                PaidForgeryUnderAnUnreachableBlock, NamingsAtTheGuardian,
+                ForgeryWhileTheL2MovesAtItsLaunchCadence):
         for name in sorted(n for n in vars(cls) if n.startswith('test_')):
             suite.addTest(cls(name))
     return suite
