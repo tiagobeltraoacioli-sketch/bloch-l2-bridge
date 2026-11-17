@@ -9,10 +9,10 @@
     "switchThreshold": "6 of 7 (owner decision 2026-11-02, validated on mainnet): one more than the release threshold to end a pause early and to propose or cancel the one-way light-client switch",
     "switchDelay": "proposed 14 days (contract minimum 7 days): time for users and guardians to react to a proposed verifier (owner decision)",
     "guard": "three independent pause-only guardians (BR-6, owner decision 2026-11-02): one Ethereum vault guardian key per guardian operator, the same 3 operators who hold the L2 token guardian keys; each runs guardiao.py (fast path, vault_pause_on_mint true) and sombra.py (proof path) runs beside it once ported; 72 h pause, 72 h cooldown, as the L2 token. validate refuses another count on mainnet. The guardian set is immutable",
-    "minDeposit": "proposed 11 USDC: the smallest deposit, immutable. With the 5 bps deposit fee it nets 10.9945 USDC, above l2MinBurn 10 (the constructor and validate refuse a minDeposit whose net is below l2MinBurn). The constructor requires l2MinBurn <= minDeposit <= windowLimit; validate --token-config requires l2MinBurn == the L2 minBurn",
+    "minDeposit": "21 units, l2MinBurn 20 (fee schedule of 2026-11-17, coordinator, agents/347-fee-economics-r17.md): immutable. The deploy tool refuses an l2MinBurn below the relayer cost of a release at the gas ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula).",
     "TBD-owner": "source.revision; deployer.address; deployer.fundedBy.safe; the 7 release signers and 3 guardians (the SAME addresses as in deployments/mainnet/busdc-vault-mainnet.config.json); confirm cap, windowLimit, switchDelay",
     "provenance": "mode 1: the vault keeps a hash chain over its deposits and pays a burn only if the burn states the same chain (BridgedStablecoinV3). Deposit ids carry the vault nonce in their top 8 bytes. releaseDelay 0 and no mintVerifier: options 2 and 3 are not the launch design",
-    "fees": "5 bps of each deposit and 5 bps of each release, paid on Arbitrum One to 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544 (the owner's address for every EVM network, given 2026-11-16; a single externally owned address by the owner's choice). A constructor argument: immutable once deployed.",
+    "fees": "5 bps of each deposit and 5 bps of each release (fee schedule of 2026-11-17), paid on Arbitrum One to 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544 (the owner's address for every EVM network, given 2026-11-16; a single externally owned address by the owner's choice). A constructor argument: immutable once deployed.",
     "network": "Arbitrum One (chain 42161). In this file the key `ethereum` names the SOURCE network, to keep one config format and one tool for every EVM source. Same committee keys, same limits and same fee as the Ethereum bridge; a separate vault, a separate L2 token and separate books (round 16, isolation).",
     "contract": "ProvenanceSourceVault, byte-identical to the Ethereum bridge (creation keccak 0x901d52d0\u20263a74). A release certificate must land within 256 blocks of its anchor: about 3072 s on this network (docs/BRIDGE-EVM-NETWORKS.md section 4)"
   },
@@ -76,8 +76,8 @@
       "windowSeconds": 86400,
       "switchThreshold": 6,
       "switchDelay": 1209600,
-      "minDeposit": 11000000,
-      "l2MinBurn": 10000000
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000
     },
     "guard": {
       "guardians": [

@@ -214,7 +214,9 @@ Do this only after a disposable-value round trip worked (10 USDC deposit → min
 needs the controls on: so enable, rehearse with 10 USDC, and if anything is wrong disable with the same
 three steps and `false false "$NONCE"`, where `NONCE` is the current `cast call "$VAULT" "controlNonce()(uint64)"`
 (1 right after the first enable; every control change uses the next value). Deposits need at least `minDeposit`
-(10 USDC) and a burn at least `minBurn` (10 USDC), so the round trip is a 10 USDC deposit and a 10 USDC burn.
+(101 USDC since the fee schedule of 2026-11-17) and a burn at least `minBurn` (100 USDC), so the round trip is a 101 USDC
+deposit and a 100 USDC burn. The relayer pays at most 2 gwei per gas for a release (`eth_max_gas_price_gwei`): above
+that the release waits.
 
 ### 4.8 HF1 window
 
@@ -274,8 +276,8 @@ a config typo cannot undo it.
 | Guardians | **3 L2 token guardians and 3 Ethereum vault guardians** (BR-6): one key per chain per guardian operator, independent of every signer | `validate` on mainnet (both tools) |
 | `vault_pause_on_mint` (guardiao) | **on**: an evidenced forged `mint:` finding also pauses the vault 72 h, so new deposits stay out of a token a coming forgery could hold; burns made before a credit stay payable. Cost: a false finding closes the vault 72 h, 6 of 7 end it early | `guardiao.template.json`; `deploy_pontes.py validate` refuses a mainnet config while the template says otherwise |
 | `release_hold` (eth_half) | **off**: with V3 over a mode-1 vault the vault already refuses every burn after a credited forgery; the hold would also stop honest releases and need a signed `accepted_unbacked_mints` list | `eth-half.template.json`; `validate` as above |
-| Vault values (BR-10) | `windowLimit` 10,000 USDC / 24 h, cap 100,000, `minDeposit` **11** (its net after the deposit fee must reach `l2MinBurn` 10), `switchDelay` 14 d, mode 1, `releaseDelay` 0, no `mintVerifier` | vault constructor and `vault_pontes.py validate` |
-| Protocol fee (agent 197, revenue middle ground) | **5 bps on deposit and 5 bps on release** ("less 0.05% per crossing"), fixed in the vault constructor, at most 30 bps each, to an immutable treasury (`provenance.fees.recipient`, `TBD-owner`); the vault records and the token mints the net amount, so bUSDC stays 1:1 with locked USDC; fees sit outside backing and `sweepFees()` (anyone) pays only the treasury | vault constructor; `vault_pontes.py validate` refuses both rates 0 on mainnet, a rate above 30, an undecided recipient or one holding a bridge role; `verify` checks the fee immutables |
+| Vault values (BR-10) | `windowLimit` 10,000 USDC / 24 h, cap 100,000, `minDeposit` **101** (its net after the deposit fee must reach `l2MinBurn` **100**; fee schedule of 2026-11-17, before: 11 and 10), `switchDelay` 14 d, mode 1, `releaseDelay` 0, no `mintVerifier` | vault constructor and `vault_pontes.py validate` |
+| Protocol fee (agent 197, revenue middle ground) | **5 bps on deposit and 10 bps on release** (fee schedule of 2026-11-17, coordinator, `agents/347-fee-economics-r17.md`; before: 5 and 5), fixed in the vault constructor, at most 30 bps each, to an immutable treasury (`provenance.fees.recipient`, `TBD-owner`); the vault records and the token mints the net amount, so bUSDC stays 1:1 with locked USDC; fees sit outside backing and `sweepFees()` (anyone) pays only the treasury | vault constructor; `vault_pontes.py validate` refuses both rates 0 on mainnet, a rate above 30, an undecided recipient or one holding a bridge role; `verify` checks the fee immutables |
 | Pending cap (F129-B) | **`MAX_PENDING` = 2,048** queued, not yet executed mints on every path. A forger with the mint quorum adds a candidate only when a guardian cancel frees a place, so each forged candidate is cancelled within 2,048 / C of its queueing; that is under the 12 h delay for any guardian cancel rate C above 2.84 a minute (measured about 25: `cancel_batch` 32 per round). Honest flow at the bucket rate peaks at about 2,000 queued even with one more delay of lag (minimum 10 USDC deposits). The cost: while a forger holds the mint keys and keeps the queue full, honest mints revert with `PendingCapReached` and the relayer retries; a guardian pause stops new candidates and cancels go on. Recovery from a compromised mint quorum is migration (4.10) | `BridgedStablecoinV3` constant (agent 194, `R194PendingCap.t.sol`) |
 | Committed keys | the 22 addresses of 2026-10-14 (deployer `0x703a…` and the rest) are removed; fresh keys from the key ceremony | both tools refuse them in every role |
 
@@ -342,7 +344,7 @@ been made on real L2 data.
 | 3 L2 guardian operators and fresh addresses | L2 config `guardians.set[]` |
 | Vault address, route, code hash, cap | L2 config `ethereum.*` (from 4.4) |
 | L2 gas price cap | L2 config `tx.maxGasPriceWei` |
-| cap, windowLimit, minDeposit (11 USDC with the fee), switchDelay (proposed 14 d); switchThreshold 6 is decided (4.11); the fee treasury address (`provenance.fees.recipient`) is filled (owner, 2026-11-16: `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) | vault config (proposed values filled) |
+| cap, windowLimit, minDeposit (101 USDC; l2MinBurn 100; fee schedule of 2026-11-17), switchDelay (proposed 14 d); switchThreshold 6 is decided (4.11); the fee treasury address (`provenance.fees.recipient`) is filled (owner, 2026-11-16: `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) | vault config (proposed values filled) |
 | Feed base URL of each of the 7 operators (`docs/SIG-TRANSPORT.md`) | `feed.peers` (signer, relayer) |
 | L2 RPC for mint pre-checks; L2 RPC for the guardian and monitor | `l2_rpc` |
 | L2 send endpoint for the guardian and relayer: the public gateway, `https://l2rpc.blochl1.com` | `l2_tx_rpc` (decided; required on chain 700770) |

@@ -1,10 +1,24 @@
 {
   "domain": "bloch.bridge.evm-networks.v1",
-  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` and `feeBps` are the owner's fee address and rates (5 + 5 bps), which the deploy tools require of every vault config of these networks (R329-EVM-2). `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
+  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` is the owner's fee address; each network's `feeBps`, `minDeposit` and `l2MinBurn` are the fee schedule decided by the coordinator on 2026-11-17 (agents/347-fee-economics-r17.md), which the deploy tools require of every vault config of these networks (R329-EVM-2); `relay` and `relayCost` hold the measured relayer cost of a release and the gas ceiling, from which the tools derive the least minimum burn they accept (`relayCost.formula`). `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
   "feeRecipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
-  "feeBps": {
-    "deposit": 5,
-    "release": 5
+  "relayCost": {
+    "formula": "l2MinBurn >= ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps / 10000)) units: the smallest exit still pays out at least what its release costs the relayer at the gas ceiling. The deploy tools refuse a config below it (tools/deploy-pontes/vault_pontes.py, deploy_pontes.py). It is a floor, not the fee break-even: the fee of the smallest exit covers the relayer at a gas price of l2MinBurn x releaseBps / 10000 / (releaseGas x 1e-9 x nativeUsd) gwei.",
+    "nativeUsd": 1816.445,
+    "nativeUsdRead": "ETH-USD spot 1,816.445 (Coinbase public API; Kraken 1,816.38), 2026-11-17 02:25 UTC. A reading, not a pin: redo it before deployment.",
+    "pricing": "vigia.py sends a release as a legacy transaction at min(2 x eth_gasPrice, eth_max_gas_price_gwei) and sends nothing while eth_gasPrice is above the ceiling (the release waits; alert gas-price-ceiling).",
+    "ethereum": {
+      "chainId": 1,
+      "feeBps": {
+        "deposit": 5,
+        "release": 10
+      },
+      "minDeposit": 101000000,
+      "l2MinBurn": 100000000,
+      "releaseGas": 207000,
+      "gasCeilingGwei": 2,
+      "measured": "release gas: the Ethereum bridge rehearsals (206,932 to 207,000). eth_gasPrice 0.1148 gwei on 2026-11-17 02:25 UTC: the relayer pays 0.23 gwei, 0.086 USD a release; 0.752 USD at the ceiling. Fee of the smallest exit (100 USDC at 10 bps): 0.10 USD."
+    }
   },
   "networks": {
     "arbitrum-one": {
@@ -14,6 +28,17 @@
         "v1": true,
         "state": "launchable",
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206932,
+        "gasCeilingGwei": 0.5,
+        "measured": "release gas 206,932 on the fork (execution only: the parent-chain data component of a real Arbitrum transaction is NOT in it). eth_gasPrice 0.02 gwei on 2026-11-17 02:25 UTC: the relayer pays 0.04 gwei, 0.015 USD a release; 0.188 USD at the ceiling. Fee of the smallest exit (20 USDC at 5 bps): 0.010 USD, below today's 0.015: the break-even exit is 30 USDC."
       },
       "rpc": "https://arb1.arbitrum.io/rpc",
       "nativeSymbol": "ETH",
@@ -76,6 +101,17 @@
         "state": "held",
         "reason": "Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures)."
       },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206950,
+        "gasCeilingGwei": 0.5,
+        "measured": "not launchable; the OP Mainnet figures are assumed."
+      },
       "rpc": "https://mainnet.base.org",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "base-mainnet",
@@ -136,6 +172,17 @@
         "v1": true,
         "state": "launchable",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "relay": {
+        "releaseGas": 206968,
+        "gasCeilingGwei": 0.5,
+        "measured": "release gas 206,968 on the fork. eth_gasPrice 0.00103 gwei on 2026-11-17 02:25 UTC: under 0.001 USD of execution a release; the L1 data fee of a real OP Mainnet transaction is NOT measured. 0.188 USD at the ceiling. Fee of the smallest exit: 0.010 USD."
       },
       "rpc": "https://mainnet.optimism.io",
       "nativeSymbol": "ETH",
@@ -198,6 +245,17 @@
         "state": "launchable",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing)."
       },
+      "feeBps": {
+        "deposit": 5,
+        "release": 15
+      },
+      "minDeposit": 601000000,
+      "l2MinBurn": 600000000,
+      "relay": {
+        "releaseGas": 210269,
+        "gasCeilingGwei": 2,
+        "measured": "release gas 210,269 on the fork. Three readings of Linea's price on 2026-11-17 02:25 UTC disagree: eth_gasPrice 1.5 gwei (what the relayer uses); linea_estimateGas 0.0385 gwei priority over a 7 wei base fee; tips actually paid in the last 100 blocks 0.035 to 2.4 gwei, median 1.0. The relayer pays min(2 x 1.5, 2) = 2 gwei: 0.764 USD a release, the ceiling itself. At 15 bps the fee covers that from 510 USDC; 600 keeps it covered up to 2,139 USD per ETH."
+      },
       "rpc": "https://rpc.linea.build",
       "nativeSymbol": "ETH",
       "sourceDomainLabel": "linea-mainnet",
@@ -258,6 +316,17 @@
         "v1": false,
         "state": "out",
         "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction."
+      },
+      "feeBps": {
+        "deposit": 5,
+        "release": 5
+      },
+      "minDeposit": 11000000,
+      "l2MinBurn": 10000000,
+      "relay": {
+        "releaseGas": null,
+        "gasCeilingGwei": null,
+        "measured": "out of v1: no relayer cost recorded (its gas is paid in BNB)."
       },
       "rpc": "https://bsc-dataseed.bnbchain.org",
       "nativeSymbol": "BNB",

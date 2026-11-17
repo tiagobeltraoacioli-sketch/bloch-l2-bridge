@@ -173,12 +173,21 @@ class Generated(unittest.TestCase):
         eth = json.loads((ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json').read_text())['vault']
         for name in LIVE:
             v = json.loads((ROOT / 'deployments' / name / 'busdc-vault.config.json').read_text())['vault']
-            for key in ('cap', 'transferMode', 'policy', 'provenance'):
+            spec = NETS[name]
+            for key in ('cap', 'transferMode'):
                 self.assertEqual(v[key], eth[key], (name, key))
+            # limits (window, switch) are the Ethereum ones; the minimums and the fee rates are the network's own
+            # (fee schedule of 2026-11-17, tools/evm-nets/networks.json)
+            for key in ('windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay'):
+                self.assertEqual(v['policy'][key], eth['policy'][key], (name, key))
+            self.assertEqual((v['policy']['minDeposit'], v['policy']['l2MinBurn']), (spec['minDeposit'], spec['l2MinBurn']), name)
+            self.assertEqual({k: v['provenance'][k] for k in ('mode', 'releaseDelay', 'mintVerifier')},
+                             {k: eth['provenance'][k] for k in ('mode', 'releaseDelay', 'mintVerifier')})
             self.assertEqual(v['signers']['threshold'], 5)
             self.assertEqual(len(v['signers']['set']), 7)
             self.assertEqual(len(v['guard']['guardians']), 3)
-            self.assertEqual(v['provenance']['fees'], {'recipient': REGISTRY['feeRecipient'], 'depositBps': 5, 'releaseBps': 5})
+            self.assertEqual(v['provenance']['fees'], {'recipient': REGISTRY['feeRecipient'], 'depositBps': spec['feeBps']['deposit'],
+                                                       'releaseBps': spec['feeBps']['release']})
 
     def test_no_generated_file_holds_a_decided_key_or_deployer(self):
         for name in LIVE:

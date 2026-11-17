@@ -246,15 +246,97 @@ class DeployGate(unittest.TestCase):
             c['vault']['provenance']['fees']['recipient'] = addr('stranger')
             rc, r = self.vault(c)
             self.assertEqual(rc, 1, name)
-            self.assertIn('must be recipient 0x775a993f09bd80aecf8f8c2ade0c84158e3a0544, depositBps 5, releaseBps 5', r['reason'])
+            self.assertIn(f'must be recipient 0x775a993f09bd80aecf8f8c2ade0c84158e3a0544, depositBps 5, releaseBps '
+                          f'{NETS[name]["feeBps"]["release"]}', r['reason'])
 
-    def test_fee_rates_other_than_5_and_5_are_refused(self):
-        for dep, rel in ((5, 4), (0, 5), (30, 30), (6, 5)):
-            c = filled_vault('linea')
-            c['vault']['provenance']['fees'].update(depositBps=dep, releaseBps=rel)
-            self.assertIn('depositBps 5, releaseBps 5', self.vault(c)[1]['reason'], (dep, rel))
+    def test_fee_rates_other_than_the_decided_ones_are_refused(self):
+        for name, want in (('linea', 'depositBps 5, releaseBps 15'), ('op-mainnet', 'depositBps 5, releaseBps 5')):
+            for dep, rel in ((5, 4), (0, 5), (30, 30), (6, 5), (5, 10), (15, 5)):
+                c = filled_vault(name)
+                c['vault']['provenance']['fees'].update(depositBps=dep, releaseBps=rel)
+                self.assertIn(want, self.vault(c)[1]['reason'], (name, dep, rel))
         self.assertEqual(REGISTRY['feeRecipient'], '0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544')
-        self.assertEqual(REGISTRY['feeBps'], {'deposit': 5, 'release': 5})
+        self.assertNotIn('feeBps', REGISTRY)
+
+    # ── the fee schedule of 2026-11-17 (coordinator; agents/347-fee-economics-r17.md) ──
+    def test_the_decided_schedule_is_in_the_registry_and_in_every_generated_file(self):
+        want = {'arbitrum-one': (5, 5, 21, 20, 0.5), 'op-mainnet': (5, 5, 21, 20, 0.5), 'base': (5, 5, 21, 20, 0.5), 'linea': (5, 15, 601, 600, 2)}
+        for name, (dep, rel, min_dep, min_burn, ceiling) in want.items():
+            spec = NETS[name]
+            self.assertEqual((spec['feeBps']['deposit'], spec['feeBps']['release'], spec['minDeposit'], spec['l2MinBurn'],
+                              spec['relay']['gasCeilingGwei']), (dep, rel, min_dep * 10**6, min_burn * 10**6, ceiling), name)
+            doc = json.loads((ROOT / 'deployments' / name / 'bridge.network.json').read_text())
+            self.assertEqual((doc['fee']['depositBps'], doc['fee']['releaseBps'], doc['limits']['minDeposit'], doc['limits']['l2MinBurn'],
+                              doc['release']['gasCeilingGwei']), (dep, rel, str(min_dep * 10**6), str(min_burn * 10**6), f'{ceiling:g}'), name)
+            self.assertTrue(any('a release waits' in n for n in doc['release']['notes']), name)
+            if spec['launch']['v1']:
+                v = json.loads((ROOT / 'deployments' / name / 'busdc-vault.config.json').read_text())['vault']
+                t = json.loads((ROOT / 'deployments' / name / 'busdc-token.config.json').read_text())
+                r = json.loads((ROOT / 'deployments' / name / 'ops/relayer.template.json').read_text())
+                self.assertEqual((v['provenance']['fees']['depositBps'], v['provenance']['fees']['releaseBps'], v['policy']['minDeposit'],
+                                  v['policy']['l2MinBurn'], t['limits']['minBurn'], r['eth_max_gas_price_gwei']),
+                                 (dep, rel, min_dep * 10**6, min_burn * 10**6, min_burn * 10**6, ceiling), name)
+                # the constructor's own rule: the smallest deposit, less its fee, is at least the smallest burn
+                self.assertGreaterEqual(min_dep * 10**6 - min_dep * 10**6 * dep // 10_000, min_burn * 10**6, name)
+        eth_v = json.loads((ROOT / 'deployments/mainnet/busdc-vault-mainnet.config.json').read_text())['vault']
+        eth_t = json.loads((ROOT / 'deployments/mainnet/busdc-mainnet.config.json').read_text())
+        eth_r = json.loads((ROOT / 'deployments/mainnet/busdc-ops/relayer.template.json').read_text())
+        e = REGISTRY['relayCost']['ethereum']
+        self.assertEqual((eth_v['provenance']['fees']['depositBps'], eth_v['provenance']['fees']['releaseBps'], eth_v['policy']['minDeposit'],
+                          eth_v['policy']['l2MinBurn'], eth_t['limits']['minBurn'], eth_r['eth_max_gas_price_gwei']),
+                         (5, 10, 101_000_000, 100_000_000, 100_000_000, 2))
+        self.assertEqual((e['feeBps'], e['minDeposit'], e['l2MinBurn'], e['gasCeilingGwei']),
+                         ({'deposit': 5, 'release': 10}, 101_000_000, 100_000_000, 2))
+        # windows and caps are NOT part of this schedule (an owner decision still open): unchanged
+        self.assertEqual((eth_v['cap'], eth_v['policy']['windowLimit']), (100_000_000_000, 10_000_000_000))
+
+    def test_the_minimum_burn_floor_is_the_stated_formula(self):
+        usd = REGISTRY['relayCost']['nativeUsd']
+        import math
+        for chain, gas, ceiling, bps in ((1, 207000, 2, 10), (59144, 210269, 2, 15), (42161, 206932, 0.5, 5), (10, 206968, 0.5, 5)):
+            want = math.ceil(gas * ceiling * 1e-9 * usd * 1e6 / (1 - bps / 10_000))
+            got = launch.min_burn_floor(chain, bps)
+            self.assertLessEqual(abs(got - want), 1, (chain, got, want))
+        self.assertEqual(launch.min_burn_floor(1, 10), 752761)       # 0.752761 dollars on Ethereum at 2 gwei and 1,816.445 USD
+        self.assertEqual(launch.min_burn_floor(59144, 15), 765032)   # 0.765032 on Linea
+        self.assertGreater(launch.min_burn_floor(1, 9999), 7 * 10**9)  # the complement: a 99.99% fee would need a 7,520 dollar minimum
+        self.assertIsNone(launch.min_burn_floor(31337, 5))           # a rehearsal chain has no recorded relayer cost
+        self.assertIsNone(launch.min_burn_floor(56, 5))              # nor a network out of v1
+        for name in ('arbitrum-one', 'op-mainnet', 'linea'):
+            self.assertGreaterEqual(NETS[name]['l2MinBurn'], launch.min_burn_floor(NETS[name]['chainId'], NETS[name]['feeBps']['release']))
+
+    def test_a_minimum_burn_below_the_relayer_cost_is_refused_by_both_tools(self):
+        import launch_fixture
+        for name in ('linea', 'op-mainnet'):
+            spec = NETS[name]
+            floor = launch.min_burn_floor(spec['chainId'], spec['feeBps']['release'])
+            for burn, ok in ((floor - 1, False), (floor, True)):
+                c = filled_vault(name)
+                c['vault']['policy'].update(l2MinBurn=burn, minDeposit=burn + 1000)
+                rc, r = self.vault(c)
+                self.assertEqual(rc == 0, ok, (name, burn, r))
+                if not ok:
+                    self.assertIn(f'is below {floor}', r['reason'])
+                    self.assertIn('(1 - releaseBps / 10000)', r['reason'])
+                t = filled_token(name)
+                t['limits']['minBurn'] = burn
+                why = self.token(t)
+                self.assertEqual(why is None, ok, (name, burn, why))
+                if not ok:
+                    self.assertIn(f'is below {floor}', why)
+        # the Ethereum route (chain 1): the same floor from relayCost.ethereum, and the decided config passes
+        floor = launch.min_burn_floor(1, 10)
+        eth = launch_fixture.filled()
+        self.assertIsNone(self.token(eth))
+        eth['limits']['minBurn'] = floor - 1
+        self.assertIn(f'is below {floor}', self.token(eth))
+        v = launch_fixture.filled_vault(launch_fixture.filled())
+        self.assertEqual(self.vault(v)[1].get('decision'), 'config-valid')
+        v['vault']['policy'].update(l2MinBurn=floor - 1, minDeposit=floor + 1000)
+        self.assertIn(f'is below {floor}', self.vault(v)[1]['reason'])
+        v = launch_fixture.filled_vault(launch_fixture.filled())
+        v['vault']['policy'].update(l2MinBurn=10_000_000, minDeposit=11_000_000)   # the values before the schedule still pass the FLOOR
+        self.assertEqual(self.vault(v)[1].get('decision'), 'config-valid')         # (it is a floor, not the schedule: chain 1 is not pinned)
 
     def test_no_flag_or_environment_variable_lifts_the_vault_tool(self):
         c = filled_vault('base')

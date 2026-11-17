@@ -197,6 +197,40 @@ def timing(chain_id, path=None, anchor_max_age=None):
             'remeasure_s': t['remeasureSeconds']}
 
 
+def fee_schedule(chain_id, path=None):
+    """The decided fee schedule and relayer cost of a route (coordinator, 2026-11-17; agents/347-fee-economics-r17.md), or
+    None for a rehearsal chain: {deposit_bps, release_bps, min_deposit, l2_min_burn, release_gas, gas_ceiling_gwei,
+    native_usd}. Chain 1 is the `relayCost.ethereum` entry of the registry: the deploy tools read it for the Ethereum
+    route's minimum-burn floor, and nothing else of this module runs for chain 1."""
+    chain_id = int(chain_id)
+    reg = _load(path)
+    if chain_id == ETHEREUM:
+        spec, relay = reg['relayCost']['ethereum'], reg['relayCost']['ethereum']
+    else:
+        net = network_of(chain_id, path)
+        if net is None:
+            return None
+        spec, relay = net[1], net[1]['relay']
+    return {'deposit_bps': spec['feeBps']['deposit'], 'release_bps': spec['feeBps']['release'], 'min_deposit': spec['minDeposit'],
+            'l2_min_burn': spec['l2MinBurn'], 'release_gas': relay['releaseGas'], 'gas_ceiling_gwei': relay['gasCeilingGwei'],
+            'native_usd': reg['relayCost']['nativeUsd']}
+
+
+def min_burn_floor(chain_id, release_bps, path=None):
+    """The least `l2MinBurn` (six-decimal units) the deploy tools accept for a route, or None when no relayer cost is
+    recorded for it (a rehearsal chain; a network out of v1):
+
+        floor = ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps / 10000))
+
+    the measured relayer cost of one release at the gas ceiling, in units of the six-decimal dollar asset, divided by the
+    complement of the release fee rate: the smallest exit still pays out at least what relaying it costs at the ceiling."""
+    s = fee_schedule(chain_id, path)
+    if s is None or s['release_gas'] is None or s['gas_ceiling_gwei'] is None or not 0 <= release_bps < 10_000:
+        return None
+    cost = s['release_gas'] * s['gas_ceiling_gwei'] * s['native_usd'] / 1000  # gas x gwei x 1e-9 x USD x 1e6 units
+    return -int(-cost * 10_000 // (10_000 - release_bps))
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
     if mode not in ('status', 'check'):

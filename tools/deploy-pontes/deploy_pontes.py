@@ -361,6 +361,19 @@ def validate(cfg, rehearsal):
             refuse((name, symbol) == (want['name'], want['symbol']),
                    f'the L2 token of source chain {eth["chainId"]} is {want["symbol"]} ("{want["name"]}"), one token per network '
                    f'(tools/evm-nets/networks.json); the config names {symbol} ("{name}")')
+        if not rehearsal:
+            # Fee schedule of 2026-11-17: the token's minBurn is the vault's l2MinBurn, held to the same floor (the vault
+            # tool states the formula). The release fee rate is the vault's; the route's decided rate is used here.
+            launch = evm_launch()
+            if launch is not None:
+                try:
+                    sched = launch.fee_schedule(eth['chainId'])
+                    floor = launch.min_burn_floor(eth['chainId'], sched['release_bps']) if sched else None
+                except launch.LaunchError as e:
+                    refuse(False, f'the relayer cost of a release cannot be read, so minBurn cannot be checked: {e}')
+                refuse(floor is None or lim['minBurn'] >= floor,
+                       f'limits.minBurn {lim["minBurn"]} is below {floor}: the measured relayer cost of one release at the gas ceiling '
+                       'divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula)')
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
         refuse(is_hash(eth['route']) and int(eth['route'], 16), 'ethereum.route is undecided (vault.routeId())')
         refuse(is_hash(eth['vaultCodeHash']), 'ethereum.vaultCodeHash is undecided')
