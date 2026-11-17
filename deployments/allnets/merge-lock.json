@@ -93,7 +93,7 @@
     },
     "tron": {
       "branch": "codex/bridge-tron-r17-20261117",
-      "commit": "12ec9041a8caca8cd4dc6cf3954986125b7a0935",
+      "commit": "f948f79bcd2f7b4b4e2ddfd5ee71be8f2fafcf4b",
       "agent": 370,
       "routes": [
         "tron"
@@ -111,6 +111,10 @@
         {
           "branch": "codex/bridge-tron-r17-20261117",
           "commit": "8fb85608d9f49b2eb5eadd01fde5b1e508261062"
+        },
+        {
+          "branch": "codex/bridge-tron-r17-20261117",
+          "commit": "12ec9041a8caca8cd4dc6cf3954986125b7a0935"
         }
       ]
     },
