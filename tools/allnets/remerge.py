@@ -37,7 +37,7 @@ LINES = json.loads((HERE / 'lines.json').read_text())
 SCHEMA = 'deployments/schema/bridge.network.schema.json'
 SCHEMA_OWNER = 'evm-nets'
 LOCK = ROOT / 'deployments/allnets/merge-lock.json'
-TRAILER = 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
+TRAILER = 'Co-Authored-By: Claude Mythos 5.2 <noreply@anthropic.com>'
 LOCAL = '--local' in sys.argv
 
 sys.path.insert(0, str(HERE))
