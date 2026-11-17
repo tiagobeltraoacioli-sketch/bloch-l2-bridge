@@ -25,10 +25,11 @@ was never used from a point no key exists for. A signature can.
 
   `proof` as the router takes it is `tag | 64-byte signature [| 32-byte application domain]`:
     tag 0  the signature covers the bytes of the line (the `signMessage` of a browser wallet);
-    tag 1  it covers the Solana off-chain message envelope, version 0, as `solana sign-offchain-message` of
-           Agave 4.4.1 builds it: 0xff "solana offchain" | 0x00 | 0x00 (format: restricted ASCII) | length u16 LE | line;
-    tag 2  it covers the envelope with an application domain and the signer:
-           0xff "solana offchain" | 0x00 | domain (32) | 0x00 | 0x01 | signer (32) | length u16 LE | line.
+    tag 1  it covers the Solana off-chain message envelope as `solana sign-offchain-message` of Agave 4.4.1 builds
+           it with a key file: 0xff "solana offchain" | 0x00 | 0x00 (format: restricted ASCII) | length u16 LE | line;
+    tag 2  it covers the envelope with an application domain and the signer, which is what a LEDGER's Solana app
+           signs (review 376, R330-SOL-4P-6): 0xff "solana offchain" | 0x00 | domain (32) | 0x00 | 0x01 | signer (32)
+           | length u16 LE | line. The app's header version 1 is not accepted.
   `exit-proof` builds those bytes from a signature and says under which envelope it verifies.
 
 No network, no key: this tool never signs. Every line is printable ASCII (format 0 of the off-chain message

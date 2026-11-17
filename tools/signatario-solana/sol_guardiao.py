@@ -262,9 +262,24 @@ class SolGuardian(Guardian):
                                   'vault approval differs from its L2 burn (not paid yet: a pause voids it)',
                                   'release': shown, 'burn': b}))
                 continue
+            if fin is not None and b['block'] > fin:
+                # Round 18 (review 376, R330-SOL-4P-9): a burn past THIS guardian's L2 finalized head is judged first
+                # as early, with the parent's severity and grace; its recipient is judged in the first round whose
+                # head covers it (the router's logs up to this head cannot show it yet).
+                findings.append((self.release_before_final, f'release-before-final:{tag}', self.provenance_grace,
+                                 {'reason': 'vault release of a burn not finalized on this guardian\'s L2',
+                                  'release': shown, 'burn_block': b['block'], 'l2_finalized': fin}))
+                if paid:
+                    released[b['burn_id']] = r['key']
+                continue
             # The recipient rule (sol_recipient.py). A paid record that passed is not read again; an approval is
             # judged every round until it is paid or voided.
             kind, why = self.judged_recipient(b, r, paid, fin)
+            if kind == 'pending-final':
+                findings.append((self.release_before_final, f'release-before-final:{tag}', self.provenance_grace,
+                                 {'reason': 'vault release for a redirect not yet finalized on this guardian\'s L2: ' + why,
+                                  'release': shown, 'burn_block': b['block'], 'l2_finalized': fin}))
+                continue
             if kind == 'mismatch':
                 findings.append(('hard', f'release-mismatch:{tag}', 0,
                                  {'reason': ('vault release' if paid else 'vault approval (not paid yet: a pause voids it)')
@@ -285,7 +300,7 @@ class SolGuardian(Guardian):
                                      'Solana: ' + why, 'release': shown, 'burn': b}))
             if paid:
                 released[b['burn_id']] = r['key']
-            if fin is None or b['block'] > fin:
+            if fin is None:  # no finalized head known: judged on the router's `finalized` logs above, and early as before
                 findings.append((self.release_before_final, f'release-before-final:{tag}', self.provenance_grace,
                                  {'reason': 'vault release of a burn not finalized on this guardian\'s L2',
                                   'release': shown, 'burn_block': b['block'], 'l2_finalized': fin}))
@@ -319,6 +334,12 @@ class SolGuardian(Guardian):
                     'from': self._senders.get(b['burn_id'])}
             view = sol_recipient.exit_view(self.router_cfg, self.node().a, burn, hex(fin) if fin is not None else 'finalized')
             wallet = sol_recipient.wallet_for_recipient(view, burn, recipient20)
+            if wallet is None and fin is not None:
+                # R330-SOL-4P-9: a redirect past this guardian's finalized head is not in its view yet. When the logs
+                # up to `latest` accept the recipient, the record is early, not wrong: release-before-final, its grace.
+                later = sol_recipient.exit_view(self.router_cfg, self.node().a, burn, 'latest')
+                if sol_recipient.wallet_for_recipient(later, burn, recipient20) is not None:
+                    return 'pending-final', 'the router log that names this recipient is past the finalized head'
             if wallet is None:
                 if S.hx(recipient20) != b['eth_recipient']:
                     return 'mismatch', None

@@ -151,7 +151,7 @@ class Cluster:
         if method == 'getSlot':
             return self.slot
         if method == 'getBlockTime':
-            return int(time.time())
+            return int(time.time()) - getattr(self, 'clock_lag', 0)
         if method == 'getAccountInfo':
             got = self.accounts.get(S.pubkey(params[0]))
             value = None if got is None else {'owner': S.b58encode(got[0]), 'lamports': 1, 'data': [base64.b64encode(got[1]).decode(), 'base64']}
@@ -458,6 +458,16 @@ class ReleaseRefusals(unittest.TestCase):
         code, out = self.release(cast='/nonexistent/cast')
         self.assertEqual(code, 1)
         self.assertIn('cast', out['reason'] + out.get('error', ''))  # every check passed; only the signing tool is missing
+
+    def test_a_cluster_clock_behind_the_host_gets_a_validity_the_vault_accepts(self):
+        """Round 18 (agent 371; rehearsal run 3 stopped on "validUntil outside the allowed window" under host load): the
+        cluster clock 40 s behind this host, valid_seconds 3590 of the vault's 3600: the first signer caps validUntil
+        at cluster time + maxValidSeconds instead of proposing a certificate it then refuses."""
+        self.c.clock_lag = 40
+        code, out = self.release(valid_seconds=3590, max_valid_seconds=3600, cast='/nonexistent/cast')
+        self.assertNotIn('validUntil outside', json.dumps(out))
+        self.assertIn('cast', out['reason'] + out.get('error', ''))
+        self.c.clock_lag = 0
 
     def test_stale_after_a_pause(self):
         self.c.state['last_pause_at'] = int(time.time()) - 600  # a pause began ten minutes ago and was ended early

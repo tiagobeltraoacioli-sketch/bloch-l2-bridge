@@ -50,7 +50,7 @@ SOLBIN = Path(arg('--solana-bin'))
 FOUNDRY = Path(arg('--foundry-bin'))
 BASE = int(arg('--port-base', '42200'))
 CAST, FORGE, ANVIL = str(FOUNDRY / 'cast'), str(FOUNDRY / 'forge'), str(FOUNDRY / 'anvil')
-L2_URL = f'http://127.0.0.1:{BASE + 1}'
+L2_URL = f'http://127.0.0.1:{BASE + 2}'
 SOL_URL = f'http://127.0.0.1:{BASE + 10}'
 L2_CHAIN = 700771  # not 700770: the signer refuses `l2_source: rpc` (tests only) on the real L2 chain id
 RESULTS = []
@@ -112,16 +112,15 @@ REQUIRED_CASES = {
     'release-mismatch:destination': 'the same with pause_on_destination (hard)',
     'release-before-final': 'an approval of a burn not finalized on the L2',
     'mint-chain': 'an L2 mint chain the deposits do not back',
+    'release-held-no-router-log': 'a router burn whose SolanaExit log the signer cannot find (its router_from_block is above the burn)',
+    'deposit-record-changed': 'a deposit record a guardian read earlier is replaced after a Solana rollback (soft)',
+    'vault-pause-failed': 'a guardian pause the vault refuses (the cooldown after a committee unpause)',
 }
 REQUIRED_ELSEWHERE = {
-    'release-held-no-router-log': 'unreachable on chain: the router emits SolanaExit in the transaction of every burn it makes '
-                                  '(test_exit_rule.Rule.test_a_router_burn_without_its_router_log_is_held_and_not_redirectable)',
     'release-held-redirect-destination': 'same code path as release-held-destination for the redirect key (test_exit_rule.Latch)',
     'certificate-withheld-<other codes>': 'the same branch of sol_vigia.relay_release as certificate-withheld-destination',
     'watch-gap-exceeds-retention': 'outside a rehearsal only (the rehearsal flag skips the retention rules): test_r330_review.R330Sol3Retention',
     'guardian refuses a slow --interval / a retention below the floor': 'outside a rehearsal only: test_r330_review.R330Sol3Retention',
-    'deposit-record-changed': 'needs a Solana rollback that rewrites a finalized deposit record: not staged; unit test of the parent',
-    'vault-pause-failed': 'a pause authorization the vault refuses: not staged (the guardian keys of this rig are valid)',
 }
 COVERED = set()
 
@@ -139,7 +138,7 @@ def section(title):
 
 
 # ── processes ───────────────────────────────────────────────────────────────
-def start_validator(reset, attempts=4):
+def start_validator(reset, attempts=10):
     """Starts the validator. Its ports lie inside the host's ephemeral range, so another process's outgoing
     connection can hold one for a moment ("Address already in use"): an immediate exit is tried again."""
     for attempt in range(attempts):
@@ -155,7 +154,7 @@ def start_validator(reset, attempts=4):
 def start_validator_once(reset):
     log = open(WORK / 'validator.log', 'a')
     argv = [str(SOLBIN / 'solana-test-validator'), '--ledger', str(WORK / 'ledger'), '--bind-address', '127.0.0.1',
-            '--rpc-port', str(BASE + 10), '--faucet-port', str(BASE + 12), '--gossip-port', str(BASE + 13),
+            '--rpc-port', str(BASE + 10), '--faucet-port', str(BASE + 12), '--gossip-port', str(BASE + 14),
             '--dynamic-port-range', f'{BASE + 20}-{BASE + 60}', '--quiet']
     if reset:
         argv.append('--reset')
@@ -186,7 +185,7 @@ def stop(name):
 
 def start_anvil():
     log = open(WORK / 'anvil.log', 'a')
-    PROCS['anvil'] = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(BASE + 1), '--chain-id', str(L2_CHAIN),
+    PROCS['anvil'] = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(BASE + 2), '--chain-id', str(L2_CHAIN),
                                        '--silent'], stdout=log, stderr=log, start_new_session=True)
     for _ in range(60):
         if run(CAST, 'chain-id', '--rpc-url', L2_URL, ok=False).returncode == 0:
@@ -1219,6 +1218,24 @@ class Rehearsal:
             code, lines = self.daemon('sol_guardiao.py', cfg, 'check')
             return code, sorted({str(x.get('id')) for x in lines if x.get('kind') == 'alert'}), lines
 
+        section('A signer that cannot find the router log of a burn holds it (no-router-log), unlatched')
+        tx0 = self.burn(10 * U, self.walletB.public)
+        b0 = self.burn_id_of(tx0)
+        block = int(json.loads(out(CAST, 'receipt', tx0, '--rpc-url', L2_URL, '--json'))['blockNumber'], 16)
+        late = json.loads(self.signer_cfgs[0][1].read_text())
+        late.update(router_from_block=block + 1, db=str(WORK / 'soldb-late.json'))
+        (WORK / 'sol1-late.json').write_text(json.dumps(late))
+        doc = json.loads(self.vigia_cfgs[0].read_text())
+        doc.update(sol_half_config=str(WORK / 'sol1-late.json'), shared_dir=str(WORK / 'shared-late'), signer_name='s1late')
+        (WORK / 'vigia1-late.json').write_text(json.dumps(doc))
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        _, lines = self.daemon('sol_vigia.py', WORK / 'vigia1-late.json', 'sign', '--once')
+        db = json.loads((WORK / 'soldb-late.json').read_text()) if (WORK / 'soldb-late.json').exists() else {}
+        check('a sign daemon whose router_from_block is above the burn holds it (release-held-no-router-log), signs nothing and '
+              'latches nothing (a configuration error must not hold the burn for good)',
+              'release-held-no-router-log' in alerts(lines, b0) and not list((WORK / 'shared-late').glob(f'release/{b0[2:]}/r-*'))
+              and b0 not in (db.get('held') or {}), alerts=alerts(lines, b0), case='release-held-no-router-log')
+
         section('R330-SOL-3P-2, inverted: a destination that becomes a mint AFTER five signers certified')
         self.wait_bucket(10 * U)
         k1, _ = self.sol.keygen('exit-rule-k1')
@@ -1376,6 +1393,25 @@ class Rehearsal:
               code is None and any(i.startswith(f"release-before-final:approval-{rel['nonce']}-") for i in ids), ids=ids,
               case='release-before-final')
         l2_mine()
+        section('A guardian pause the vault refuses: inside the cooldown after a committee unpause (vault-pause-failed)')
+        pausing_cfg = WORK / 'guardian-pausing.json'
+        pausing_cfg.write_text(json.dumps(dict(quiet, vault_pause=True, state=str(WORK / 'guardian-pausing-state.json'))))
+        self.wait_guardians_free()
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        p0 = self.state()['pauseCount']
+        code, ids, _ = guardian_ids(pausing_cfg)
+        check('a guardian with vault pause pauses the vault on the hard findings above', self.state()['pauseCount'] == p0 + 1, exit=code, ids=ids)
+        r = self.committee_unpause('exit-rule')
+        check('the committee (6 of 7) ends the pause early: guardians are blocked for the cooldown', r['ok'], answer=r)
+        time.sleep(35)  # a certificate dated now must not predate the pause (StaleCertificate), the cooldown still runs
+        rel, ctx = self.l2_burn_release(self.held_direct[0])
+        code, _ = self.forged_approve(rel, ctx, self.release_keys[:5])
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        p1 = self.state()['pauseCount']
+        code_g, ids, _ = guardian_ids(pausing_cfg)
+        check('a new hard finding inside the cooldown: the pause is refused by the vault and the guardian raises vault-pause-failed',
+              code is None and 'vault-pause-failed' in ids and self.state()['pauseCount'] == p1, exit=code_g, ids=ids,
+              case='vault-pause-failed')
         # The guardian watches above (without vault pause) paused the L2 token's mints on their hard findings, as the
         # parent does; the later sections deposit and mint again, so the L2 clock is moved past that pause.
         l2_warp(259200 + 10)
@@ -1953,6 +1989,12 @@ class Rehearsal:
         dep = self.deposit(60 * U)
         m = self.attest_and_mint(dep, 'd-cancel')
         check('a deposit made after the snapshot is attested and its mint queued', m.get('receipt', {}).get('status') == '0x1', answer=m)
+        import contextlib
+        import io
+        import sol_guardiao
+        watcher = sol_guardiao.SolGuardian(str(WORK / 'canceller1.json'))
+        watcher._nodes = {}
+        seen_before = len(watcher.records())  # the deposit records at `finalized`, kept as a watching guardian keeps them
         self.rollback('a')
         s1 = self.state()
         check('the cluster is back at the earlier state: the deposit is gone', s1.get('depositCount') == s0['depositCount'], before=s0, after=s1)
@@ -1971,6 +2013,17 @@ class Rehearsal:
         dep_new = self.deposit(45 * U)
         m = self.attest_and_mint(dep_new, 'd-refill')
         r = self.credit(dep_new)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 2)
+        watcher._nodes = {}
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            try:
+                watcher.records()
+            except Exception as e:  # noqa: BLE001 - an unverifiable round is reported, the check below decides
+                print(json.dumps({'kind': 'error', 'error': str(e)}))
+        check('a guardian that read the rolled-back deposit record raises deposit-record-changed when another record takes its nonce',
+              'deposit-record-changed' in said.getvalue(), seen_before=seen_before, said=said.getvalue()[-600:],
+              case='deposit-record-changed')
         check('a real deposit at the same count then takes the freed slot and credits: nothing unbacked was ever minted',
               dep_new['nonce'] == dep['nonce'] and m.get('receipt', {}).get('status') == '0x1' and r['status'] == '0x1', mint=m, credit=r)
         self.deps.append(dep_new)

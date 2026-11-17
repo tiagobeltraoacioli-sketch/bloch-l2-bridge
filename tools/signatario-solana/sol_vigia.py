@@ -442,7 +442,13 @@ class SolVigia(Vigia):
                 reason='the vault holds an approval for this burn, and no wallet with a valid proof of its key stands '
                        'behind its recipient: honest signers do not certify one. Not paid by this relayer')
             return
-        redirect = view['redirect'] if view['redirect'] is not None and view['redirect'].get('wallet') == wallet else None
+        # The latch key of the candidate that matched (R330-SOL-4P-7): the latest redirect, the burn's own destination,
+        # or an earlier proven redirect, in the order of sol_recipient.wallet_for_recipient.
+        redirect = view['redirect'] if view['redirect'] is not None and view['redirect'].get('problem') is None \
+            and view['redirect'].get('wallet') == wallet else None
+        original = view['original']
+        if redirect is None and not (original is not None and original.get('problem') is None and original.get('wallet') == wallet):
+            redirect = next((c for c in reversed(view.get('proven') or []) if c['wallet'] == wallet), None)
         key = burn_id if redirect is None else f"{burn_id}:r{redirect['nonce']}"
         latched = self.holds().get(key)
         dest = self.destination_read(wallet)

@@ -368,7 +368,11 @@ def cmd_release(cfg, intent_path):
         anchor = (slot, want)
     else:
         anchor = node.rpc.last_block('finalized', finalized)
-        valid_until = now + int(cfg.get('valid_seconds', 1800))
+        # Round 18 (agent 371; rehearsal run 3): the vault measures validity on the CLUSTER clock (validUntil at most
+        # maxValidSeconds after it). A cluster clock behind this host's by more than maxValidSeconds - valid_seconds
+        # made the first signer propose a certificate the window rule below then refused. Capped to what the vault
+        # accepts; every check below is unchanged.
+        valid_until = min(now + int(cfg.get('valid_seconds', 1800)), int(cluster_now) + node.config.max_valid_seconds)
     if not now < valid_until <= now + max_valid or valid_until - int(cluster_now) > node.config.max_valid_seconds:
         refuse('validUntil outside the allowed window', validUntil=valid_until, now=now)
     # The vault refuses a certificate that could have been signed before its last guardian pause (R325-SOL-2).
