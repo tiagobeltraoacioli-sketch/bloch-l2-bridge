@@ -423,6 +423,14 @@ class SolGuardian(Guardian):
                else None)
         if why:
             self.clear_problem('vault-pause-failed')
+            if why == 'already paused':
+                self.clear_problem('vault-pause-blocked')
+            elif 'vault-pause-blocked' not in self.state['problems']:
+                # Round 18 (rehearsal run 5): a hard finding stands and this guardian cannot pause (the committee's
+                # cooldown, or its one pause of this chain is used): page, once, until the vault is paused or the
+                # finding is gone. Before, only a `vault-pause-skip` line was written.
+                self.problem('vault-pause-blocked', f'{why} until {max(v["paused_until"], v["guardian_blocked_until"])}: '
+                                                    f'hard findings stand and this guardian cannot pause: {", ".join(map(str, reasons))[:200]}')
             note = f'{why}:{count}'
             if self.state.get('vault_skip') != note:
                 self.state['vault_skip'] = note
