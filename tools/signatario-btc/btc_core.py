@@ -658,6 +658,16 @@ def refund_text(vault_id, txid, vout, bitcoin_address):
             f'to the Bitcoin address {bitcoin_address}')
 
 
+def proposal_text(vault_id, proposal):
+    """What a relayer signs (personal message) to hand a proposal to a signer: the vault and the hash of the proposal
+    without its two authentication fields, in canonical JSON. Signers work only for relayers on their allow-list."""
+    import hashlib
+    import json
+    body = {k: v for k, v in proposal.items() if k not in ('relayer', 'relayer_signature')}
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return f'bloch.bbtc.proposal.v1: vault {vault_id.hex()} proposal {digest}'
+
+
 def p2wpkh_hash(network, bitcoin_address):
     """The 20-byte key hash of a P2WPKH address of this network; anything else raises BadAddress."""
     spk = spk_from_address(network, bitcoin_address)
