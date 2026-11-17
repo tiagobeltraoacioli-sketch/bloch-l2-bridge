@@ -26,7 +26,9 @@ from custody_deployment_ancestry import (  # noqa: E402
 )
 from custody_deployment_compare import NON_AUTHORIZING  # noqa: E402
 from custody_deployment_manifest import canonical_sha256  # noqa: E402
+from usdt_observer.common import Invalid  # noqa: E402
 from test_custody_deployment_evidence import fixture  # noqa: E402
+from verifier_fixture import private_copy  # noqa: E402
 
 
 VECTORS = json.loads((Path(__file__).parent / "fixtures" / "ethereum_headers.synthetic.json").read_text())["headers"]
@@ -171,7 +173,9 @@ class AncestryVerifierTest(unittest.TestCase):
         target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
         if not target.is_absolute():
             target = ROOT / target
-        cls.executable = target / "debug" / "ethereum_header_ancestry_verifier"
+        cls.built = target / "debug" / "ethereum_header_ancestry_verifier"
+        # A private copy with an explicit mode, never cargo's output under the process umask (verifier_fixture.py).
+        cls.executable = private_copy(cls, cls.built)
         cls.pin = "0x" + hashlib.sha256(cls.executable.read_bytes()).hexdigest()
 
     def setUp(self):
@@ -272,6 +276,52 @@ class AncestryVerifierTest(unittest.TestCase):
         result = subprocess.run([str(self.executable), "--activate"], input=DOMAIN + encoded,
                                 capture_output=True, timeout=10, check=False)
         self.assertEqual(result.returncode, 1)
+
+    def test_a_group_or_other_writable_verifier_is_refused(self):
+        # The rule itself, pinned (agent 403, round 19): what cargo leaves under umask 002 (0775), and any other
+        # group- or other-writable mode, IS refused by the library and by the CLI; only the mode differs from the
+        # accepted case (same bytes, same pin), shown by the 0755 and 0500 controls.
+        for mode in (0o775, 0o757, 0o777, 0o520, 0o502):
+            with self.subTest(mode=oct(mode)):
+                loose = private_copy(type(self), self.built, mode)
+                with self.assertRaises(Invalid) as refused:
+                    verify_custody_deployment_ancestry(self.manifest, self.captures, self.evidence,
+                                                       executable=str(loose), expected_verifier_sha256=self.pin)
+                self.assertIn("immutable regular settlement verifier required", str(refused.exception))
+        old = os.umask(0o002)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                made = Path(directory) / "verifier"
+                descriptor = os.open(made, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o777)  # as a linker creates it
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(self.built.read_bytes())
+                self.assertEqual(made.stat().st_mode & 0o777, 0o775)
+                with self.assertRaises(Invalid):
+                    verify_custody_deployment_ancestry(self.manifest, self.captures, self.evidence,
+                                                       executable=str(made), expected_verifier_sha256=self.pin)
+                paths = {}
+                for name, value in (("manifest", self.manifest), ("ancestry", self.evidence),
+                                    ("a", self.captures[0]["evidence"]), ("b", self.captures[1]["evidence"])):
+                    paths[name] = Path(directory) / (name + ".json")
+                    paths[name].write_text(json.dumps(value))
+                command = [sys.executable, str(SCRIPTS / "check-custody-deployment-ancestry.py"), str(paths["manifest"]),
+                           "--ancestry", str(paths["ancestry"]), "--capture", "node-0=" + str(paths["a"]),
+                           "--capture", "node-1=" + str(paths["b"]), "--verifier-sha256", self.pin, "--verifier"]
+                result = subprocess.run(command + [str(made)], capture_output=True, text=True, timeout=15, check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(json.loads(result.stderr)["error"], "custody-ancestry-verification-refused")
+                made.chmod(0o755)  # the same file, only its mode changed: accepted
+                result = subprocess.run(command + [str(made)], capture_output=True, text=True, timeout=15, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.umask(old)
+        for mode in (0o755, 0o500):
+            with self.subTest(control=oct(mode)):
+                report = verify_custody_deployment_ancestry(
+                    self.manifest, self.captures, self.evidence,
+                    executable=str(private_copy(type(self), self.built, mode)), expected_verifier_sha256=self.pin)
+                self.assertTrue(report["rawHeaderAncestryVerified"])
 
     def test_offline_cli_outputs_non_authorizing_report_and_safe_refusal(self):
         with tempfile.TemporaryDirectory() as directory:

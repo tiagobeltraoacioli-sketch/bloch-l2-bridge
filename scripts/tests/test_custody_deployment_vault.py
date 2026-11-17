@@ -18,6 +18,7 @@ from custody_deployment_evidence import _route
 from custody_deployment_manifest import canonical_sha256
 from custody_deployment_vault import SCHEMA, expected_slots, collect_custody_deployment_vault, verify_custody_deployment_vault
 from test_custody_deployment_evidence import fixture
+from verifier_fixture import private_copy
 from usdt_observer.vault_state import expected_words
 
 VECTOR = json.loads((ROOT / 'test-vectors/ethereum-deployment-vault/anvil-shanghai.json').read_text())
@@ -93,7 +94,9 @@ class VaultTest(unittest.TestCase):
         if result.returncode:
             raise AssertionError('real vault verifier build failed: '+result.stderr)
         target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT/'target'))
-        cls.executable = (ROOT/target if not target.is_absolute() else target)/'debug/ethereum_deployment_vault_verifier'
+        cls.built = (ROOT/target if not target.is_absolute() else target)/'debug/ethereum_deployment_vault_verifier'
+        # A private copy with an explicit mode, never cargo's output under the process umask (verifier_fixture.py).
+        cls.executable = private_copy(cls, cls.built)
         cls.pin = '0x'+hashlib.sha256(cls.executable.read_bytes()).hexdigest()
 
     def verify(self, inputs, pin=None):
