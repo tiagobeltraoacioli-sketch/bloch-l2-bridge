@@ -81,7 +81,7 @@ class Run:
         self.forge = str(Path(fb) / 'forge')
 
     def suite(self, stage, name, argv, cwd=ROOT, env=None, ok_rc=(0,), expect=None, retry_busy=True):
-        log = self.out / f'{stage}-{name}.log'
+        log = self.out / f'{stage}-{re.sub(r"[^A-Za-z0-9_.+-]", "_", name)}.log'
         for attempt in range(3 if retry_busy else 1):
             t0 = time.time()
             with open(log, 'w') as fh:
@@ -130,6 +130,7 @@ def py(*args):
 def stage_integration(r):
     r.suite('integration', 'registry-check', py('tools/allnets/registry.py', 'check'))
     r.suite('integration', 'test_registry', py('-m', 'unittest', 'test_registry'), cwd=HERE)
+    r.suite('integration', 'test_cross_route', py('-m', 'unittest', 'test_cross_route'), cwd=HERE)
     r.suite('integration', 'mergecheck', py('tools/allnets/mergecheck.py'))
     r.suite('integration', 'test_routes', py('test_routes.py'), cwd=ROOT / 'tools/deploy-pontes')
     r.suite('integration', 'remerge-status', py('tools/allnets/remerge.py', '--status'),
@@ -168,7 +169,7 @@ def stage_offline(r):
     # every unittest module of every tools directory, from its own directory (as each line's own runs did)
     for path in sorted(ROOT.glob('tools/*/test_*.py')):
         text = path.read_text()
-        if 'unittest' not in text or path.name in ('test_verifier_review.py', 'test_routes.py', 'test_registry.py'):
+        if path.parent.name == 'allnets' or 'unittest' not in text or path.name in ('test_verifier_review.py', 'test_routes.py'):
             continue
         if 'unittest.main' not in text and 'class ' not in text:
             continue
