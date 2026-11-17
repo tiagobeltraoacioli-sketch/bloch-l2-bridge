@@ -1,0 +1,43 @@
+{
+  "domain": "bloch.bridge.tron-vault-build.v1",
+  "notes": "The vault a TRON deployment uses is built by TRON's own compiler, and every hash a deployment pins comes from that build. `python3 scripts/tron/build_vault_tron_solc.py --solc PATH` reproduces it and compares; `tron_deploy.py` refuses any other creation code on TRON mainnet. The forge build (stock solc 0.8.24, creation 24,288 bytes, sha256 22402ad300000150ac82bec9962ea1c30b7ab7e693e6d81bb29a76214226f4a8) is for the forge suites only. UNAUDITED.",
+  "compiler": {
+    "distribution": "https://github.com/tronprotocol/solidity",
+    "tag": "tv_0.8.24",
+    "releaseName": "0.8.24_Kant_v4.8.0",
+    "published": "2025-05-14",
+    "asset": "solc-static-linux",
+    "bytes": 15086296,
+    "sha256": "82605d2d64d9bcc2ab0b7608d192463de009a8ece6032058d4cbdbefbde87e78",
+    "sha256Source": "equal to the line for solc-static-linux in the release's own shasum.txt, downloaded with it on 2026-11-17; the release's PGP signature file (solc-static-linux.sig) was downloaded and NOT verified: no trusted copy of the signing key was at hand",
+    "url": "https://github.com/tronprotocol/solidity/releases/download/tv_0.8.24/solc-static-linux",
+    "version": "0.8.24+commit.7d902c66.Linux.g++"
+  },
+  "options": [
+    "--optimize",
+    "--optimize-runs",
+    "1",
+    "--evm-version",
+    "shanghai",
+    "--metadata-hash",
+    "none",
+    "--bin",
+    "--bin-runtime"
+  ],
+  "source": {
+    "contracts/tron/TronSourceVault.sol": "b505ff0e47d60ef56cd5c307c79449cc78dc104b82666b12e099c71d36c71802",
+    "contracts/usdt/ProvenanceSourceVault.sol": "271fd445c73f4160151ba1647c0291816cade6dc10916d64dfbbb2fa2df74915"
+  },
+  "creation": {
+    "bytes": 24371,
+    "sha256": "0c0498f1a853931f679dc557d5f1dee94405cdcbd52b8c7ab999de02c07e8f43",
+    "keccak256": "0xa4e5b8a5e5199d4237169c2a489ffbbd59eaa2e9a1cd4edd88d274904dc2b7c3",
+    "binFileSha256": "7fcb5f836dda34eac0dee147bf7436559e1a76539263656d764c7429a3b7e2cf"
+  },
+  "runtimeTemplate": {
+    "bytes": 19502,
+    "sha256": "43a2e3bb663a04c01865edb915c4a472455a65301c57e25bdd24fa4606309308",
+    "keccak256": "0x8225f58a56fc10c1badaa8c6f17ae1d23514ef7612f12e7259c70f27541f1fda",
+    "note": "the output of --bin-runtime: immutables are zero in it. The runtime code hash of a DEPLOYED vault (vaultCodeHash in the L2 token config, vault_code_keccak in every signer config) carries the constructor values and is read from the chain after the creation: TBD-deploy"
+  }
+}

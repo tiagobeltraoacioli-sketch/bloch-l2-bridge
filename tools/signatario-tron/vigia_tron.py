@@ -28,6 +28,7 @@ The L2 side (mints, executes, drains) is `vigia.py`'s code, untouched.
 """
 import hashlib
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -35,6 +36,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / 'signatario-stable'))
 import vigia  # noqa: E402
 import tron_send  # noqa: E402
+import tronlib  # noqa: E402
 
 TRON_MAINNET = 728126428
 
@@ -51,7 +53,8 @@ class VigiaTron(vigia.Vigia):
                    'journal_dir': c.get('relayer_submission_dir', str(self.shared.parent / '.tron-submissions')),
                    'fee_limit_sun': c.get('tron_fee_limit_sun', tron_send.DEFAULT_FEE_LIMIT),
                    'valid_s': c.get('tron_valid_s', 90),
-                   'max_sends_per_hour': c.get('tron_max_releases_per_hour', 120)}
+                   'max_sends_per_hour': c.get('tron_max_releases_per_hour', 120),
+                   **({'release_cost_sun': c['tron_release_cost_sun']} if c.get('tron_release_cost_sun') else {})}
             sender = tron_send.Sender(cfg)
             sender.wallet = lambda: self.relayer_wallet('eth')
             self._tron = sender
@@ -91,7 +94,27 @@ class VigiaTron(vigia.Vigia):
     def relay_round(self):
         for key, state in self.tron().settle_all():
             vigia.log(kind='tron-settled', key=key, state=state)
+        self.float_check()
         super().relay_round()
+
+    _float_at, _float_address = 0.0, None
+
+    def float_check(self, every_s=300):
+        """The relayer's TRX float, logged at most every five minutes and at once when it turns into an alert
+        (review R325-TRX-2P-3). Never stops a round: a node that does not answer is the round's own problem."""
+        now = time.time()
+        if now - self._float_at < every_s:
+            return None
+        try:
+            if self._float_address is None:
+                self._float_address = self.tron().sender()
+            line = self.tron().float_status(self._float_address)
+        except (tron_send.Refused, tronlib.TronError, RuntimeError, OSError) as e:
+            vigia.log(kind='tron-float-unknown', error=str(e)[:200])
+            return None
+        self._float_at = now
+        vigia.log(**line)
+        return line
 
     def send_locked(self, side, to, call, gas, replace, release_id, locks):
         if side != 'eth':

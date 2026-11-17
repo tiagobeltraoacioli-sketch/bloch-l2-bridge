@@ -895,12 +895,67 @@ def test_deploy(tmp):
     art.write_text(json.dumps({'bytecode': {'object': '0x60806040'}}))
     binf.write_text('60806040\n')
     empty.write_text('60__$abc$__40\n')
+    # R325-TRX-9: on TRON mainnet only the pinned build of TRON's own compiler is a creation code
+    repo_pin = json.loads((ROOT / 'deployments/tron/vault-build.pin.json').read_text())
+    check('build pin: on TRON mainnet a creation code that is not the pinned TRON-compiler build is refused (a forge artifact '
+          'and a .bin file alike)', 'not the pinned build' in raises(tron_deploy.Refuse, tron_deploy.creation, node, s, art)
+          and 'not the pinned build' in raises(tron_deploy.Refuse, tron_deploy.creation, node, s, binf))
+    check('build pin: the pin names the compiler release by hash, the options, both source files and the build (24,371 bytes); '
+          'the two source files in the tree are the pinned ones',
+          repo_pin['compiler']['sha256'] == '82605d2d64d9bcc2ab0b7608d192463de009a8ece6032058d4cbdbefbde87e78'
+          and repo_pin['compiler']['tag'] == 'tv_0.8.24' and repo_pin['creation']['bytes'] == 24_371
+          and repo_pin['creation']['sha256'] == '0c0498f1a853931f679dc557d5f1dee94405cdcbd52b8c7ab999de02c07e8f43'
+          and '--metadata-hash' in repo_pin['options'] and 'shanghai' in repo_pin['options']
+          and all(hashlib.sha256((ROOT / f).read_bytes()).hexdigest() == h for f, h in repo_pin['source'].items()), repo_pin['source'])
+    fake_pin = {'compiler': {'tag': 'test'}, 'creation': {'bytes': 4, 'sha256': hashlib.sha256(bytes.fromhex('60806040')).hexdigest()}}
+    check('build pin: the right hash with another length, or one byte changed, is refused',
+          raises(tron_deploy.Refuse, tron_deploy.check_build_pin, '60806040', {**fake_pin, 'creation': {**fake_pin['creation'], 'bytes': 5}}) != ''
+          and raises(tron_deploy.Refuse, tron_deploy.check_build_pin, '60806041', fake_pin) != ''
+          and tron_deploy.check_build_pin('60806040', fake_pin) is None)
+    rehearsal_shape = {**s, 'mainnet': False}
+    check('build pin: a rehearsal chain accepts any build (the forge artifact)',
+          tron_deploy.creation(node, rehearsal_shape, art)[0] == '60806040abcdef')
+    s = {**s, 'build_pin': fake_pin}
     full_a, plan_a = tron_deploy.creation(node, s, art)
     full_b, plan_b = tron_deploy.creation(node, s, binf)
     check('artifact: a forge artifact and a `solc --bin` file of the same code give the same creation bytes',
           full_a == full_b == '60806040abcdef' and plan_a == plan_b and plan_a['creationBytes'] == 4, (full_a, full_b))
     check('artifact: a file with unlinked placeholders or no code is refused',
           raises(tron_deploy.Refuse, tron_deploy.creation, node, s, empty) != '')
+
+
+def test_float(tmp):
+    """Round 17 (R325-TRX-2P-3): the relayer's TRX float is an alert of its own."""
+    class Acct:
+        requests = {}
+
+        def __init__(self, balance):
+            self.balance = balance
+
+        def post(self, path, obj=None, solid=False):
+            assert path == 'getaccount' and not solid and obj['address'] == tronlib.tron_hex(ME)
+            return {'balance': self.balance} if self.balance is not None else {}
+
+    def status(balance_trx, **cfg):
+        s = tron_send.Sender.__new__(tron_send.Sender)
+        s.cfg, s.max_per_hour = cfg, int(cfg.get('max_sends_per_hour', 0))
+        s.node = Acct(None if balance_trx is None else int(balance_trx * 10**6))
+        return s.float_status(ME)
+
+    ok = status(4_000, max_sends_per_hour=120)
+    soft = status(2_000, max_sends_per_hour=120)
+    hard = status(279, max_sends_per_hour=120)
+    empty = status(None, max_sends_per_hour=120)
+    check('float: 4,000 TRX covers 142 releases at 28 TRX, above one hour at the cap of 120: no alert',
+          (ok['kind'], ok['covers_releases'], ok['hours_at_the_cap']) == ('tron-float', 142, 1.18), ok)
+    check('float: the reviewer\'s case, 2,000 TRX against a cap of 120 releases an hour (3,360 TRX): soft alert',
+          (soft['kind'], soft['severity'], soft['id'], soft['covers_releases']) == ('alert', 'soft', 'tron-relayer-float', 71), soft)
+    check('float: fewer than ten releases of TRX left, or an account that does not exist: hard alert',
+          (hard['severity'], hard['covers_releases'], empty['severity'], empty['balance_trx']) == ('hard', 9, 'hard', 0.0), (hard, empty))
+    staked = status(300, max_sends_per_hour=120, release_cost_sun=2_000_000)
+    check('float: a relayer that stakes energy sets its real cost (2 TRX): 300 TRX is then 150 releases, no alert',
+          staked['kind'] == 'tron-float' and staked['covers_releases'] == 150, staked)
+    check('float: without an hourly cap the soft line is 20 releases', status(500)['kind'] == 'alert' and status(600)['kind'] == 'tron-float')
 
 
 def test_fee_rule():
@@ -962,6 +1017,7 @@ def main():
         test_daemons(tmp)
         test_deploy(tmp)
         test_fee_rule()
+        test_float(tmp)
     print(f'\n{sum(results)}/{len(results)} checks passed')
     raise SystemExit(0 if all(results) else 1)
 

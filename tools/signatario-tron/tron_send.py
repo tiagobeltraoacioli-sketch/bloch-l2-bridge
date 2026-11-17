@@ -4,6 +4,7 @@
   tron_send.py --config SEND.json call 'guardianPause()' [--key NAME]
   tron_send.py --config SEND.json call 'sweepFees()'
   tron_send.py --config SEND.json status --key NAME
+  tron_send.py --config SEND.json float       the sender's TRX balance against what releases cost: exit 0 ok, 2 alert
 
 Config: `tron_node` (the operator's own FullNode HTTP API), optional `tron_solidity`, `tron_chain_id`, `vault`
 (`T...` or hex), `keystore` + `password_file` (or `private_key_file`, throwaway rehearsal keys only), `journal_dir`,
@@ -31,6 +32,13 @@ and it cannot be replaced or repriced. So the rule is simpler and stronger:
      ceiling: a call that runs out of energy burns its whole limit.
   7. After a transaction that landed and FAILED on chain, nothing is signed for that payment for 60 s, doubling with
      every further failure (at most an hour). `max_sends_per_hour` caps what one journal signs in an hour.
+
+The float (review R325-TRX-2P-3). The fixed release fee is income in USDT at the owner's address; what a release costs
+is TRX at each relayer's own key, so somebody must convert and top up, and a relayer that runs dry stops paying exits.
+`float_status()` (the `float` command; the relayer daemon logs it every round) compares the sender's TRX balance with
+`release_cost_sun` (default 28 TRX: one release with no staked energy to a recipient that never held USDT, measured;
+a relayer that stakes or rents energy sets its real cost): `soft` alert below one hour of releases at the hourly cap
+(`max_sends_per_hour`, or 20 when there is no cap), `hard` below ten releases.
 """
 import fcntl
 import json
@@ -46,6 +54,8 @@ DEFAULT_FEE_LIMIT = 150_000_000
 ENERGY_MARGIN = (3, 2)  # the simulated energy times 3/2 must fit the fee limit
 MIN_FEE_LIMIT = 1_000_000
 BACKOFF_S, BACKOFF_MAX_S = 60, 3600  # after a transaction that landed and failed: 60 s, doubling, at most an hour
+RELEASE_COST_SUN = 28_000_000        # 257,319 energy x 100 sun + 1,563 bytes x 1,000 sun = 27.3 TRX (docs section 5), rounded up
+FLOAT_HARD_RELEASES = 10             # below this many releases of float: hard alert
 
 
 class Refused(RuntimeError):
@@ -84,6 +94,28 @@ class Sender:
 
     def sender(self):
         return self.node.run(self.node.cast, 'wallet', 'address', *self.wallet()).lower()
+
+    def float_status(self, address=None):
+        """The sender's TRX against the cost of releases: {'kind': 'tron-float' | 'alert', ...}. Read at the head: a
+        balance is not a signing decision, and the alert should come early rather than final."""
+        who = address or self.sender()
+        acct = self.node.post('getaccount', {'address': tronlib.tron_hex(who), 'visible': False})
+        balance = int(acct.get('balance', 0))
+        cost = int(self.cfg.get('release_cost_sun', RELEASE_COST_SUN))
+        if cost <= 0:
+            raise Refused('release_cost_sun must be positive')
+        per_hour = self.max_per_hour or 20
+        covers = balance // cost
+        line = {'sender': tronlib.base58(who), 'balance_trx': balance / 1e6, 'release_cost_trx': cost / 1e6,
+                'covers_releases': covers, 'hourly_cap': per_hour, 'hours_at_the_cap': round(covers / per_hour, 2)}
+        if covers < FLOAT_HARD_RELEASES:
+            return {'kind': 'alert', 'severity': 'hard', 'id': 'tron-relayer-float', **line,
+                    'reason': f'the relayer holds TRX for fewer than {FLOAT_HARD_RELEASES} releases: top it up now, exits stop when it is empty'}
+        if covers < per_hour:
+            return {'kind': 'alert', 'severity': 'soft', 'id': 'tron-relayer-float', **line,
+                    'reason': 'the relayer holds less TRX than one hour of releases at its hourly cap costs: top it up '
+                              '(the fixed release fee accrues in USDT at the owner address; it does not refill this key)'}
+        return {'kind': 'tron-float', **line}
 
     # ── journal ──────────────────────────────────────────────────────────────
     def path(self, key):
@@ -253,7 +285,7 @@ class Sender:
 
 def main():
     args = sys.argv[1:]
-    if '--config' not in args or not ({'call', 'status'} & set(args)):
+    if '--config' not in args or not ({'call', 'status', 'float'} & set(args)):
         raise SystemExit(__doc__)
     cfg = json.loads(Path(args[args.index('--config') + 1]).read_text())
     key = args[args.index('--key') + 1] if '--key' in args else None
@@ -263,6 +295,10 @@ def main():
             state, doc = s.wait(key, timeout=0.1)
             print(json.dumps({'ok': True, 'state': state, 'entry': doc}, indent=1))
             return
+        if 'float' in args:
+            line = s.float_status()
+            print(json.dumps(line))
+            raise SystemExit(2 if line['kind'] == 'alert' else 0)
         call = args[args.index('call') + 1:]
         call = call[:call.index('--key')] if '--key' in call else call
         data = s.node.calldata(*call)

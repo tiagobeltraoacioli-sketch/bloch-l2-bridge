@@ -3,7 +3,9 @@
 
   tron_deploy.py validate --config CFG.json [--token-config L2TOKEN.json]
   tron_deploy.py plan     --config CFG.json --artifact out/TronSourceVault.sol/TronSourceVault.json
-                          (--artifact is a forge artifact, or FILE.bin = the hex creation code `solc --bin` writes)
+                          (--artifact is FILE.bin = the hex creation code TRON's compiler writes with --bin: on TRON
+                          mainnet only the pinned build of deployments/tron/vault-build.pin.json is accepted; a forge
+                          artifact is accepted on a rehearsal chain only)
   tron_deploy.py create   --config CFG.json --artifact ART.json --node URL --keystore K --password-file P [--broadcast]
   tron_deploy.py verify   --config CFG.json --artifact ART.json --node URL --vault T...
   tron_deploy.py fee      --config CFG.json [--node URL] [--trx-usdt PRICE]
@@ -230,12 +232,29 @@ def ctor_args(node, s):
     return node.run(node.cast, 'abi-encode', CTOR, *values), labels
 
 
+BUILD_PIN = HERE.parent.parent / 'deployments' / 'tron' / 'vault-build.pin.json'
+
+
+def check_build_pin(code_hex, pin):
+    """On TRON mainnet the creation code must be the pinned build of TRON's own compiler (review R325-TRX-9): the forge
+    artifact is the stock-solc build, which every test uses and no deployment may."""
+    got = hashlib.sha256(bytes.fromhex(code_hex)).hexdigest()
+    want = pin['creation']['sha256']
+    if got != want or len(code_hex) // 2 != int(pin['creation']['bytes']):
+        raise Refuse(f"TRON mainnet: the creation code (sha256 {got}, {len(code_hex) // 2} bytes) is not the pinned build of "
+                     f"TRON's compiler {pin['compiler']['tag']} (sha256 {want}, {pin['creation']['bytes']} bytes). Build it with "
+                     'scripts/tron/build_vault_tron_solc.py and pass its TronSourceVault.bin; a forge artifact is the '
+                     'stock-solc build and is for tests only')
+
+
 def creation(node, s, artifact):
     text = Path(artifact).read_text()
     # A forge artifact (JSON), or the hex file `solc --bin` writes (a build with TRON's own compiler).
     code = (text.strip() if str(artifact).endswith('.bin') else json.loads(text)['bytecode']['object']).removeprefix('0x')
     if not code or len(code) % 2 or any(c not in '0123456789abcdefABCDEF' for c in code):
         raise Refuse('the artifact holds no creation code (unlinked libraries or an empty file?)')
+    if s['mainnet']:
+        check_build_pin(code, s.get('build_pin') or json.loads(BUILD_PIN.read_text()))
     args, labels = ctor_args(node, s)
     full = code + args[2:]
     return full, {'constructorArgs': args, 'creationCodeKeccak': node.run(node.cast, 'keccak', '0x' + code),
