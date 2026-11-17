@@ -1,7 +1,7 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T20:00:00Z",
+  "asOf": "2026-11-17T19:47:00Z",
   "findings": [
     {
       "id": "R329-EVM-3P-2",
@@ -158,19 +158,6 @@
       "source": "376 fourth pass"
     },
     {
-      "id": "R329-SHARED-2",
-      "routes": [
-        "ethereum",
-        "arbitrum-one",
-        "op-mainnet",
-        "linea",
-        "tron"
-      ],
-      "severity": "Low (fixed in 807478f by 374; 379 re-check pending)",
-      "what": "the group of a group-readable relayer credential was not checked (read exposure, not a write path)",
-      "source": "agents/329-bridge-evm-review-r17.md"
-    },
-    {
       "id": "R331-XLM-4P-7",
       "routes": [
         "stellar"
@@ -189,6 +176,10 @@
     {
       "id": "R342-BTC-2P-6",
       "why": "closed by reviewer 378's re-check of cd0d0ab"
+    },
+    {
+      "id": "R329-SHARED-2",
+      "why": "closed by reviewer 379's re-check of 807478f (shared-tools tip 056fea5) and TRON f948f79: agents/329-bridge-evm-review-r17.md 'R329-SHARED-2 re-check'; R16-CROSS-AREA 2026-11-17 19:45 UTC"
     }
   ]
 }

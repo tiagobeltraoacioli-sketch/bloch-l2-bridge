@@ -732,19 +732,6 @@
       "source": "376 fourth pass"
     },
     {
-      "id": "R329-SHARED-2",
-      "routes": [
-        "ethereum",
-        "arbitrum-one",
-        "op-mainnet",
-        "linea",
-        "tron"
-      ],
-      "severity": "Low (fixed in 807478f by 374; 379 re-check pending)",
-      "what": "the group of a group-readable relayer credential was not checked (read exposure, not a write path)",
-      "source": "agents/329-bridge-evm-review-r17.md"
-    },
-    {
       "id": "R331-XLM-4P-7",
       "routes": [
         "stellar"

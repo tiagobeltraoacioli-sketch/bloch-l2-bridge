@@ -45,7 +45,6 @@ Open findings below Medium, listed on request (they do not hold the route):
 | R330-SOL-1 (residual) | solana | residual, per reviewer 376 | an on-curve destination nobody holds a key for cannot be told from a fresh wallet except by the destination-key proof; exits must carry it (router burnTo with the proof; the bridge page signs it) |
 | R330-SOL-4P-5 | solana | Info | exitHash is computed and logged by the router but read by no tool |
 | R330-SOL-4P-8 | solana | Info (rig hygiene) | the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host |
-| R329-SHARED-2 | ethereum, arbitrum-one, op-mainnet, linea, tron | Low (fixed in 807478f by 374; 379 re-check pending) | the group of a group-readable relayer credential was not checked (read exposure, not a write path) |
 | R331-XLM-4P-7 | stellar | Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm) | a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement) |
 <!-- allnets-launch-table:end -->
 
