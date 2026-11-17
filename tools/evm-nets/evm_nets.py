@@ -47,8 +47,13 @@ def vault_config(name, spec, registry, template):
     v['contract'] = FROZEN
     v['sourceDomainLabel'], v['assetLabel'] = spec['sourceDomainLabel'], spec['assetLabel']
     v['token'] = None if unit else asset['address']
-    v['provenance']['fees']['recipient'] = registry['feeRecipient']
+    v['provenance']['fees'].update(recipient=registry['feeRecipient'], depositBps=spec['feeBps']['deposit'],
+                                   releaseBps=spec['feeBps']['release'])
+    v['policy']['minDeposit'], v['policy']['l2MinBurn'] = spec['minDeposit'], spec['l2MinBurn']
     n = c['notes']
+    n['minDeposit'] = (f'{spec["minDeposit"] / 1e6:g} units, l2MinBurn {spec["l2MinBurn"] / 1e6:g} (fee schedule of 2026-11-17, coordinator, '
+                       'agents/347-fee-economics-r17.md): immutable. The deploy tool refuses an l2MinBurn below the relayer cost of a '
+                       'release at the gas ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula).')
     n['network'] = (f'{spec["name"]} (chain {spec["chainId"]}). In this file the key `ethereum` names the SOURCE network, to keep '
                     'one config format and one tool for every EVM source. Same committee keys, same limits and same fee as '
                     'the Ethereum bridge; a separate vault, a separate L2 token and separate books (round 16, isolation).')
@@ -59,7 +64,8 @@ def vault_config(name, spec, registry, template):
     n['contract'] = ('ProvenanceSourceVault, byte-identical to the Ethereum bridge (creation keccak 0x901d52d0…3a74). A release '
                      f'certificate must land within 256 blocks of its anchor: about {spec["measured"]["blockhashWindowSeconds"]} s '
                      'on this network (docs/BRIDGE-EVM-NETWORKS.md section 4)')
-    n['fees'] = (f'5 bps of each deposit and 5 bps of each release, paid on {spec["name"]} to {registry["feeRecipient"]} (the owner\'s '
+    n['fees'] = (f'{spec["feeBps"]["deposit"]} bps of each deposit and {spec["feeBps"]["release"]} bps of each release (fee schedule of '
+                 f'2026-11-17), paid on {spec["name"]} to {registry["feeRecipient"]} (the owner\'s '
                  'address for every EVM network, given 2026-11-16; a single externally owned address by the owner\'s choice). '
                  'A constructor argument: immutable once deployed.')
     n['TBD-owner'] = ('source.revision; deployer.address; deployer.fundedBy.safe; the 7 release signers and 3 guardians (the SAME '
@@ -72,6 +78,7 @@ def token_config(name, spec, template):
     c = copy.deepcopy(template)
     c['token']['name'], c['token']['symbol'] = spec['l2']['name'], spec['l2']['symbol']
     c['ethereum']['chainId'] = spec['chainId']
+    c['limits']['minBurn'] = spec['l2MinBurn']
     if isinstance(c.get('notes'), dict):
         c['notes']['network'] = (f'L2 token of the {spec["name"]} bridge: {spec["l2"]["symbol"]}. `ethereum` names the source network '
                                  f'(chain {spec["chainId"]}). BridgedStablecoinV3 byte-identical (creation keccak {TOKEN_CREATION}); '
@@ -137,7 +144,11 @@ def relayer_template(name, spec, template):
     c['source_chain_id'] = c['eth_chain_id'] = spec['chainId']
     c['eth_rpc'] = f'TBD-owner (an RPC of {spec["name"]})'
     c['anchor_policy'], c['anchor_max_age'] = sig['anchor_policy'], sig['anchor_max_age']
-    c['eth_max_gas_price_gwei'] = 'TBD-owner (the most this relayer pays per gas on the source network; proposed 5)'
+    c['eth_max_gas_price_gwei'] = spec['relay']['gasCeilingGwei']
+    c['_about_gas_ceilings'] = (f'eth_max_gas_price_gwei {spec["relay"]["gasCeilingGwei"]}: fee schedule of 2026-11-17 (coordinator). The relayer '
+                                'pays twice the node\'s eth_gasPrice quote, at most this; while the quote is above it nothing is sent, '
+                                'gas-price-ceiling is alerted and a release WAITS until the price is back under the ceiling (it is not lost). '
+                                'l2_max_gas_price_gwei is the default, not a decision.')
     c['_about_pacing'] = (f'Run `vigia.py relay` without --interval (the network\'s {sig["interval_s"]} s is the default; a longer '
                           'one is refused): a certificate must land within 256 blocks of its anchor.')
     return c
@@ -181,10 +192,13 @@ def network_json(name, spec, registry, vcfg):
         'limits': {'cap': str(vcfg['vault']['cap']), 'window': str(pol['windowLimit']), 'windowSeconds': pol['windowSeconds'],
                    'minDeposit': str(pol['minDeposit']), 'maxDeposit': str(pol['windowLimit']), 'l2MinBurn': str(pol['l2MinBurn']),
                    'l2MaxBurn': str(pol['windowLimit']), 'mintDelaySeconds': 43200, 'largeItemThreshold': '0'},
-        'fee': {'depositBps': 5, 'releaseBps': 5, 'recipient': registry['feeRecipient'], 'paidOn': 'source',
+        'fee': {'depositBps': spec['feeBps']['deposit'], 'releaseBps': spec['feeBps']['release'], 'recipient': registry['feeRecipient'],
+                'paidOn': 'source',
                 'collection': 'accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient'
                               + (' in unit tokens, which the recipient unwraps' if unit else ''),
-                'networkFee': 'the depositor pays the deposit transaction; the relayer pays the release transaction'},
+                'networkFee': 'the depositor pays the deposit transaction; the relayer pays the release transaction'
+                              + (f', up to {spec["relay"]["gasCeilingGwei"]} gwei: while the network\'s gas price is above that the release waits'
+                                 if spec['relay']['gasCeilingGwei'] else '')},
         'finality': {'rule': rule, 'tag': 'finalized', 'confirmations': margin, 'typicalSeconds': fin['typicalSeconds'],
                      'worstCaseSeconds': fin['worstCaseSeconds'],
                      'reorg': 'Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never '
@@ -205,13 +219,19 @@ def network_json(name, spec, registry, vcfg):
                       'call deposit(amount, l2Recipient) on the vault',
                       'after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient']}),
         'release': {'l2Function': 'burn(uint64 amount, address sourceRecipient)',
+                    **({'gasCeilingGwei': f'{spec["relay"]["gasCeilingGwei"]:g}'} if spec['relay']['gasCeilingGwei'] else {}),
                     'recipientEncoding': '20-byte address on the source network', 'typicalSeconds': 3600,
-                    'paysAsset': (f'unit tokens (6 decimals), the burned amount less 0.05%; the recipient calls unwrap(to, units) on '
+                    'paysAsset': (f'unit tokens (6 decimals), the burned amount less {spec["feeBps"]["release"] / 100:g}%; the recipient calls unwrap(to, units) on '
                                   f'the unit token to receive {asset["name"]}' if unit else
-                                  f'{asset["symbol"]}, the burned amount less 0.05%'),
+                                  f'{asset["symbol"]}, the burned amount less {spec["feeBps"]["release"] / 100:g}%'),
                     'notes': (['the recipient must be able to call unwrap: do not name a contract that cannot'] if unit else
                               ['a recipient blacklisted by the issuer cannot be paid until the issuer lifts it; the burn names the '
-                               'recipient and cannot be redirected'])},
+                               'recipient and cannot be redirected'])
+                             + ([f'the relayer pays at most {spec["relay"]["gasCeilingGwei"]:g} gwei per gas: while the network\'s gas price is '
+                                 'above that ceiling a release waits (it is not lost) and is paid when the price falls',
+                                 f'the smallest exit is l2MinBurn ({spec["l2MinBurn"] / 1e6:g}); the fee of an exit covers the relayer\'s gas only '
+                                 f'up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)']
+                                if spec['relay']['gasCeilingGwei'] else [])},
         'explorers': {'source': {'tx': exp + '/tx/{tx}', 'address': exp + '/address/{address}', 'block': exp + '/block/{block}'},
                       'l2': {'tx': 'TBD-owner', 'address': 'TBD-owner'}},
         'notes': ['UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge\'s launch values, proposed for this network; '

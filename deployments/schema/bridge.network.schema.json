@@ -585,6 +585,11 @@
         "router": {
           "description": "Optional (requested by the Solana review; also Bitcoin and Stellar). The L2 address of the burn router a page must call instead of `burn` on the token; TBD-deploy before deployment.",
           "$ref": "#/$defs/stringOrTbd"
+        },
+        "gasCeilingGwei": {
+          "description": "Optional (round 17, fee schedule). The most the relayer pays per gas for a release on the source network, in gwei, as a decimal string. While the network price is above it a release waits; it is not lost.",
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
         }
       }
     },

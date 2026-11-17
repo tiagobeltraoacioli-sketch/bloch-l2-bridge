@@ -70,9 +70,9 @@
     "cap": "100000000000",
     "window": "10000000000",
     "windowSeconds": 86400,
-    "minDeposit": "11000000",
+    "minDeposit": "21000000",
     "maxDeposit": "10000000000",
-    "l2MinBurn": "10000000",
+    "l2MinBurn": "20000000",
     "l2MaxBurn": "10000000000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
@@ -83,7 +83,7 @@
     "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
     "paidOn": "source",
     "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
-    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction"
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 0.5 gwei: while the network's gas price is above that the release waits"
   },
   "finality": {
     "rule": "A deposit is attested when its block is at or below the block the signer's own Base node reports as finalized (its batch is in a finalized Ethereum block).",
@@ -111,11 +111,14 @@
   },
   "release": {
     "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "0.5",
     "recipientEncoding": "20-byte address on the source network",
     "typicalSeconds": 3600,
     "paysAsset": "USDC, the burned amount less 0.05%",
     "notes": [
-      "a recipient blacklisted by the issuer cannot be paid until the issuer lifts it; the burn names the recipient and cannot be redirected"
+      "a recipient blacklisted by the issuer cannot be paid until the issuer lifts it; the burn names the recipient and cannot be redirected",
+      "the relayer pays at most 0.5 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (20); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
     ]
   },
   "explorers": {

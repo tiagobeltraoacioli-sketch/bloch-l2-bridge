@@ -32,7 +32,7 @@ import time
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rehearse_fork as rf  # noqa: E402
-from rehearse_fork import CAST, U, check, net_of, out, sh  # noqa: E402
+from rehearse_fork import CAST, check, out, sh  # noqa: E402
 
 
 class NitroRig(rf.Rig):
@@ -104,6 +104,8 @@ def main():
         raise SystemExit(__doc__)
     registry = rf.launch.registry()
     spec = json.loads(json.dumps(registry['networks']['arbitrum-one']))
+    rf.schedule(spec)
+    U, paid_out = rf.U, rf.paid
     work = Path(tempfile.mkdtemp(prefix='evm-nets-nitro-'))
     rig = None
     try:
@@ -123,8 +125,8 @@ def main():
         rf.measure(rig, int(opt('--watch', 300)), 5, stagger=True)
 
         paid = rig.bal(rig.held, A['bob'])
-        check('[nitro] the burn of 300 is paid on the Nitro chain by the relayer daemon\'s transaction, less 5 bps',
-              paid == net_of(300 * U) and rig.released(rig.burn_id(1)), paid)
+        check('[nitro] the burn of 150 is paid on the Nitro chain by the relayer daemon\'s transaction, less the release fee',
+              paid == paid_out(150 * U) and rig.released(rig.burn_id(1)), paid)
         logs = [json.loads(l) for f in work.glob('daemon-relay-*.out') for l in f.read_text().splitlines() if l.startswith('{')]
         txs = [e['tx'] for e in logs if e.get('kind') == 'relay-release' and e.get('tx')]
         check('[nitro] the relayer daemon logged the release transaction', len(txs) >= 1, logs[-4:])
@@ -154,7 +156,7 @@ def main():
         check('[nitro] a second relay pass sends nothing: the burn is released once', not again and rig.bal(rig.held, A['bob']) == paid, again)
         fees = int(rig.vview('feesAccrued()(uint64)'))
         check('[nitro] books: fees are 5 bps of the deposit and of the release, outside the backing',
-              fees == rf.fee(1000 * U) + rf.fee(300 * U) and int(rig.vview('totalLocked()(uint64)')) == net_of(1000 * U) - 300 * U, fees)
+              fees == rf.fee(600 * U) + rf.rfee(150 * U) and int(rig.vview('totalLocked()(uint64)')) == rf.net_of(600 * U) - 150 * U, fees)
     finally:
         if rig is not None and hasattr(rig, 'stop'):
             rig.stop.set()

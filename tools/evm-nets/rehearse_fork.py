@@ -20,7 +20,7 @@ NETWORK is a key of tools/evm-nets/networks.json. Two loopback anvils are starte
 (chain 700771, as the other suites). Every key is a throwaway generated here. The contracts deployed on the fork are
 the unchanged artifacts: ProvenanceSourceVault (its creation-code keccak is compared with the Ethereum freeze) with
 the mainnet shape (5-of-7 release signers, 6-of-7 switch, 3 pause-only guardians, cap 100,000, window 10,000 a day,
-minimum 11, 5 + 5 bps to the owner's fee address) and, on the L2 anvil, BridgedStablecoinV3 (creation keccak
+the network's own minimums and fee rates from the registry, to the owner's fee address) and, on the L2 anvil, BridgedStablecoinV3 (creation keccak
 compared with the DEX pin) at T = 0 with the 12 h delay. For an 18-decimal asset the vault holds ScaledUnitToken.
 
 The daemons are the real ones: signatario.py with eth_half.py (anchor policy and finality margin of the network),
@@ -55,10 +55,14 @@ CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
 VAULT_CREATION = '0x901d52d04b519c826bfb1e82a298d96ab1f33a1aec5721db55a7f9dfe2ce3a74'
 TOKEN_CREATION = '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7'
 L2_CHAIN = 700771
-U = 10**6
+USDC = 10**6
 DELAY = 43200
-CAP, WINDOW, MIN_DEPOSIT, MIN_BURN = 100_000 * U, 10_000 * U, 11 * U, 10 * U
-FEE_BPS = 5
+CAP, WINDOW = 100_000 * USDC, 10_000 * USDC
+# Per network, set by `schedule()` from the registry (fee schedule of 2026-11-17): the vault's minimums and fee rates,
+# and the rig's unit U. Every amount of the flow is a multiple of U; the smallest burn of the flow is 40 U, so U is
+# the least whole number of dollars that puts 40 U at or above the network's minimum burn (1 dollar on Arbitrum One
+# and OP Mainnet, 15 on Linea), and the largest deposit, 600 U, stays inside the 10,000 a day window.
+U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS = USDC, 21 * USDC, 20 * USDC, 5, 5
 results, gas, PROCS = [], {}, []
 OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False}
 
@@ -79,12 +83,35 @@ def check(name, cond, detail=''):
     print(('PASS ' if cond else 'FAIL ') + name + (f'  {str(detail)[:900]}' if detail != '' and not cond else ''), flush=True)
 
 
+def schedule(spec):
+    global U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS
+    MIN_DEPOSIT, MIN_BURN = spec['minDeposit'], spec['l2MinBurn']
+    FEE_BPS, RELEASE_BPS = spec['feeBps']['deposit'], spec['feeBps']['release']
+    U = USDC * -(-MIN_BURN // (40 * USDC))
+    if 600 * U > WINDOW or 70 * U < MIN_DEPOSIT:
+        raise SystemExit(f'the flow\'s amounts do not fit this network\'s limits (unit {U}, minimum burn {MIN_BURN})')
+    print(f'INFO fee schedule: deposit {FEE_BPS} bps, release {RELEASE_BPS} bps, minimum deposit {MIN_DEPOSIT / USDC:g}, minimum burn '
+          f'{MIN_BURN / USDC:g}; one flow unit is {U // USDC} dollar(s)', flush=True)
+
+
 def fee(amount):
+    """The deposit fee."""
     return amount * FEE_BPS // 10_000
 
 
 def net_of(amount):
+    """What a deposit credits."""
     return amount - fee(amount)
+
+
+def rfee(amount):
+    """The release fee."""
+    return amount * RELEASE_BPS // 10_000
+
+
+def paid(amount):
+    """What a release pays the recipient."""
+    return amount - rfee(amount)
 
 
 def selector(error):
@@ -317,7 +344,7 @@ class Rig:
         tgs = '[' + ','.join(sorted(self.addr[f'tg{i}'] for i in range(3))) + ']'
         ctor = [k(spec['sourceDomainLabel']), k('bloch-l2-700770'), k(spec['assetLabel']), self.held, str(CAP), '0', addrs, '5',
                 f'({WINDOW},86400,6,1209600,{MIN_DEPOSIT},{MIN_BURN})', f'({vgs},259200,259200)',
-                f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{FEE_BPS}))']
+                f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{RELEASE_BPS}))']
         target = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'
         if dec != 6:
             bad = sh(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', self.eth, '--private-key', self.key['deployer'],
@@ -492,11 +519,11 @@ def flow(rig):
     alice_before = rig.bal(rig.asset, A['alice'])
 
     # 1. deposit
-    d = rig.deposit(1000 * U)
+    d = rig.deposit(600 * U)
     gas['deposit' + (' (wrapAndDeposit)' if rig.unit else '')] = int(d['gasUsed'], 16)
-    check('1 deposit: 1,000 taken from the depositor in the real asset; net 999.5 locked, 0.5 fee outside the backing',
-          rig.bal(rig.asset, A['alice']) == alice_before - 1000 * U * S and int(rig.vview('totalLocked()(uint64)')) == net_of(1000 * U)
-          and int(rig.vview('feesAccrued()(uint64)')) == fee(1000 * U) and rig.bal(rig.held, rig.vault) == 1000 * U)
+    check('1 deposit: 600 units taken from the depositor in the real asset; the net is locked, the deposit fee stays outside the backing',
+          rig.bal(rig.asset, A['alice']) == alice_before - 600 * U * S and int(rig.vview('totalLocked()(uint64)')) == net_of(600 * U)
+          and int(rig.vview('feesAccrued()(uint64)')) == fee(600 * U) and rig.bal(rig.held, rig.vault) == 600 * U)
 
     # 2. no attestation before source finality
     rig.mine(rig.eth, 3)
@@ -522,7 +549,7 @@ def flow(rig):
     rig.mine(rig.l2, 1)
     check('3 mint: 5 of 7 attest after finality, the relayer queues the mint (T = 0)',
           rig.tview('nextSlot()(uint64)') == '1' and rig.tview('mintCount()(uint64)') == '0'
-          and int(rig.tview('pendingSupply()(uint256)')) == net_of(1000 * U), (four[-4:], fifth, all_relay))
+          and int(rig.tview('pendingSupply()(uint256)')) == net_of(600 * U), (four[-4:], fifth, all_relay))
     if os.environ.get('EVMNETS_STOP') == '3':
         raise SystemExit('stopped after step 3 (EVMNETS_STOP)')
     gas['token.mint (queued)'] = [used(rig.l2, e['tx']) for e in relayed if e.get('tx')]
@@ -533,13 +560,13 @@ def flow(rig):
     rig.warp_l2(601)
     ex = [e for e in rig.relay() if e.get('kind') == 'relay-execute']
     rig.mine(rig.l2, 0x80)
-    check('3 credit: after the delay the depositor holds 999.5 on the L2 and the mint chain equals the deposit chain',
-          int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(1000 * U) and rig.clean(), ex)
+    check('3 credit: after the delay the depositor holds the deposit less its fee on the L2 and the mint chain equals the deposit chain',
+          int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(600 * U) and rig.clean(), ex)
     check('3 books: L2 supply equals the vault totalLocked (1:1 on net amounts)',
           int(rig.tview('totalSupply()(uint256)')) == int(rig.vview('totalLocked()(uint64)')))
 
     # 4. burn and release
-    r = rig.burn(300 * U, A['bob'])
+    r = rig.burn(150 * U, A['bob'])
     gas['token.burn'] = int(r['gasUsed'], 16)
     if policy == 'probe':
         # The Ethereum rule (anchor = the finalized block) cannot work here: finalized is outside the blockhash window.
@@ -566,17 +593,17 @@ def flow(rig):
     signed = rig.sign_all()
     rel = rig.relay()
     rel = [e for e in rel if e.get('kind') == 'relay-release' and e.get('tx')]
-    check('4 release: the burn of 300 is paid on the source network, less 5 bps, in what the vault holds',
-          rig.bal(rig.held, A['bob']) == net_of(300 * U) and rig.released(rig.burn_id(1)), (signed[-3:], rel))
+    check('4 release: the burn of 150 units is paid on the source network, less the release fee, in what the vault holds',
+          rig.bal(rig.held, A['bob']) == paid(150 * U) and rig.released(rig.burn_id(1)), (signed[-3:], rel))
     gas['vault.release (5-of-7 certificate)'] = [used(rig.eth, e['tx']) for e in rel]
     if rig.unit:
-        rig.send(rig.eth, 'bob', rig.unit, 'unwrap(address,uint256)', A['bob'], str(net_of(300 * U)))
+        rig.send(rig.eth, 'bob', rig.unit, 'unwrap(address,uint256)', A['bob'], str(paid(150 * U)))
         check('4 release: the recipient unwraps the units into the real 18-decimal asset, exactly',
-              rig.bal(rig.asset, A['bob']) == net_of(300 * U) * S and rig.bal(rig.unit, A['bob']) == 0)
+              rig.bal(rig.asset, A['bob']) == paid(150 * U) * S and rig.bal(rig.unit, A['bob']) == 0)
     fees = int(rig.vview('feesAccrued()(uint64)'))
     locked = int(rig.vview('totalLocked()(uint64)'))
-    check('4 books: fees = 5 bps of the deposit + 5 bps of the release, held outside the backing',
-          fees == fee(1000 * U) + fee(300 * U) and locked == net_of(1000 * U) - 300 * U and rig.bal(rig.held, rig.vault) == locked + fees
+    check('4 books: fees = the deposit fee + the release fee of this network, held outside the backing',
+          fees == fee(600 * U) + rfee(150 * U) and locked == net_of(600 * U) - 150 * U and rig.bal(rig.held, rig.vault) == locked + fees
           and int(rig.tview('totalSupply()(uint256)')) == locked, (fees, locked))
 
     # 5. fee to the owner's address
@@ -625,7 +652,7 @@ def flow(rig):
     # 8. limits
     inv = selector('InvalidTransfer()')[2:]
     check('8 limits: a deposit below the minimum (10) and one above the window (10,001) are refused',
-          inv in rig.deposit_reverts(10 * U) and inv in rig.deposit_reverts(WINDOW + U))
+          inv in rig.deposit_reverts(MIN_DEPOSIT - 1) and inv in rig.deposit_reverts(WINDOW + U))
     check('8 limits: a burn above the bucket and one below the minimum are refused by the token',
           rig.reverts(rig.l2, A['alice'], rig.token, 'burn(uint64,address)', str(WINDOW + U), A['bob']) != ''
           and rig.reverts(rig.l2, A['alice'], rig.token, 'burn(uint64,address)', str(MIN_BURN - 1), A['bob']) != '')
@@ -658,7 +685,7 @@ def flow(rig):
         if rig.bal(rig.held, A['bob']) != bob_before:
             break
         time.sleep(1)
-    check('9 unpause: 6 of 7 end it and the waiting burn is paid', rig.bal(rig.held, A['bob']) == bob_before + net_of(50 * U))
+    check('9 unpause: 6 of 7 end it and the waiting burn is paid', rig.bal(rig.held, A['bob']) == bob_before + paid(50 * U))
 
     # 10. a deposit that disappears after attestation (a source reorganisation deeper than finality)
     snap = rig.rpc(rig.eth, 'evm_snapshot', [])
@@ -693,7 +720,7 @@ def flow(rig):
     rig.mine(rig.l2, 0x80)
     check('10 reorg after attestation: the attested mint was queued, and the relayer never executes it once its deposit is gone',
           queued and rig.tview('mintCount()(uint64)') == '1'
-          and int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(1000 * U) - 350 * U, after[-4:])
+          and int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(600 * U) - 200 * U, after[-4:])
     rc, lines, err = rig.guardian('g-reorg')
     ids = [str(l.get('id')) for l in lines if l.get('kind') == 'alert']
     check('10 reorg after attestation: the guardian raises a mint finding for it (to cancel within the 12 h delay)',
@@ -719,7 +746,7 @@ def flow(rig):
             ev += rig.sign_all()
             ev += rig.relay()
         stuck = not rig.released(rig.burn_id(3)) and rig.bal(rig.asset, A['carol']) == 0
-        later_paid = rig.bal(rig.held, A['bob']) == bob_before + net_of(60 * U)
+        later_paid = rig.bal(rig.held, A['bob']) == bob_before + paid(60 * U)
         check('11 issuer: a burn to a recipient the issuer blacklisted is not paid and nothing leaves the vault for it', stuck,
               [e for e in ev if 'release' in str(e.get('kind'))][-3:])
         check('11 issuer: the blacklisted burn does not stop the next burn from being paid', later_paid,
@@ -734,7 +761,7 @@ def flow(rig):
                 break
             time.sleep(1)
         check('11 issuer: once the issuer lifts the blacklist the same burn is paid',
-              rig.released(rig.burn_id(3)) and rig.bal(rig.asset, A['carol']) == net_of(40 * U))
+              rig.released(rig.burn_id(3)) and rig.bal(rig.asset, A['carol']) == paid(40 * U))
         rig.impersonated(blacklister, rig.asset, 'blacklist(address)', rig.vault)
         check('11 issuer: with the VAULT blacklisted, deposits and the fee sweep revert; nothing is lost or mis-booked',
               rig.deposit_reverts(100 * U) != '' and int(rig.vview('totalLocked()(uint64)')) == rig.bal(rig.held, rig.vault) - int(rig.vview('feesAccrued()(uint64)')))
@@ -767,7 +794,7 @@ def measure(rig, seconds, interval, stagger=False):
     """One burn, then the daemons as operators run them: five `vigia.py sign` and one `vigia.py relay` processes at
     `--interval`, on a fork that makes blocks at the network's pace. Reports whether and when the release lands."""
     A = rig.addr
-    rig.deposit(1000 * U)
+    rig.deposit(600 * U)
     rig.finalize_source()
     rig.sign_all()
     rig.relay()
@@ -775,8 +802,8 @@ def measure(rig, seconds, interval, stagger=False):
     rig.warp_l2(DELAY + 1)
     rig.relay()
     rig.mine(rig.l2, 0x80)
-    check('[measure] setup: the deposit is credited on the L2', int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(1000 * U))
-    rig.burn(300 * U, A['bob'])
+    check('[measure] setup: the deposit is credited on the L2', int(rig.tview('balanceOf(address)(uint256)', A['alice'])) == net_of(600 * U))
+    rig.burn(150 * U, A['bob'])
     head0 = int(rig.rpc(rig.eth, 'eth_blockNumber', []), 16)
     t0 = time.time()
     procs, logs = [], []
@@ -790,7 +817,7 @@ def measure(rig, seconds, interval, stagger=False):
         PROCS.append(procs[-1])
     paid_at = None
     while time.time() - t0 < seconds:
-        if rig.bal(rig.held, A['bob']) == net_of(300 * U):
+        if rig.bal(rig.held, A['bob']) == paid(150 * U):
             paid_at = round(time.time() - t0, 1)
             break
         time.sleep(1)
@@ -857,6 +884,7 @@ def main():
         spec = json.loads(json.dumps(spec))
         spec['signer'].update({k: int(opt(f)) for k, f in (('anchor_max_age', '--anchor-max-age'), ('anchor_depth', '--anchor-depth'))
                                if opt(f) and (k != 'anchor_depth' or spec['signer']['anchor_policy'] == 'probe')})
+    schedule(spec)
     work = Path(tempfile.mkdtemp(prefix=f'evm-nets-{name}-'))
     rig = None
     try:

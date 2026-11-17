@@ -74,8 +74,8 @@ def source_networks():
     except launch.LaunchError:
         registry = None  # every chain id of the registry is then refused by launch.refusal with the reason
     if registry:
-        fees = (registry['feeRecipient'].lower(), registry['feeBps']['deposit'], registry['feeBps']['release'])
         for spec in registry['networks'].values():
+            fees = (registry['feeRecipient'].lower(), spec['feeBps']['deposit'], spec['feeBps']['release'])
             asset = spec['asset']
             # An asset that is not six-decimal is held through its unit token, deployed first; the raw asset is refused.
             token = asset['address'].lower() if asset['decimals'] == 6 else None
@@ -225,7 +225,19 @@ def validate(cfg, rehearsal, token_cfg=None):
     if provenance and isinstance(pol['minDeposit'], int) and isinstance(v['provenance']['fees'].get('depositBps'), int):
         net = pol['minDeposit'] - pol['minDeposit'] * v['provenance']['fees']['depositBps'] // 10_000
         refuse(net >= pol['l2MinBurn'], f'vault.policy.minDeposit nets {net} after the deposit fee, below l2MinBurn '
-               '(the constructor refuses it; with 5 bps use minDeposit 11 USDC for l2MinBurn 10)')
+               '(the constructor refuses it; with a 5 bps deposit fee use minDeposit 101 USDC for l2MinBurn 100)')
+    if launch and not rehearsal and provenance:
+        # Fee schedule of 2026-11-17 (coordinator): no vault whose smallest exit pays out less than relaying it costs at
+        # the relayer's gas ceiling. floor = ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps/10000)),
+        # from tools/evm-nets/networks.json (`relay`, `relayCost`; chain 1: `relayCost.ethereum`).
+        try:
+            floor = launch.min_burn_floor(eth['chainId'], v['provenance']['fees']['releaseBps'])
+        except launch.LaunchError as e:
+            refuse(False, f'the relayer cost of a release cannot be read, so the minimum burn cannot be checked: {e}')
+        refuse(floor is None or pol['l2MinBurn'] >= floor,
+               f'vault.policy.l2MinBurn {pol["l2MinBurn"]} is below {floor}: the measured relayer cost of one release at the gas '
+               'ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula); an exit that small '
+               'would pay out less than relaying it costs')
     windows = -(-v['cap'] // pol['windowLimit'])
     refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
            'switchDelay is too short for holders to exit: the cap needs '

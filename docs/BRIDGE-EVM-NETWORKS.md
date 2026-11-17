@@ -45,7 +45,7 @@ network's id), never under the network's own. Tests: `tools/evm-nets/test_launch
 now asserted: `tools/evm-nets/r329_demo_deploy_gate.py`.
 
 Also pinned by the registry for its networks (reviews R329-EVM-2, R329-EVM-5): the vault config's fee recipient
-(`0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) and both rates (5 and 5 bps), and the L2 token's name and symbol per
+(`0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544`) and both rates of the network's fee schedule (section 9.1), and the L2 token's name and symbol per
 source chain id. A config that differs is refused by the deploy tools.
 
 ## 1. The model, unchanged
@@ -364,7 +364,7 @@ growth applies to it with a 1,920 s window; adding it is a decision for that lin
 | Anchor window (time for five signatures and the relay) | 51 min | 51 min (Arbitrum), 512 s (OP), 4 to 40 min (Linea), **51 s (Base), 115 s (BNB)** | block times; section 4 |
 | Daemon interval | 60 s | 60 s (Arbitrum), 20 s (OP, Linea), **5 s (Base, BNB)** | section 4 |
 | Fee recipient | `0x775a…0544` | the same address, on each network | owner, 2026-11-16 |
-| Limits | cap 100,000, window 10,000 / day, min 11, 5 + 5 bps | the same values proposed; the owner confirms | - |
+| Limits | cap 100,000, window 10,000 / day (an owner decision still open); since the fee schedule of 2026-11-17: deposit 5 bps, release 10 bps, minimums 101 / 100 | cap and window the same; fees and minimums per network (section 9.1) | each network's relayer cost differs |
 | Gas payer | ETH | ETH on four, BNB on BNB Smart Chain; rollups add an L1 data fee | section 9 |
 | Sequencer | none | Arbitrum, OP, Base and Linea have a single sequencer: it can delay or order deposits and releases, not forge them | - |
 
@@ -485,9 +485,12 @@ network (own configuration directory, own databases, own shared directory, own g
    Mainnet: 20 s, depth 2, 250 blocks, 6 an hour, 120 s. Linea: 20 s, depth 2, 250 blocks, 8 an hour, 60 s. The
    hourly budget and the retry may be set in the operator file; they default to these. A relayer that sends a
    certificate too late pays gas for a revert; nothing else is lost.
-4. **Relayer gas:** ETH on the four rollups, BNB on BNB Smart Chain; the 300 gwei ceiling of Ethereum is far above
-   these networks' prices: set `eth_max_gas_price_gwei` per network (proposed 5 on the rollups, 10 on BNB Smart
-   Chain; owner input). Rollup transactions also pay an L1 data fee that the ceiling does not cover.
+4. **Relayer gas and its ceiling** (fee schedule of 2026-11-17): `eth_max_gas_price_gwei` is 0.5 on Arbitrum One and
+   OP Mainnet and 2 on Linea (2 on Ethereum), already in each generated `ops/relayer.template.json`. The relayer pays
+   twice the node's `eth_gasPrice` quote, at most the ceiling. **While the quote is above the ceiling nothing is
+   sent, `gas-price-ceiling` is alerted and the release waits; it is paid when the price is back under the ceiling.
+   It is not lost and needs no action** unless it lasts (then the owner decides whether to raise the ceiling in the
+   primary relayer's file). Rollup transactions also pay an L1 data fee that the ceiling does not cover.
 5. **Guardians:** one `guardiao.py` per network with that network's vault and token; `vault_from_block` set to the
    vault's deployment block (the daemons scan logs from it; on these networks a scan from 0 never ends).
 6. **Reserves monitor:** one bridge entry per network in `reservas.py`'s config; on BNB Smart Chain the vault's
@@ -511,6 +514,59 @@ Gas used on the forks (the same bytecode uses the same gas on every network, up 
 | `deposit` | 150,771 (USDC); 154,118 on Linea; 228,330 `wrapAndDeposit` on BNB Smart Chain |
 | `release`, 5-of-7 certificate | about 207,000 (194,048 on BNB Smart Chain, 210,245 on Linea) |
 | L2 token creation | 4,822,736 to 4,822,796 of the 5,000,000 allowed (checked in every rehearsal) |
+
+### 9.1 Fee schedule and the relayer's cost of a release (coordinator, 2026-11-17)
+
+Basis: `agents/347-fee-economics-r17.md`. Constructor and configuration values only; no bytecode changes (rates stay
+under the contract's 30 bps ceiling). Windows and caps are NOT part of it (an owner decision still open).
+
+| Route | Deposit fee | Release fee | Minimum deposit / burn | Relayer gas ceiling |
+|---|---|---|---|---|
+| Ethereum (`deployments/mainnet/`) | 5 bps | **10 bps** | **101 / 100** USDC | **2 gwei** |
+| Linea | 5 bps | **15 bps** | **601 / 600** | **2 gwei** |
+| Arbitrum One, OP Mainnet (Base, refused) | 5 bps | 5 bps | **21 / 20** | **0.5 gwei** |
+
+All of it is in `tools/evm-nets/networks.json` (`feeBps`, `minDeposit`, `l2MinBurn`, `relay`; Ethereum under
+`relayCost.ethereum`) and from there in every generated config, operator template and `bridge.network.json`.
+
+**What a release costs the relayer.** `vigia.py` sends it as a legacy transaction at `min(2 x eth_gasPrice,
+ceiling)`. Read on 2026-11-17 02:25 UTC (anonymous, read-only), ETH at 1,816.445 USD:
+
+| Route | Release gas (fork) | `eth_gasPrice` | Relayer pays | Cost today | Cost at the ceiling | Fee of the smallest exit | Smallest exit whose fee covers today's cost |
+|---|---|---|---|---|---|---|---|
+| Ethereum | 207,000 | 0.115 gwei | 0.23 gwei | 0.086 USD | 0.752 USD | 0.100 USD | 86 USDC |
+| Linea | 210,269 | 1.5 gwei | 2 gwei (the ceiling: twice the quote is above it) | **0.764 USD** | 0.764 USD | 0.900 USD | **510 USDC** |
+| Arbitrum One | 206,932 (execution only) | 0.02 gwei | 0.04 gwei | 0.015 USD plus the parent-chain data component (not measured) | 0.188 USD | 0.010 USD | **30 USDC** |
+| OP Mainnet | 206,968 | 0.001 gwei | 0.002 gwei | under 0.001 USD plus the L1 data fee (not measured) | 0.188 USD | 0.010 USD | under 2 USDC plus the data fee |
+
+- **Linea.** The proposal was 250 / 251 on a 1.0 gwei reading. Three readings of Linea's price disagree: the node's
+  `eth_gasPrice` says 1.5 gwei; `linea_estimateGas` says 0.0385 gwei of priority fee over a base fee of 7 wei; the
+  tips actually paid in the last 100 blocks ran from 0.035 to 2.4 gwei, median 1.0. The relayer as written uses the
+  first and doubles it, so it pays the 2 gwei ceiling: 0.764 USD a release. At 15 bps that is covered from 510 USDC;
+  the minimum is set to **600** (covered up to 2,139 USD per ETH), minimum deposit 601. Had the relayer priced with
+  `linea_estimateGas`, a release would cost about 0.015 USD and the minimum could be about 10: that is a change to
+  the relayer's pricing (an Ethereum-line file), not made here; listed for the coordinator.
+- **Arbitrum One.** With the relayer paying twice the quote, the smallest exit (20 USDC, fee 0.010 USD) is served
+  below today's cost (0.015 USD before the data component): the fee covers the cost from 30 USDC. The decided
+  minimum (20) is applied as decided; the number is reported.
+- **Ethereum.** The fee of the smallest exit (0.100 USD) covers today's cost (0.086 USD) and stops covering it
+  above a quote of 0.133 gwei (the relayer then pays 0.266 gwei); up to the 2 gwei ceiling the relayer subsidises
+  at most 0.65 USD an exit, as the schedule accepts.
+
+**The floor the deploy tools enforce** (`vault_pontes.py` on `vault.policy.l2MinBurn`, `deploy_pontes.py` on the
+token's `limits.minBurn`; chain 1 and the registry's networks, not in `--rehearsal`):
+
+```
+l2MinBurn >= ceil( releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps / 10000) )
+```
+
+in six-decimal units: the measured relayer cost of one release at the gas ceiling, divided by the complement of the
+release fee rate. It guarantees that the smallest exit still pays out at least what relaying it costs at the
+ceiling: 0.752761 on Ethereum, 0.765032 on Linea, 0.188 on Arbitrum One and OP Mainnet. **It is a floor against
+absurd values, not the fee break-even**: the fee of an exit of B covers the relayer only while the price it pays is
+at most `B x releaseBps / 10000 / (releaseGas x 1e-9 x nativeUsd)` gwei (0.27 on Ethereum at 100; 2.36 on Linea at
+600; 0.027 on Arbitrum One and OP Mainnet at 20). `nativeUsd` is a reading (`relayCost.nativeUsdRead`): redo it, and
+the gas readings, before deployment.
 
 Cost of the vault creation at the prices read on 2026-11-16 (execution only):
 
