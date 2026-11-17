@@ -1,0 +1,137 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "network": {
+    "id": "bitcoin",
+    "name": "Bitcoin",
+    "kind": "utxo",
+    "chainId": "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+    "nativeCurrency": {
+      "symbol": "BTC",
+      "decimals": 8
+    }
+  },
+  "asset": {
+    "symbol": "BTC",
+    "name": "Bitcoin",
+    "decimals": 8,
+    "id": "native",
+    "issuer": "none",
+    "issuerNative": true,
+    "issuerPowers": [],
+    "verified": [
+      {
+        "source": "the genesis block hash read from two public explorers (mempool.space and blockstream.info, /api/block-height/0): 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f; it is the constant in tools/signatario-btc/btc_core.py that every signer's node must report",
+        "date": "2026-11-16"
+      },
+      {
+        "source": "Bitcoin Core 31.2 release from bitcoincore.org (tarball sha256 2f38996afaa74dfa469a23bf4727887133dfc09784df1f21ddf1c74d0dc82300, SHA256SUMS signed by two release builders): the node the rehearsal ran; native BTC has no issuer and no contract",
+        "date": "2026-11-16"
+      }
+    ],
+    "unit": {
+      "adapter": "none: the vault rules credit whole units of 100 sat (tools/signatario-btc/btc_policy.py deposit_credit)",
+      "decimals": 6,
+      "assetUnitsPerUnit": "100",
+      "note": "BridgedStablecoinV3 hard-codes 6 decimals. bBTC therefore has 6 decimals: 1 bBTC = 1 BTC, the smallest unit is 0.000001 BTC = 100 sat. Sats below a whole unit stay in the vault's fee pool."
+    }
+  },
+  "custody": {
+    "type": "btc-script",
+    "address": "TBD-deploy",
+    "contract": "tools/signatario-btc/btc_policy.py (the vault rules) over P2WSH 5-of-7 OP_CHECKMULTISIG scripts (tools/signatario-btc/btc_core.py)",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged Bitcoin",
+    "symbol": "bBTC",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "1000000",
+    "window": "100000",
+    "windowSeconds": 86400,
+    "minDeposit": "1000",
+    "maxDeposit": "100000",
+    "l2MinBurn": "1000",
+    "l2MaxBurn": "100000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 10,
+    "releaseBps": 10,
+    "recipient": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
+    "paidOn": "source",
+    "collection": "an output to the recipient in the vault's own transactions, whenever at least 10,000 sat is due (the amount due is carried in the vault marker until then)",
+    "networkFee": "taken from the user's amount at a fee rate the signers check against their own nodes (at most 1.5 times the node's estimate, never above 200 sat/vB): a swept deposit pays fee rate x 574 vbytes (not swept while that exceeds 10% of it; refundable meanwhile), a release fee rate x 402 vbytes, a refund fee rate x 605 vbytes. On an exit the burner names the highest fee rate it accepts (1 to 200 sat/vB): the release is never charged above it, so the miner charge is at most that rate x 402 sat and is known before the burn (router.quote); the exit waits while the market is above it. The smallest burn (0.001 BTC) still pays out at 200 sat/vB."
+  },
+  "finality": {
+    "rule": "A deposit is credited after the vault has swept it (2 confirmations) and the sweep has 6 confirmations, plus one more confirmation for every BTC swept since, up to 144.",
+    "confirmations": 6,
+    "typicalSeconds": 5400,
+    "worstCaseSeconds": 90000,
+    "reorg": "A deposit that leaves the chain before its depth is never attested. If a reorganisation removes an attested sweep, every signer holds: no attestation and no release while the L2 token carries a mint the Bitcoin ledger does not back; the mint waits 12 hours on the L2 and the guardians cancel it. Never a second credit: the same coins swept again need the same slot, which the stray mint holds until it is cancelled."
+  },
+  "deposit": {
+    "method": "tagged-address",
+    "recipientEncoding": "the deposit address is the P2WSH of a script that begins with the vault id and the 20-byte L2 address: one address per recipient, computed offline by anyone (btc_relay.py address)",
+    "steps": [
+      "compute your deposit address from your L2 address (the bridge page does it; check it with btc_relay.py address)",
+      "send BTC to it from any wallet: an ordinary payment, no OP_RETURN, any change goes back to your own wallet",
+      "after the confirmations and the 12 hour mint delay the L2 token credits the amount less 0.10% and the miner charge, in units of 0.000001 BTC; before it is swept, the deposit can be refunded at the L2 recipient's signed request"
+    ],
+    "refusals": [
+      "below 0.001 BTC or above 0.1 BTC in one output, or while the supply cap is reached: not credited; the L2 address the deposit names can have it sent back (less 0.10% and the miner charge) by signing a refund request naming a bc1q address. An L2 address that is a contract and cannot sign cannot ask for a refund",
+      "sent to the bare vault (thread) address: names no recipient, joins the fee pool",
+      "sent to an address computed for another L2 address: credited (or refundable) to that address",
+      "an address computed for another vault, network or key set is not this bridge"
+    ]
+  },
+  "release": {
+    "l2Function": "BitcoinBurnRouter.burnTo(uint64 amount, string bitcoinAddress, uint16 maxFeeRate), after approve(router, amount) on the token; router address TBD-deploy, runtime code keccak TBD-deploy (pinned by every signer)",
+    "recipientEncoding": "a lowercase P2WPKH address string (bc1q..., 42 characters); the router checks prefix, checksum and witness version before it burns. maxFeeRate is the highest fee rate in sat/vB (1 to 200) the payout may be charged; the router refuses a burn whose payout would be dust at that rate",
+    "typicalSeconds": 3600,
+    "paysAsset": "BTC to that P2WPKH address: the burned amount less 0.10% and the miner charge",
+    "notes": [
+      "burn through the router. A burn made directly on the token (burn(uint64,address)) is NEVER paid to the 20 bytes it names and there is no timeout: it is paid only after the account that burned sends claimDirectBurn(uint64 burnNonce, string bitcoinAddress, uint16 maxFeeRate) to the router (a contract account can make that call). Until then its coins stay in the vault and the reserves report lists it as an unclaimed direct burn",
+      "an exit waits while the Bitcoin fee market is above the maxFeeRate its burner named; the page should propose the current estimate with a margin and show router.quote(amount, maxFeeRate) as the least the user receives",
+      "a burn above 0.05 BTC waits 12 hours",
+      "at most 0.1 BTC leaves the vault in any 24 hours",
+      "a release stuck at a low fee rate is replaced by one with a higher fee rate; the higher miner charge comes out of the payout",
+      "the smallest burn is 0.001 BTC"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://mempool.space/tx/{tx}",
+      "address": "https://mempool.space/address/{address}",
+      "block": "https://mempool.space/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "UNAUDITED. Nothing is deployed.",
+    "There is no contract on Bitcoin: 5 of the 7 committee keys can spend the whole vault AND every deposit not yet swept. Every limit on the Bitcoin side is a rule each signer applies before signing. The worst loss on a five-key compromise is the vault (at most the supply cap plus fees) plus whatever sits unswept at deposit addresses at that moment.",
+    "Limits are proposals in units of 0.000001 BTC; the owner confirms them."
+  ]
+}

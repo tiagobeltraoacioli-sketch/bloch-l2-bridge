@@ -1,0 +1,26 @@
+{
+  "_about": "One per signer operator. Config of tools/signatario-stable/signatario.py (unchanged) for the bBTC token. Same fields as deployments/mainnet/busdc-ops/signer.template.json; only the differences are listed here, copy the rest from it.",
+  "l2_pins": "mainnet-v2",
+  "l2_chain_id": 700770,
+  "l2_source": "rebuild",
+  "provenance": true,
+  "token": "TBD-deploy (bBTC address)",
+  "token_code_keccak": "TBD-deploy",
+  "token_from_block": "TBD-deploy",
+  "source_chain_id": 10628944869218562084050143519444549580389464591454674019345556079,
+  "source_vault": "TBD-deploy (btc_deploy.py vault: source_vault)",
+  "source_route": "TBD-deploy (btc_deploy.py vault: source_route)",
+  "threshold": 5,
+  "keystore": "/etc/bloch-busdc-signer/l2-mint.keystore",
+  "password_file": "/etc/bloch-busdc-signer/l2-mint.password",
+  "db": "/var/lib/bloch-bbtc-signer/signatario-db.json",
+  "eth_half_deposit": [
+    "python3",
+    "/opt/bloch-bridge/tools/signatario-btc/btc_half.py",
+    "--config",
+    "/etc/bloch-bbtc-signer/btc-half.json",
+    "deposit",
+    "--deposit-id",
+    "{deposit_id}"
+  ]
+}

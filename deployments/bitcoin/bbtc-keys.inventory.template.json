@@ -1,0 +1,69 @@
+{
+  "domain": "bloch.bridge.key-inventory.v1",
+  "_about": "Public inventory of the 7 separate Bitcoin vault keys (one per signer operator), attested with `btc_deploy.py message` and `cast wallet sign`. Same record shape as deployments/mainnet/busdc-keys.inventory.template.json. No address here may appear in any role of the bUSDC inventory.",
+  "keys": [
+    {
+      "role": "btc-vault-signer",
+      "index": 1,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 2,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 3,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 4,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 5,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 6,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    },
+    {
+      "role": "btc-vault-signer",
+      "index": 7,
+      "operator": "TBD-owner",
+      "address": null,
+      "custody": "hot-keystore",
+      "date": null,
+      "attestation": null
+    }
+  ]
+}

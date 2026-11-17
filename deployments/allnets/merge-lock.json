@@ -27,6 +27,20 @@
           "resolution": "recorded resolution tools__deploy-pontes__vault_pontes.py.ca43a63658c95de4"
         }
       ]
+    },
+    "bitcoin": {
+      "branch": "codex/bridge-btc-r17-20261117",
+      "commit": "c3febdd1e987990659dc9dd1d15f54dbb827ca36",
+      "agent": 332,
+      "routes": [
+        "bitcoin"
+      ],
+      "conflicts": [
+        {
+          "path": "deployments/schema/bridge.network.schema.json",
+          "resolution": "schema owner's version (ours)"
+        }
+      ]
     }
   }
 }
