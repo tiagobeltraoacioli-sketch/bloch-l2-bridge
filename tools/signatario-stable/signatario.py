@@ -75,14 +75,17 @@ fingerprint of the rebuilt database. With `warm_dir` set, `release` and `measure
 warm rebuild only if, checked again at that moment against the follower as it is NOW,
   1. the produce binary on disk still has the manifest's hash (and the pinned one, as always);
   2. the arguments are the ones this release would use;
-  3. the first N lines of the follower's index today hash to the manifest's value: the L1 prefix the rebuild consumed
-     is byte for byte the prefix of today's chain (a reorganised or replaced follower store fails here);
+  3. the first N lines of the follower's index today hash to the manifest's value, N being the whole snapshot the
+     rebuild was given: every L1 block it could have read is byte for byte a prefix of today's chain (a reorganised,
+     shortened or replaced follower store fails here);
   4. the report reproduces EVERY finalized settlement of today's follower status, hash and state root (the same
      `check_rebuild` the full path runs, against the fresh status, not the one of the time of the rebuild): a
      settlement finalized since the rebuild that the rebuild does not hold fails here, so nothing a later L1 block
      finalized is taken on trust;
-  5. the rebuilt database is the one the manifest fingerprints (every file's SHA-256, or names and sizes with
-     `warm_db_check: "sizes"`).
+  5. the rebuilt database is the one the manifest fingerprints (every file's SHA-256 over its allocated extents: the
+     database file is sparse; or names and sizes only with `warm_db_check: "sizes"`).
+The private settled RPC opens its database read-write, so it never opens the warm one: each release serves a sparse
+COPY of it made after the checks (measured: the round-15 database is 2.3 MB on disk inside a 4 GiB sparse file).
 If any of these fails the release is refused at once with "warm rebuild not ready" (fail safe: no signature) until the
 next `warm` succeeds; it never falls back silently to an unverified view. Everything after the rebuild is unchanged:
 the private settled RPC is started over that database with a frozen copy of today's status, and the burn, its block,
@@ -649,7 +652,7 @@ def own_l2(ctx, work):
     if c.get('warm_dir'):
         if getattr(ctx, 'warming', False):
             return status, rule, net_args  # cmd_warm does the rebuild itself, from its index snapshot
-        target, rebuilt = warm_view(ctx, status, rule, net_args)
+        target, rebuilt = warm_view(ctx, status, rule, net_args, work)
         TIMING.update(cache='hit', verify_s=round(time.time() - t0, 3), native_blocks=rebuilt.get('native_blocks'),
                       l2_blocks=rebuilt.get('settled'))
     else:
@@ -737,13 +740,38 @@ def sha256_lines(path, n):
     return h.hexdigest(), got
 
 
+def sha256_extents(path):
+    """SHA-256 over the allocated extents of a (sparse) file, each with its offsets: MDBX keeps a few megabytes of data in
+    a multi-gigabyte sparse file, and hashing the holes would cost more than the rebuild this path replaces."""
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        fd, size, off = f.fileno(), os.fstat(f.fileno()).st_size, 0
+        while off < size:
+            try:
+                data = os.lseek(fd, off, os.SEEK_DATA)
+            except OSError:
+                break  # only a hole is left
+            hole = os.lseek(fd, data, os.SEEK_HOLE)
+            h.update(f'{data}:{hole}:'.encode())
+            os.lseek(fd, data, os.SEEK_SET)
+            left = hole - data
+            while left:
+                chunk = os.read(fd, min(left, 1 << 20))
+                if not chunk:
+                    break
+                h.update(chunk)
+                left -= len(chunk)
+            off = hole
+    return h.hexdigest()
+
+
 def db_fingerprint(root, mode):
-    """Every file of the rebuilt database: relative name, size and (unless mode is `sizes`) the SHA-256 of its bytes."""
+    """Every file of the rebuilt database: relative name, size and (unless mode is `sizes`) the hash of its extents."""
     h = hashlib.sha256()
     for p in sorted(x for x in Path(root).rglob('*') if x.is_file()):
         h.update(f'{p.relative_to(root)}\0{p.stat().st_size}\0'.encode())
         if mode != 'sizes':
-            h.update(bytes.fromhex(l2_finality.sha256_file(p)))
+            h.update(bytes.fromhex(sha256_extents(p)))
     return h.hexdigest()
 
 
@@ -768,7 +796,8 @@ def warm_stale(ctx, status, rule, net_args):
             return d, m, 'the warm rebuild read another follower store'
         n = int(m['index_lines'])
         digest, got = sha256_lines(native / 'index', n)
-        if got != n or digest != m['index_prefix_sha256'] or report.get('native_blocks') != n:
+        if got != n or digest != m['index_prefix_sha256'] or not isinstance(report.get('native_blocks'), int) \
+                or report['native_blocks'] > n:
             return d, m, 'the L1 prefix the warm rebuild consumed is not the prefix of the follower\'s chain today'
         if ctx.pins is not None:
             try:
@@ -789,11 +818,16 @@ def warm_stale(ctx, status, rule, net_args):
         return None, None, f'no usable warm rebuild: {type(e).__name__}: {e}'
 
 
-def warm_view(ctx, status, rule, net_args):
+def warm_view(ctx, status, rule, net_args, work):
     d, m, why = warm_stale(ctx, status, rule, net_args)
     if why:
         refuse('warm rebuild not ready', why=why, warm_dir=ctx.cfg['warm_dir'])
-    return d / 'l2', m['report']
+    # The settled RPC writes to the database it opens (measured): it gets a private sparse copy, the warm one stays as
+    # its manifest fingerprints it.
+    done = subprocess.run(['cp', '-a', '--sparse=always', str(d / 'l2'), str(work / 'l2')], capture_output=True, text=True)
+    if done.returncode:
+        refuse('warm rebuild not ready', why=f'the warm database could not be copied: {done.stderr.strip()[-300:]}')
+    return work / 'l2', m['report']
 
 
 def cmd_warm(ctx, args):
@@ -824,11 +858,11 @@ def cmd_warm(ctx, args):
             shutil.copyfile(native / 'index', build / 'native' / 'index')
             os.symlink((native / 'blocks').resolve(), build / 'native' / 'blocks')
             report = reconstruct(ctx, build / 'l2', build / 'native', rule, net_args, status)
-            n = report.get('native_blocks')
-            digest, got = sha256_lines(build / 'native' / 'index', n) if isinstance(n, int) else ('', -1)
-            live, live_got = sha256_lines(native / 'index', n) if isinstance(n, int) else ('', -2)
-            if got != n or (live, live_got) != (digest, got):
-                refuse('the follower rewrote its index during the warm rebuild; retry', native_blocks=n)
+            # The whole snapshot is bound, not only the blocks the report counts: whatever the rebuild read is in it.
+            n = sum(1 for _ in open(build / 'native' / 'index', 'rb'))
+            digest, got = sha256_lines(build / 'native' / 'index', n)
+            if (digest, got) != sha256_lines(native / 'index', n):
+                refuse('the follower rewrote its index during the warm rebuild; retry', index_lines=n)
             manifest = {'domain': WARM_DOMAIN, 'built_at': int(time.time()), 'rebuild_s': round(time.time() - t0, 3),
                         'produce_sha256': l2_finality.sha256_file(c['produce']), 'args': [str(a) for a in (*rule, *net_args)],
                         'follower_native': str(native.resolve()), 'index_lines': n, 'index_prefix_sha256': digest,
@@ -836,7 +870,7 @@ def cmd_warm(ctx, args):
                         'report': report}
             shutil.rmtree(build / 'native')
             (build / 'manifest.json').write_text(json.dumps(manifest) + '\n')
-            final = root / f'v-{int(time.time() * 1000)}-{n}'
+            final = root / f'v-{int(time.time() * 1000):015d}-{n}'
             os.replace(build, final)
         except BaseException:
             shutil.rmtree(build, ignore_errors=True)
