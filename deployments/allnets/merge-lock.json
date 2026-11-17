@@ -206,13 +206,27 @@
     },
     "operator-pkg": {
       "branch": "codex/bridge-operator-pkg-r18-20261117",
-      "commit": "ba23175043c5bdaf4474bf3a1b3019498bf8a161",
+      "commit": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
       "agent": 381,
       "routes": [
         "ethereum"
       ],
-      "conflicts": [],
-      "history": []
+      "conflicts": [
+        {
+          "path": "tools/signatario-stable/test_credentials_r18.py",
+          "resolution": "recorded resolution tools__signatario-stable__test_credentials_r18.py.feff42b6b4491fa6"
+        },
+        {
+          "path": "tools/signatario-stable/vigia.py",
+          "resolution": "recorded resolution tools__signatario-stable__vigia.py.f962e1e5bf41de71"
+        }
+      ],
+      "history": [
+        {
+          "branch": "codex/bridge-operator-pkg-r18-20261117",
+          "commit": "ba23175043c5bdaf4474bf3a1b3019498bf8a161"
+        }
+      ]
     },
     "ceremony": {
       "branch": "codex/bridge-ceremony-r18-20261117",
