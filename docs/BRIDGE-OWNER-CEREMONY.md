@@ -428,7 +428,7 @@ its whole life. Confirm it on the second channel before section 8.
 
 ## 8. The Ethereum vault (deposits and releases start OFF)
 
-The Safe sends the vault deployer the gas only: the creation used 4,598,076 gas in the rehearsal (section 17); the
+The Safe sends the vault deployer the gas only: the creation used 4,598,052 to 4,598,088 gas in the rehearsals (section 17); the
 kit's gas limit is 5,000,000 and it signs at up to twice the node's gas price quote, capped at `ETH_MAX_GWEI`, and
 refuses to sign unless the balance covers `5,000,000 x that price`. At 30 gwei that is 0.15 ETH; at today's 0.11 gwei
 quote (0.23 gwei paid) about 0.0012 ETH. Send `5,000,000 x 2 x the current quote` plus a margin.
@@ -863,10 +863,10 @@ verdict and its merge into `main` by the integrator (agent 375), and none before
 `FOUNDRY_BIN=<directory of cast, forge, anvil 1.7.1> python3 deploy/ceremony/rehearse_ceremony.py` (this file has no
 code block that is not a marked step, and the rehearsal checks that).
 
-Result on 2026-11-17 (agent 380; details in `agents/380-bridge-ceremony-r18.md`): 128 of 128 marked blocks run,
-49 of 49 checks pass, `CEREMONY REHEARSAL OK`: 27 key records from 12 hosts and the owner re-verified; configs filled
+Result on 2026-11-17 at `c0aa0d5` (agent 380; details in `agents/380-bridge-ceremony-r18.md`), from a clean clone with
+no build cache: 128 of 128 marked blocks run, 50 of 50 checks pass, `CEREMONY REHEARSAL OK`: 27 key records from 12 hosts and the owner re-verified; configs filled
 and every tool's mainnet-policy check passed with no rehearsal flag; the vault created on a fork of Ethereum mainnet
-over the real USDC at the planned address (4,598,076 gas) and verified at finality; the token created on the 700770
+over the real USDC at the planned address (4,598,052 gas) and verified at finality; the token created on the 700770
 stand-in (4,822,592 gas, under the 5,000,000 limit) and verified with its vault; both chains equal the configs and
 the fee schedule; 5-of-7 controls (4 signatures and a non-member's refused); 101 USDC in, 100.9495 bUSDC after the
 12 h delay, 100 bUSDC out, 99.90 USDC paid, 0.1505 USDC of fees swept to `0x775a…0544`, reserves `ok`; vault and token
