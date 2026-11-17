@@ -125,12 +125,21 @@ def sh(argv, what=None, cwd=None):
     return done.stdout.strip()
 
 
+def plain(*values):
+    """Positional values for a `cast` command line. `cast` reads an argument that starts with `-` as an option (`--help`
+    exits 0 with the help text as its output), so such a value is refused before the command runs (agent 341, round 17).
+    Honest values here are hex, unsigned integers, tuples, lists and labels: none starts with `-`."""
+    out = [str(v) for v in values]
+    refuse(not any(v.startswith('-') for v in out), 'a value that would be read as a command-line option was refused')
+    return out
+
+
 def keccak_hex(data_hex):
-    return sh([CAST, 'keccak', data_hex], 'cast keccak').lower()
+    return sh([CAST, 'keccak', *plain(data_hex)], 'cast keccak').lower()
 
 
 def keccak_text(text):
-    return sh([CAST, 'keccak', text], 'cast keccak').lower()
+    return sh([CAST, 'keccak', *plain(text)], 'cast keccak').lower()
 
 
 def is_addr(v):
@@ -174,11 +183,11 @@ class Rpc:
         return out['result']
 
     def call(self, to, sig, *args, block='latest', returns=None):
-        data = sh([CAST, 'calldata', sig, *[str(a) for a in args]], 'cast calldata')
+        data = sh([CAST, 'calldata', sig, *plain(*args)], 'cast calldata')
         raw = self(method='eth_call', params=[{'to': to, 'data': data}, block])
         if returns is None:
             return raw
-        return sh([CAST, 'abi-decode', f'f(){returns}', raw, '--json'], 'cast abi-decode')
+        return sh([CAST, 'abi-decode', f'f(){returns}', *plain(raw), '--json'], 'cast abi-decode')
 
 
 # ── validate ────────────────────────────────────────────────────────────────
@@ -512,7 +521,7 @@ def make_plan(cfg, rehearsal, build=True):
     git_revision_check(cfg['source']['revision'])
     art = load_artifacts(p, build)
     sig, args = constructor_args(p)
-    encoded = sh([CAST, 'abi-encode', sig, *args], 'cast abi-encode').lower()
+    encoded = sh([CAST, 'abi-encode', sig, *plain(*args)], 'cast abi-encode').lower()
     init_code = art['bytecode'] + encoded[2:]
     deployer = cfg['deployer']['address'].lower()
     nonce = cfg['deployer']['startNonce']
@@ -637,7 +646,7 @@ def broadcast(plan, init_code, rpc, wallet_args, write, gas_price, timeout):
     raw = sh([CAST, 'mktx', *wallet_args, '--chain', str(plan['chain']['id']), '--nonce', str(plan['deployer']['nonce']),
               '--gas-limit', str(plan['tx']['gasLimit']), '--gas-price', str(gas_price), '--legacy',
               '--create', init_code], 'cast mktx').lower()
-    tx = json.loads(sh([CAST, 'decode-transaction', raw], 'cast decode-transaction'))
+    tx = json.loads(sh([CAST, 'decode-transaction', *plain(raw)], 'cast decode-transaction'))
     if isinstance(tx, str):  # cast 1.x prints the JSON object as a JSON string
         tx = json.loads(tx)
     refuse(tx.get('signer', '').lower() == plan['deployer']['address'], 'signed transaction: wrong signer')

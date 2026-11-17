@@ -404,10 +404,11 @@ class Rig:
         (work / 'relayer.key').write_text(self.key['relayer'] + '\n')
         (work / 'relayer.key').chmod(0o600)
         self.cfgs, self.eth_cfgs = [], []
-        # Under the network's own chain id the anchor settings come from the registry by chain id (the configs omit
-        # them, as an operator file may); under a rehearsal chain id they are this run's own keys.
+        # Under the network's own chain id the configs state the registry's anchor settings, as the generated operator
+        # templates do (round 18: a file that omits one is refused at start; step 4 shows it); under a rehearsal chain id
+        # they are this run's own keys, taken from the same spec.
         shared = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin', 'deposit_cursor')
-        policy = {} if self.registry_chain else {k: spec['signer'][k] for k in shared if k in spec['signer']}
+        policy = {k: spec['signer'][k] for k in shared if k in spec['signer']}
         budgets = {'refused_retry': 0, 'max_release_signs_per_hour': 1000}
         if OPTS['production_budgets']:
             budgets = {} if self.registry_chain else {k: spec['signer'][k] for k in ('refused_retry', 'max_release_signs_per_hour')}
@@ -628,6 +629,28 @@ def flow(rig):
         check('4 anchor: with the Ethereum rule (finalized anchor) the signer cannot sign on this network',
               done.returncode != 0 and ('contradicts the network registry' if rig.registry_chain else 'finality lags') in done.stdout,
               done.stdout[-400:] + done.stderr[-300:])
+        if rig.registry_chain:
+            # Round 18 (R329-EVM-3, "missing key refused at start"): the same signer's files without `anchor_policy`
+            # are refused before any read, by the source half and by the daemon alike.
+            for key in ('anchor_policy',):
+                bare = {k: v for k, v in json.loads(rig.eth_cfgs[0].read_text()).items() if k != key}
+                bare['db'] = str(rig.work / 'ethdb-missing-key.json')
+                (rig.work / 'eth-missing-key.json').write_text(json.dumps(bare))
+                scfg = json.loads(rig.cfgs[0].read_text())
+                half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(rig.work / 'eth-missing-key.json')]
+                scfg.update(eth_half_release=half + ['release', '--intent', '{intent}'], db=str(rig.work / 'db-missing-key.json'))
+                (rig.work / 'cfg-missing-key.json').write_text(json.dumps(scfg))
+                half_done = sh(sys.executable, STABLE / 'signatario.py', '--config', rig.work / 'cfg-missing-key.json', 'release',
+                               '--burn-tx', r['transactionHash'], '--out', rig.work / 'missing-key.sig', ok=False)
+                vcfg = {k: v for k, v in scfg.items() if k != key}
+                (rig.work / 'vigia-missing-key.json').write_text(json.dumps(vcfg))
+                daemon = sh(sys.executable, STABLE / 'vigia.py', '--config', rig.work / 'vigia-missing-key.json', 'sign', '--once',
+                            ok=False)
+                check(f'4 anchor: a signer file without {key} is refused at start (source half and daemon)',
+                      half_done.returncode != 0 and 'misses keys the network registry sets' in half_done.stdout
+                      and daemon.returncode != 0 and 'missing keys the network registry sets' in daemon.stderr
+                      and not (rig.work / 'missing-key.sig').exists(),
+                      half_done.stdout[-300:] + daemon.stderr[-300:])
     signed = rig.sign_all()
     # The certificate ages 300 source blocks before the relayer sees it (more than the 256-block `blockhash` window).
     rig.mine(rig.eth, 300)

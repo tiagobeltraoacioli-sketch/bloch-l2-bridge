@@ -1,5 +1,9 @@
 # Phase 2 and 2B: bridge V3 audit freeze, round 15 (2026-11-11, second freeze of the round)
 
+**Round 17 (2026-11-17): for the tools this freeze is superseded by `PHASE2-BRIDGE-TOOLS-REFREEZE-R17.md`** (signatures
+verified in process; nine tool files changed, `sigverify.py` added, the Phase 2 manifest regenerated). The contracts,
+their hashes below and the Phase 2B manifest are unchanged.
+
 **This is the second round 15 freeze.** The first, `13d79cc`, was reviewed by the independent reviewer (second pass:
 0 Critical, 0 High, 1 Medium that is High without a handoff authority, 2 Low, 2 Info). This freeze fixes those
 findings and replaces `13d79cc`; nobody was sent the first one.

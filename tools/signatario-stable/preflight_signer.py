@@ -8,7 +8,7 @@
 --network NAME (round 17): the configs are those of another EVM source network of tools/evm-nets/networks.json
 (arbitrum-one, op-mainnet, linea). The decided source chain id is then that network's; the network must be launchable
 (a network that is not, such as base or bnb, fails at once and nothing else is checked) and no file may contradict the
-anchor settings its signers share. Without it everything below is the Ethereum bridge, unchanged.
+anchor settings its signers share, nor omit one the registry sets (round 18). Without it everything below is the Ethereum bridge, unchanged.
 
 Read-only. It signs nothing, sends nothing and prints no key material. Run it as the service user on the signer host,
 after the configs are filled and before the daemons are started. Exit 0: every check passed. Exit 1: at least one
@@ -157,6 +157,9 @@ def check_network(report, name, cfg, eth_half_cfg, relayer_cfg):
     for label, c, tool in (('signer', cfg, 'vigia'), ('eth-half', eth_half_cfg, 'eth_half'), ('relayer', relayer_cfg, 'vigia')):
         if c is None:
             continue
+        missing = launch.config_missing(spec['chainId'], c, tool)
+        report.add('network', f'{label} config states every anchor setting the registry sets for {name}', not missing,
+                   ', '.join(f'{k} missing, the registry says {spec["signer"][k]!r}' for k in missing))
         bad = launch.config_conflicts(spec['chainId'], c, tool)
         report.add('network', f'{label} config does not contradict the registry anchor settings of {name}', not bad,
                    ', '.join(f'{k} is {v!r}, the registry says {w!r}' for k, v, w in bad))

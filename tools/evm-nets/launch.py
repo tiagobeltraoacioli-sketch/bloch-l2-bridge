@@ -166,7 +166,7 @@ def signer_settings(chain_id, path=None):
 
 def config_conflicts(chain_id, cfg, tool, path=None):
     """Keys of an operator file that contradict the registry for this network: [(key, file value, registry value)].
-    A key the file does not carry is taken from the registry and is not a conflict."""
+    A key the file does not carry is not a conflict; `config_missing` refuses that case."""
     settings = signer_settings(chain_id, path)
     if settings is None:
         return []
@@ -175,6 +175,17 @@ def config_conflicts(chain_id, cfg, tool, path=None):
         if key in cfg and (key not in settings or cfg[key] != settings[key] or type(cfg[key]) is not type(settings[key])):
             bad.append((key, cfg[key], settings.get(key)))
     return bad
+
+
+def config_missing(chain_id, cfg, tool, path=None):
+    """Keys the registry sets for this network that an operator file does not carry (round 18, coordinator: "missing key
+    refused at start"). The tools refuse such a file at start instead of filling it: an operator file then always states
+    the settings every signer of the network shares, and a key left out (the R329-EVM-3 case: Arbitrum One without
+    `anchor_policy` took the Ethereum rule) can never select another rule, now or after a later edit of the tool."""
+    settings = signer_settings(chain_id, path)
+    if settings is None:
+        return []
+    return [key for key in SHARED_BY[tool] if key in settings and key not in cfg]
 
 
 def timing(chain_id, path=None, anchor_max_age=None):

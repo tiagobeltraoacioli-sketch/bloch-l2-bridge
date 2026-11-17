@@ -65,6 +65,19 @@ def redact(url):
     return f'{u.scheme}://{u.hostname}' + (f':{u.port}' if u.port else '')
 
 
+def alert_argv(command, pid, detail):
+    """The argv of `alert_command` with {id} and {detail} filled in. The detail is text from outside (an RPC error, a
+    command's stderr, cut to its LAST 300 characters), so it can begin with `-`: an argument that the operator's
+    template did not start with `-` must not become an option of the pager program. Such an argument gets one leading
+    space (agent 341, round 17). Arguments of honest alerts are unchanged."""
+    out = []
+    for a in command:
+        a = str(a)
+        filled = a.replace('{id}', str(pid)).replace('{detail}', str(detail)[-300:])
+        out.append(' ' + filled if filled.startswith('-') and not a.startswith('-') else filled)
+    return out
+
+
 class Unverifiable(Exception):
     pass
 
@@ -93,6 +106,8 @@ class Monitor:
 
     def calldata(self, sig, *args):
         key = (sig, *map(str, args))
+        if any(a.startswith('-') for a in key[1:]):  # `cast` would read it as an option (`--help` exits 0): agent 341, round 17
+            raise Unverifiable(f'cast calldata {sig}: a value that would be read as a command-line option was refused')
         if key not in self._data:
             p = subprocess.run([self.cast, 'calldata', *key], capture_output=True, text=True)
             if p.returncode:
@@ -201,7 +216,7 @@ class Monitor:
         command = self.cfg.get('alert_command')
         if not command:
             return
-        argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+        argv = alert_argv(command, pid, detail)
         try:
             done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
             if done.returncode:
