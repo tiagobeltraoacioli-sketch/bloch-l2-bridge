@@ -582,7 +582,8 @@ def upgrade_drills(bundles):
         f.write_text(f.read_text() + '\n# rehearsal v2 (agent 381): a code change that keeps behaviour\n')
         sh('git', '-C', wt, '-c', 'user.name=a381-rehearsal', '-c', 'user.email=a381-rehearsal@localhost', 'commit', '-qam', 'rehearsal v2 (local, never pushed)')
         v2 = sh('git', '-C', wt, 'rev-parse', 'HEAD').stdout.strip()
-        f.write_text(f.read_text() + '\nraise SystemExit("rehearsal: broken release")\n')
+        head, rest = f.read_text().split('\n', 1)  # at the top: the end of the file is never reached by a daemon loop
+        f.write_text(head + '\nraise SystemExit("rehearsal: broken release")\n' + rest)
         sh('git', '-C', wt, '-c', 'user.name=a381-rehearsal', '-c', 'user.email=a381-rehearsal@localhost', 'commit', '-qam', 'rehearsal broken (local, never pushed)')
         broken = sh('git', '-C', wt, 'rev-parse', 'HEAD').stdout.strip()
         built = {}
