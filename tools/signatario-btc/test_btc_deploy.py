@@ -120,7 +120,8 @@ class Deploy(unittest.TestCase):
         cfg = j.loads(P(self.vault(anchor={'txid': 'ab' * 32, 'vout': 1})).read_text())
         v = pol.Vault.from_config(cfg)
         n = btc_deploy.router_numbers(v)
-        self.assertEqual(n, {'hrp': 'bc', 'unitSats': 100, 'releaseFeeBps': 10, 'chargeVbytes': 402, 'dustSats': 546, 'feeRateCeiling': 200})
+        self.assertEqual(n, {'hrp': 'bc', 'unitSats': 100, 'releaseFeeBps': 10, 'chargeVbytes': 402, 'dustSats': 546, 'feeRateCeiling': 200,
+                             'feeRateFloor': 2})   # review 342: the router refuses a ceiling below the policy floor
         # the router's quote is then the vault's rule, for every amount and rate
         for units, rate in ((1_000, 200), (250_000, 6), (1_000, 1), (99_999, 137)):
             payout, fee, charge = pol.release_payout(v, units, rate)

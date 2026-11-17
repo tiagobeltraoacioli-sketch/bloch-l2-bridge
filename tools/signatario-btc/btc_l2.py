@@ -146,7 +146,9 @@ class Router:
     def claim_terms(self, burner, nonce, key_hash, block='latest'):
         """Terms of the claim (burner, nonce, key hash), or None when there is none."""
         return self._terms(self._call('claimTermsOf(address,uint64,bytes20)', bytes.fromhex(str(burner).removeprefix('0x')), int(nonce),
-                                      bytes(key_hash), block=block), 'claimTermsOf')
+                                      # a bytes20 argument is LEFT-aligned in its ABI word (abi_word right-aligns
+                                      # 20 bytes, as for an address): pass the full word
+                                      bytes(key_hash).ljust(32, b'\0'), block=block), 'claimTermsOf')
 
 
 def burn_terms(router, router_address, burn_from, burn_id, nonce, named, block='latest'):
