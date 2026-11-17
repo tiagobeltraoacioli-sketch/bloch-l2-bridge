@@ -1921,10 +1921,29 @@ class Vigia:
         return tx
 
 
+def warm_loop(args):
+    """PROTOTYPE: keep the signer's verified rebuild ready. Needs nothing of the daemon but its config path: no key, no feed."""
+    cfg = option(args, '--config')
+    interval = int(option(args, '--interval', '60'))
+    while True:
+        done = subprocess.run([sys.executable, str(HERE / 'signatario.py'), '--config', cfg, 'warm'], capture_output=True, text=True)
+        try:
+            res = json.loads(done.stdout)
+        except ValueError:
+            res = {'reason': 'no JSON from signatario.py: ' + done.stderr.strip()[-300:]}
+        log(kind='warm', ok=done.returncode == 0, **{k: res[k] for k in ('warm', 'dir', 'why', 'rebuild_s', 'index_lines', 'l2_blocks',
+                                                                         'reason') if k in res})
+        if '--once' in args:
+            break
+        time.sleep(interval)
+
+
 def main():
     args = sys.argv[1:]
+    if 'warm' in args and 'sign' not in args and 'relay' not in args:
+        return warm_loop(args)
     v = Vigia(option(args, '--config'))
-    mode = 'sign' if 'sign' in args else 'relay' if 'relay' in args else 'warm' if 'warm' in args else None
+    mode = 'sign' if 'sign' in args else 'relay' if 'relay' in args else None
     if mode is None:
         raise SystemExit(__doc__)
     interval = int(option(args, '--interval', str(v.pace['interval_s'] if v.pace else 60)))
@@ -1936,12 +1955,7 @@ def main():
             v.relayer_wallet(side)
     while True:
         try:
-            if mode == 'warm':
-                rc, res = v.signatario('warm')
-                log(kind='warm', ok=rc == 0, **{k: res[k] for k in ('warm', 'dir', 'why', 'rebuild_s', 'index_lines', 'l2_blocks',
-                                                                   'reason') if k in res})
-            else:
-                v.sign_round() if mode == 'sign' else v.relay_round()
+            v.sign_round() if mode == 'sign' else v.relay_round()
         except Exception as e:  # noqa: BLE001 - a daemon keeps running; the next round retries
             log(kind=mode, error=f'{type(e).__name__}: {e}')
         if '--once' in args:
