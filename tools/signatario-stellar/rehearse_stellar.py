@@ -1130,12 +1130,19 @@ def main_flow(r):
     rc_late, out_late = r.signer(2, 'release', '--burn-tx', txd, '--out', r.dir / 'direct-late-2.json')
     check('direct burn: a claim after the vault recorded the release changes nothing (no signer certifies again)',
           late and rc_late and 'already recorded' in json.dumps(out_late) and r.balance(p2) == bal2, out_late)
+    rc_late_g, out_late_g = r.guard_check(1)
+    back = r.claim(ANVIL_KEYS[1], nonce_d, payee)    # the burner names the paid address again: it is the latest
+    r.mine()
     rc_now, out_now = r.guard_check(1)
     rc_before, out_before = r.guard_check(1, l2_finalized_tag=str(claim_block - 1))
-    check('direct burn: the guardian check judges that release against the burner\'s claims on the router (ok, also '
-          'after the later claim); on a final view from before the paid claim it cannot judge (exit 3: page, no '
-          'pause; the claim is in its newest blocks, not yet final there)',
-          ok and rc_now == 0 and rc_before == 3 and not out_before.get('findings')
+    check('direct burn: after the later claim the guardian finds nothing and pauses for nothing, but asks a person '
+          '(exit 4, "paid-not-latest-naming": the paid address is not the burner\'s latest naming)',
+          rc_late_g == 4 and not out_late_g.get('findings')
+          and [a['kind'] for a in out_late_g.get('alerts', [])] == ['paid-not-latest-naming'], out_late_g)
+    check('direct burn: the guardian check judges that release against the burner\'s claims on the router (ok once the '
+          'paid address is again the latest); on a final view from before the paid claim it cannot judge (exit 3: '
+          'page, no pause; the claim is in its newest blocks, not yet final there)',
+          ok and back and rc_now == 0 and rc_before == 3 and not out_before.get('findings')
           and [x['nonce'] for x in out_before.get('cannot_judge', [])] == [nonce_d]
           and 'not final in this guardian' in out_before['cannot_judge'][0]['reason'], [out_now, out_before])
     notes['direct_burn_claim'] = {'burn_tx': txd, 'burn_id': burnd, 'claims': [p2, payee, p2], 'paid': payee,

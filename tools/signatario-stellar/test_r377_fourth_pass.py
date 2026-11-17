@@ -16,6 +16,9 @@ from test_stellar_tools import (FakeL2, FakeVault, MALLORY, PAYEE, PAYEE2, PASS,
                                 g_address, sn)
 
 
+RealNet = sn.Net   # the real class, taken before the fakes patch it in
+
+
 class HalfSignsForAnAddressThatCannotReceive(T.SignerDestination):
     """R331-XLM-4P-1. The half asks whether the burnTo address can receive ONLY when a redirect exists. Without one it
     signs for an address that cannot receive; with the recommended configuration (release_delay on every release)
@@ -145,7 +148,10 @@ class ForgeryWhileTheL2MovesAtItsLaunchCadence(T.GuardianCheck):
     it matures, whether or not finality moves (age rule restricted to `behind`, as 4P-3 asked), or a margin derived
     from the block interval and the delay (and the tool refuses a margin x interval above the deadline)."""
 
-    def test_DEFECT_a_queued_forgery_is_never_a_finding_before_it_matures(self):
+    def test_FIXED_a_queued_forgery_is_a_finding_before_it_matures(self):
+        """Turned into a regression test by developer 373 (round 18): the same twelve checks; every one up to half the
+        delay pages (exit 3), and from the first check past 3,600 s on the release is a finding (exit 2) while it is
+        still queued, with the L2 moving at its launch cadence."""
         rid = self.release(self.forged(1), MALLORY, ledger=1000, event='release_queued',
                            names=(10**9, '0x' + '11' * 32))
         base = FakeVault.now
@@ -161,9 +167,11 @@ class ForgeryWhileTheL2MovesAtItsLaunchCadence(T.GuardianCheck):
                 s.update(fin=236 + t // 1800, head=300 + t // 1800)
             code, out = self.check()
             codes.append(code)
-            self.assertEqual(out['findings'], [], t)
-        self.assertEqual(set(codes), {3})                     # paged only, never a pause, until it is payable
-        self.assertIn(rid, [f['release'] for f in out['cannot_judge']])
+            if t <= 3600:
+                self.assertEqual(out['findings'], [], t)
+        self.assertEqual(codes, [3] * 7 + [2] * 5)            # paged at once, paused from 4,200 s, before 7,200 s
+        self.assertIn(rid, [f['release'] for f in out['findings']])
+        self.assertIn('stall rule', out['findings'][0]['reason'])
 
     def test_with_the_L2_idle_the_stall_rule_does_catch_it(self):
         self.release(self.forged(1), MALLORY, ledger=1000, event='release_queued', names=(10**9, '0x' + '11' * 32))
@@ -182,20 +190,34 @@ class AnEmptyEventPageIsNotTheEnd(T.GuardianCheck):
     the fake RPC behaves like that: from ledger 1 it scans to ledger 500 and finds nothing; the forgery sits at 990.
     Fixed behaviour: page by the cursor to the latest ledger; a guardian that cannot reach it exits 3, never 0."""
 
-    def test_DEFECT_the_guardian_sees_no_release_behind_an_empty_page_and_answers_ok(self):
+    def test_FIXED_the_guardian_pages_by_the_cursor_behind_an_empty_page(self):
+        """Turned into a regression test by developer 373 (round 18). The reviewer's case patched the fake vault's
+        one-page `events`; since 1d41a73 the guardian reads through `stellar_net.Net.scan`, so the case is run here
+        on a REAL `Net` over an RPC that answers like stellar-rpc (an empty page at the end of a bounded scan range,
+        then the forgery at ledger 990): the guardian sees it and reports the finding."""
         self.release(self.forged(1), MALLORY, ledger=990, event='release_queued', names=(100, block_hash(100)))
-        self.assertEqual(self.check()[0], 2)                       # seen: a finding (a forgery naming a final block)
-        real = FakeVault.events
+        events = list(FakeVault.events_list)
 
-        def bounded(self_, start):
-            if start < 500:
-                return [], 1000, 1                                   # empty page: the scan range ended at 500
-            return real(self_, start)
-        patch = mock.patch.object(FakeVault, 'events', bounded)
-        patch.start()
-        self.addCleanup(patch.stop)
-        code, out = self.check()
-        self.assertEqual((code, out['releases_checked'], out['findings']), (0, 0, []))   # blind, and says ok
+        def rpc(method, params=None):
+            assert method == 'getEvents'
+            cur = params['pagination'].get('cursor')
+            first = (int(cur.split('-')[0]) >> 32) + 1 if cur else params['startLedger']
+            end = min(first + 499, 1000)                         # 500 ledgers scanned per request
+            page = [e for e in events if first <= e['ledger'] <= end]
+            return {'events': [{'ledger': e['ledger'], 'txHash': e['tx'], 'topicJson': [{'symbol': e['name']}]
+                                + [{'bytes': t} for t in e['topics']],
+                                'valueJson': {'map': [{'key': {'symbol': k}, 'val': {'u64': str(v)} if isinstance(v, int)
+                                                       else {'string': v}} for k, v in e['data'].items()]}}
+                               for e in page],
+                    'cursor': '%019d-%010d' % ((end << 32), 0), 'latestLedger': 1000, 'oldestLedger': 1}
+        real = RealNet.__new__(RealNet)
+        real.vault, real.rpc = T.VAULT, rpc
+        with mock.patch.object(FakeVault, 'scan', lambda self_, start: RealNet.scan(real, start)):
+            code, out = self.check()
+        self.assertEqual((code, out['releases_checked']), (2, 1))   # seen behind the empty page: a finding
+        src = (T.HERE / 'guardiao_stellar.py').read_text()
+        self.assertIn('self.net.scan(', src)
+        self.assertNotIn('self.net.events(', src)
 
 
 def load_tests(loader, tests, pattern):

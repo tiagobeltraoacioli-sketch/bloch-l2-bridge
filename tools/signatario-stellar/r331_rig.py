@@ -232,6 +232,14 @@ def flow(r):
           'guardian still judges the paid release ok, whatever file it is handed', second and kind == 'ok'
           and [verdict(bd['nonce'])[0] for _ in range(1)] == ['ok'], [second, kind, why])
     notes['two_claims_guardian'] = [kind, why, rc]
+    # Round 18: the paid address is now not the burner's latest naming; the guardian asks a person (alert
+    # `paid-not-latest-naming`, no finding). The burner names the paid address again, so later checks see no alert.
+    rc_alert, out_alert = r.guard_check(0)
+    check('two claims: the guardian alerts a person (exit 4, paid-not-latest-naming) and finds nothing',
+          rc_alert == 4 and not out_alert.get('findings')
+          and 'paid-not-latest-naming' in [a['kind'] for a in out_alert.get('alerts', [])], out_alert)
+    r.claim(KEYS[1], bd['nonce'], payee)
+    mine(128)
 
     # ── C. the guardian's later-block rules, on a sane clock ──────────────────────
     txh = r.burn(20 * U, payee)                     # an honest router exit (128 blocks mined behind it)
