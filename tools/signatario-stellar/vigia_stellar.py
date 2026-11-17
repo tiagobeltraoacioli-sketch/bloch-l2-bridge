@@ -317,14 +317,21 @@ class VigiaStellar(V.Vigia):
             if count != self.pause_count():
                 return None  # signed before a pause: dead
             if '0x' + sn.recipient_commitment(recipient).hex() != str(rel['recipient']).lower():
-                # Not the address the burn commits to: then it must be THE claim of a direct burn, which this watcher
-                # reads itself from the router on its own L2 at its final block (stellar_net.claim_of; set once on
-                # the L2, so there is nothing to choose). The burner is the one the partial states; a wrong one only
-                # makes the router answer for another account, and the vault's signers each read their own L2.
+                # Not the address the burn commits to: then it must be the LATEST claim of a direct burn, or the
+                # LATEST redirect of a held router exit, which this watcher reads itself from the router on its own
+                # L2 at its final block (stellar_net.claim_of / redirects_of). A partial for an older naming is not
+                # combined. The burner is the one the partial states; a wrong one only makes the router answer for
+                # another account, and the vault's signers each read their own L2.
                 l2 = sn.L2(self.cfg['l2_rpc'])
                 final = l2.block('finalized')
-                burner = (rec.get('l2') or {}).get('from')
-                if final is None or sn.claim_of(l2, self.cfg['router'], burner, int(rel['nonce']), final['number']) != recipient:
+                burner = str((rec.get('l2') or {}).get('from')).lower()
+                if final is None:
+                    return None
+                if burner == sn.address20(self.cfg['router'], 'router'):
+                    latest = sn.redirects_of(l2, self.cfg['router'], int(rel['nonce']), final['number'])[-1:]
+                    if latest != [recipient]:
+                        return None
+                elif sn.claim_of(l2, self.cfg['router'], burner, int(rel['nonce']), final['number']) != recipient:
                     return None
             item = {'route': rel['route'], 'nonce': rel['nonce'], 'recipient': recipient, 'amount': rel['amount'],
                     'native_burn': rel['nativeBurn'], 'mint_count': rel['mintCount'],

@@ -86,15 +86,16 @@
     },
     "stellar": {
       "branch": "codex/bridge-stellar-r17-20261117",
-      "commit": "3ce640fccb2a4f6384094346239e82cc6ca4ab94",
-      "agent": 338,
+      "commit": "87d8ed6058b87af64478a9b736428d4557b28bfa",
+      "agent": 373,
       "routes": [
         "stellar"
       ],
-      "conflicts": [
+      "conflicts": [],
+      "history": [
         {
-          "path": "deployments/schema/bridge.network.schema.json",
-          "resolution": "schema owner's version (ours)"
+          "branch": "codex/bridge-stellar-r17-20261117",
+          "commit": "3ce640fccb2a4f6384094346239e82cc6ca4ab94"
         }
       ]
     }
