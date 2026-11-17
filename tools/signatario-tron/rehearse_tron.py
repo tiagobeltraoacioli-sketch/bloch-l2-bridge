@@ -6,6 +6,10 @@
 Optional: VAULT_CREATION_BIN=FILE deploys that creation code (hex, the output of `solc --bin`) as the vault instead of
 the forge artifact, to rehearse a build made with TRON's own compiler.
 
+Optional: TRON_SOLIDITY_URL=http://127.0.0.1:PORT runs against a node's REAL `/walletsolidity` (a private network of
+several block producers, tools/signatario-tron/rehearse_tron_producers.py) instead of the lag proxy, and
+TRON_ACCOUNTS_JSON=FILE names the funded throwaway keys ({"privateKeys": [8 hex keys]}) of such a network.
+
 Needs: a private java-tron HTTP API at TRON_URL with funded accounts listed at /admin/accounts-json (the official
 quickstart image `tronbox/tre`, pinned by digest), Foundry 1.7.1 in FOUNDRY_BIN (default ~/.foundry/bin), and
 USDT_GETCONTRACT_JSON = the answer of a public node's `/wallet/getcontract` for TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t,
@@ -42,6 +46,7 @@ import tron_log_index  # noqa: E402
 BIN = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin'))
 CAST, FORGE, ANVIL = str(BIN / 'cast'), str(BIN / 'forge'), str(BIN / 'anvil')
 TRON_URL = os.environ.get('TRON_URL', 'http://127.0.0.1:42390')
+SOLIDITY_URL = os.environ.get('TRON_SOLIDITY_URL')  # a real /walletsolidity (several producers): no lag proxy is started
 PORT = int(os.environ.get('PORT_BASE', '42300'))
 SHIM_PORT, PROXY_PORT, L2_PORT = PORT + 20, PORT + 21, PORT + 45
 L2_CHAIN = 700771  # 700770 makes the daemons demand the mainnet pins
@@ -180,11 +185,15 @@ class Net:
     def __init__(self, repo, work, usdt_json):
         self.repo, self.work, self.procs = Path(repo), Path(work), []
         self.work.mkdir(parents=True, exist_ok=True)
-        self.proxy = f'http://127.0.0.1:{PROXY_PORT}'
+        self.proxy = SOLIDITY_URL or f'http://127.0.0.1:{PROXY_PORT}'
+        self.front = TRON_URL if SOLIDITY_URL else self.proxy   # what the shim reads the head from
         self.shim = f'http://127.0.0.1:{SHIM_PORT}'
         self.l2 = f'http://127.0.0.1:{L2_PORT}'
         self.node = tronlib.Node(TRON_URL, self.proxy, cast=CAST)
-        acc = json.load(urllib.request.urlopen(TRON_URL + '/admin/accounts-json'))['privateKeys']
+        if os.environ.get('TRON_ACCOUNTS_JSON'):
+            acc = json.loads(Path(os.environ['TRON_ACCOUNTS_JSON']).read_text())['privateKeys']
+        else:
+            acc = json.load(urllib.request.urlopen(TRON_URL + '/admin/accounts-json'))['privateKeys']
         names = ['deployer', 'alice', 'relayer', 'g1', 'g2', 'g3', 'mallory', 'issuer']
         self.key = {n: '0x' + k for n, k in zip(names, acc)}
         self.a = {n: addr_of(k) for n, k in self.key.items()}
@@ -193,7 +202,8 @@ class Net:
         self.signers = sorted((addr_of(k), k) for k in SIGNER_KEYS)
         self.l2_guards = [(addr_of(k), k) for k in L2_GUARD_KEYS]
         self.chain = int(self.node.block(0)['id'][-8:], 16)
-        start_proxy()
+        if not SOLIDITY_URL:
+            start_proxy()
         self.spawn([ANVIL, '--chain-id', L2_CHAIN, '--port', L2_PORT, '--silent'])
         self.wait_for(self.l2, 'anvil')
         self.deploy(usdt_json)
@@ -220,7 +230,7 @@ class Net:
         raise SystemExit(f'{what} did not start')
 
     def start_shim(self, port, index_dir, logs_rpc=None, recheck_s=30, fresh_s=1, grace_s=3):
-        argv = [sys.executable, HERE / 'tron_rpc_shim.py', '--node', self.proxy, '--solidity', self.proxy, '--port', port,
+        argv = [sys.executable, HERE / 'tron_rpc_shim.py', '--node', self.front, '--solidity', self.proxy, '--port', port,
                 '--cast', CAST, '--vault', self.vault, '--from-block', self.vault_block, '--index', index_dir,
                 '--recheck-s', recheck_s, '--fresh-s', fresh_s, '--grace-s', grace_s]
         self.spawn(argv + (['--logs-rpc', logs_rpc] if logs_rpc else []))
@@ -408,7 +418,10 @@ class Net:
 
     # ── daemons ──────────────────────────────────────────────────────────────
     def tick(self):
-        """The quickstart node makes a block only when it has a transaction; this makes an empty one at the wall clock."""
+        """The quickstart node makes a block only when it has a transaction; this makes an empty one at the wall clock.
+        A network of real producers makes its own blocks every three seconds."""
+        if SOLIDITY_URL:
+            return
         req = urllib.request.Request(TRON_URL + '/tre', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tre_mine', 'params': []}).encode(),
                                      {'content-type': 'application/json'})
         urllib.request.urlopen(req, timeout=30).read()
