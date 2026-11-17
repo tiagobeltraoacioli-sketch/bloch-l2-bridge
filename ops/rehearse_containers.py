@@ -533,6 +533,9 @@ def run(args):
     check('logrotate rotates health.log (su to the instance user) and the timer keeps writing a new 640 file',
           'health.log.1' in lr.stdout and 'bb-ethereum-guardian 640' in lr.stdout, lr.stdout + lr.stderr)
 
+    # ── F381-1 after 374's fix (b4ff916): the committed relayer unit with `credential:` starts and relays ──
+    committed_relayer_case(dep, alice, alice_key)
+
     # ── alert hook: a killed daemon (restart counted), then a forged mint (guardian finding) ──
     ex('a381-relayer', 'systemctl kill -s KILL bloch-bridge-ethereum-relayer.service')
     hook_lines = lambda: ex('a381-relayer', 'journalctl -t bloch-bridge-alert --since -6min -o cat --no-pager', ok=False).stdout  # noqa: E731
@@ -566,6 +569,65 @@ def run(args):
     # ── F381-1: the committed relayer unit's `credential:` form under a real LoadCredential ──
     f381_1()
     log(f'flow and drills done {int(time.time() - t_started)} s after start')
+
+
+def committed_relayer_case(dep, alice, alice_key):
+    """deploy/signatario/bloch-busdc-relay.service exactly as committed (plain LoadCredential=, `credential:NAME` in the
+    config, code at /opt/bloch-l2-bridge from this checkout's HEAD), in place of the bundle's relayer for one deposit."""
+    c = 'a381-relayer'
+    arch = WORK / 'bundles' / 'tools-head.tar'
+    sh('git', '-C', REPO, 'archive', '-o', arch, 'HEAD', 'tools/signatario-stable', 'deploy/signatario/bloch-busdc-relay.service')
+    bridgectl(c, 'ethereum-relayer', 'stop', 'ethereum-relayer')
+    script = '''set -e
+useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin bloch-relayer
+mkdir -p /opt/bloch-l2-bridge && tar -xf /bundles/tools-head.tar -C /opt/bloch-l2-bridge
+install -m 0644 /opt/bloch-l2-bridge/deploy/signatario/bloch-busdc-relay.service /etc/systemd/system/bloch-busdc-relay.service
+install -d -m 0750 -o root -g bloch-relayer /etc/bloch-busdc-relayer
+install -d -m 0700 -o bloch-relayer -g bloch-relayer /var/lib/bloch-busdc-relayer
+for side in l2 eth; do
+  d=$(mktemp -d /run/a381-k.XXXXXX)
+  head -c 24 /dev/urandom | base64 > /etc/bloch-busdc-relayer/$side-gas.password
+  chmod 0600 /etc/bloch-busdc-relayer/$side-gas.password
+  /opt/foundry/bin/cast wallet new $d --unsafe-password "$(cat /etc/bloch-busdc-relayer/$side-gas.password)" >/dev/null
+  install -m 0600 -o bloch-relayer -g bloch-relayer $d/$(ls $d) /etc/bloch-busdc-relayer/$side-gas.keystore
+  shred -u $d/*; rmdir $d
+  echo $side=$(/opt/foundry/bin/cast wallet address --keystore /etc/bloch-busdc-relayer/$side-gas.keystore --password-file /etc/bloch-busdc-relayer/$side-gas.password)
+done
+python3 - <<"PY"
+import json
+d = json.load(open("/etc/bloch-bridge/ethereum-relayer/relayer.json"))
+b = "/var/lib/bloch-busdc-relayer"
+d.update(l2_relayer_keystore="/etc/bloch-busdc-relayer/l2-gas.keystore", l2_relayer_password_file="credential:l2-gas.password",
+         eth_relayer_keystore="/etc/bloch-busdc-relayer/eth-gas.keystore", eth_relayer_password_file="credential:eth-gas.password",
+         shared_dir=b + "/signatures", db=b + "/relayer-db.json", scan_state_dir=b + "/signatures/.scan",
+         relayer_submission_dir=b + "/relayer-submissions", relay_other_gas_addresses=[])
+d["feed"]["status_file"] = b + "/feed-status.json"
+json.dump(d, open("/etc/bloch-busdc-relayer/relayer.json", "w"), indent=1)
+PY
+chown root:bloch-relayer /etc/bloch-busdc-relayer/relayer.json; chmod 0640 /etc/bloch-busdc-relayer/relayer.json
+systemctl daemon-reload'''
+    out = ex(c, script).stdout
+    gas = dict(l.split('=', 1) for l in out.split() if l.startswith(('l2=', 'eth=')))
+    chain_cast('rpc', 'anvil_setBalance', gas['l2'], hex(10**21), '--rpc-url', f'http://127.0.0.1:{L2_PORT}')
+    chain_cast('rpc', 'anvil_setBalance', gas['eth'], hex(10**21), '--rpc-url', f'http://127.0.0.1:{ETH_PORT}')
+    same = sh('git', '-C', REPO, 'diff', '--quiet', 'HEAD', '--', 'deploy/signatario/bloch-busdc-relay.service', ok=False).returncode == 0
+    ex(c, 'systemctl start bloch-busdc-relay.service', ok=False)
+    time.sleep(20)
+    st = ex(c, 'systemctl is-active bloch-busdc-relay.service; journalctl -u bloch-busdc-relay.service -o cat --no-pager | tail -5', ok=False).stdout
+    check('F381-1 fixed (b4ff916): the committed bloch-busdc-relay.service, unchanged, with `credential:` passwords starts and stays up',
+          same and st.startswith('active') and 'has mode 0440' not in st, st[-800:])
+    before = int(view(L2_PORT, dep['token'], 'nextSlot()(uint64)'))
+    send(ETH_PORT, alice_key, dep['vault'], 'deposit(uint64,bytes32)', str(20 * U), '0x' + '00' * 12 + alice[2:])
+    mine(ETH_PORT)
+    got, took = wait_for('committed relayer mint', lambda: int(view(L2_PORT, dep['token'], 'nextSlot()(uint64)')) == before + 1, 600)
+    jr = ex(c, 'journalctl -u bloch-busdc-relay.service -o cat --no-pager', ok=False).stdout
+    check(f'F381-1 fixed: the committed relayer relays the next deposit\'s mint with its credential-loaded gas key ({int(took)} s)',
+          got and '"relay-mint"' in jr and gas['l2'][2:].lower() in json.dumps(chain_cast('tx', json.loads(
+              [l for l in jr.splitlines() if '"relay-mint"' in l and '"tx"' in l][-1])['tx'], '--rpc-url', f'http://127.0.0.1:{L2_PORT}', '--json')).lower()
+          if got and '"relay-mint"' in jr else False, jr[-1200:])
+    ex(c, 'systemctl stop bloch-busdc-relay.service', ok=False)
+    rc, doc, _ = bridgectl(c, 'ethereum-relayer', 'start', 'ethereum-relayer')
+    check('the bundle relayer starts again after the committed-unit case', rc == 0, doc)
 
 
 def upgrade_drills(bundles):
@@ -634,8 +696,10 @@ def f381_1():
     done = ex(c, unit, ok=False, timeout=300)
     text = done.stdout + done.stderr
     (WORK / 'f381-1.txt').write_text(text)
-    check('F381-1 demonstrated: with `credential:NAME` under a real LoadCredential the relayer refuses its own password file (mode 0440)',
-          '440 root:root' in text and 'has mode 0440' in text, text[-800:])
+    # Restated after 374's fix b4ff916 (run 6 showed the refusal; agents/381-evidence/run6/f381-1.txt): the property now
+    # checked is that the 0440 credential systemd hands over is accepted, the stage before any send.
+    check('F381-1 (after b4ff916): systemd still hands the credential as 0440 root, and vigia.py no longer refuses it',
+          '440 root:root' in text and 'has mode 0440' not in text, text[-800:])
 
 
 if __name__ == '__main__':
