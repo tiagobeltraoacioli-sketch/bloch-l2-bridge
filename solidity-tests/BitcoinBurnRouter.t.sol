@@ -46,7 +46,7 @@ contract BitcoinBurnRouterTest {
 
     function setUp() public {
         token = new RouterTestToken();
-        router = new BitcoinBurnRouter(address(token), "bc", 100, 5, 402, 546, 200);
+        router = new BitcoinBurnRouter(address(token), "bc", 100, 10, 402, 546, 200); // the launch policy: 10 bps
     }
 
     function test_decodesTheBip173VectorAndTheOwnersFeeAddress() public view {
@@ -98,7 +98,7 @@ contract BitcoinBurnRouterTest {
     }
 
     function test_regtestPrefix() public {
-        BitcoinBurnRouter r = new BitcoinBurnRouter(address(token), "bcrt", 100, 5, 402, 546, 200);
+        BitcoinBurnRouter r = new BitcoinBurnRouter(address(token), "bcrt", 100, 10, 402, 546, 200);
         require(r.keyHashOf("bcrt1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22tkfggv") == bytes20(hex"906600553abcaea9c4ab138875ac72adfc72194a"));
         vm.expectRevert(BitcoinBurnRouter.NotAP2wpkhAddress.selector);
         r.keyHashOf("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
@@ -108,9 +108,9 @@ contract BitcoinBurnRouterTest {
     function test_quoteIsTheVaultRule() public view {
         // btc_policy.release_payout: gross - floor(gross * bps / 10000) - fee rate x 402
         (uint256 payout, uint256 fee, uint256 charge) = router.quote(1_000, 200);
-        require(payout == 19_550 && fee == 50 && charge == 80_400, "smallest burn at the ceiling");
+        require(payout == 19_500 && fee == 100 && charge == 80_400, "smallest burn at the ceiling");
         (payout, fee, charge) = router.quote(250_000, 6);
-        require(payout == 25_000_000 - 12_500 - 2_412 && fee == 12_500 && charge == 2_412);
+        require(payout == 25_000_000 - 25_000 - 2_412 && fee == 25_000 && charge == 2_412);
         (payout,,) = router.quote(1, 200);
         require(payout == 0, "never underflows");
     }
@@ -138,16 +138,16 @@ contract BitcoinBurnRouterTest {
         vm.prank(user);
         vm.expectRevert(BitcoinBurnRouter.PayoutBelowDustAtFeeRate.selector);
         router.burnTo(804, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
-        // the boundary: payout must be >= 546. 810 units at 200: 81,000 - 40 - 80,400 = 560; 809: 80,900 - 40 - 80,400 = 460
+        // the boundary (10 bps): payout must be >= 546. 811 units at 200: 81,100 - 81 - 80,400 = 619; 810: 81,000 - 81 - 80,400 = 519
         vm.prank(user);
         vm.expectRevert(BitcoinBurnRouter.PayoutBelowDustAtFeeRate.selector);
-        router.burnTo(809, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
-        vm.prank(user);
         router.burnTo(810, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
+        vm.prank(user);
+        router.burnTo(811, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 200);
         // the same small amount is accepted under a low ceiling: it waits for that market instead of losing most of itself
         vm.prank(user);
         router.burnTo(804, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", 10);
-        require(token.balanceOf(user) == 5_000 - 810 - 804);
+        require(token.balanceOf(user) == 5_000 - 811 - 804);
     }
 
     function test_fuzz_anAcceptedBurnAlwaysPaysAtLeastDustAtItsCeiling(uint64 amount, uint16 rate) public {

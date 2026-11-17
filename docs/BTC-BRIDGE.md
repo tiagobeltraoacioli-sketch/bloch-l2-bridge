@@ -66,7 +66,7 @@ Any deposit output that has not been swept can be sent back: below the minimum, 
 cap or for lower fees, or simply unwanted. The L2 address the deposit names signs a request (an EIP-191 personal
 message, `btc_core.refund_text`: vault id, outpoint, a P2WPKH address); the relayer puts it in a proposal; every
 signer checks the outpoint, that it is the deposit address of that L2 address, and the signature, and the vault
-transaction pays `value - 5 bps - fee rate x 605 vbytes` to the address named. Nobody is credited. The spend makes it
+transaction pays `value - 10 bps - fee rate x 605 vbytes` to the address named. Nobody is credited. The spend makes it
 single-use by consensus (rehearsal J).
 
 - Why the L2 recipient and not "the sender": Bitcoin has no sender. The first input's script is often an exchange's
@@ -199,7 +199,7 @@ credited forgery, and needs the owner's settlement.
   burner's bound (rehearsal L1 to L4).
 - **Exits land at any rate up to the ceiling the burner accepts.** A burn has no percentage cap. The token's
   `minBurn` (0.001 BTC) is checked at deployment against the policy ceiling: at 200 sat/vB the smallest burn still
-  pays out `100,000 - 50 - 200 x 402 = 19,550 sat` (a burner who does not want that names a lower ceiling and waits).
+  pays out `100,000 - 100 - 200 x 402 = 19,500 sat` (a burner who does not want that names a lower ceiling and waits).
   Above the 200 ceiling no vault transaction is signed at a higher rate, it is signed at 200 and waits in the
   mempool. Cost at ordinary rates: 5 sat/vB takes 2,010 sat of a release, 20 sat/vB 8,040, 50 sat/vB 20,100.
 - **Deposits keep a cap.** A deposit is not swept while its charge exceeds 10% of it (the minimum deposit sweeps up
@@ -209,8 +209,18 @@ credited forgery, and needs the owner's settlement.
   falling below `min(pool before, target)`: an anchor above the target could lose the difference to miners once
   (review 325, 2P-6). Charges above the fee paid stay in the thread up to the target; anything above is added to the
   owner's fees due (revenue flows; nothing is burned).
-- **Bridge fee**: 5 bps of every deposit and every release, accrued in the marker and paid as an output to the
+- **Bridge fee**: **10 bps of every deposit and 10 bps of every release** (coordinator decision of round 17 on the
+  basis of `agents/347-fee-economics-r17.md`; it was 5 + 5; the ceiling of the model stays 30), accrued in the marker and paid as an output to the
   owner's address in the next vault transaction once at least `ownerPayoutMinSats` (10,000, far above dust) is due.
+  **Minimums re-derived at 10 bps: unchanged.** (a) The owner's output is created only once 10,000 sat are due,
+  18 times dust, whatever the rate; one minimum deposit or burn now adds 100 sat to what is due (50 before). (b) No
+  item is served below its own cost: every item pays its own miner charge by rule, a deposit is not swept while
+  that charge exceeds 10% of it (the minimum deposit of 0.001 BTC sweeps up to 17 sat/vB, as before, and is
+  refundable meanwhile), and the smallest burn (0.001 BTC) at the 200 sat/vB ceiling still pays out
+  `100,000 - 100 - 80,400 = 19,500 sat`, 35 times dust (`btc_deploy.py token` refuses a `minBurn` that would not;
+  the router refuses a burn under dust at its own ceiling: with 10 bps the smallest burn it accepts at 200 sat/vB
+  is 811 units, was 810). So `minDepositSats` and the token's `minBurn` stay 0.001 BTC. Windows and caps are
+  unchanged (an owner decision still open).
 - **Stuck release: replace-by-fee.** Every vault transaction signals BIP125. The relayer proposes the same items on
   the same tip at a higher fee rate; signers rebuild and sign it only if it pays more than the pending one and is
   inside their band. The payouts shrink by exactly the rule (rehearsal B5, B6). The replaced transaction can never confirm (B8).
@@ -232,7 +242,7 @@ credited forgery, and needs the owner's settlement.
 | `windowLimit` per `windowSeconds` | Rolling sum of the releases in the thread's last `windowSeconds`, by block time against the tip's median time past | **Signers** |
 | Release delay (`releaseDelay`, 0 at launch) | `largeReleaseSats` / `largeReleaseDelaySeconds`: a large burn waits 12 h from its L2 timestamp | **Signers** |
 | Vault guardians pause deposits and releases for 72 h | The token's guardian pause: while `paused()` no signer signs any vault transaction (rehearsal C1). One guardian set, not two | L2 token for mints; **signers** for the vault |
-| `minDeposit`, deposit and release fee, immutable `feeRecipient`, `sweepFees()` | `minDepositSats`, `maxDepositSats`, 5 + 5 bps, the owner's address inside the route, paid as an output | **Signers** (and the route binds the values) |
+| `minDeposit`, deposit and release fee, immutable `feeRecipient`, `sweepFees()` | `minDepositSats`, `maxDepositSats`, 10 + 10 bps, the owner's address inside the route, paid as an output | **Signers** (and the route binds the values) |
 | A release pays the recipient the burn names | Burns go through `BitcoinBurnRouter` (section 9): the destination is a checked P2WPKH address. A burn made directly on the token is paid only to the address its burner claims on the router, never to the 20 bytes it names; there is no timeout | L2 contract for the check and the claim; **signers** for the rule |
 | No fee choice for the recipient (gas is the relayer's) | The burner names the highest fee rate its payout may be charged; the burn waits above it | L2 contract records it; **signers** honour it |
 | No refund of a deposit (a deposit is credited or reverts) | Refund of any unswept deposit at its L2 recipient's signed request (section 3a) | **Signers** |
@@ -435,6 +445,7 @@ is never counted as paid, is payable exactly once, and that no encoding of the m
 | R325-BTC-2P-3 Info: estimate mode, signer without an estimate | Mode and target pinned in the signer; `fee-status` alert line (section 6). Rehearsal N3 |
 | R325-BTC-2P-5 Info: floating pragma | `pragma solidity 0.8.24;` |
 | R325-BTC-2P-6 Info: an anchor above the target | Enforced: deploy tool and every tool require exactly `poolTargetSats` (section 6). Rehearsal N1, N2 |
+| Coordinator, round 17: the bridge fee | 10 bps on deposit credit and 10 bps on release (was 5 + 5), to the same owner address; minimums re-derived and unchanged (section 6). Policy default, mainnet vault config, router constructor value, tests, rehearsal amounts |
 | Coordinator, round 17: decisions taken from a CLI exit code or from request text passed as an argument (R331-XLM-1 class) | Not present in `tools/signatario-btc`. Hardened anyway: strict in-process parsing of the refund signature; the signed burn claim no longer exists (claims are L2 state). Section 3a; rehearsal J1b |
 
 ## 13. Review 325 (first pass) and what changed

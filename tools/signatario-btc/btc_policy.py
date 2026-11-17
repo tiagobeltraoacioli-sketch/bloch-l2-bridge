@@ -32,8 +32,8 @@ import btc_core as c
 DEFAULT_POLICY = {
     'version': 1,
     'unitSats': 100,              # one token unit (BridgedStablecoinV3 has 6 decimals) = 100 sat
-    'depositFeeBps': 5,
-    'releaseFeeBps': 5,
+    'depositFeeBps': 10,          # bridge fee, to the owner's address (coordinator decision of round 17: 10 + 10 bps)
+    'releaseFeeBps': 10,
     'minDepositSats': 100_000,
     'maxDepositSats': 10_000_000,  # at most the L2 token's mint bucket: a larger credit could never mint and would block the order
     'capSats': 100_000_000,        # the L2 token's supply cap in sats: the vault never owes holders more

@@ -126,7 +126,7 @@ python3 tools/signatario-btc/btc_deploy.py router --config deployments/bitcoin/b
 cast send --rpc-url "$L2_RPC" --ledger --mnemonic-derivation-path "$BBTC_ROUTER_PATH" --legacy --create "$(cat bbtc-router.initcode)"
 ```
 
-Read it back; every number must equal the vault's (`unitSats` 100, `releaseFeeBps` 5, `chargeVbytes` 402, `dustSats`
+Read it back; every number must equal the vault's (`unitSats` 100, `releaseFeeBps` 10, `chargeVbytes` 402, `dustSats`
 546, `feeRateCeiling` 200, prefix `bc`, the token):
 
 ```
@@ -171,7 +171,7 @@ user only. Templates: `deployments/bitcoin/bbtc-ops/`.
 | One burn, or all | `python3 tools/signatario-btc/btc_relay.py --config relay.json burn status --nonce N` | `paid` (and where), `payable`, `waiting-fee-rate`, `unclaimed`; totals what is never paid until claimed |
 | Signer: fee estimate alert | `python3 tools/signatario-btc/btc_signer.py --config vault-signer.json fee-status` | Run from the operator's monitor every few minutes. Exit 0 with the ceiling this signer accepts now; exit 2 with an alert line when its node has no estimate (it then signs nothing) |
 | Relayer: combine and send | `python3 tools/signatario-btc/btc_relay.py --config relay.json combine --proposal P.json --partial A.json --partial B.json --partial C.json --partial D.json --partial E.json --out TX.json --broadcast` | Verifies the five signatures and asks the node to accept before sending |
-| Refund an unswept deposit | The L2 recipient signs the text printed by `python3 tools/signatario-btc/btc_relay.py --config relay.json refund-text --outpoint TXID:VOUT --to bc1q...` with any wallet's personal-sign; the relayer adds `--refund TXID:VOUT:0xRECIPIENT:bc1q...:0xSIGNATURE` to `propose` | Any unswept deposit; pays the amount less 0.05% and fee rate x 605 vbytes |
+| Refund an unswept deposit | The L2 recipient signs the text printed by `python3 tools/signatario-btc/btc_relay.py --config relay.json refund-text --outpoint TXID:VOUT --to bc1q...` with any wallet's personal-sign; the relayer adds `--refund TXID:VOUT:0xRECIPIENT:bc1q...:0xSIGNATURE` to `propose` | Any unswept deposit; pays the amount less 0.10% and fee rate x 605 vbytes |
 | Pay a burn made directly on the token | The account that burned sends `claimDirectBurn(uint64 burnNonce, string bc1q..., uint16 maxFeeRate)` to the router (`cast send 0xROUTER "claimDirectBurn(uint64,string,uint16)" N bc1q... 50`, or the same call from a Safe); once that is final on the L2 the relayer names the burn in `--burn` | Without a claim such a burn is never paid: no timeout. The claim is set once |
 | Reserves | `python3 tools/signatario-btc/btc_reservas.py --config relay.json check` | Exit 0 ok, 2 deficit or held, 3 surplus, 1 unverifiable |
 | Guardian view | `python3 tools/signatario-btc/btc_reservas.py --config relay.json guard` | Lists queued mints without a ledger deposit with the `voteCancelMint` arguments |

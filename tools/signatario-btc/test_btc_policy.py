@@ -174,7 +174,7 @@ class Builder(unittest.TestCase):
         v = vault()
         b = pol.build_vault_tx(v, tip(), [dep(0, 1_000_000)], [], [], 2)
         cr = b['credits'][0]
-        fee, charge = 500, 2 * (v.deposit_vb + v.overhead_vb)
+        fee, charge = 1_000, 2 * (v.deposit_vb + v.overhead_vb)   # 10 bps of 1,000,000
         self.assertEqual(cr['units'], (1_000_000 - fee - charge) // 100)
         self.assertEqual(int.from_bytes(cr['deposit_id'][:8], 'big'), 0)
         m = b['marker']
@@ -185,7 +185,7 @@ class Builder(unittest.TestCase):
         t2 = {'txid': tx.txid(), 'vout': 0, 'value': tx.outputs[0][0], 'marker': m}
         b2 = pol.build_vault_tx(v, t2, [], [], [{'nonce': 1, 'units': 5000, 'recipient': b'\x33' * 20}], 2)
         pay = b2['payouts'][0]
-        self.assertEqual(pay['sats'], 500_000 - 250 - 2 * (31 + v.overhead_vb))
+        self.assertEqual(pay['sats'], 500_000 - 500 - 2 * (31 + v.overhead_vb))
         self.assertEqual(b2['marker'].burn_base, 1)
         self.assertEqual(b2['marker'].liabilities, m.liabilities - 500_000)
         t3 = {'txid': b2['tx'].txid(), 'vout': 0, 'value': b2['tx'].outputs[0][0], 'marker': b2['marker']}
@@ -218,14 +218,14 @@ class Builder(unittest.TestCase):
         v = vault()
         b = pol.build_vault_tx(v, tip(value=300_000), [dep(0, 50_000_000)], [], [], 1)
         self.assertEqual(b['tx'].outputs[-1][1], v.owner_spk)
-        # bridge fee 25,000 + the pool surplus above the target
-        self.assertEqual(b['owner_paid'], 25_000 + (300_000 + b['credits'][0]['charge'] + (50_000_000 - 25_000 - b['credits'][0]['charge']) % 100
+        # bridge fee 50,000 (10 bps) + the pool surplus above the target
+        self.assertEqual(b['owner_paid'], 50_000 + (300_000 + b['credits'][0]['charge'] + (50_000_000 - 50_000 - b['credits'][0]['charge']) % 100
                                                     - b['fee'] - 200_000))
         self.assertEqual(b['marker'].owner_due, 0)
         self.assertEqual(b['pool'], 200_000)
         small = pol.build_vault_tx(v, tip(value=100_000), [dep(0, 1_000_000)], [], [], 1)
         self.assertEqual(small['owner_paid'], 0)
-        self.assertEqual(small['marker'].owner_due, 500)  # carried until it reaches ownerPayoutMinSats
+        self.assertEqual(small['marker'].owner_due, 1_000)  # 10 bps of 1,000,000, carried until it reaches ownerPayoutMinSats
         self.assertNotIn(v.owner_spk, [k for _, k in small['tx'].outputs])
 
     def test_property_conservation_solvency_replay(self):
@@ -391,7 +391,7 @@ class SetAside(unittest.TestCase):
         # later burn 2 is claimed: a late payment, charged like any release
         late = pol.build_vault_tx(v, s1, [], [], [burn(2, 5_000)], 3)
         self.assertEqual((late['late'], sorted(late['aside']), late['marker'].late), ([2], [1], (2,)))
-        self.assertEqual(late['payouts'][0]['sats'], 500_000 - 250 - 3 * v.release_vb)
+        self.assertEqual(late['payouts'][0]['sats'], 500_000 - 500 - 3 * v.release_vb)
         self.assertEqual(late['marker'].liabilities, owed - 100_000 - 500_000)
         s2 = after(late)
         self.assertTrue(pol.burn_paid(s2, 2))
@@ -614,9 +614,9 @@ class ReviewR16(unittest.TestCase):
         m = c.Marker(next_deposit=3, burn_base=0, liabilities=60_000_000)
         for rate in (1, 14, 100, v.policy['maxFeerate']):
             b = pol.build_vault_tx(v, tip(60_250_000, m), [], [], [{'nonce': 1, 'units': 1_000, 'recipient': b'\x07' * 20}], rate)
-            self.assertEqual(b['payouts'][0]['sats'], 100_000 - 50 - rate * (31 + v.overhead_vb))
+            self.assertEqual(b['payouts'][0]['sats'], 100_000 - 100 - rate * (31 + v.overhead_vb))
             self.assertGreaterEqual(b['payouts'][0]['sats'], 546)
-        self.assertEqual((31 + v.overhead_vb, (100_000 - 50 - 546) // (31 + v.overhead_vb)), (402, 247))
+        self.assertEqual((31 + v.overhead_vb, (100_000 - 100 - 546) // (31 + v.overhead_vb)), (402, 247))
 
     def test_btc4_no_burn_waits_for_fees_so_the_marker_window_is_not_held_by_one(self):
         # burn 1 (the smallest allowed) is payable at the ceiling even with 328 later burns already paid
@@ -635,7 +635,7 @@ class Refunds(unittest.TestCase):
         for value in (30_000, 99_999, 5 * 10**9):  # below the minimum, and above the maximum
             r = {'txid': 'dd' * 32, 'vout': 1, 'value': value, 'recipient': b'\x0a' * 20, 'dest': b'\x0b' * 20}
             b = pol.build_vault_tx(v, tip(), [], [], [], 3, [r])
-            self.assertEqual(b['refunds'][0]['sats'], value - value * 5 // 10_000 - 3 * (v.deposit_vb + 31 + v.overhead_vb))
+            self.assertEqual(b['refunds'][0]['sats'], value - value * 10 // 10_000 - 3 * (v.deposit_vb + 31 + v.overhead_vb))
             self.assertEqual((b['marker'].next_deposit, b['marker'].liabilities, b['credits']), (0, 0, []))
             self.assertIn((b['refunds'][0]['sats'], c.p2wpkh(b'\x0b' * 20)), b['tx'].outputs)
             again = pol.replay_tx(v, tip(), b['inputs'], b['tx'].outputs)

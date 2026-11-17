@@ -23,8 +23,8 @@
   "policy": {
     "version": 1,
     "unitSats": 100,
-    "depositFeeBps": 5,
-    "releaseFeeBps": 5,
+    "depositFeeBps": 10,
+    "releaseFeeBps": 10,
     "minDepositSats": 100000,
     "maxDepositSats": 10000000,
     "capSats": 100000000,

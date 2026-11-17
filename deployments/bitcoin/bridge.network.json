@@ -75,8 +75,8 @@
     "largeItemThreshold": "0"
   },
   "fee": {
-    "depositBps": 5,
-    "releaseBps": 5,
+    "depositBps": 10,
+    "releaseBps": 10,
     "recipient": "bc1qjpnqq4f6hjh2n39tzwy8ttrj4h78yx22retkyk",
     "paidOn": "source",
     "collection": "an output to the recipient in the vault's own transactions, whenever at least 10,000 sat is due (the amount due is carried in the vault marker until then)",
@@ -95,10 +95,10 @@
     "steps": [
       "compute your deposit address from your L2 address (the bridge page does it; check it with btc_relay.py address)",
       "send BTC to it from any wallet: an ordinary payment, no OP_RETURN, any change goes back to your own wallet",
-      "after the confirmations and the 12 hour mint delay the L2 token credits the amount less 0.05% and the miner charge, in units of 0.000001 BTC; before it is swept, the deposit can be refunded at the L2 recipient's signed request"
+      "after the confirmations and the 12 hour mint delay the L2 token credits the amount less 0.10% and the miner charge, in units of 0.000001 BTC; before it is swept, the deposit can be refunded at the L2 recipient's signed request"
     ],
     "refusals": [
-      "below 0.001 BTC or above 0.1 BTC in one output, or while the supply cap is reached: not credited; the L2 address the deposit names can have it sent back (less 0.05% and the miner charge) by signing a refund request naming a bc1q address. An L2 address that is a contract and cannot sign cannot ask for a refund",
+      "below 0.001 BTC or above 0.1 BTC in one output, or while the supply cap is reached: not credited; the L2 address the deposit names can have it sent back (less 0.10% and the miner charge) by signing a refund request naming a bc1q address. An L2 address that is a contract and cannot sign cannot ask for a refund",
       "sent to the bare vault (thread) address: names no recipient, joins the fee pool",
       "sent to an address computed for another L2 address: credited (or refundable) to that address",
       "an address computed for another vault, network or key set is not this bridge"
@@ -108,7 +108,7 @@
     "l2Function": "BitcoinBurnRouter.burnTo(uint64 amount, string bitcoinAddress, uint16 maxFeeRate), after approve(router, amount) on the token; router address TBD-deploy, runtime code keccak TBD-deploy (pinned by every signer)",
     "recipientEncoding": "a lowercase P2WPKH address string (bc1q..., 42 characters); the router checks prefix, checksum and witness version before it burns. maxFeeRate is the highest fee rate in sat/vB (1 to 200) the payout may be charged; the router refuses a burn whose payout would be dust at that rate",
     "typicalSeconds": 3600,
-    "paysAsset": "BTC to that P2WPKH address: the burned amount less 0.05% and the miner charge",
+    "paysAsset": "BTC to that P2WPKH address: the burned amount less 0.10% and the miner charge",
     "notes": [
       "burn through the router. A burn made directly on the token (burn(uint64,address)) is NEVER paid to the 20 bytes it names and there is no timeout: it is paid only after the account that burned sends claimDirectBurn(uint64 burnNonce, string bitcoinAddress, uint16 maxFeeRate) to the router (a contract account can make that call). Until then its coins stay in the vault and the reserves report lists it as an unclaimed direct burn",
       "an exit waits while the Bitcoin fee market is above the maxFeeRate its burner named; the page should propose the current estimate with a margin and show router.quote(amount, maxFeeRate) as the least the user receives",

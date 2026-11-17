@@ -369,6 +369,7 @@ def run(rig):
     policy = {**pol.DEFAULT_POLICY, 'sweepDepth': 1, 'minConfirmations': 3, 'windowLimitSats': 100_000_000,
               'largeReleaseSats': 30_000_000, 'maxDepositSats': 100_000_000, 'capSats': 10_000_000_000}
     assert policy['maxFeerate'] == 200 and policy['minDepositSats'] == 100_000
+    assert policy['depositFeeBps'] == policy['releaseFeeBps'] == 10   # the launch fee: every amount below is computed with it
 
     # the anchor: the first thread output, paid to the bare 5-of-7 script; it seeds the fee pool with EXACTLY the target
     thread_address = c.address_from_spk('bitcoin-regtest', c.p2wsh(c.multisig_script(5, pubs)))
@@ -438,7 +439,7 @@ def run(rig):
     # the exit door: BitcoinBurnRouter over the token, for this network's address prefix and this vault's payout numbers
     rc, rplan = rig.tool('btc_deploy.py', str(vault_path), 'router', '--token', rig.token, '--artifact', opt('--router-artifact'),
                          '--out', str(rig.work / 'router.initcode'))
-    rctor = sh(rig.cast, 'abi-encode', 'f(address,string,uint256,uint256,uint256,uint256,uint16)', rig.token, 'bcrt', '100', '5',
+    rctor = sh(rig.cast, 'abi-encode', 'f(address,string,uint256,uint256,uint256,uint256,uint16)', rig.token, 'bcrt', '100', str(policy['releaseFeeBps']),
                str(vault.release_vb), '546', '200').stdout.strip()
     rdep = json.loads(sh(rig.cast, 'send', '--rpc-url', rig.l2, '--private-key', deployer, '--json', '--create',
                          (rig.work / 'router.initcode').read_text().strip()).stdout)
@@ -449,7 +450,7 @@ def run(rig):
     other_policy.write_text(json.dumps({**vault_cfg, 'policy': {**policy, 'maxFeerate': 150}}, indent=1))
     rc_o, rother = rig.tool('btc_deploy.py', str(other_policy), 'router-verify', '--token', rig.token, '--l2-rpc', rig.l2, '--router', rig.router)
     check('0 btc_deploy.py router: its constructor encoding equals cast abi-encode; router-verify reads the deployed router back '
-          '(unit 100, 5 bps, 402 vbytes, dust 546, ceiling 200) and gives the code hash the signers pin; a router for another '
+          '(unit 100, 10 bps, 402 vbytes, dust 546, ceiling 200) and gives the code hash the signers pin; a router for another '
           'policy is refused',
           rc == 0 and rplan.get('constructorArgs') == rctor and rc_v == 0 and rver.get('runtimeCodeKeccak') == router_keccak
           and rver['expected']['chargeVbytes'] == 402 and rc_o != 0 and 'feeRateCeiling' in rother.get('differences', {}), (rplan, rver, rother))
@@ -567,10 +568,10 @@ def run(rig):
     id_a, units_a = by_recipient[alice]['deposit_id'], by_recipient[alice]['units']
     id_b, units_b = by_recipient[bob]['deposit_id'], by_recipient[bob]['units']
     charge = 2 * (vault.deposit_vb + vault.overhead_vb)
-    check('A6 credit = (deposit - 5 bps - miner charge) in 100-sat units',
-          units_a == units_b == (90_000_000 - 45_000 - charge) // 100 and id_a != id_b, sweep)
-    check('A7 the sweep pays the 5 bps deposit fees to the owner address as an output above dust',
-          sweep['owner_paid'] >= 90_000 and len(credits) == 2, sweep)
+    check('A6 credit = (deposit - 10 bps - miner charge) in 100-sat units',
+          units_a == units_b == (90_000_000 - 90_000 - charge) // 100 and id_a != id_b, sweep)
+    check('A7 the sweep pays the 10 bps deposit fees to the owner address as an output above dust',
+          sweep['owner_paid'] >= 180_000 and len(credits) == 2, sweep)
     answers, call = rig.attest(id_a, tag='a-early')
     check('A8 no signer attests before the confirmation depth', call is None and all('not deep enough' in str(a) for _, a in answers), answers[:1])
     rig.mine(2)
@@ -671,8 +672,8 @@ def run(rig):
     check('B6 the bump lowers each payout by exactly the rule: 5 sat/vB x (payout + overhead vbytes)',
           all(pay_low[n] - pay_high[n] == step for n in pay_low), (pay_low, pay_high, step))
     rig.mine(1)
-    exp1 = 25_000_000 - 12_500 - 6 * (vault.payout_vb + vault.overhead_vb)
-    check('B7 the user is paid on Bitcoin: amount - 5 bps - miner charge, once', received(burn1['address']) == exp1 == pay_high[1]
+    exp1 = 25_000_000 - 25_000 - 6 * (vault.payout_vb + vault.overhead_vb)
+    check('B7 the user is paid on Bitcoin: amount - 10 bps - miner charge, once', received(burn1['address']) == exp1 == pay_high[1]
           and received(burn2['address']) == pay_high[2], (received(burn1['address']), exp1))
     lowraw = json.loads((rig.work / 'b-release-low.final.json').read_text())['raw']
     again = rig.bcli('sendrawtransaction', lowraw, ok=False)
@@ -733,7 +734,7 @@ def run(rig):
     r = rig.sign_and_combine(good['proposal'], range(2, 7), 'b-burn3-go')
     rig.mine(1)
     check('B14 the honest release of the third burn (signers 3..7 this time) confirms', r['combine'] and r['combine'][0] == 0
-          and received(burn3['address']) == 5_000_000 - 2_500 - (vault.payout_vb + vault.overhead_vb), r)
+          and received(burn3['address']) == 5_000_000 - 5_000 - (vault.payout_vb + vault.overhead_vb), r)
 
     # ── C. pause, large-release delay, window ────────────────────────────────
     big = burn(alice_k, 310_000)     # 0.31 BTC > largeReleaseSats (0.3 BTC)
@@ -765,7 +766,7 @@ def run(rig):
     r = rig.vault_tx(1, burns=[big], tag='c-large')
     rig.mine(1)
     check('C5 after the delay the large release is signed and paid', r['combine'] and r['combine'][0] == 0
-          and received(big['address']) == 31_000_000 - 15_500 - (vault.payout_vb + vault.overhead_vb), r)
+          and received(big['address']) == 31_000_000 - 31_000 - (vault.payout_vb + vault.overhead_vb), r)
     r = rig.vault_tx(1, burns=[over], tag='c-window')
     check('C6 the rolling release window (1 BTC here) holds the next large burn although its delay has passed', all_refuse(r['signs'], 'window is full'), reasons(r['signs']) or r['propose'])
     rig.advance(86_400 + 60)
@@ -900,9 +901,9 @@ def run(rig):
     rc, res = rig.reserves()
     note(f'smallest burn (0.001 BTC) paid at {rate} sat/vB' + (' (the signers refused 200: above 1.5 x their estimate)' if band else ''))
     check('I2 the relayer cannot lift the fee rate above the signers\' own band, and the smallest burn lands at the highest '
-          'rate they accept: 100,000 - 50 - rate x 402 sat paid; the pool did not fall',
+          'rate they accept: 100,000 - 100 - rate x 402 sat paid; the pool did not fall',
           band is not False and 1 <= rate <= 200 and r['combine'] and r['combine'][0] == 0
-          and received(small['address']) == 100_000 - 50 - rate * (vault.payout_vb + vault.overhead_vb) >= 546
+          and received(small['address']) == 100_000 - 100 - rate * (vault.payout_vb + vault.overhead_vb) >= 546
           and vault.payout_vb + vault.overhead_vb == 402 and rc == 0 and res['fee_pool_sats'] >= pool0, (r, res))
 
     # ── J. refunds (review R325-BTC-4) ───────────────────────────────────────
@@ -931,9 +932,9 @@ def run(rig):
     after = rig.status()
     cost = vault.deposit_vb + vault.payout_vb + vault.overhead_vb
     check('J2 the deposits below the minimum and above the maximum go back to the address their L2 recipient signed for, '
-          'less 5 bps and the miner charge; nobody is credited',
-          r['combine'] and r['combine'][0] == 0 and received(to_small) == 10_000 - 5 - cost
-          and received(to_huge) == 150_000_000 - 75_000 - cost and len(after['deposits']) == len(before['deposits'])
+          'less 10 bps and the miner charge; nobody is credited',
+          r['combine'] and r['combine'][0] == 0 and received(to_small) == 10_000 - 10 - cost
+          and received(to_huge) == 150_000_000 - 150_000 - cost and len(after['deposits']) == len(before['deposits'])
           and after['marker']['liabilities'] == before['marker']['liabilities'], r)
     r = rig.vault_tx(1, refunds=[req_huge], tag='j-again')
     rc, res = rig.reserves()
@@ -987,7 +988,7 @@ def run(rig):
     check('K4 the burner claims on the router (a transaction from the burning account, set once) and is paid to the address '
           'claimed, only once the claim is final on the L2: the mistaken burn is rescued',
           again is None and r_early['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0
-          and received(to_claim) == 500_000 - 250 - (vault.payout_vb + vault.overhead_vb), (r_early['propose'][1], r))
+          and received(to_claim) == 500_000 - 500 - (vault.payout_vb + vault.overhead_vb), (r_early['propose'][1], r))
 
     # An unclaimed direct burn is NEVER paid, however long it waits, although here it names a real key hash.
     named_addr, named = user_hash()
@@ -1029,7 +1030,7 @@ def run(rig):
           'payable burn cannot be set aside',
           r_bad['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0 and sum(1 for c0, _ in r['signs'] if c0 == 0) == 7
           and r['propose'][1]['set_aside'] == [unclaimed['nonce']] and m['burn_base'] == nxt['nonce'] and m['aside_through'] == unclaimed['nonce']
-          and received(nxt['address']) == 300_000 - 150 - (vault.payout_vb + vault.overhead_vb) and received(named_addr) == 0
+          and received(nxt['address']) == 300_000 - 300 - (vault.payout_vb + vault.overhead_vb) and received(named_addr) == 0
           and rc == 0 and res['status'] == 'ok' and res['identity_books'] and res['set_aside_count'] == 1
           and res['set_aside_burns'][0]['nonce'] == unclaimed['nonce'] and res['set_aside_burns'][0]['reason'] == 'unclaimed direct burn'
           and res['unclaimed_direct_burns']['sats'] == 200_000 and row['state'] == 'unclaimed' and row['set_aside_in'] == r['propose'][1]['txid'],
@@ -1048,7 +1049,7 @@ def run(rig):
     check('K8 three weeks later the burner claims and is paid as a late payment to the address claimed (not the 20 bytes the '
           'burn named), once; nothing is set aside or unclaimed any more and the reserves are exact',
           r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == [unclaimed['nonce']]
-          and received(bob_to) == 200_000 - 100 - (vault.payout_vb + vault.overhead_vb) and received(named_addr) == 0
+          and received(bob_to) == 200_000 - 200 - (vault.payout_vb + vault.overhead_vb) and received(named_addr) == 0
           and r_again['propose'][0] != 0 and rc == 0 and res['status'] == 'ok' and res['set_aside_count'] == 0
           and res['unclaimed_direct_burns']['count'] == 0 and res['unpaid_burn_units'] == 0
           and res['vault_sats'] == res['l2_supply_units'] * 100 + res['fees_due_sats'] + res['fee_pool_sats']
@@ -1078,7 +1079,7 @@ def run(rig):
           'either; the contract claims by calling the router and is then paid to the address claimed',
           sh(rig.cast, 'code', acct, '--rpc-url', rig.l2).stdout.strip() not in ('0x', '') and row0['from'] == acct
           and r0['propose'][0] != 0 and all_refuse(r_forced['signs'], 'never paid to the 20 bytes') and row0['state'] == 'unclaimed'
-          and r['combine'] and r['combine'][0] == 0 and received(acct_to) == 400_000 - 200 - (vault.payout_vb + vault.overhead_vb)
+          and r['combine'] and r['combine'][0] == 0 and received(acct_to) == 400_000 - 400 - (vault.payout_vb + vault.overhead_vb)
           and rc == 0 and res['status'] == 'ok' and cburn['nonce'] in res['direct_burns_paid_to_their_claim'], (row0, r, res))
 
     # ── L. the burner bounds the miner charge (R325-BTC-2P-2) ─────────────────
@@ -1087,8 +1088,8 @@ def run(rig):
     over = router_send(bob_k, 'burnTo(uint64,string,uint16)', '5000', user_hash()[0], '201', ok=False)
     quote = sh(rig.cast, 'call', rig.router, 'quote(uint64,uint16)(uint256,uint256,uint256)', '1000', '200', '--rpc-url', rig.l2).stdout.split()
     check('L1 the router refuses a burn whose payout would be dust at the fee rate it names, a zero ceiling and one above the '
-          'policy ceiling; its quote is the vault rule (smallest burn at 200 sat/vB: 19,550 sat, charge 80,400)',
-          dusty is None and zero is None and over is None and [int(q) for q in quote if q.isdigit()] == [19_550, 50, 80_400], quote)
+          'policy ceiling; its quote is the vault rule (smallest burn at 200 sat/vB: 19,500 sat, charge 80,400)',
+          dusty is None and zero is None and over is None and [int(q) for q in quote if q.isdigit()] == [19_500, 100, 80_400], quote)
     capped = burn(bob_k, 2_000, max_rate=2)      # accepts at most 2 sat/vB: its charge is at most 804 sat
     free = burn(alice_k, 2_000, max_rate=200)
     rig.l2_mine(3)
@@ -1115,7 +1116,7 @@ def run(rig):
     check('L3 at 5 sat/vB the capped burn is set aside (reason: its fee ceiling) and the other exit is paid, charged 5 x 402; '
           'signers refuse to set aside a burn that is payable at the proposed rate',
           r['combine'] and r['combine'][0] == 0 and r['propose'][1]['set_aside'] == [capped['nonce']]
-          and received(free['address']) == 200_000 - 100 - 5 * 402 and received(capped['address']) == 0
+          and received(free['address']) == 200_000 - 200 - 5 * 402 and received(capped['address']) == 0
           and all_refuse(r_cheat['signs'], 'may not be set aside') and rc == 0 and res['set_aside_count'] == 1
           and res['set_aside_burns'][0]['reason'] == 'fee ceiling 2 sat/vB set by its burner' and res['unclaimed_direct_burns']['count'] == 0,
           (r['propose'][1], reasons(r_cheat['signs']), res))
@@ -1125,9 +1126,9 @@ def run(rig):
     rig.l2_mine(3)
     rc, res = rig.reserves()
     check('L4 when a transaction at its ceiling can be made the capped burn is paid (late payment): it receives '
-          '200,000 - 100 - 2 x 402 sat, so its miner charge was bounded by the rate it named; reserves exact',
+          '200,000 - 200 - 2 x 402 sat, so its miner charge was bounded by the rate it named; reserves exact',
           r3['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0 and r['propose'][1]['late'] == [capped['nonce']]
-          and received(capped['address']) == 200_000 - 100 - 2 * 402 and rc == 0 and res['status'] == 'ok'
+          and received(capped['address']) == 200_000 - 200 - 2 * 402 and rc == 0 and res['status'] == 'ok'
           and res['set_aside_count'] == 0 and res['unpaid_burn_units'] == 0, (r3['propose'][1], r, res))
     fs = [rig.tool('btc_signer.py', rig.signer_cfg[i], 'fee-status') for i in range(2)]
     check('N3 fee-status: each signer reports the estimate mode it pins (target 2, economical) and either its ceiling (exit 0) '
