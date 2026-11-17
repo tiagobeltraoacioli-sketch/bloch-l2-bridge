@@ -296,7 +296,7 @@ def flow(rig):
             rec = json.loads((h.dir / f'signer-op{i}-{f}.json').read_text())
             if i == 1:
                 check(f'[3] the record of {f} holds public data only', set(rec) == {'role', 'index', 'operator', 'address',
-                      'custody', 'date', 'attestation'} and 'keystore' not in json.dumps(rec))
+                      'custody', 'date', 'attestation'} and not re.search(r'password|ciphertext|[0-9a-f]{64}(?![0-9a-f])', json.dumps(rec).replace(rec['attestation'], '')))
         signers.append(h)
     for i in range(1, 4):
         h = Host(rig, f'guard-op{i}', 'guardian')

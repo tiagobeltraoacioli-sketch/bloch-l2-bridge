@@ -106,7 +106,7 @@ def main():
 
     # collect
     inv, verdict = ck.collect(d, safe)
-    check('collect: 21 + 2 deployer keys + the Safe, every attestation verified', verdict['keys'] == 24
+    check('collect: 22 committee and relayer keys + 2 deployer keys + the Safe, every attestation verified', verdict['keys'] == 25
           and verdict['signaturesChecked'] is True and verdict['decision'] == 'ok', verdict)
     dup = Path(tmp) / 'dup'
     dup.mkdir()
