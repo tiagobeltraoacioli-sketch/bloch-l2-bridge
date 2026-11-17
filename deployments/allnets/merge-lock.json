@@ -192,6 +192,16 @@
       ],
       "conflicts": [],
       "history": []
+    },
+    "ceremony": {
+      "branch": "codex/bridge-ceremony-r18-20261117",
+      "commit": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
+      "agent": 380,
+      "routes": [
+        "ethereum"
+      ],
+      "conflicts": [],
+      "history": []
     }
   }
 }
