@@ -136,7 +136,10 @@ class KeyProofs(unittest.TestCase):
         self.address = S.b58encode(self.public)
         self.doc = json.loads(MAINNET_FILE.read_text())
         self.doc['vault']['fees']['owner'] = self.address
-        self.message = sol_proof.fee_owner_message(self.doc, '2026-11-17')
+        self.doc['vault']['signers']['set'] = [{'operator': f'o{i}', 'address': S.hx(bytes([i + 1]) * 20)} for i in range(7)]
+        self.doc['vault']['guard']['guardians'] = [{'operator': f'g{i}', 'address': S.hx(bytes([0xa0 + i]) * 20)} for i in range(3)]
+        self.program = S.b58encode(T.Cluster().program)
+        self.message = sol_proof.fee_owner_message(self.doc, self.program, '2026-11-17')
 
     def sign(self, message=None, envelope='text'):
         raw = (message or self.message).encode()
@@ -150,7 +153,7 @@ class KeyProofs(unittest.TestCase):
             for text in (S.b58encode(sig), sig.hex(), '0x' + sig.hex(), base64.b64encode(sig).decode()):
                 self.assertEqual(sol_proof.verify(self.address, self.message, text), envelope)
         proof = sol_proof.proof_of(self.address, self.message, S.b58encode(self.sign()))
-        self.assertEqual(sol_proof.check_fee_owner_proof(proof, self.doc), 'text')
+        self.assertEqual(sol_proof.check_fee_owner_proof(proof, self.doc, self.program), 'text')
 
     def test_the_cli_envelope_of_agave_4_4_1(self):
         # `solana sign-offchain-message` of solana-cli 4.4.1 with a throwaway key, made on the build host by agent 336
@@ -169,7 +172,7 @@ class KeyProofs(unittest.TestCase):
                 sol_proof.verify(self.address, self.message, value)
             proof = {'kind': 'bloch.solana.key-proof.v1', 'address': self.address, 'message': self.message, 'signature': value}
             with self.assertRaises(S.Refused, msg=repr(value)):
-                sol_proof.check_fee_owner_proof(proof, self.doc)
+                sol_proof.check_fee_owner_proof(proof, self.doc, self.program)
 
     def test_option_shaped_and_malformed_addresses_and_messages_are_refused(self):
         sig = S.b58encode(self.sign())
@@ -197,43 +200,59 @@ class KeyProofs(unittest.TestCase):
         other = json.loads(json.dumps(self.doc))
         other['vault']['fees']['owner'] = T.FEE_WALLET  # the real file: another fee owner
         with self.assertRaises(S.Refused):
-            sol_proof.check_fee_owner_proof(proof, other)
+            sol_proof.check_fee_owner_proof(proof, other, self.program)
         devnet = json.loads(json.dumps(self.doc))
         devnet['solana']['genesisHash'] = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
         with self.assertRaises(S.Refused):
-            sol_proof.check_fee_owner_proof(proof, devnet)
+            sol_proof.check_fee_owner_proof(proof, devnet, self.program)
         for change in ({'kind': 'something else'}, {'address': T.FEE_WALLET}, {'message': self.message.replace('2026-11-17', '2026-11-18')},
                        {'message': '--help'}, {'message': None}, {'signature': '--help'}):
             with self.assertRaises(S.Refused, msg=change):
-                sol_proof.check_fee_owner_proof(dict(proof, **change), self.doc)
-        future = sol_proof.fee_owner_message(self.doc, '2031-01-01')
+                sol_proof.check_fee_owner_proof(dict(proof, **change), self.doc, self.program)
+        future = sol_proof.fee_owner_message(self.doc, self.program, '2031-01-01')
         late = sol_proof.proof_of(self.address, future, S.b58encode(self.sign(future)))
         with self.assertRaises(S.Refused):
-            sol_proof.check_fee_owner_proof(late, self.doc)
+            sol_proof.check_fee_owner_proof(late, self.doc, self.program)
         for not_a_proof in (None, [], 'proof', {'kind': 'bloch.solana.key-proof.v1'}):
             with self.assertRaises(S.Refused):
-                sol_proof.check_fee_owner_proof(not_a_proof, self.doc)
+                sol_proof.check_fee_owner_proof(not_a_proof, self.doc, self.program)
 
     def test_the_command_line_refuses_without_running_anything(self):
         import contextlib
         import io
         for argv in (['verify', '--address', self.address, '--message', self.message, '--signature', '--help'],
                      ['verify', '--address', '--help', '--message', self.message, '--signature', '--help'],
-                     ['exit-message', '--wallet', '--help', '--l2-account', '--help', '--router', '--help', '--issued', '--help'],
+                     ['exit-message', '--wallet', '--help', '--burner', '--help', '--amount', '--help', '--nonce', '--help', '--router',
+                      '--help', '--route', '--help'],
+                     ['redirect-message', '--wallet', self.address, '--burner', '--help', '--burn', '--help', '--nonce', '1', '--router',
+                      '--help', '--route', '--help'],
+                     ['exit-proof', '--wallet', self.address, '--message', self.message, '--signature', '--help'],
                      ['check-fee-owner', '--config', str(MAINNET_FILE), '--proof', '/nonexistent/--help']):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = sol_proof.main(argv)
             self.assertEqual((code, json.loads(out.getvalue())['ok']), (1, False), argv)
 
-    def test_the_exit_message(self):
-        text = sol_proof.exit_message(self.address, '0x' + 'ab' * 20, '0x' + 'cd' * 20, 1795000000)
-        self.assertEqual(text, f'Bloch bridge exit: pay bUSDC.sol exits to my Solana wallet {self.address}. L2 account 0x'
-                         + 'ab' * 20 + '. Router 0x' + 'cd' * 20 + '. Chain 700770. Issued 1795000000.')
-        self.assertEqual(sol_proof.verify(self.address, text, S.b58encode(self.sign(text))), 'text')
+    def test_the_exit_and_redirect_messages_take_only_strictly_parsed_values(self):
+        router, route = '0x' + 'cd' * 20, '0x' + 'ef' * 32
+        text = sol_proof.exit_message(self.address, '0x' + 'AB' * 20, 25, 3, router, route)
+        self.assertEqual(text, f'Bloch bridge exit v1: pay 25 units burned by 0x' + 'ab' * 20 + f' to my Solana wallet {self.address}. '
+                         'Nonce 3. Router 0x' + 'cd' * 20 + '. Chain 700770. Route 0x' + 'ef' * 32 + '.')
+        name, proof = sol_proof.make_exit_proof(self.address, text, S.b58encode(self.sign(text)))
+        self.assertEqual((name, len(proof), proof[0]), ('text', 65, 0))
+        self.assertTrue(sol_proof.exit_proof_valid(self.public, text, proof))
         for wallet in (T.FEE_ATA, T.FEE_WALLET + '0', ' ' + T.FEE_WALLET, S.b58encode(bytes([1]) + bytes(31)), '--help'):
             with self.assertRaises(S.Refused):
-                sol_proof.exit_message(wallet, '0x' + 'ab' * 20, '0x' + 'cd' * 20, 1)
+                sol_proof.exit_message(wallet, '0x' + 'ab' * 20, 1, 0, router, route)
+        for field in range(5):
+            for value in OPTION_SHAPED[:6] + ['0x' + 'ab' * 19, 'ab' * 21]:
+                args = [self.address, '0x' + 'ab' * 20, 1, 0, router, route]
+                args[field + 1] = value
+                with self.assertRaises((S.Refused, ValueError), msg=(field, value)):
+                    sol_proof.exit_message(*args)
+        for value in OPTION_SHAPED + [S.b58encode(self.sign(text))[:-1]]:
+            with self.assertRaises(S.Refused, msg=repr(value)):
+                sol_proof.make_exit_proof(self.address, text, value)
 
 
 class PeerPartials(unittest.TestCase):
@@ -330,8 +349,9 @@ class VaultToolInputs(unittest.TestCase):
                 S.pubkey(value)
 
 
-class Recipients(unittest.TestCase):
-    """The direct-burn announcement, the hint file and the router log: text from outside, and the hash decides."""
+class RouterLogs(unittest.TestCase):
+    """The router's logs come from an L2 endpoint and carry text a burner chose (the recipient string, the proof
+    bytes): parsed strictly, never handed on, and the signature decides."""
 
     def setUp(self):
         no_subprocess(self)
@@ -341,22 +361,25 @@ class Recipients(unittest.TestCase):
                                      None, 7, b'--help']:
             self.assertIsNone(sol_recipient.wallet_of_text(text), repr(text))
 
-    def test_a_hint_file_or_a_log_with_anything_else_counts_for_nothing(self):
-        wallet = S.pubkey(T.FEE_WALLET)
-        commitment = S.account_id(wallet)
-        with tempfile.TemporaryDirectory() as d:
-            for text in OPTION_SHAPED[:-2] + [T.USDC_MINT, T.FEE_ATA, T.FEE_WALLET + ' x']:
-                (Path(d) / S.hx(commitment)[2:]).write_text(text)
-                self.assertEqual(sol_recipient.find_wallet({'recipient_hints': d}, commitment), (None, None), text)
-        for data in OPTION_SHAPED + ['0x', '0x' + '00' * 31, '0xzz', '0x' + 'ff' * 400, None]:
-            self.assertIsNone(sol_recipient.exit_text(data) and sol_recipient.wallet_of_text(sol_recipient.exit_text(data)), data)
-
-        def answer(method, params):
-            return [{'data': v} for v in ('--help', '0x', '0x' + '00' * 31, None, 5, S.hx(S.pubkey(T.FEE_ATA)), '0x' + '00' * 32)] + [{}]
-        fake = T.Fake(answer)
-        self.addCleanup(fake.close)
-        cfg = {'l2_rpc': fake.url, 'recipient_registry': '0x' + '22' * 20, 'burn_router': '0x' + '11' * 20}
-        self.assertEqual(sol_recipient.find_wallet(cfg, commitment, '0x' + 'ab' * 32), (None, None))
+    def test_a_log_with_option_shaped_or_malformed_values_establishes_nothing(self):
+        import testkit as K
+        c = T.Cluster()
+        l2 = K.L2(self, c)
+        for text in OPTION_SHAPED[:-2] + [T.FEE_WALLET + ' --help']:
+            padded = text.ljust(32, ' ')  # the fake log needs some bytes; the router itself refuses every one of these
+            burn = l2._burned(l2.router, 10**7, bytes(19) + b'\x01')
+            data = (K.word(10**7) + bytes(12) + bytes(19) + b'\x01' + K.word(192) + K.word(0) + K.word(192 + len(K.dynamic(padded.encode())))
+                    + bytes(32) + K.dynamic(padded.encode()) + K.dynamic(b'--help'.ljust(65, b'-')))
+            l2.logs.append({'address': l2.router, 'blockNumber': hex(l2.block), 'transactionHash': '0x' + '00' * 32,
+                            'topics': [sol_recipient.topic(sol_recipient.EXIT_EVENT), burn['burn_id'], '0x' + '00' * 12 + 'ab' * 20],
+                            'data': S.hx(data)})
+            verdict = sol_recipient.decide(sol_recipient.exit_view(l2.cfg(), c.a, burn), burn['burn_id'], sol_recipient.Holds(None),
+                                           lambda w: {'hold': None})
+            self.assertEqual((verdict['target'], verdict['hold']), (None, 'not-a-wallet-address'), text)
+        for entry in ({'data': '--help', 'topics': ['0x', '0x', '0x']}, {'data': None, 'topics': ['a', 'b', 'c']}, {}, None, '--help',
+                      {'data': '0x' + '00' * 31, 'topics': [1, 2, 3]}, {'data': '0x' + 'ff' * 640, 'topics': ['0x', '0x', '0x']}):
+            self.assertIsNone(sol_recipient.decode_exit(entry), repr(entry)[:40])
+            self.assertIsNone(sol_recipient.decode_redirect(entry), repr(entry)[:40])
 
 
 if __name__ == '__main__':

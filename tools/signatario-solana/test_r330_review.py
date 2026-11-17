@@ -31,6 +31,7 @@ import sol_half  # noqa: E402
 import sol_recipient  # noqa: E402
 import sol_vault  # noqa: E402
 import test_solana_tools as T  # noqa: E402  (the developer's fake RPC servers and account encoders)
+import testkit as K  # noqa: E402  (throwaway signers and a fake L2 with the burn router's logs)
 
 # Addresses that are points of the Ed25519 curve and are not wallets. The first is the USDC mint itself, as
 # deployments/solana/busdc-sol-vault.config.json records it; the second is the classic token program; the third is
@@ -64,20 +65,15 @@ def token_account(mint, owner, amount=0):
 
 
 def release_setup(case, cluster, wallet, **cfg):
-    """An intent for a burn to `wallet` with a hint that names it, and the signer half's answer."""
+    """The signer half's answer for an exit through the router to `wallet`: a label (a throwaway wallet whose key
+    signs the exit's proof, testkit.wallet_of) or 32 bytes nobody holds a key for (the log then carries no proof)."""
     d = Path(tempfile.mkdtemp())
     fake = T.Fake(cluster.answer)
     case.addCleanup(fake.close)
-    (d / 'hints').mkdir()
-    (d / 'hints' / S.hx(S.account_id(wallet))[2:]).write_text(S.b58encode(wallet))
-    rel = {'route': S.hx(cluster.a.route), 'nonce': 3, 'recipient': S.hx(S.account_id(wallet)), 'amount': 10**7,
-           'nativeBurn': S.hx(S.sha256(b'burn-3')), 'mintCount': 2, 'mintedTotal': 201 * 10**6, 'mintHead': S.hx(cluster.state['head'])}
-    doc = {'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': int.from_bytes(cluster.config.source_chain_id, 'big'),
-           'vault': S.hx(cluster.a.vault20), 'release': rel, 'native': {'nativeFinalizedNumber': 5, 'nativeFinalizedHash': S.hx(S.sha256(b'l2'))},
-           'l2': {'from': '0x' + '11' * 20}, 'proposed_context': None, 'l2_mints': []}
-    (d / 'intent.json').write_text(json.dumps(doc))
-    files = cluster.files(d, cfg.pop('urls', fake.url), recipient_hints=str(d / 'hints'), cast='/nonexistent/cast', **cfg)
-    return T.run(sol_half.cmd_release, files, str(d / 'intent.json'))
+    l2 = K.L2(case, cluster)
+    burn = l2.exit(wallet) if isinstance(wallet, str) else l2.exit(text=S.b58encode(wallet), proof=bytes(65))
+    files = cluster.files(d, cfg.pop('urls', fake.url), cast='/nonexistent/cast', **dict(l2.cfg(), **cfg))
+    return T.run(sol_half.cmd_release, files, l2.intent(burn, d))
 
 
 class R330Sol1(unittest.TestCase):
@@ -97,14 +93,14 @@ class R330Sol1(unittest.TestCase):
         tool has never heard of, by what the chain shows at the address."""
         code, out = release_setup(self, T.Cluster(), S.pubkey(USDC_MINT))
         self.assertEqual(code, 1)
-        self.assertTrue(out['reason'].startswith('held'), out)  # no wallet is known: the hint names a non-wallet
-        self.assertEqual(out['hold'], 'no-wallet')
+        self.assertTrue(out['reason'].startswith('held'), out)  # the address is on the list of non-wallets
+        self.assertEqual(out['hold'], 'not-a-wallet-address')
         self.assertNotIn('cast', json.dumps(out))
         # another mint, at a keypair address nobody listed: the chain says what it is
         cluster = T.Cluster()
-        mint = keypair_address('some other mint')
+        mint = K.wallet_of('some other mint')[1]  # its key exists and signed the proof; it is a mint all the same
         cluster.accounts[mint] = (S.TOKEN_PROGRAM, bytes(82))
-        code, out = release_setup(self, cluster, mint)
+        code, out = release_setup(self, cluster, 'some other mint')
         self.assertEqual((code, out['hold']), (1, 'destination-not-a-wallet'), out)
         self.assertIn('classic SPL Token program', out['reason'])
         self.assertNotIn('cast', json.dumps(out))
@@ -115,9 +111,9 @@ class R330Sol1Destination(unittest.TestCase):
 
     def held(self, owner, data, executable=False, lamports=1):
         cluster = T.Cluster()
-        wallet = keypair_address('destination')
+        wallet = K.wallet_of('destination')[1]
         cluster.accounts[wallet] = (owner, data)
-        return release_setup(self, cluster, wallet)
+        return release_setup(self, cluster, 'destination')
 
     def test_every_small_order_point_is_refused_in_every_spelling(self):
         for h in SMALL_ORDER:
@@ -150,50 +146,27 @@ class R330Sol1Destination(unittest.TestCase):
     def test_a_plain_system_account_and_an_absent_address_pass(self):
         code, out = self.held(S.SYSTEM_PROGRAM, b'')
         self.assertIn('cast cannot be run', out['reason'])  # every refusal passed: the next step is the keystore
-        code, out = release_setup(self, T.Cluster(), keypair_address('never used'))
+        code, out = release_setup(self, T.Cluster(), 'never used')
         self.assertIn('cast cannot be run', out['reason'])
 
     def test_every_endpoint_is_asked_and_one_that_shows_a_non_wallet_holds(self):
-        wallet = keypair_address('two endpoints')
+        wallet = K.wallet_of('two endpoints')[1]
         one, two = T.Cluster(), T.Cluster()
         two.accounts[wallet] = (S.TOKEN_PROGRAM, bytes(82))  # the second endpoint knows it is a mint
         fake2 = T.Fake(two.answer)
         self.addCleanup(fake2.close)
         fake1 = T.Fake(one.answer)
         self.addCleanup(fake1.close)
-        code, out = release_setup(self, one, wallet, urls=[fake1.url, fake2.url])
+        code, out = release_setup(self, one, 'two endpoints', urls=[fake1.url, fake2.url])
         self.assertEqual((code, out['hold']), (1, 'destination-not-a-wallet'), out)
         # an endpoint that does not answer is not "absent": fail closed
         with self.assertRaises(S.RpcError):  # sol_half.main answers "Solana RPC failed": nothing is signed
-            release_setup(self, one, wallet, urls=[fake1.url, 'http://127.0.0.1:9'])
+            release_setup(self, one, 'two endpoints', urls=[fake1.url, 'http://127.0.0.1:9'])
 
     def test_the_vaults_own_accounts_are_never_a_destination(self):
         cluster = T.Cluster()
         for key in (cluster.a.config.mint, cluster.a.program_id, cluster.a.vault, cluster.a.tokens):
             self.assertIn('not a wallet', sol_recipient.destination([], key, cluster.a)['hold'])
-
-    def test_burn_status_names_the_hold_and_its_reason(self):
-        cluster = T.Cluster()
-        fake = T.Fake(cluster.answer)
-        self.addCleanup(fake.close)
-        d = Path(tempfile.mkdtemp())
-        node = sol_half.Node(cluster.files(d, fake.url))
-        mint, fresh = keypair_address('a mint'), keypair_address('a fresh wallet')
-        cluster.accounts[mint] = (S.TOKEN_PROGRAM, bytes(82))
-        for key in (mint, fresh):
-            (d / S.hx(S.account_id(key))[2:]).write_text(S.b58encode(key))
-        cfg = {'recipient_hints': str(d), 'burn_router': '0x' + '11' * 20}
-        burn = lambda key, nonce: {'burn_id': S.hx(S.sha256(b'b%d' % nonce)), 'nonce': nonce, 'amount': 10**7,  # noqa: E731
-                                   'recipient': S.hx(S.account_id(key)), 'from': '0x' + '11' * 20}
-        held = sol_recipient.burn_status(node, cfg, burn(mint, 3))
-        self.assertEqual((held['state'], held['hold'], held['direct']), ('held', 'destination-not-a-wallet', False))
-        self.assertIn('classic SPL Token program', held['reason'])
-        nowallet = sol_recipient.burn_status(node, cfg, dict(burn(mint, 4), recipient='0x' + '77' * 20, **{'from': '0x' + '99' * 20}))
-        self.assertEqual((nowallet['state'], nowallet['hold'], nowallet['direct']), ('held', 'no-wallet', True))
-        waiting = sol_recipient.burn_status(node, cfg, burn(fresh, 5))
-        self.assertEqual((waiting['state'], waiting['hold'], waiting['recipientTokenAccountExists']), ('waiting', None, False))
-        cluster.paid_page([6])
-        self.assertEqual(sol_recipient.burn_status(node, cfg, burn(fresh, 6))['state'], 'paid')
 
     def test_the_tool_never_pays_or_creates_for_a_non_wallet(self):
         cluster = T.Cluster()
@@ -216,27 +189,27 @@ class R330Sol1Destination(unittest.TestCase):
 
 class R330Sol1Relayer(unittest.TestCase):
     """The relayer applies the rule itself: it does not deliver a certificate for a held burn, does not pay an
-    approval whose destination is not a wallet, and creates a token account only for a funded System account."""
+    approval whose destination is not a wallet, and creates a token account only for a funded System account.
+    Third pass (R330-SOL-3P-1): its hold is latched in its own database."""
 
     def setUp(self):
         import sol_vigia
-        self.sol_vigia = sol_vigia
         self.cluster = T.Cluster()
         self.fake = T.Fake(self.cluster.answer)
         self.addCleanup(self.fake.close)
+        self.l2 = K.L2(self, self.cluster)
         self.dir = Path(tempfile.mkdtemp())
-        self.sol_cfg = self.cluster.files(self.dir, self.fake.url)
-        self.wallet = keypair_address('relayed wallet')
-        self.burn = {'burn_id': S.hx(S.sha256(b'relayed burn')), 'nonce': 3, 'amount': 10**7,
-                     'recipient': S.hx(S.account_id(self.wallet)), 'mint_count': 2, 'mint_head': S.hx(self.cluster.state['head'])}
+        self.b = self.l2.exit('relayed wallet')
+        self.wallet = self.b['wallet']
         v = sol_vigia.SolVigia.__new__(sol_vigia.SolVigia)
-        v.sol_cfg, v.cfg = self.sol_cfg, {'sol_fee_payer': 'unused'}
-        v._nodes, v._destinations, v._wallets, v._held_logged, v.parked_logged = {}, {}, {self.burn['burn_id']: self.wallet}, set(), set()
+        v.sol_cfg = self.cluster.files(self.dir, self.fake.url, **self.l2.cfg())
+        v.cfg, v.token = {'sol_fee_payer': 'unused', 'token_from_block': 0}, self.l2.token
+        v._nodes, v._views, v._verdicts, v._senders, v._held_logged, v.parked_logged = {}, {}, {}, None, set(), set()
+        v._burns_pass = {self.b['burn_id']: self.b}
         v.sent = []
         v.sol_vault = lambda command, *argv: v.sent.append((command, *argv)) or {'ok': True}
         v.backup_due = lambda *a: True
         v.burn_done = lambda d, burn_id: None
-        v.burn_of = lambda burn_id: self.burn
         v.quorum_release = lambda d, burn_id: (self.dir / 'r-1', 5)
         self.logs = []
         patch = unittest.mock.patch.object(sol_vigia, 'log', lambda **fields: self.logs.append(fields))
@@ -244,61 +217,109 @@ class R330Sol1Relayer(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.v = v
 
+    def again(self):
+        """A new pass of the daemon."""
+        self.v._nodes, self.v._views, self.v._verdicts, self.v._senders = {}, {}, {}, None
+
     def put(self, owner, data):
         self.cluster.accounts[self.wallet] = (owner, data)
+        self.again()
 
-    def approval(self):
-        c = self.cluster
-        data = (bytes([3, S.LAYOUT_VERSION, 255, 1]) + c.a.vault + (3).to_bytes(8, 'little') + S.sha256(b'id') + S.account_id(self.wallet)
-                + (10**7).to_bytes(8, 'little') + S.unhex(self.burn['burn_id'], 32) + bytes(8) + (1).to_bytes(8, 'little')
-                + (1).to_bytes(8, 'little') + bytes(8) + bytes(8) + bytes([9]) * 32)
+    def approval(self, recipient=None):
+        c, b = self.cluster, self.b
+        data = (bytes([3, S.LAYOUT_VERSION, 255, 1]) + c.a.vault + b['nonce'].to_bytes(8, 'little') + S.sha256(b'id')
+                + (recipient or S.account_id(self.wallet)) + b['amount'].to_bytes(8, 'little') + S.unhex(b['burn_id'], 32) + bytes(8)
+                + (1).to_bytes(8, 'little') + (1).to_bytes(8, 'little') + bytes(8) + bytes(8) + bytes([9]) * 32)
         assert len(data) == S.RELEASE_LEN
-        c.accounts[c.a.release_record(3)] = (c.program, data)
+        c.accounts[c.a.release_record(b['nonce'])] = (c.program, data)
         c.state.update(approval_seq=1)
         c.put_vault()
+        self.again()
+
+    def relay(self):
+        self.v.relay_release(self.dir / self.b['burn_id'][2:])
 
     def test_the_sign_daemon_parks_and_alerts_with_the_reason(self):
         self.put(S.TOKEN_PROGRAM, bytes(82))
-        self.assertTrue(self.v.unpayable(self.burn))
-        self.assertEqual([(x['id'], x['burn']) for x in self.logs], [('release-held-destination', self.burn['burn_id'])])
+        self.assertTrue(self.v.unpayable(self.b))
+        self.assertEqual([(x['id'], x['burn']) for x in self.logs], [('release-held-destination', self.b['burn_id'])])
         self.assertIn('classic SPL Token program', self.logs[0]['reason'])
-        self.v._destinations = {}
-        self.put(S.SYSTEM_PROGRAM, b'')
-        self.assertFalse(self.v.unpayable(self.burn))
-        self.v._wallets = {}
-        self.v.wallet_for = lambda b: None
-        self.assertTrue(self.v.unpayable(self.burn))
-        self.assertEqual(self.logs[-1]['id'], 'release-held-no-wallet')
+        del self.cluster.accounts[self.wallet]  # the account is closed: the hold is latched in this operator's database
+        self.again()
+        self.assertTrue(self.v.unpayable(self.b))
+        fine = self.l2.exit('another wallet')
+        self.again()
+        self.assertFalse(self.v.unpayable(fine))
+        direct = self.l2.direct(bytes(19) + b'\x01')
+        self.again()
+        self.assertTrue(self.v.unpayable(direct))
+        self.assertEqual(self.logs[-1]['id'], 'release-held-direct-burn')
+        self.l2.redirect(direct, 'claimed')  # redirected: the parent must not sign the burn's own release, and nothing is alerted
+        self.again()
+        count = len(self.logs)
+        self.assertTrue(self.v.unpayable(direct))
+        self.assertEqual(len(self.logs), count)
 
     def test_a_certificate_for_a_held_burn_is_not_delivered(self):
-        self.put(S.TOKEN_PROGRAM, token_account(S.pubkey(USDC_MINT), bytes([5]) * 32))
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.put(S.TOKEN_PROGRAM, T.u64(0) * 20 + bytes(5))
+        self.relay()
         self.assertEqual(self.v.sent, [])
         self.assertEqual([x['id'] for x in self.logs], ['certificate-withheld-destination'])
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.relay()
         self.assertEqual(len(self.logs), 1, 'alerted once')
+        del self.cluster.accounts[self.wallet]  # R330-SOL-3P-1: closed, absent, and still not delivered
+        self.again()
+        self.relay()
+        self.assertEqual(self.v.sent, [])
+
+    def test_a_certificate_without_a_valid_proof_is_not_delivered(self):
+        self.b = self.l2.exit(text=S.b58encode(K.keyless_address('relayed')), proof=bytes(65))
+        self.v._burns_pass = {self.b['burn_id']: self.b}
+        self.again()
+        self.relay()
+        self.assertEqual((self.v.sent, [x['id'] for x in self.logs]), ([], ['certificate-withheld-invalid-proof']))
 
     def test_an_approval_whose_destination_is_not_a_wallet_is_not_paid(self):
         self.approval()
         self.put(S.TOKEN_PROGRAM, bytes(82))
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.relay()
         self.assertEqual(self.v.sent, [])
         self.assertEqual([x['id'] for x in self.logs], ['approved-destination-not-a-wallet'])
+        del self.cluster.accounts[self.wallet]
+        self.again()
+        self.relay()
+        self.assertEqual(self.v.sent, [], 'latched: not paid by this relayer after the account is closed either')
+        self.assertTrue(self.logs[-1]['latched'])
+
+    def test_an_approval_for_a_recipient_nobody_proved_is_not_paid(self):
+        self.approval(S.account_id(K.wallet_of('a thief')[1]))
+        self.relay()
+        self.assertEqual((self.v.sent, [x['id'] for x in self.logs]), ([], ['approval-mismatch']))
+
+    def test_an_approval_for_the_burners_redirect_is_paid(self):
+        direct = self.l2.direct(bytes(19) + b'\x02')
+        new = self.l2.redirect(direct, 'claimed')
+        self.b, self.wallet = direct, new['wallet']
+        self.v._burns_pass = {direct['burn_id']: direct}
+        self.cluster.accounts[S.associated_token_address(new['wallet'], self.cluster.config.mint)] = (
+            S.TOKEN_PROGRAM, token_account(self.cluster.config.mint, new['wallet']))
+        self.approval(S.account_id(new['wallet']))
+        self.v.pay_approved(direct['burn_id'], direct, self.v.node('confirmed').release(direct['nonce']))
+        self.assertEqual(self.v.sent, [('execute', '--nonce', str(direct['nonce']), '--owner', new['text'])])
 
     def test_a_token_account_is_created_only_for_a_funded_system_account(self):
         self.approval()
         self.v.cfg['sol_create_recipient_account'] = True
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])  # the wallet is absent from the chain
+        self.relay()  # the wallet is absent from the chain
         self.assertEqual(self.v.sent, [])
         self.assertEqual((self.logs[-1]['id'], self.logs[-1]['wallet_is_a_funded_system_account']), ('recipient-account-missing', False))
         self.put(S.SYSTEM_PROGRAM, b'')
-        self.v._destinations, self.v._nodes = {}, {}
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
-        self.assertEqual(self.v.sent, [('execute', '--nonce', '3', '--owner', S.b58encode(self.wallet), '--create-account')])
+        self.relay()
+        self.assertEqual(self.v.sent, [('execute', '--nonce', str(self.b['nonce']), '--owner', S.b58encode(self.wallet), '--create-account')])
         self.v.sent.clear()
         self.v.cfg['sol_create_recipient_account'] = False
-        self.v._destinations, self.v._nodes = {}, {}
-        self.v.relay_release(self.dir / self.burn['burn_id'][2:])
+        self.again()
+        self.relay()
         self.assertEqual(self.v.sent, [], 'the default: the relayer never pays that rent')
 
 
@@ -352,11 +373,11 @@ class R330Sol2Cluster(unittest.TestCase):
 
     def test_the_release_rules_cannot_be_switched_off_on_the_mainnet_genesis(self):
         c = MainnetGenesisCluster(rehearsal=True)
-        code, out = release_setup(self, c, S.pubkey(T.FEE_WALLET))
+        code, out = release_setup(self, c, 'a wallet')
         self.assertEqual(code, 1)
         self.assertIn('refused on a public cluster', out['reason'])
         c = MainnetGenesisCluster(rehearsal=False)
-        code, out = release_setup(self, c, S.pubkey(T.FEE_WALLET))
+        code, out = release_setup(self, c, 'a wallet', burn_router=None)
         self.assertIn('burn_router', out['reason'])  # the router requirement stands
 
     def test_validate_refuses_the_flag_on_the_mainnet_file(self):

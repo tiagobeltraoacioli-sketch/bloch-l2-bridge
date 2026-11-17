@@ -210,7 +210,7 @@ def decode_exit(entry):
     data = _log_data(entry)
     try:
         topics = entry['topics']
-        if data is None or len(topics) != 3 or len(data) < 32 * 6:
+        if data is None or len(topics) != 3 or len(data) < 32 * 6 or len(data) % 32:
             return None
         text, proof = _dynamic(data, _word(data, 2), 64), _dynamic(data, _word(data, 4), 97)
         if text is None or proof is None or _word(data, 0) >= 2**64 or _word(data, 3) >= 2**64 or any(data[32:44]):
@@ -227,7 +227,7 @@ def decode_redirect(entry):
     data = _log_data(entry)
     try:
         topics = entry['topics']
-        if data is None or len(topics) != 3 or len(data) < 32 * 4:
+        if data is None or len(topics) != 3 or len(data) < 32 * 4 or len(data) % 32:
             return None
         text, proof = _dynamic(data, _word(data, 2), 64), _dynamic(data, _word(data, 3), 97)
         if text is None or proof is None or _word(data, 0) >= 2**64 or any(data[32:44]):
@@ -479,7 +479,7 @@ def router_runtime_pin(artifact, token, mint32, route):
             ids[str(node['id'])] = node['name']
     values = {'token': S.unhex(token, 20, 'token').rjust(32, b'\0'), 'solanaMint': S.unhex(mint32, 32, 'mint'),
               'route': S.unhex(route, 32, 'route')}
-    if sorted(ids.get(k) for k in refs) != sorted(values):
+    if sorted(str(ids.get(k)) for k in refs) != sorted(values):
         raise S.Refused('the artifact does not name exactly the immutables token, solanaMint and route (build with --ast)')
     for key, places in refs.items():
         for place in places:

@@ -213,14 +213,48 @@ def _secp_add(a, b):
     return x, (m * (x1 - x) - y1) % _SP
 
 
+def _jac_double(p):
+    x, y, z = p
+    if not y:
+        return (0, 1, 0)
+    ysq = y * y % _SP
+    m = 4 * x * ysq % _SP
+    t = 3 * x * x % _SP
+    nx = (t * t - 2 * m) % _SP
+    return (nx, (t * (m - nx) - 8 * ysq * ysq) % _SP, 2 * y * z % _SP)
+
+
+def _jac_add(p, q):
+    if not p[2]:
+        return q
+    if not q[2]:
+        return p
+    z1z1, z2z2 = p[2] * p[2] % _SP, q[2] * q[2] % _SP
+    u1, u2 = p[0] * z2z2 % _SP, q[0] * z1z1 % _SP
+    s1, s2 = p[1] * q[2] * z2z2 % _SP, q[1] * p[2] * z1z1 % _SP
+    if u1 == u2:
+        return _jac_double(p) if s1 == s2 else (0, 1, 0)
+    h, r = (u2 - u1) % _SP, (s2 - s1) % _SP
+    h2 = h * h % _SP
+    h3, v = h * h2 % _SP, u1 * h2 % _SP
+    nx = (r * r - h3 - 2 * v) % _SP
+    return (nx, (r * (v - nx) - s1 * h3) % _SP, h * p[2] * q[2] % _SP)
+
+
 def _secp_mul(k, point):
-    out = None
+    """k times an affine point (or None for the point at infinity); affine again. Jacobian inside."""
+    if point is None:
+        return None
+    out, q = (0, 1, 0), (point[0], point[1], 1)
     while k:
         if k & 1:
-            out = _secp_add(out, point)
-        point = _secp_add(point, point)
+            out = _jac_add(out, q)
+        q = _jac_double(q)
         k >>= 1
-    return out
+    if not out[2]:
+        return None
+    zi = pow(out[2], _SP - 2, _SP)
+    return (out[0] * zi * zi % _SP, out[1] * zi * zi * zi % _SP)
 
 
 def secp256k1_recover(digest, signature):

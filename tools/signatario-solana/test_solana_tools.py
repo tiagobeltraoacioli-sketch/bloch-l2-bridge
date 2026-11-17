@@ -75,7 +75,7 @@ class Cluster:
     GENESIS = S.sha256(b'unit-test-cluster')
     ELF = b'\x7fELF unit test image' + bytes(range(64))
 
-    def __init__(self, rehearsal=True, signers=5, deposits=2):
+    def __init__(self, rehearsal=True, signers=5, deposits=2, signer_addresses=None):
         self.program = S.sha256(b'program')
         while S.on_curve(self.program):  # any 32 bytes do for a program id here
             self.program = S.sha256(self.program)
@@ -85,13 +85,17 @@ class Cluster:
             'vault': {
                 'mint': USDC_MINT, 'tokenProgram': S.b58encode(S.TOKEN_PROGRAM), 'sourceDomainLabel': 'solana-unit',
                 'nativeDomainLabel': 'bloch-l2-unit', 'assetLabel': 'USDC', 'cap': 10**11,
-                'signers': {'threshold': 5, 'set': [{'operator': f'op{i}', 'address': S.hx(bytes([i + 1]) * 20)} for i in range(7)][:max(signers, 5)]},
-                'policy': {'windowLimit': 10**10, 'windowSeconds': 86400, 'unpauseThreshold': 5, 'minDeposit': 11 * 10**6,
+                # outside a rehearsal the tools apply the mainnet policy to the vault they serve: 7 signers, 5 and 6
+                'signers': {'threshold': 5, 'set': [{'operator': f'op{i}', 'address': S.hx(bytes([i + 1]) * 20)}
+                                                   for i in range(7)][:max(signers, 5) if rehearsal else 7]},
+                'policy': {'windowLimit': 10**10, 'windowSeconds': 86400, 'unpauseThreshold': 5 if rehearsal else 6, 'minDeposit': 11 * 10**6,
                            'l2MinBurn': 10**7, 'largeReleaseThreshold': 10**9, 'releaseDelay': 1800, 'maxValidSeconds': 3600,
                            'recordRetention': 604800},
                 'guard': {'guardians': [{'operator': f'g{i}', 'address': S.hx(bytes([0xa0 + i]) * 20)} for i in range(3)],
                           'pauseDuration': 259200, 'pauseCooldown': 259200},
                 'fees': {'owner': FEE_WALLET, 'depositBps': 5, 'releaseBps': 5}}}
+        if signer_addresses is not None:
+            self.doc['vault']['signers']['set'] = [{'operator': f'op{i}', 'address': S.hx(a)} for i, a in enumerate(sorted(signer_addresses))]
         self.config = S.Config.from_json(self.doc)
         self.a = S.Addresses(self.program, self.config)
         self.slot, self.accounts, self.state = 5_000, {}, {}
@@ -275,6 +279,9 @@ class Encodings(unittest.TestCase):
 
 
 class Recipients(unittest.TestCase):
+    """What a wallet ADDRESS is. Who may be paid for a burn (the proof of the key, the read on Solana, redirects,
+    the latch) is tested in test_exit_rule.py; the registry and hint files of round 16 are no longer read."""
+
     def setUp(self):
         self.wallet = S.pubkey(FEE_WALLET)
         self.commitment = S.account_id(self.wallet)
@@ -289,47 +296,6 @@ class Recipients(unittest.TestCase):
         self.assertIsNone(sol_recipient.wallet_of_text('1' + FEE_WALLET), 'not canonical')
         self.assertIsNone(sol_recipient.wallet_of_text('0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544'))
         self.assertEqual(sol_recipient.wallet_of_text(' ' + FEE_WALLET + '\n'), self.wallet)
-
-    @staticmethod
-    def exit_data(text):
-        raw = text.encode()
-        return '0x' + ((5).to_bytes(32, 'big') + bytes(32) + (96).to_bytes(32, 'big') + len(raw).to_bytes(32, 'big')
-                       + raw.ljust((len(raw) + 31) // 32 * 32, b'\0')).hex()
-
-    def l2(self, router_logs=(), registry_logs=()):
-        def answer(method, params):
-            if method != 'eth_getLogs':
-                raise KeyError(method)
-            topic0 = params[0]['topics'][0]
-            return list(router_logs if topic0 == sol_recipient.topic(sol_recipient.ROUTER_EVENT) else registry_logs)
-        fake = Fake(answer)
-        self.addCleanup(fake.close)
-        return {'l2_rpc': fake.url, 'burn_router': '0x' + '11' * 20, 'recipient_registry': '0x' + '22' * 20,
-                'router_from_block': None, 'registry_from_block': None, 'recipient_hints': None}  # unset keys may be present as null
-
-    def test_router_log_names_the_wallet(self):
-        self.assertEqual(sol_recipient.exit_text(self.exit_data(FEE_WALLET)), FEE_WALLET)
-        cfg = self.l2(router_logs=[{'data': self.exit_data(FEE_WALLET)}])
-        self.assertEqual(sol_recipient.find_wallet(cfg, self.commitment, '0x' + 'ab' * 32), (self.wallet, 'router'))
-
-    def test_a_log_that_does_not_hash_to_the_recipient_counts_for_nothing(self):
-        other = S.hx(S.pubkey(USDC_MINT))  # a curve point, but not this commitment's preimage
-        cfg = self.l2(router_logs=[{'data': self.exit_data(USDC_MINT)}, {'data': '0x00'}], registry_logs=[{'data': other}])
-        self.assertEqual(sol_recipient.find_wallet(cfg, self.commitment, '0x' + 'ab' * 32), (None, None))
-
-    def test_registry_announcement_of_a_token_account_is_not_a_wallet(self):
-        token_account = S.pubkey(FEE_ATA)
-        cfg = self.l2(registry_logs=[{'data': S.hx(token_account)}])
-        self.assertEqual(sol_recipient.find_wallet(cfg, S.account_id(token_account), None), (None, None))
-        cfg = self.l2(registry_logs=[{'data': S.hx(self.wallet)}])
-        self.assertEqual(sol_recipient.find_wallet(cfg, self.commitment, None), (self.wallet, 'registry'))
-
-    def test_hint_file_and_unreachable_l2(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / S.hx(self.commitment)[2:]).write_text(FEE_WALLET + '\n')
-            self.assertEqual(sol_recipient.find_wallet({'recipient_hints': d}, self.commitment), (self.wallet, 'hint'))
-        with self.assertRaises(S.RpcError):  # "the L2 did not answer" is not "there is no wallet"
-            sol_recipient.find_wallet({'l2_rpc': 'http://127.0.0.1:9', 'recipient_registry': '0x' + '22' * 20}, self.commitment)
 
 
 class MintSigning(unittest.TestCase):
@@ -401,96 +367,83 @@ class ReleaseRefusals(unittest.TestCase):
     """What the Solana half refuses before it reads a key: every refusal here happens ahead of the signature."""
 
     def setUp(self):
+        import testkit
         self.dir = Path(tempfile.mkdtemp())
         self.c = Cluster()
         self.fake = Fake(self.c.answer)
         self.addCleanup(self.fake.close)
-        self.wallet = S.pubkey(FEE_WALLET)
+        self.l2 = testkit.L2(self, self.c)
+        self.burn = self.l2.exit('payee')  # an exit through the router with a valid proof of the destination key
 
-    def intent(self, **change):
-        c = self.c
-        rel = {'route': S.hx(c.a.route), 'nonce': 3, 'recipient': S.hx(S.account_id(self.wallet)), 'amount': 10**7,
-               'nativeBurn': S.hx(S.sha256(b'burn-3')), 'mintCount': 2, 'mintedTotal': 201 * 10**6, 'mintHead': S.hx(c.state['head'])}
-        rel.update(change)
-        doc = {'kind': 'stable-release-intent', 'version': 1, 'source_chain_id': int.from_bytes(c.config.source_chain_id, 'big'),
-               'vault': S.hx(c.a.vault20), 'release': rel, 'native': {'nativeFinalizedNumber': 5, 'nativeFinalizedHash': S.hx(S.sha256(b'l2'))},
-               'l2': {'from': '0x' + '11' * 20}, 'proposed_context': None, 'l2_mints': []}
-        path = self.dir / 'intent.json'
-        path.write_text(json.dumps(doc))
-        return str(path)
+    def release(self, burn=None, cluster=None, fake=None, l2=None, intent=None, **cfg):
+        l2 = l2 or self.l2
+        files = (cluster or self.c).files(self.dir, (fake or self.fake).url, **dict(l2.cfg(), **cfg))
+        return run(sol_half.cmd_release, files, l2.intent(burn or self.burn, self.dir, **(intent or {})))
 
-    def release(self, intent, **cfg):
-        return run(sol_half.cmd_release, self.c.files(self.dir, self.fake.url, **cfg), intent)
-
-    def hint(self):
-        hints = self.dir / 'hints'
-        hints.mkdir(exist_ok=True)
-        (hints / S.hx(S.account_id(self.wallet))[2:]).write_text(FEE_WALLET)
-        return str(hints)
-
-    def test_held_without_a_wallet(self):
-        code, out = self.release(self.intent())
+    def test_a_direct_burn_is_held(self):
+        import testkit
+        wallet = testkit.wallet_of('direct')[1]
+        code, out = self.release(self.l2.direct(S.account_id(wallet)))
         self.assertEqual(code, 1)
-        self.assertTrue(out['reason'].startswith('held'), out['reason'])
+        self.assertTrue(out['reason'].startswith('held') and out['hold'] == 'direct-burn' and out['direct_burn'] is True, out)
 
-    def test_an_ethereum_address_can_never_have_a_wallet(self):
-        code, out = self.release(self.intent(recipient='0x775a993f09bd80aecf8f8c2ade0c84158e3a0544'), recipient_hints=self.hint())
+    def test_an_ethereum_address_can_never_be_paid_blind(self):
+        code, out = self.release(self.l2.direct(S.unhex('0x775a993f09bd80aecf8f8c2ade0c84158e3a0544')))
         self.assertEqual(code, 1)
         self.assertTrue(out['reason'].startswith('held') and out['direct_burn'] is True, out)
 
-    def test_with_a_wallet_the_refusals_end_and_the_key_is_asked_for(self):
-        code, out = self.release(self.intent(), recipient_hints=self.hint(), cast='/nonexistent/cast')
+    def test_with_a_proven_wallet_the_refusals_end_and_the_key_is_asked_for(self):
+        code, out = self.release(cast='/nonexistent/cast')
         self.assertEqual(code, 1)
         self.assertIn('cast', out['reason'] + out.get('error', ''))  # every check passed; only the signing tool is missing
 
     def test_stale_after_a_pause(self):
         self.c.state['last_pause_at'] = int(time.time()) - 600  # a pause began ten minutes ago and was ended early
         self.c.put_vault()
-        code, out = self.release(self.intent(), recipient_hints=self.hint(), valid_seconds=1800)
+        code, out = self.release(valid_seconds=1800)
         self.assertEqual(code, 1)
         self.assertIn('last guardian pause', out['reason'])
         self.assertGreater(out['resumes_at'], int(time.time()))
-        code, out = self.release(self.intent(), recipient_hints=self.hint(), valid_seconds=3500, cast='/nonexistent/cast')
+        code, out = self.release(valid_seconds=3500, cast='/nonexistent/cast')
         self.assertNotIn('guardian pause', out['reason'])  # a certificate dated past the boundary is signed
 
     def test_paused_and_provenance_and_spent_nonces(self):
+        n = self.burn['nonce']
         self.c.state['paused_until'] = int(time.time()) + 1000
         self.c.put_vault()
-        self.assertIn('paused', self.release(self.intent(), recipient_hints=self.hint())[1]['reason'])
+        self.assertIn('paused', self.release()[1]['reason'])
         self.c.state['paused_until'] = 0
         self.c.put_vault()
-        self.assertIn('provenance', self.release(self.intent(mintHead=S.hx(S.sha256(b'another chain'))), recipient_hints=self.hint())[1]['reason'])
-        self.assertIn('provenance', self.release(self.intent(mintCount=3), recipient_hints=self.hint())[1]['reason'])
-        self.c.release_record(3, 2, paid_at=1)
-        self.assertIn('already has a release', self.release(self.intent(), recipient_hints=self.hint())[1]['reason'])
-        del self.c.accounts[self.c.a.release_record(3)]
-        self.c.paid_page([3])  # paid, and its record closed after the retention: the bit alone keeps the nonce spent
-        code, out = self.release(self.intent(), recipient_hints=self.hint())
+        self.assertIn('provenance', self.release(intent={'mintHead': S.hx(S.sha256(b'another chain'))})[1]['reason'])
+        self.assertIn('provenance', self.release(intent={'mintCount': 3})[1]['reason'])
+        self.c.release_record(n, 2, paid_at=1)
+        self.assertIn('already has a release', self.release()[1]['reason'])
+        del self.c.accounts[self.c.a.release_record(n)]
+        self.c.paid_page([n])  # paid, and its record closed after the retention: the bit alone keeps the nonce spent
+        code, out = self.release()
         self.assertIn('already has a release', out['reason'])
         self.assertTrue(out['closed'])
-        self.c.paid_page([4])
-        self.c.release_record(3, 1, seq=1)  # an approval a pause voided is not a release: it is certified again
+        self.c.paid_page([n + 1])
+        self.c.release_record(n, 1, seq=1)  # an approval a pause voided is not a release: it is certified again
         self.c.state.update(void_through_seq=1, approval_seq=1)
         self.c.put_vault()
-        self.assertIn('cast', json.dumps(self.release(self.intent(), recipient_hints=self.hint(), cast='/nonexistent/cast')[1]))
+        self.assertIn('cast', json.dumps(self.release(cast='/nonexistent/cast')[1]))
 
-    def test_public_cluster_requires_the_router(self):
-        public = Cluster(rehearsal=False)
-        fake = Fake(public.answer)
-        self.addCleanup(fake.close)
-        self.c = public
-        self.fake = fake
-        code, out = self.release(self.intent(mintHead=S.hx(public.state['head'])), recipient_hints=self.hint())
-        self.assertEqual(code, 1)
-        self.assertIn('burn_router', out['reason'])
+    def test_the_router_is_required_everywhere(self):
+        for missing in ('l2_rpc', 'burn_router', 'token', 'l2_chain_id'):
+            code, out = self.release(**{missing: None})
+            self.assertEqual(code, 1)
+            self.assertIn('are required', out['reason'])
+        code, out = self.release(burn_router_code_keccak=None)
+        self.assertIn('burn_router_code_keccak', out['reason'])
 
     def test_another_program_image_or_an_upgrade_authority(self):
         pd = self.c.a.program_data
         owner, data = self.c.accounts[pd]
         self.c.accounts[pd] = (owner, data[:12] + b'\x01' + bytes([5]) * 32 + data[45:])
-        self.assertIn('upgrade authority', self.release(self.intent())[1]['reason'])
+        self.assertIn('upgrade authority', self.release()[1]['reason'])
         self.c.accounts[pd] = (owner, data[:45] + b'\x7fELF another image')
-        self.assertIn('not the pinned build', self.release(self.intent())[1]['reason'])
+        self.assertIn('not the pinned build', self.release()[1]['reason'])
 
 
 if __name__ == '__main__':

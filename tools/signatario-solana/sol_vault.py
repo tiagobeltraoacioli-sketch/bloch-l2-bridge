@@ -594,7 +594,7 @@ def refuse_destination(node, owner, commitment):
                         'key, or an address known not to be a wallet)', commitment=commitment)
     dest = sol_recipient.destination([node.rpc], owner, node.a)
     if dest['hold']:
-        raise S.Refused(sol_recipient.HELD_DESTINATION + dest['hold'], hold='destination-not-a-wallet',
+        raise S.Refused('refused: the address is not a wallet on Solana. ' + dest['hold'], hold='destination-not-a-wallet',
                         wallet=S.b58encode(owner), destination=dest)
     return dest
 
