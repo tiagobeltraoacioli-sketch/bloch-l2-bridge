@@ -731,8 +731,8 @@ id) bind it to one exit of one account: it cannot be replayed for another burn, 
 | Tag | The signature covers | Produced by |
 |---|---|---|
 | 0 | the UTF-8 bytes of the line | a browser wallet's `signMessage` (wallet adapter) |
-| 1 | `0xff "solana offchain" \| 0x00 (version) \| 0x00 (format: restricted ASCII) \| length u16 LE \| line` | `solana sign-offchain-message` (Agave CLI 4.4.1); the legacy off-chain format of hardware wallets' Solana app |
-| 2 | `0xff "solana offchain" \| 0x00 \| application domain (32) \| 0x00 \| 0x01 (one signer) \| signer (32) \| length u16 LE \| line` | the off-chain message specification with an application domain |
+| 1 | `0xff "solana offchain" \| 0x00 (version) \| 0x00 (format: restricted ASCII) \| length u16 LE \| line` | `solana sign-offchain-message` with a key FILE (Agave CLI 4.4.1, verified) |
+| 2 | `0xff "solana offchain" \| 0x00 (version 0) \| application domain (32) \| 0x00 (format 0) \| 0x01 (one signer) \| signer (32) \| length u16 LE \| line` | a LEDGER (its Solana app parses exactly this header: `LedgerHQ/app-solana`, `libsol/parser.c` `parse_offchain_message_header`, read 2026-11-17 by reviewer 376; any 32-byte domain, one signer that is the device key, format 0); the off-chain message specification with an application domain |
 
 **Why the router does not verify it.** The L2 has no Ed25519 precompile; a verifier written in Solidity costs on
 the order of a million gas per signature (field arithmetic over 2^255 - 19 and SHA-512 on 64-bit words), which
@@ -758,9 +758,13 @@ redirect under each tag; 14 invalid cases), checked by `test_exit_rule.py` and `
 Reference tools: `sol_proof.py exit-message`, `redirect-message`, `exit-proof`.
 
 **What a wallet shows.** The line is short (about 330 bytes for an exit, 380 for a redirect) and printable ASCII,
-so a wallet that displays off-chain messages displays it as text; with the Solana app of a hardware wallet the
-line is signed in the off-chain envelope (tag 1). NOT verified here on a Ledger device or any browser wallet (no
-device in this work); verified with the Agave 4.4.1 CLI and with key files.
+so a wallet that displays off-chain messages displays it as text. A Ledger's Solana app signs the version-0 header
+with an application domain and its own key as the one signer: that is TAG 2 (round 18, review 376 R330-SOL-4P-6;
+the earlier text said tag 1, which no Ledger produces and which a page would therefore mis-wrap: fail-safe, the exit
+is held). The app shows a restricted-ASCII (format 0) message as text, with the signer; other formats need blind
+signing. The app's header version 1 (no domain, no format, no length) is NOT accepted by the router's tags or the
+tools. NOT verified on a device or any browser wallet (no device in this work); tag 1 verified with the Agave 4.4.1
+CLI and key files; tag 2 with this repository's test signer and the vectors.
 
 ### 11.4 Cases that are the recipient's own doing (review 330, R330-SOL-6)
 

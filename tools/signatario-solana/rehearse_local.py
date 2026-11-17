@@ -50,7 +50,7 @@ SOLBIN = Path(arg('--solana-bin'))
 FOUNDRY = Path(arg('--foundry-bin'))
 BASE = int(arg('--port-base', '42200'))
 CAST, FORGE, ANVIL = str(FOUNDRY / 'cast'), str(FOUNDRY / 'forge'), str(FOUNDRY / 'anvil')
-L2_URL = f'http://127.0.0.1:{BASE + 1}'
+L2_URL = f'http://127.0.0.1:{BASE + 2}'
 SOL_URL = f'http://127.0.0.1:{BASE + 10}'
 L2_CHAIN = 700771  # not 700770: the signer refuses `l2_source: rpc` (tests only) on the real L2 chain id
 RESULTS = []
@@ -154,7 +154,7 @@ def start_validator(reset, attempts=10):
 def start_validator_once(reset):
     log = open(WORK / 'validator.log', 'a')
     argv = [str(SOLBIN / 'solana-test-validator'), '--ledger', str(WORK / 'ledger'), '--bind-address', '127.0.0.1',
-            '--rpc-port', str(BASE + 10), '--faucet-port', str(BASE + 12), '--gossip-port', str(BASE + 13),
+            '--rpc-port', str(BASE + 10), '--faucet-port', str(BASE + 12), '--gossip-port', str(BASE + 14),
             '--dynamic-port-range', f'{BASE + 20}-{BASE + 60}', '--quiet']
     if reset:
         argv.append('--reset')
@@ -185,7 +185,7 @@ def stop(name):
 
 def start_anvil():
     log = open(WORK / 'anvil.log', 'a')
-    PROCS['anvil'] = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(BASE + 1), '--chain-id', str(L2_CHAIN),
+    PROCS['anvil'] = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(BASE + 2), '--chain-id', str(L2_CHAIN),
                                        '--silent'], stdout=log, stderr=log, start_new_session=True)
     for _ in range(60):
         if run(CAST, 'chain-id', '--rpc-url', L2_URL, ok=False).returncode == 0:

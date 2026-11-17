@@ -3,7 +3,7 @@
   "notes": [
     "TEST VECTORS ONLY. The two wallets below are derived from the published seeds and hold nothing; never use them.",
     "message: one line of printable ASCII, no trailing newline; it is byte for byte SolanaBurnRouter.exitMessage(burner, amount, recipient, nonce) or redirectMessage(burner, burnId, recipient, nonce).",
-    "proof (the bytes given to the router): tag | 64-byte Ed25519 signature [| 32-byte application domain]. tag 0: the signature covers the UTF-8 bytes of the message (wallet signMessage). tag 1: it covers 0xff \"solana offchain\" | 0x00 | 0x00 | length u16 little-endian | message (solana sign-offchain-message, Agave CLI 4.4.1). tag 2: it covers 0xff \"solana offchain\" | 0x00 | application domain (32) | 0x00 | 0x01 | signer (32) | length u16 little-endian | message.",
+    "proof (the bytes given to the router): tag | 64-byte Ed25519 signature [| 32-byte application domain]. tag 0: the signature covers the UTF-8 bytes of the message (a browser wallet's signMessage). tag 1: it covers 0xff \"solana offchain\" | 0x00 | 0x00 | length u16 little-endian | message (solana sign-offchain-message with a key file, Agave CLI 4.4.1). tag 2: it covers 0xff \"solana offchain\" | 0x00 | application domain (32) | 0x00 | 0x01 | signer (32) | length u16 little-endian | message: what a LEDGER's Solana app signs (any 32-byte domain, the device key as the one signer, format 0); the app's header version 1 is not accepted.",
     "Ed25519 signatures are deterministic (RFC 8032): signing the message with the seed must reproduce the signature exactly."
   ],
   "router": "0x2e234dae75c793f67a35089c9d99245e1c58470b",

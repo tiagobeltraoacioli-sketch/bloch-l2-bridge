@@ -255,5 +255,83 @@ class Controls(unittest.TestCase):
             self.assertEqual(S.secp256k1_recover(digest, K.secp_sign(key, digest)), K.secp_address(key))
 
 
+
+import test_r330_review as R330  # noqa: E402
+
+
+class RelayerLatchKeyOfAnEarlierRedirect(unittest.TestCase):
+    """R330-SOL-4P-7 (review 376, on 29cf708): after the 4P-3 fix an approval for an EARLIER proven redirect is
+    acceptable, but the relayer judges it under the latch key of the burn's ORIGINAL destination. (The rig of
+    test_r330_review.R330Sol1Relayer, without inheriting its tests.)"""
+
+    setUp, again, approval = R330.R330Sol1Relayer.setUp, R330.R330Sol1Relayer.again, R330.R330Sol1Relayer.approval
+
+    def test_r376_sol_4p_7_fixed_an_approval_for_the_first_redirect_is_judged_under_its_own_key(self):
+        held = self.l2.exit(text=S.b58encode(K.keyless_address('4p7')), proof=bytes(65))  # held: invalid-proof
+        self.b = held
+        self.v._burns_pass = {held['burn_id']: held}
+        self.again()
+        self.v.verdict_of(held)  # the relayer's own pass latches the original (invalid-proof) under the burn id
+        self.assertEqual(self.v.holds().get(held['burn_id'])['problem'], 'invalid-proof')
+        first = self.l2.redirect(held, 'first redirect')
+        self.wallet = first['wallet']
+        self.cluster.accounts[S.associated_token_address(first['wallet'], self.cluster.config.mint)] = (
+            S.TOKEN_PROGRAM, R330.token_account(self.cluster.config.mint, first['wallet']))
+        self.approval(S.account_id(first['wallet']))  # honest: certified while W1 was the latest redirect
+        self.l2.redirect(held, 'second redirect')
+        self.again()
+        self.v.pay_approved(held['burn_id'], held, self.v.node('confirmed').release(held['nonce']))
+        # was: nothing sent, 'approved-destination-not-a-wallet' with latched True (the ORIGINAL destination's latch)
+        self.assertNotIn('approved-destination-not-a-wallet', [x.get('id') for x in self.logs])
+        self.assertTrue(self.v.sent, 'the approval for the proven first redirect is paid by the relayer')
+
+
+class GuardianLagsTheSigners(unittest.TestCase):
+    """R330-SOL-4P-9 (review 376, on c90c6f8): an honest approval whose burn (or redirect) is past THIS guardian's
+    L2 `finalized` head is judged by the recipient rule on logs read only up to that head: the router's log is not
+    there yet, and the finding is `release-mismatch:unproven-…` / `release-mismatch:…`, hard with grace 0 (vault and
+    token paused), instead of the parent's `release-before-final` with its configured severity and grace, which
+    exist for exactly this lag. (The developer's own rehearsal case `release-before-final` fails this way.)"""
+
+    setUp = GuardianBlindRound.setUp
+
+    def findings_at(self, burn, recipient20, fin):
+        b = dict(burn, eth_recipient=burn['recipient'])
+        record = {'nonce': burn['nonce'], 'seq': 1, 'state': 1, 'recipient': recipient20, 'amount': burn['amount'],
+                  'native_burn': S.unhex(burn['burn_id'], 32), 'key': 'record', 'ready_at': 0}
+        self.g.records = lambda: []
+        self.g.release_records = lambda: [record]
+        self.node.token_balance = lambda address: {'mint': self.node.config.mint, 'owner': self.node.a.vault, 'amount': 10**12}
+        self.node.vault['void_through_seq'] = 0
+        self.g._senders = None
+        _, _, findings = self.g.eth_source([b], fin=fin)
+        return [(f[0], f[1].rsplit('-', 2)[0] if 'approval' in f[1] else f[1], f[2]) for f in findings]
+
+    def test_control_the_same_approval_judged_at_a_head_past_the_burn_is_clean(self):
+        honest = self.l2.exit('an honest exit, just final for the signers')
+        self.assertEqual(self.findings_at(honest, S.unhex(honest['recipient'], 20), fin=honest['block']), [])
+
+    def test_r376_sol_4p_9_fixed_a_guardian_one_block_behind_reports_release_before_final_with_its_grace(self):
+        honest = self.l2.exit('an honest exit, just final for the signers')
+        found = self.findings_at(honest, S.unhex(honest['recipient'], 20), fin=honest['block'] - 1)
+        # was: [('hard', 'release-mismatch:unproven-approval', 0)]
+        self.assertEqual(found, [(self.g.release_before_final, 'release-before-final:approval', self.g.provenance_grace)])
+
+    def test_r376_sol_4p_9_fixed_the_same_for_an_approval_of_a_redirect_the_guardian_has_not_finalized(self):
+        held = self.l2.direct(S.account_id(K.wallet_of('held 4p9')[1]))
+        r = self.l2.redirect(held, 'redirected 4p9')
+        found = self.findings_at(held, S.account_id(r['wallet']), fin=r['block'] - 1)
+        # was: [('hard', 'release-mismatch:approval', 0)]
+        self.assertEqual(found, [(self.g.release_before_final, 'release-before-final:approval', self.g.provenance_grace)])
+
+    def test_control_once_final_a_recipient_nobody_named_is_still_hard_with_grace_0(self):
+        held = self.l2.direct(S.account_id(K.wallet_of('held 4p9 control')[1]))
+        self.l2.redirect(held, 'named')
+        stranger = S.account_id(K.wallet_of('never named 4p9')[1])
+        self.assertEqual(self.findings_at(held, stranger, fin=self.l2.block), [('hard', 'release-mismatch:approval', 0)])
+        unproven = self.l2.exit(text=S.b58encode(K.keyless_address('4p9 unproven')), proof=bytes(65))
+        self.assertEqual(self.findings_at(unproven, S.unhex(unproven['recipient'], 20), fin=self.l2.block),
+                         [('hard', 'release-mismatch:unproven-approval', 0)])
+
 if __name__ == '__main__':
     unittest.main()
