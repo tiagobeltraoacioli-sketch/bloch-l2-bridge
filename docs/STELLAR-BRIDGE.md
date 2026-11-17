@@ -477,14 +477,43 @@ signatures; the absence of an on-chain source anchor; the pause count and the vo
 guardian's later-block rules (they assume L2 block timestamps do not run ahead of real time and that an honest
 signer certifies only a burn that was final before it signed); the re-pin rule of the half.
 
-## 12. Tests and results (final Wasm `ebe14e4b…f25e9`)
+## 12. Tests and results (final Wasm `ebe14e4b…f25e9`; revision 3, code at `8f1d0c4`)
 
+All on the host from a clone of the branch with its own toolchain copy and target directories (agent 338, round 17);
+the Python suites also on the Mac. The commit that carries this section differs from `8f1d0c4` in this document only.
+
+- Vault Wasm rebuilt: `ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9` (34,547 bytes), unchanged;
+  the `rehearsal-short-ttl` build `510ec1010d5b91dfbc5338654500146e8939bc7188a2b903e5c5f07602d32ea3`, unchanged.
 - Vault unit suite: 163 tests, 163 pass (SDK 29 test host, independent second implementation of every hash,
-  randomized rate-limit and books properties): revision 2's 159 and the four tests of reviewer 331.
+  randomized rate-limit and books properties): revision 2's 159 and the four tests of reviewer 331
+  (`r331_hostile_guardians_with_the_worst_schedule_delay_an_exit_by_one_chain_at_most`,
+  `r331_burn_status_in_every_state`, `r331_a_signed_pause_with_a_far_valid_until_stays_usable`,
+  `r331_one_full_window_exit_holds_the_queue_behind_it`).
 - Router: 9 of 9 forge tests.
-- Tools, offline: `test_stellar_tools.py` 42 of 42; deploy tool `test_source_stellar.py` 15 of 15, and the existing
-  deploy tool suites unchanged and passing.
-- The two rehearsals of revision 3 are recorded in the commit that closes this line (the one after this one).
+- Tools, offline: `tools/signatario-stellar/test_stellar_tools.py` 42 of 42 (claims 11, command lines 5, guardian
+  check 19, pins 1, asset and deployment file 5, paid cache 1); deploy tool `test_source_stellar.py` 15 of 15, with
+  the existing deploy tool suites unchanged and passing (35 tests in the four files, 1 skipped as before).
+- Archival rehearsal (private network, entries live 20 ledgers, the short-TTL Wasm), run `a2`: 14 of 14 checks.
+- Main rehearsal (private Stellar network, protocol 29, testnet limits; anvil with the real token bytecode;
+  everything run from a clean git clone of `8f1d0c4`, the L2 token deployed by `deploy_pontes.py`), run `m2`:
+  **132 of 132 checks** (revision 2: 114). The same driver one commit earlier (run `m1`, `2ba9d40`): 132 of 132.
+  Sections: the deploy tool (the look-alike asset and a wrong contract id refused; validate, plan twice, dry run,
+  broadcast, record, verify); pairing; preflight and vault-check against the deployment file (a fee account
+  without a trustline or that does not exist, another asset, another window, minimum, delay, label or fee address
+  refused; a vault deployed over a look-alike asset refused by vault-check, a signer's half and the reserves
+  monitor); controls; limits; deposit and credit; finality margin; release with fee; replay; 11 forged
+  certificates; delay; guardian check; pause, void and re-certification; 6-of-7 unpause; pause chain; false alarm;
+  rate limit; issuer freeze; clawback; missing trustline; direct burn and claim (the guardian without the claim
+  cannot judge, then reports a finding); reviewer 331's case A1 (six forged claim files pay nobody); two claims of
+  one burner; case A2 (a guardian behind the burn cannot judge); case A3 (a release with 7 signatures simulates);
+  diverging and stale views held; watcher daemons (deposit, instant release, queued release, voided release, the
+  paid file); deploy tool source checks; fee sweep; books; cost; two quorum forgeries that pay a stranger, found by
+  the guardian check.
+- Cost of a release with 5 signatures on the private network (per-transaction limits equal to the public
+  network's), from the journaled envelope: 1,800 bytes, 14,458,139 instructions, 116 bytes read, 2,772 bytes
+  written, fee bid 191,398 stroops (0.0191 XLM; resource fee 191,298). Simulated (case A3, not sent): 5 signatures
+  14,476,459 instructions, 7 signatures 19,430,697 instructions (about 2.5 million per signature) against a
+  per-transaction limit of 400,000,000; envelope 1,880 bytes, fee 193,275 stroops.
 
 ## 13. Not done, not proven
 
