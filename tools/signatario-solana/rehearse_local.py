@@ -139,7 +139,7 @@ def section(title):
 
 
 # ── processes ───────────────────────────────────────────────────────────────
-def start_validator(reset, attempts=4):
+def start_validator(reset, attempts=10):
     """Starts the validator. Its ports lie inside the host's ephemeral range, so another process's outgoing
     connection can hold one for a moment ("Address already in use"): an immediate exit is tried again."""
     for attempt in range(attempts):
