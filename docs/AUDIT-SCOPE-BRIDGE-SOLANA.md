@@ -171,6 +171,21 @@ guardian signatures are recovered in process (`secp256k1_recover`), key proofs a
 byte-identical to `cc2511a` and still call `cast wallet verify` on values they have matched against a fixed-length
 hexadecimal pattern (`vigia.py`) or that come from the operator's own source half (`signatario.py`).
 
+## 4.2 Round 17 second half and round 18 additions (agents 336, 371), for the auditor
+
+| Path | What | In scope |
+|---|---|---|
+| `contracts/solana/SolanaBurnRouter.sol` | `burnTo(amount, recipient, nonce, proof)` (proof shape, per-caller nonce, `exitHash`), `redirectHeldBurn`, `exitMessage` / `redirectMessage` views (the line the destination key signs); creation keccak `0xb6ce6ba3…bea4` | Yes, first: the text the router builds must equal `sol_proof.exit_message` byte for byte |
+| `tools/signatario-solana/sol_recipient.py` | `exit_view` (router logs: exit and redirects), `decide` (the rule, latch), `Holds`, `check_router` and `router_runtime_pin` | Yes, first among the tools |
+| `tools/signatario-solana/sol_proof.py` | exit / redirect lines, `covered_bytes` (three envelopes), `exit_proof_valid`; fee proof with route, genesis hash, date, 30-day limit | Yes |
+| `tools/signatario-solana/sol_half.py` | the rule before signing, redirected partials written by the half, equivocation record across redirects, `release-hold` | Yes |
+| `tools/signatario-solana/sol_vigia.py` | redirect rounds (sign and relay), relayer latch, `approved-without-wallet` | Yes |
+| `tools/signatario-solana/sol_guardiao.py` | recipient verdict on every approval and payment; `judged_recipient` (round 18: a blind round judges nothing and caches nothing) | Yes |
+| `tools/signatario-solana/sol_vault.py` | `approve` always applies the rule; `init` creates the fee account; `router-pin` | Yes |
+| `deployments/solana/exit-proof-vectors.json`, `test_exit_rule.py`, `testkit.py`, `solidity-tests/SolanaExitProof.t.sol` | vectors and tests | Supporting |
+
+The registry (`SolanaRecipientRegistry.sol`) and operator hint files are no longer read by any tool.
+
 ## 5. Not in this note
 
 Results of the end-to-end rehearsal on `solana-test-validator` and the reproducibility of the program binary are

@@ -81,7 +81,7 @@ def tool(script, *argv):
 
 
 # Round 18, item 6 of agent 371's task: every guardian finding and every relayer (or sign daemon) refusal of the Solana
-# tools has a case on this validator. The table is docs/SOLANA-VAULT.md 14; a full run FAILS when a row of it has no
+# tools has a case on this validator. The table is docs/SOLANA-VAULT.md 16; a full run FAILS when a row of it has no
 # passing check here. Rows that cannot happen on chain, or only outside a rehearsal, are in REQUIRED_ELSEWHERE with
 # the test that covers them instead (they are not counted as staged).
 REQUIRED_CASES = {
