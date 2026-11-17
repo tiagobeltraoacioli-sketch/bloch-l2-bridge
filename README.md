@@ -26,7 +26,7 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | ethereum | bUSDC | launchable | - |
 | arbitrum-one | bUSDC.arb | launchable | - |
 | base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
-| bitcoin | bBTC | undeclared | - |
+| bitcoin | bBTC | held | - |
 | bnb | bUSDC.bnb | out | - |
 | linea | bUSDC.linea | launchable | - |
 | op-mainnet | bUSDC.op | launchable | - |

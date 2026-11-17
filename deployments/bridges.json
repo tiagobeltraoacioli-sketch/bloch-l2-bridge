@@ -268,10 +268,10 @@
       ],
       "launch": {
         "v1": false,
-        "state": "undeclared",
-        "sourceState": "undeclared",
-        "source": "none",
-        "reason": "the route's bridge.network.json carries no `launch` block",
+        "state": "held",
+        "sourceState": "held",
+        "source": "route-file",
+        "reason": "NOT LAUNCHABLE until an external audit of this route and the owner key ceremony (unaudited; nothing deployed; addresses TBD-deploy). Open Infos: R342-BTC-4 (a burn in its large-release delay or waiting for the daily window can still hold set-asides behind it for up to 12 h / a day), R342-BTC-6 (no status source a page can read without the operator node), R342-BTC-7 (router address and code hash are per-signer configuration; no migration rule). Also not shown: cmd_sign with the launch pins on a settled L2; signers need an L2 view that serves past state (the thread audit fails closed).",
         "openFindings": []
       },
       "sourceDomain": "genesis:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
