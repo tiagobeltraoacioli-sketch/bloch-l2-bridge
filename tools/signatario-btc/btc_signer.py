@@ -449,8 +449,8 @@ def cmd_sign(cfg, args):
             # 4e. The thread so far against the finalized L2 (review R342-BTC-2): this signer does not add a transaction to
             # a thread in which five keys already signed outside the L2-side rules (a set-aside the rule did not allow,
             # a late payment without its burner's call, a payout above its burner's ceiling). Each set-aside is judged at the
-            # set-aside's own L2 block where this signer's L2 serves it, skipped where it does not, so it never holds
-            # on a false alarm; the reserves monitor judges every one. Confirmed transactions are audited once.
+            # set-aside's own L2 block; if this signer's L2 view cannot answer there, it signs nothing and marks nothing
+            # (fail closed, R342-BTC-2P-8). Confirmed transactions are marked audited only after a complete judgment.
             l2_view, fin = final_token[0], int(final_token[1], 16)
             log = {b['nonce']: b for b in l2_view.burns(int(cfg.get('token_from_block', 0)), fin)}
 
@@ -469,7 +469,13 @@ def cmd_sign(cfg, args):
             audited = set(journal_now.get('audited', []))
             try:
                 bad = btc_audit.audit_thread(vault, view.entries, log, at_final, lambda b: l2_view.block_time(b['block']),
-                                             historical=True, skip=audited)
+                                             historical=True, skip=audited, strict=True)
+            except btc_audit.Unjudged as e:
+                # Fail CLOSED (review R342-BTC-2P-8): an L2 view that cannot answer at a set-aside's block (no history,
+                # or a transient error: not told apart) leaves that transaction unaudited; nothing is marked, nothing
+                # is signed, the next proposal tries again. A signer needs an L2 view that serves past state.
+                refuse(f'hold: the vault thread cannot be audited now: {e}; retry (this signer needs an L2 view with history)',
+                       txid=e.txid, aside_block=e.block)
             except btc_l2.L2Error as e:
                 refuse(f'hold: {e}')
             # an operator who investigated a violation releases the hold by naming its transaction in the config

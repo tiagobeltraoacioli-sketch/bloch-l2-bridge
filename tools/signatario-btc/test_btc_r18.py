@@ -89,6 +89,23 @@ class ThreadAudit(unittest.TestCase):
         then = {(1, 10): router_terms(1, 11)}
         self.assertEqual([x['rule'] for x in self.audit(v, entries, now, then)], ['set-aside-after-burner-call'])
 
+    def test_a_signer_that_cannot_read_a_set_aside_block_fails_closed(self):
+        """R342-BTC-2P-8: the signer's audit must not skip a set-aside it could not judge (and then mark it audited):
+        in strict mode an unanswered past block raises Unjudged, and the caller refuses to sign and keeps no mark."""
+        v = t.vault()
+        entries = self.thread(v, [({'burns': [t.burn(3)], 'feerate': 2, 'aside_through': 1, 'aside_block': 10}, 4 * DAY)])
+        now = {1: router_terms(50, 12), 3: router_terms(200, 4)}
+        burns = {n: {'nonce': n, 'units': 1_000} for n in range(1, 10)}
+        with self.assertRaises(btc_audit.Unjudged) as e:
+            btc_audit.audit_thread(v, entries, burns, lambda b, blk: now[b['nonce']] if blk is None else None,
+                                   lambda b: 0, True, strict=True)
+        self.assertEqual((e.exception.txid, e.exception.block), (entries[1]['txid'], 10))
+        # the signer's code path: strict, and the audited mark only after a complete judgment
+        import inspect
+        src = inspect.getsource(btc_signer.cmd_sign)
+        self.assertIn('historical=True, skip=audited, strict=True)', src)
+        self.assertLess(src.index('except btc_audit.Unjudged'), src.index("journal_now['audited'] = "))
+
     def test_payouts_above_the_ceiling_and_late_payments_without_a_burner_call_are_found(self):
         v = t.vault()
         entries = self.thread(v, [({'burns': [t.burn(3)], 'feerate': 2, 'aside_through': 2, 'aside_block': 10}, 4 * DAY),
