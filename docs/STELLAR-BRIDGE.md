@@ -18,19 +18,21 @@ symbol `bUSDC.xlm`. One vault, one token, own cap and own books.
 
 | Piece | File | Lines |
 |---|---|---|
-| Vault (Soroban, Rust) | `stellar/vault/src/lib.rs` | 1,156 |
-| Vault unit tests | `stellar/vault/src/test.rs` | 3,296 |
-| L2 exit router (periphery, no power) | `contracts/stellar/StellarBurnRouter.sol` | 88 |
-| Network layer, signer half, signer wrapper | `tools/signatario-stellar/stellar_net.py`, `stellar_half.py`, `signatario_stellar.py` | 382, 407, 203 |
-| Relayer, watcher daemons | `relay_stellar.py`, `vigia_stellar.py` | 134, 392 |
-| Guardian tool, reserves monitor, committee controls | `guardiao_stellar.py`, `reservas_stellar.py`, `comite_stellar.py` | 148, 108, 118 |
-| Pairing reader, Wasm import check | `pairing.py`, `wasm_imports.py` | 146, 78 |
-| Deploy tool, Stellar source path | `tools/deploy-pontes/source_stellar.py` (+ 16 lines in `deploy_pontes.py`) | 210 |
-| Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,218 |
+| Vault (Soroban, Rust; unchanged since `ffdb9b5`) | `stellar/vault/src/lib.rs` | 1,156 |
+| Vault unit tests (159 + reviewer 331's four) | `stellar/vault/src/test.rs` | 3,456 |
+| L2 exit router (periphery, no power; unchanged) | `contracts/stellar/StellarBurnRouter.sol` | 88 |
+| Network layer, signer half, signer wrapper | `tools/signatario-stellar/stellar_net.py`, `stellar_half.py`, `signatario_stellar.py` | 855, 459, 212 |
+| Relayer, watcher daemons | `relay_stellar.py`, `vigia_stellar.py` | 156, 474 |
+| Guardian tool, reserves monitor, committee controls | `guardiao_stellar.py`, `reservas_stellar.py`, `comite_stellar.py` | 336, 112, 135 |
+| Pairing and deployment-file checks, Wasm import check | `pairing.py`, `wasm_imports.py` | 214, 78 |
+| Deploy tool, Stellar source path | `tools/deploy-pontes/source_stellar.py` (+ 16 lines in `deploy_pontes.py`, unchanged) | 288 |
+| Offline tests of the tools | `tools/signatario-stellar/test_stellar_tools.py`, `tools/deploy-pontes/test_source_stellar.py` | 692, 342 |
+| Rehearsal driver | `tools/signatario-stellar/rehearse_stellar.py` | 1,544 |
 
 Final vault Wasm: sha256 `ebe14e4bbbf513e6a6f8f1c40bcfaea7e9013bb6974b5781dc5211fe8d1f25e9` (34,547 bytes), built on the host with stellar-cli 30.0.1,
-soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`, twice: from two source paths with two target directories,
-same hash. It imports no `update_current_contract_wasm`, no `create_contract` and no `upload_wasm`
+soroban-sdk 29.0.1, rustc 1.92.0, target `wasm32v1-none`: by agent 324 twice (two source paths, two target
+directories), by reviewer 331 in its own clone, and by agent 338 in its own clone in round 17; the same hash every
+time. It imports no `update_current_contract_wasm`, no `create_contract` and no `upload_wasm`
 (`wasm_imports.py`), so its code can never change.
 
 Revision 2 (2026-11-17) answers review 325 (`agents/325-bridges-review-r16.md` section 4): the guardian cancel is
@@ -477,24 +479,12 @@ signer certifies only a burn that was final before it signed); the re-pin rule o
 
 ## 12. Tests and results (final Wasm `ebe14e4b…f25e9`)
 
-- Vault unit suite: 159 tests, 159 pass (SDK 29 test host, independent second implementation of every hash,
-  randomized rate-limit and books properties). Fewer than revision 1's 168: the cancel and generation tests are
-  gone with the code they tested.
-- Router: 9 of 9 forge tests, rerun on the host on the final tip.
-- Deploy tool: `test_source_stellar.py`, 12 tests pass; the existing deploy tool suites pass unchanged.
-- Wasm built twice on the host, from two source paths with two target directories: the same hash.
-- Archival rehearsal (private network, entries live 20 ledgers, Wasm `510ec101…32ea3`, the same source with
-  `RECORD_TTL` 30): 14 of 14 checks pass.
-- Main rehearsal (private Stellar network, protocol 29, anvil with the real token bytecode, everything run from a
-  git checkout of the tip): @@MAIN@@.
-  Sections: the L2 token deployed by `deploy_pontes.py` (validate, plan twice, dry run, broadcast, record, verify);
-  pairing; controls; limits; deposit and credit; finality margin; release with fee; replay; 11 forged certificates;
-  delay; guardian check; pause, void and re-certification; 6-of-7 unpause; pause chain; false alarm; rate limit;
-  issuer freeze; clawback; missing trustline; direct burn and claim; diverging and stale views held; watcher
-  daemons (deposit, instant release, queued release, voided release); deploy tool source checks; fee sweep; books;
-  cost.
-- Cost of a release with 5 signatures on the private network (per-transaction limits equal to the public network's):
-  @@COST@@.
+- Vault unit suite: 163 tests, 163 pass (SDK 29 test host, independent second implementation of every hash,
+  randomized rate-limit and books properties): revision 2's 159 and the four tests of reviewer 331.
+- Router: 9 of 9 forge tests.
+- Tools, offline: `test_stellar_tools.py` 41 of 41; deploy tool `test_source_stellar.py` 15 of 15, and the existing
+  deploy tool suites unchanged and passing.
+- The two rehearsals of revision 3 are recorded in the commit that closes this line (the one after this one).
 
 ## 13. Not done, not proven
 
@@ -509,15 +499,32 @@ signer certifies only a burn that was final before it signed); the re-pin rule o
   account. The Stellar Asset Contract is the same built-in contract; the issuer's flags were read from the public
   network.
 - Fees and resource limits were measured with the testnet limits of the quickstart image, not the public network's.
-  A release with 6 signatures ran; one with 7 did not.
-- The final Wasm was built on one host (two paths, same hash; reviewer 325 reproduced revision 1's hash in its own
-  clone). A reproduction on a second machine is an owner step.
+  A release with 7 signatures was simulated (section 12), not sent.
+- The final Wasm was built on one host (three independent clones and target directories, same hash). A reproduction
+  on a second machine is an owner step.
 - Archival was exercised on protocol 29 only. A change of the archival rules in a later protocol needs a new check.
 - The guardian and shadow daemons of the Ethereum bridge (`tools/guardiao/`) are not adapted; `check` is a one-shot
   command run from a timer.
 - The claim rule for direct burns needs the burner to be an account that can sign. A contract that burns directly
-  towards 20 bytes that are no commitment is never paid. Claims travel between operators as files; the watcher does
-  not distribute them.
+  towards 20 bytes that are no commitment is never paid. Claims travel between operators as files; the relayer
+  daemon publishes the one a quorum used under `SHARED/claims/`, but nothing gives the seven signers the same file
+  before they sign, and which of two claims of one burner wins is not decided by the bridge (section 4b). An on-L2
+  claim registry (one canonical claim per burn, readable by every signer and guardian from its own L2, as reviewer
+  331 suggested) would remove the files altogether; it is a new L2 contract and was not built in round 17.
+- The guardian check's later-block rules (section 4c) need the L2's block timestamps not to run ahead of real time.
+  On a chain whose clock is ahead (the rehearsal's anvil, whose clock is moved forward by days) they are switched
+  off by the check itself and a forgery that names an unreachable block is "cannot judge"; those rules are proven by
+  the offline suite against fake sources, not by the rehearsal. The check was never run against a Bloch L2 node.
+- A guardian whose L2 view is behind does not pause (section 4c): a real forgery during that guardian's outage
+  waits for another guardian or for a human.
+- `guardiao_stellar.py check` reads the release's L2 block from the release transaction on the guardian's Stellar
+  RPC; outside the RPC's transaction window, or for a vault call made from inside another contract, only the
+  later-block rules apply. Putting the block into the vault's events would close this, and would move the Wasm
+  hash; not done.
+- The relayer does not restore an archived chain head a release needs (review 325, R325-XLM-7): after 30 days
+  without a deposit a signer refuses until someone restores the entry by hand.
+- The three changes to `tools/deploy-pontes/deploy_pontes.py` (EVM networks, Tron, Stellar) are still unmerged; the
+  token config's `stellar` section gained `asset`, `labels`, `vaultWindowSeconds` and `vaultMinDeposit` in round 17.
 - A persistent holder of five signer keys can queue a forgery again after every pause (section 4). The pauses and the
   delay buy time only.
 - Muxed accounts are not supported. A recipient that never opens a trustline is never paid; there is no timeout or
