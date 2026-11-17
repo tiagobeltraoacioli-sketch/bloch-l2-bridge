@@ -42,11 +42,27 @@ Modes:
 
 Work per call is bounded by `budget` node requests; a catch-up continues on the next call and in the shim's background
 thread. Standard library only.
+
+One writer per directory (review R325-TRX-2P-1):
+  * LOCK: the directory holds a file `LOCK` on which the process takes an exclusive, non-blocking `flock` when it
+    opens the index and keeps it until it exits. A second PROCESS on the same directory (a restart that overlaps the
+    old one, the signer's and the guardian's shim given the same `--index`, a copied unit file) is refused at start
+    with the holder's pid. The kernel drops the lock when the holder dies, so a crash leaves nothing to clean up.
+  * NOTHING ON DISK IS BELIEVED ON LOAD: the number of deposits is recounted from the logs, never taken from the
+    cursor file; the `Deposited` logs must carry nonces 0, 1, .. n-1 in order, every log must lie at or below the
+    cursor in non-decreasing block order, and the file must hold the lines the cursor names. Anything else (two
+    writers before the lock existed, a torn or edited file, a restored backup) and the index is REBUILT from the
+    vault's first block: emptied and read again, never served and never left for a person to delete.
+  * A second index object in the SAME process shares the process's lock. It cannot corrupt the files either: before
+    it reads or writes, every object compares the cursor file with the one it last loaded or wrote, and loads the
+    newer one instead of appending under a stale cursor.
 """
 import bisect
 import concurrent.futures
+import fcntl
 import json
 import os
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -71,6 +87,47 @@ class Broken(Exception):
     """The node's solidified receipts and the vault's solidified state disagree; nothing is served."""
 
 
+_LOCKS = {}  # real path of an index directory -> [open LOCK file, number of LogIndex objects of this process on it]
+
+
+def lock_directory(directory):
+    """Take the directory's exclusive lock for this process (once per process, counted). Another process holding it
+    ends this one with a message: two writers on one index is the defect of review R325-TRX-2P-1."""
+    key = os.path.realpath(directory)
+    held = _LOCKS.get(key)
+    if held:
+        held[1] += 1
+        return key
+    f = open(os.path.join(key, 'LOCK'), 'a+')
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        holder = f.read(64).strip() or 'unknown'
+        f.close()
+        raise SystemExit(f'the log index in {directory} is in use by another process (pid {holder}): one shim per index '
+                         'directory. Stop that process first, or give this shim a directory of its own')
+    f.seek(0)
+    f.truncate()
+    f.write(f'{os.getpid()}\n')
+    f.flush()
+    _LOCKS[key] = [f, 1]
+    return key
+
+
+def unlock_directory(key):
+    held = _LOCKS.get(key)
+    if not held:
+        return
+    held[1] -= 1
+    if held[1] <= 0:
+        try:
+            fcntl.flock(held[0].fileno(), fcntl.LOCK_UN)
+            held[0].close()
+        finally:
+            del _LOCKS[key]
+
+
 class LogIndex:
     def __init__(self, node, vault, from_block, directory, chain_id, logs_rpc=None, logs_range=2000, batch=256,
                  workers=8, recheck_s=30, settle_blocks=28_800, recheck_max=50, grace_s=10):
@@ -87,33 +144,110 @@ class LogIndex:
         self.cursor, self.cursor_id, self.verified, self.deposits = self.from_block - 1, None, self.from_block - 1, 0
         self.anchors, self.checked, self.scan_until = [], {}, -1
         self.stats = {'hint_queries': 0, 'hint_fallbacks': 0, 'blocks_read': 0, 'rollbacks': 0, 'dropped_logs': 0,
-                      'rescans': 0, 'last_error': None, 'node_error': None, 'solidified': None}
+                      'rescans': 0, 'rebuilds': 0, 'reloads': 0, 'rebuilt_because': None, 'last_error': None,
+                      'node_error': None, 'solidified': None}
         self._retry_at, self._short = 0.0, None  # _short: [count, first seen, stage] of a deposit the receipts lack
         self.advanced_at = 0.0  # when a round last completed: the index was checked against the node at that moment
-        self.load()
+        self._lock = lock_directory(self.dir)   # held until this process exits (or close())
+        self._seen = None                       # the cursor file as this object last loaded or wrote it
+        try:
+            self.load()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        """Give the directory up (tests, and a shim that shuts down in an orderly way). A process that dies needs no
+        such call: the kernel releases the lock."""
+        if self._lock:
+            unlock_directory(self._lock)
+            self._lock = None
 
     # ── persistence ──────────────────────────────────────────────────────────
+    def _stamp(self):
+        """Identity of the cursor file on disk now: every save replaces the file, so a new inode or time is a new save."""
+        try:
+            st = os.stat(self.dir / 'cursor.json')
+            return (st.st_ino, st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return None
+
+    def _empty(self):
+        self.logs, self.numbers = [], []
+        self.cursor, self.cursor_id, self.verified, self.deposits = self.from_block - 1, None, self.from_block - 1, 0
+        self.anchors, self.checked, self.scan_until, self._short = [], {}, -1, None
+
+    def rebuild(self, why):
+        """The files are not an index this code wrote in one piece: forget them and read the vault's history again.
+        Nothing from them is served. Loud, because on mainnet the reading takes hours (one request per block)."""
+        self.stats['rebuilds'] += 1
+        self.stats['rebuilt_because'] = why
+        print(json.dumps({'kind': 'alert', 'severity': 'critical', 'id': 'tron-log-index-rebuilt', 'component': 'tron-log-index', 'directory': str(self.dir),
+                          'action': 'the index is rebuilt from the first block of the vault',
+                          'reason': why}), file=sys.stderr, flush=True)
+        self._empty()
+        (self.dir / 'logs.jsonl').write_text('')
+        try:
+            os.unlink(self.dir / 'cursor.json')
+        except FileNotFoundError:
+            pass
+        self._seen = self._stamp()
+
     def load(self):
+        self._empty()
         cur = self.dir / 'cursor.json'
         if not cur.exists():
             (self.dir / 'logs.jsonl').write_text('')
+            self._seen = None
             return
-        c = json.loads(cur.read_text())
+        try:
+            c = json.loads(cur.read_text())
+        except ValueError:
+            return self.rebuild('the cursor file is not JSON')
         same = (c.get('version'), c.get('chain_id'), c.get('vault'), c.get('from_block')) == \
             (VERSION, self.chain_id, self.vault, self.from_block)
         if not same:
             raise SystemExit(f'the log index in {self.dir} belongs to another vault, chain or start block; '
                              'give this shim its own empty directory')
-        lines = (self.dir / 'logs.jsonl').read_text().splitlines()[:c['lines']]
-        if len(lines) != c['lines']:
-            raise SystemExit(f'the log index in {self.dir} is truncated; delete the directory to rebuild it')
-        self.logs = [json.loads(x) for x in lines]
-        self.numbers = [int(l['blockNumber'], 16) for l in self.logs]
-        self.cursor, self.cursor_id, self.verified = c['cursor'], c['cursor_id'], c['verified']
-        self.deposits, self.anchors = c['deposits'], [tuple(a) for a in c['anchors']]
+        try:
+            lines = (self.dir / 'logs.jsonl').read_text().splitlines()[:c['lines']]
+            if len(lines) != c['lines']:
+                return self.rebuild(f"the log file holds {len(lines)} lines, the cursor names {c['lines']}")
+            logs = [json.loads(x) for x in lines]
+            numbers = [int(l['blockNumber'], 16) for l in logs]
+            cursor, cursor_id, verified = int(c['cursor']), c['cursor_id'], int(c['verified'])
+            anchors = [(int(a[0]), a[1]) for a in c['anchors']]
+            # Recount: the stored number of deposits is not believed. The `Deposited` logs must be deposits 0..n-1 of
+            # the vault, in order, each once; a file two writers appended to holds one twice or lacks one.
+            nonces = [int(l['data'][2:66], 16) for l in logs if l['topics'][:1] == [DEPOSITED]]
+        except (ValueError, KeyError, TypeError, IndexError, OSError) as e:
+            return self.rebuild(f'the index files cannot be read as an index: {type(e).__name__}')
+        if nonces != list(range(len(nonces))):
+            return self.rebuild(f'the Deposited logs on disk carry nonces {nonces[:12]}{"..." if len(nonces) > 12 else ""}, '
+                                f'not 0..{len(nonces) - 1}')
+        if c.get('deposits') != len(nonces):
+            return self.rebuild(f"the cursor counts {c.get('deposits')} deposits, the logs hold {len(nonces)}")
+        if numbers != sorted(numbers) or (numbers and (numbers[-1] > cursor or numbers[0] < self.from_block)) \
+                or not self.from_block - 1 <= verified <= cursor:
+            return self.rebuild('the logs on disk are not in block order below the cursor, or the cursor is not ahead of '
+                                'what it calls verified')
+        self.logs, self.numbers = logs, numbers
+        self.cursor, self.cursor_id, self.verified = cursor, cursor_id, verified
+        self.deposits, self.anchors = len(nonces), anchors
         (self.dir / 'logs.jsonl').write_text(''.join(x + '\n' for x in lines))  # drop lines written after the cursor
+        self._seen = self._stamp()
+
+    def in_step(self):
+        """Before reading or writing: if the cursor file is not the one this object loaded or wrote last, another index
+        object wrote it (the same process: another process is excluded by the lock). Take its state instead of
+        appending under a stale cursor, which is how one deposit got into the file twice."""
+        if self._stamp() != self._seen:
+            self.stats['reloads'] += 1
+            self.load()
 
     def save(self, appended=()):
+        if self._stamp() != self._seen:
+            raise Broken('the index files changed under this writer; nothing was written, the next round reloads them')
         if appended:
             with open(self.dir / 'logs.jsonl', 'a') as f:
                 f.write(''.join(json.dumps(l) + '\n' for l in appended))
@@ -128,6 +262,7 @@ class LogIndex:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.dir / 'cursor.json')
+        self._seen = self._stamp()
 
     def truncate(self, last_kept):
         """Forget everything after block `last_kept` and read it again."""
@@ -285,6 +420,7 @@ class LogIndex:
             raise Broken(self.stats['last_error'])
         start = self.used()
         try:
+            self.in_step()
             solid = self.node.solidified()
             self.stats['solidified'] = solid['number']
             self.check_cursor()
@@ -349,6 +485,8 @@ class LogIndex:
 
     def query(self, lo, hi, topics):
         """The vault's logs in blocks [lo, hi], hi <= verified, matching an Ethereum topic filter. No node request."""
+        if self._stamp() != self._seen:
+            raise Behind('the index files were written by another index object; the next round reloads them')
         if hi > self.verified:
             raise Behind(f'the log index is verified up to block {self.verified}, block {hi} was asked for '
                          f"(solidified: {self.stats['solidified']})")
