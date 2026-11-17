@@ -63,6 +63,40 @@ class Credentials(unittest.TestCase):
         self.assertEqual(sender({'private_key_file': self.file('k2', 0o600, '0x' + '11' * 32), 'tron_chain_id': 1}).wallet()[0],
                          '--private-key')
 
+    def _cred(self, mode=0o440):
+        cred = self.d / 'creds'
+        cred.mkdir(mode=0o700, exist_ok=True)
+        pw = cred / f'relayer-password-{mode:o}'
+        pw.write_text('x')
+        os.chmod(pw, mode)
+        os.environ['CREDENTIALS_DIRECTORY'] = str(cred)
+        return pw
+
+    def _gid(self, path, gid):
+        """os.lstat of `path` answers with another group (R329-SHARED-2: a 0440 credential of a foreign group)."""
+        from unittest import mock
+        real = os.lstat
+
+        def fake(p, *a, **k):
+            st = real(p, *a, **k)
+            if Path(p) == path:
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid, gid, st.st_size,
+                                       st.st_atime, st.st_mtime, st.st_ctime))
+            return st
+        return mock.patch('os.lstat', fake)
+
+    def test_a_group_readable_credential_of_another_group_is_refused(self):
+        # R329-SHARED-2 (374's 807478f): the group of a 0440 credential must be root's or the service's own
+        pw, ks = self._cred(), self.file('keystore', 0o600)
+        with self._gid(pw, os.getgid() + 4242), self.assertRaises(tron_send.Refused):
+            sender({'keystore': ks, 'password_file': str(pw)}).wallet()
+        for gid in (0, os.getgid()):
+            with self._gid(pw, gid):
+                self.assertEqual(sender({'keystore': ks, 'password_file': str(pw)}).wallet()[3], str(pw))
+        quiet = self._cred(0o400)                                 # no group bit: the group does not matter
+        with self._gid(quiet, os.getgid() + 4242):
+            self.assertEqual(sender({'keystore': ks, 'password_file': str(quiet)}).wallet()[3], str(quiet))
+
     def test_a_link_into_the_credentials_directory_or_a_0440_file_elsewhere_is_refused(self):
         os.environ['CREDENTIALS_DIRECTORY'] = str(self.d / 'creds')
         pw = self.file('pw', 0o440)
