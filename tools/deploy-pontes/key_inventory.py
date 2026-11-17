@@ -13,7 +13,7 @@ It never reads a key, a keystore or a password.
                 --allow-legacy-address after the operators confirm they generated and still hold that key;
               - guardian operators run no signer; one key per operator per role;
               - the custody class allowed for each role;
-              - each attestation verifies against its address (`cast wallet verify`), except contract accounts;
+              - each attestation recovers to its address (EIP-191, checked in this process), except contract accounts;
               - with --token-config / --vault-config: the deploy configs list exactly the inventory's addresses and
                 operators for each role, the deployers and the Safe.
 
@@ -28,11 +28,12 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parents[1] / 'signatario-stable'))
 from legacy_digests import is_legacy  # noqa: E402
+import sigverify  # noqa: E402  (tools/signatario-stable: signatures are recovered in process, no command is run)
 
 DOMAIN = 'bloch.bridge.key-inventory.v1'
 FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
@@ -88,9 +89,16 @@ def message(role, index, operator, address, date):
 
 
 def verify_sig(address, text, sig):
+    """The attestation is an EIP-191 personal signature of `text` by `address`. Recovered in this process (round 17,
+    agent 341): until then the answer was the exit code of `cast wallet verify`, which is also 0 when an argument is
+    read as `--help`. The strict text form below is kept as the first test."""
     refuse(isinstance(sig, str) and re.fullmatch(r'0x[0-9a-fA-F]{130}', sig or ''), f'{address}: attestation missing')
-    done = subprocess.run([CAST, 'wallet', 'verify', '--address', address, text, sig], capture_output=True, text=True)
-    refuse(done.returncode == 0, f'{address}: attestation does not verify ({done.stderr.strip()[-200:]})')
+    refuse(is_addr(address), f'{address}: address must be 0x + 40 hex')
+    try:
+        signer = sigverify.possession(sigverify.personal_digest(text), sig)
+    except sigverify.Malformed as e:
+        raise Refused(f'{address}: attestation does not verify ({e})') from None
+    refuse(signer == address.lower(), f'{address}: attestation does not verify (it is signed by {signer})')
 
 
 def check(inv, token_cfg=None, vault_cfg=None, allow_legacy=(), skip_signatures=False):

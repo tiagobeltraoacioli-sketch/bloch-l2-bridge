@@ -117,6 +117,14 @@ def is_uint(v, hi=UINT64_MAX, lo=0):
     return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
 
 
+def plain(*values):
+    """Positional values for a `cast` command line: one that starts with `-` would be read as an option (`--help` exits
+    0 with the help text as its output), so it is refused before the command runs (agent 341, round 17)."""
+    out = [str(v) for v in values]
+    refuse(not any(v.startswith('-') for v in out), 'a value that would be read as a command-line option was refused')
+    return out
+
+
 def cast(*args):
     done = subprocess.run([CAST, *[str(a) for a in args]], capture_output=True, text=True)
     refuse(done.returncode == 0, f'cast {args[0]} failed: {done.stderr.strip()[-400:]}')
@@ -308,7 +316,8 @@ def validate(cfg, rehearsal, token_cfg=None):
 def constructor_args(cfg, norm):
     v = cfg['vault']
     p, g = v['policy'], v['guard']
-    return [cast('keccak', v['sourceDomainLabel']), cast('keccak', v['nativeDomainLabel']), cast('keccak', v['assetLabel']),
+    return [cast('keccak', *plain(v['sourceDomainLabel'])), cast('keccak', *plain(v['nativeDomainLabel'])),
+            cast('keccak', *plain(v['assetLabel'])),
             v['token'].lower(), str(v['cap']), str(v['transferMode']), '[' + ','.join(norm['signers']) + ']',
             str(v['signers']['threshold']),
             f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
@@ -342,8 +351,8 @@ def verify(cfg, norm, url, address, block, unused=False):
     refuse(code not in ('0x', ''), f'no code at {address} at block {int(at, 16)} ({block})')
 
     def get(sig, *a):
-        return cast('call', address, sig, *[str(x) for x in a], '--rpc-url', url, '--block', str(int(at, 16))).split()[0]
-    k = lambda t: cast('keccak', t).lower()
+        return cast('call', address, sig, *plain(*a), '--rpc-url', url, '--block', str(int(at, 16))).split()[0]
+    k = lambda t: cast('keccak', *plain(t)).lower()
     expect = {
         'sourceDomain()(bytes32)': k(v['sourceDomainLabel']), 'nativeDomain()(bytes32)': k(v['nativeDomainLabel']),
         'nativeAsset()(bytes32)': k(v['assetLabel']), 'token()(address)': v['token'].lower(),
@@ -382,7 +391,7 @@ def verify(cfg, norm, url, address, block, unused=False):
         # A new token over a used vault mints its old deposits again, and its burn nonces restart under releases already spent.
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
-    code_hash = cast('keccak', code).lower()
+    code_hash = cast('keccak', *plain(code)).lower()
     genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
