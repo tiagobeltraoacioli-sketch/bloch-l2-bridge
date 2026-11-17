@@ -133,6 +133,7 @@ def finish(line, tip, resolved, how=None):
     if lost:
         for p, x in lost:
             print(f'    {p}: line added by {x["side"]} {x["added"]}x, present {x["present"]}x: {x["line"].strip()[:160]}')
+        git('merge', '--abort')  # never leave a half-merge behind: a later plain `git commit` would conclude it
         raise SystemExit(f'the staged merge of {line["id"]} {tip[:7]} loses {len(lost)} line(s) or constraint(s) of a side '
                          '(listed above); nothing was committed. Fix the resolution, or justify each in '
                          f'tools/allnets/merge-justifications.json under "staged:{tip}", then rerun.')
@@ -196,6 +197,8 @@ def main():
 
 
 def main_merge():
+    if (gitdir() / 'MERGE_HEAD').exists():
+        raise SystemExit('a merge is in progress (MERGE_HEAD exists); finish it with --record or `git merge --abort` first')
     if git('status', '--porcelain', '--untracked-files=no'):
         raise SystemExit('the worktree has uncommitted changes; commit them first')
     for name in LINES['never']:
