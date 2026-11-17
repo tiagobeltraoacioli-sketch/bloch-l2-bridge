@@ -33,6 +33,10 @@ contract RouterMockToken {
         return true;
     }
 
+    function sourceRoute() external pure returns (bytes32) {
+        return 0x1111111111111111111111111111111111111111111111111111111111111111;
+    }
+
     function burn(uint64 amount, address ethRecipient) external returns (bytes32 burnId) {
         balanceOf[msg.sender] -= amount;
         (lastBurner, lastAmount, lastRecipient) = (msg.sender, amount, ethRecipient);
@@ -52,7 +56,7 @@ contract SolanaBurnRouterTest {
     /// The USDC mint on Solana, EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v (the route's mint).
     bytes32 constant USDC_MINT = 0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61;
 
-    event SolanaExit(bytes32 indexed burnId, address indexed from, uint64 amount, address commitment, string recipient);
+    bytes constant PROOF = hex"00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     function setUp() public {
         token = new RouterMockToken();
@@ -102,7 +106,7 @@ contract SolanaBurnRouterTest {
         router.walletOf(text);
         vm.expectRevert(SolanaBurnRouter.NotASolanaWallet.selector);
         vm.prank(USER);
-        router.burnTo(10_000_000, text);
+        router.burnTo(10_000_000, text, 0, PROOF);
     }
 
     function test_refusesWhatIsNotAWallet() public {
@@ -133,7 +137,7 @@ contract SolanaBurnRouterTest {
     function test_burnToBurnsToTheCommitmentAndPublishesTheWallet() public {
         string memory text = "BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8";
         vm.prank(USER);
-        bytes32 burnId = router.burnTo(25_000_000, text);
+        bytes32 burnId = router.burnTo(25_000_000, text, 0, PROOF);
         require(burnId == keccak256(abi.encode(block.chainid, address(token), uint64(1))), "burn id is the token's");
         require(token.lastRecipient() == 0xdF5a03Ae91Aca56d37572127c03e371a9563F8A0, "the burn names the commitment");
         require(token.lastBurner() == address(router) && token.lastAmount() == 25_000_000, "burned by the router");

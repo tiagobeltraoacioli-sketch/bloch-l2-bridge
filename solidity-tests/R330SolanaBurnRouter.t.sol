@@ -27,6 +27,7 @@ contract R330SolanaBurnRouterTest {
     SolanaBurnRouter router;
     address constant USER = address(0xB0B);
     bytes32 constant USDC_MINT = 0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61;
+    bytes constant PROOF = hex"00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     function setUp() public {
         token = new RouterMockToken();
@@ -43,7 +44,7 @@ contract R330SolanaBurnRouterTest {
         router.commitment(text);
         vm.expectRevert(SolanaBurnRouter.NotASolanaWallet.selector);
         vm.prank(USER);
-        router.burnTo(10_000_000, text);
+        router.burnTo(10_000_000, text, 0, PROOF);
         require(token.burnNonce() == 0 && token.balanceOf(USER) == 1_000_000_000, "nothing was burned");
     }
 
@@ -97,7 +98,7 @@ contract R330SolanaBurnRouterTest {
         string memory text = "Fez9HxW5AW1CKWxt6Um6U7aS4c5dcaT1TNpAN1LZy5tJ";
         require(router.walletOf(text) == 0xd9beb7faae4e2a2066231d54e6987e4ba87f6815a7b6423bf7bd4c86f408254f, "wallet bytes");
         vm.prank(USER);
-        router.burnTo(10_000_000, text);
+        router.burnTo(10_000_000, text, 0, PROOF);
         require(token.balanceOf(USER) == 990_000_000, "burned");
         require(token.lastRecipient() == 0xA065bca581412B846fDE16768645d2759328cf6a, "commitment");
     }
