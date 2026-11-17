@@ -392,7 +392,7 @@ class Rig:
                                         'vault_code_keccak': vault_code, 'vault_from_block': self.from_block, 'keystore': ks,
                                         'password_file': str(work / 'pw'), 'cast': CAST, 'provenance': True,
                                         'db': str(work / f'ethdb{i}.json'), **policy}))
-            half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
+            half = plain_half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
             if OPTS['work_config']:
                 # The real work before a signature: signatario.py measure over a real follower store (prototype branch).
                 wc = json.loads(Path(OPTS['work_config']).read_text())
@@ -421,7 +421,7 @@ class Rig:
                 'source_chain_id': self.chain, 'source_vault': self.vault, 'source_route': self.route, 'threshold': 5,
                 'vault_threshold': 5, 'keystore': ks, 'password_file': str(work / 'pw'), 'eth_signer': addr, 'cast': CAST,
                 'db': str(work / f'db{i}.json'), 'l2_source': 'rpc', 'work_dir': str(work), 'provenance': True,
-                'eth_half_deposit': half + ['deposit', '--deposit-id', '{deposit_id}'],
+                'eth_half_deposit': (plain_half if OPTS['work_config'] else half) + ['deposit', '--deposit-id', '{deposit_id}'],
                 'eth_half_release': half + ['release', '--intent', '{intent}'],
                 'shared_dir': str(work / (f's{i}/shared' if OPTS['feed'] else 'shared')), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
                 'vault_from_block': self.from_block,
