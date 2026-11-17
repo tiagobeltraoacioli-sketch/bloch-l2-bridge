@@ -94,7 +94,7 @@
     },
     "stellar": {
       "branch": "codex/bridge-stellar-r17-20261117",
-      "commit": "87d8ed6058b87af64478a9b736428d4557b28bfa",
+      "commit": "495797e931589d0880ba3759f89e01b80d51dd0c",
       "agent": 373,
       "routes": [
         "stellar"
@@ -104,6 +104,10 @@
         {
           "branch": "codex/bridge-stellar-r17-20261117",
           "commit": "3ce640fccb2a4f6384094346239e82cc6ca4ab94"
+        },
+        {
+          "branch": "codex/bridge-stellar-r17-20261117",
+          "commit": "87d8ed6058b87af64478a9b736428d4557b28bfa"
         }
       ]
     }

@@ -213,7 +213,9 @@ forge create contracts/stellar/StellarBurnRouter.sol:StellarBurnRouter --rpc-url
 ```
 
 The router has no power: it forwards a burn of the caller's own tokens and logs the Stellar address, and it keeps
-the set-once claim of a burn made directly on the token (`claimDirectBurn`; `docs/STELLAR-BRIDGE.md` section 4b).
+the claims of a burn made directly on the token (`claimDirectBurn`, the latest final one before the vault records
+a release counts) and the redirects of a held exit by its own burner (`redirectHeldBurn`; `docs/STELLAR-BRIDGE.md`
+section 4b).
 Exits go through it. Record its address and the keccak of its runtime code:
 
 ```
