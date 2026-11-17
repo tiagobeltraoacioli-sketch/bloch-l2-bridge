@@ -1,13 +1,26 @@
 {
   "base": "cc2511a",
-  "note": "Merge order. Every branch is read-only for the integrator. `never` lists branches that must not be merged (history holds a parked contract).",
-  "never": ["codex/bridge-evm-nets-r16-20261116"],
+  "note": "Merge order. Every branch is read-only for the integrator. `never`: branches that must never be merged (their history holds a parked contract, or a prototype that is not for use). `forbiddenPaths`: paths that no commit in the history of a merged tip may ever have touched. `preRound18` / `lastVerified`: the commit of the line when round 18 started (2026-11-17 03:20 UTC stop; a coordinator WIP commit where the agent was cut off) and the last commit whose suites the line's own report recorded; the regression check compares against both.",
+  "never": [
+    "codex/bridge-evm-nets-r16-20261116",
+    "codex/bridge-evm-nets-r16-history-vault-20261116",
+    "codex/bridge-evm-base-signer-r17-20261117"
+  ],
+  "forbiddenPaths": ["contracts/evmnets/ProvenanceSourceVaultHistory.sol"],
   "lines": [
-    {"id": "shared-tools", "routes": ["ethereum"], "branch": "codex/bridge-signer-verify-r17-20261117", "agent": 341},
-    {"id": "evm-nets", "routes": ["arbitrum-one", "op-mainnet", "linea", "base", "bnb"], "branch": "codex/bridge-evm-nets-r17-20261117", "agent": 337},
-    {"id": "bitcoin", "routes": ["bitcoin"], "branch": "codex/bridge-btc-r17-20261117", "agent": 332},
-    {"id": "tron", "routes": ["tron"], "branch": "codex/bridge-tron-r17-20261117", "agent": 332},
-    {"id": "solana", "routes": ["solana"], "branch": "codex/bridge-solana-r17-20261117", "agent": 336},
-    {"id": "stellar", "routes": ["stellar"], "branch": "codex/bridge-stellar-r17-20261117", "agent": 338}
+    {"id": "shared-tools", "routes": ["ethereum"], "branch": "codex/bridge-signer-verify-r17-20261117", "agent": 374,
+     "preRound18": "ec79cf8", "lastVerified": "0f07e10", "report": "agents/341-bridge-signer-verify-r17.md"},
+    {"id": "evm-nets", "routes": ["arbitrum-one", "op-mainnet", "linea", "base", "bnb"],
+     "branch": "codex/bridge-evm-nets-r17-audit-20261117", "devBranch": "codex/bridge-evm-nets-r17-20261117", "agent": 372,
+     "preRound18": "9187656", "lastVerified": "10b8147", "report": "agents/337-bridge-evm-r17.md",
+     "rule": "the audit line (one commit or a short series on cc2511a) carries a tree identical to a commit of the developer line; the developer line was merged once at 2f22b20, whose tree equals 9187656"},
+    {"id": "bitcoin", "routes": ["bitcoin"], "branch": "codex/bridge-btc-r17-20261117", "agent": 370,
+     "preRound18": "91bb6ca", "lastVerified": "7a37491", "report": "agents/332-bridge-btc-tron-r17.md"},
+    {"id": "tron", "routes": ["tron"], "branch": "codex/bridge-tron-r17-20261117", "agent": 370,
+     "preRound18": "577ca36", "lastVerified": "577ca36", "report": "agents/332-bridge-btc-tron-r17.md"},
+    {"id": "solana", "routes": ["solana"], "branch": "codex/bridge-solana-r17-20261117", "agent": 371,
+     "preRound18": "b2fa301", "lastVerified": "32e124c", "report": "agents/336-bridge-solana-r17.md"},
+    {"id": "stellar", "routes": ["stellar"], "branch": "codex/bridge-stellar-r17-20261117", "agent": 373,
+     "preRound18": "3ce640f", "lastVerified": "22ea9a4", "report": "agents/338-bridge-stellar-r17.md"}
   ]
 }

@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """Re-merge of the bridge lines into the all-networks tree. One command, repeatable:
 
-  python3 tools/allnets/remerge.py            merge every line whose tip moved (tools/allnets/lines.json, in order)
+  python3 tools/allnets/remerge.py            fetch, then merge every line whose published tip moved (lines.json order)
   python3 tools/allnets/remerge.py --status   what moved, nothing changed
   python3 tools/allnets/remerge.py --record   after a conflict was resolved by hand: remember the resolution and commit
+  python3 tools/allnets/remerge.py --local    use the local branch refs instead of origin (never for a tree to publish)
+
+What is merged: `origin/<branch>` of each line, i.e. what the line's developer has published (and scanned before the
+push) - never an unpublished local commit of another agent (agent 375, round 18).
 
 A conflict is resolved by a rule kept in this tree, never by a setting of the shared repository:
   1. `deployments/schema/bridge.network.schema.json`: the schema owner's version (the EVM-networks line) wins; every
-     `bridge.network.json` is validated against it after the merge, so a line that needs a property the owner's schema
-     lacks stops the merge here.
+     `bridge.network.json` is validated against it after the merge (registry.py), and mergecheck.py proves that every
+     constraint of the other side's copy is present, unchanged, in the result.
   2. Any other file: a resolution recorded in `tools/allnets/resolutions/` under the SHA-256 of the conflicted text
      (markers included). The same conflict gets the same resolution; a different conflict (a line moved in the
      conflicted region) stops the merge for a person, with the files named.
-After every merge: `deployments/allnets/merge-lock.json` (branch -> commit taken) and the registry
-`deployments/bridges.json` are rewritten and the quick checks run (`registry.py check`).
-Nothing is pushed. No branch other than the current one is written.
+  3. A tip whose TREE equals the tree of a commit already merged (the EVM audit line: one commit on cc2511a carrying the
+     tree of a developer-line commit) is recorded with `git merge -s ours`: it brings no change, and the equality is
+     checked by git (`git diff --quiet`) before, never assumed.
+Before every merge commit: `mergecheck.py --staged` (no line or JSON constraint added by either side may be missing
+from the staged result: the owner's standard forbids resolving a conflict by dropping one side's checks), the
+`never` branches and the `forbiddenPaths` (no commit of a merged history may have touched them).
+After every merge: `deployments/allnets/merge-lock.json` (line -> commit taken) and the registry
+`deployments/bridges.json` are rewritten. Nothing is pushed. No branch other than the current one is written.
 """
 import hashlib
 import json
@@ -28,7 +37,11 @@ LINES = json.loads((HERE / 'lines.json').read_text())
 SCHEMA = 'deployments/schema/bridge.network.schema.json'
 SCHEMA_OWNER = 'evm-nets'
 LOCK = ROOT / 'deployments/allnets/merge-lock.json'
-TRAILER = 'Co-Authored-By: Claude Mythos 5.2 <noreply@anthropic.com>'
+TRAILER = 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
+LOCAL = '--local' in sys.argv
+
+sys.path.insert(0, str(HERE))
+import mergecheck  # noqa: E402
 
 
 def git(*args, check=True):
@@ -36,6 +49,10 @@ def git(*args, check=True):
     if check and done.returncode:
         raise SystemExit(f'git {" ".join(args)}: {done.stderr.strip() or done.stdout.strip()}')
     return done.stdout.strip()
+
+
+def ancestor(a, b):
+    return subprocess.run(['git', 'merge-base', '--is-ancestor', a, b], cwd=ROOT).returncode == 0
 
 
 def gitdir():
@@ -46,12 +63,15 @@ def lock():
     return json.loads(LOCK.read_text()) if LOCK.exists() else {'base': LINES['base'], 'lines': {}}
 
 
+def ref(line):
+    return line['branch'] if LOCAL else f'origin/{line["branch"]}'
+
+
 def moved():
     out = []
     for line in LINES['lines']:
-        tip = git('rev-parse', line['branch'])
-        merged = subprocess.run(['git', 'merge-base', '--is-ancestor', tip, 'HEAD'], cwd=ROOT).returncode == 0
-        out.append((line, tip, merged))
+        tip = git('rev-parse', ref(line))
+        out.append((line, tip, ancestor(tip, 'HEAD')))
     return out
 
 
@@ -65,6 +85,26 @@ def key(path):
 
 def slot(path, digest):
     return HERE / 'resolutions' / (path.replace('/', '__') + '.' + digest[:16])
+
+
+def refuse_history(line, tip):
+    for name in LINES['never']:
+        bad = git('rev-parse', '--verify', '--quiet', name, check=False)
+        if bad and ancestor(bad, tip):
+            raise SystemExit(f'{line["branch"]} contains {name}; refused')
+    for path in LINES.get('forbiddenPaths', []):
+        if git('rev-list', '-n', '1', tip, '--', path):
+            raise SystemExit(f'{line["branch"]} at {tip[:7]} has {path} in its history; refused')
+
+
+def same_tree_as_merged(tip):
+    """A commit already in HEAD's history whose tree equals tip's tree (rule 3), or None."""
+    tree = git('rev-parse', f'{tip}^{{tree}}')
+    for entry in lock()['lines'].values():
+        for c in [entry.get('commit')] + [h.get('commit') for h in entry.get('history', [])]:
+            if c and ancestor(c, 'HEAD') and git('rev-parse', f'{c}^{{tree}}') == tree:
+                return c
+    return None
 
 
 def resolve(line):
@@ -88,10 +128,20 @@ def resolve(line):
     return resolved, left
 
 
-def finish(line, tip, resolved):
+def finish(line, tip, resolved, how=None):
+    lost = mergecheck.staged(tip)
+    if lost:
+        for p, x in lost:
+            print(f'    {p}: line added by {x["side"]} {x["added"]}x, present {x["present"]}x: {x["line"].strip()[:160]}')
+        raise SystemExit(f'the staged merge of {line["id"]} {tip[:7]} loses {len(lost)} line(s) or constraint(s) of a side '
+                         '(listed above); nothing was committed. Fix the resolution, or justify each in '
+                         f'tools/allnets/merge-justifications.json under "staged:{tip}", then rerun.')
     state = lock()
+    old = state['lines'].get(line['id'])
+    history = (old.get('history', []) + [{k: old[k] for k in ('branch', 'commit') if k in old}]) if old else []
     state['lines'][line['id']] = {'branch': line['branch'], 'commit': tip, 'agent': line['agent'], 'routes': line['routes'],
-                                  'conflicts': [{'path': p, 'resolution': how} for p, how in resolved]}
+                                  'conflicts': [{'path': p, 'resolution': h} for p, h in resolved],
+                                  **({'rule': how} if how else {}), 'history': history}
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     LOCK.write_text(json.dumps(state, indent=2) + '\n')
     git('add', str(LOCK.relative_to(ROOT)))
@@ -104,10 +154,13 @@ def finish(line, tip, resolved):
         else:
             git('add', 'deployments/bridges.json')
     text = [f'Merge {line["id"]} line: {line["branch"]} at {tip[:7]}', '']
-    text += [f'Conflict {p}: {how}' for p, how in resolved] or ['No textual conflict.']
+    if how:
+        text += [how]
+    text += [f'Conflict {p}: {h}' for p, h in resolved] or (['No textual conflict.'] if not how else [])
+    text += ['Lost-change check (tools/allnets/mergecheck.py --staged): no line or JSON constraint of either side missing.']
     text += ['', TRAILER]
     git('commit', '--no-verify', '-m', '\n'.join(text))
-    print(f'merged {line["id"]} {tip[:7]}: {len(resolved)} conflict(s) resolved by rule')
+    print(f'merged {line["id"]} {tip[:7]}: {len(resolved)} conflict(s) resolved by rule' + (f'; {how}' if how else ''))
 
 
 def pending_file():
@@ -115,12 +168,15 @@ def pending_file():
 
 
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'merge'
+    mode = next((a for a in sys.argv[1:] if a != '--local'), 'merge')
+    if not LOCAL and mode != '--record':
+        git('fetch', '--quiet', 'origin')
     if mode == '--status':
         for line, tip, merged in moved():
             taken = lock()['lines'].get(line['id'], {}).get('commit', '')[:7] or '-'
-            dirty = ''
-            print(f'{line["id"]:13} {line["branch"]:45} tip {tip[:7]} taken {taken:7} {"merged" if merged else "MOVED"}{dirty}')
+            local = git('rev-parse', line['branch'])
+            note = '' if local == tip else f' (local branch {local[:7]} differs from the published tip)'
+            print(f'{line["id"]:13} {ref(line):55} tip {tip[:7]} taken {taken:7} {"merged" if merged else "MOVED"}{note}')
         return 0
     if mode == '--record':
         pend = json.loads(pending_file().read_text())
@@ -128,6 +184,7 @@ def main():
             raise SystemExit(f'conflict markers remain in {unmerged_markers}')
         for path, digest in pend['left']:
             kept = slot(path, digest)
+            kept.parent.mkdir(parents=True, exist_ok=True)
             kept.write_bytes((ROOT / path).read_bytes())
             git('add', path, str(kept.relative_to(ROOT)))
             pend['resolved'].append([path, f'recorded resolution {kept.name}'])
@@ -143,15 +200,18 @@ def main_merge():
         raise SystemExit('the worktree has uncommitted changes; commit them first')
     for name in LINES['never']:
         tip = git('rev-parse', '--verify', '--quiet', name, check=False)
-        if tip and subprocess.run(['git', 'merge-base', '--is-ancestor', tip, 'HEAD'], cwd=ROOT).returncode == 0:
+        if tip and ancestor(tip, 'HEAD'):
             raise SystemExit(f'{name} is an ancestor of this branch; it must never be merged')
     for line, tip, merged in moved():
         if merged:
             continue
-        for name in LINES['never']:
-            bad = git('rev-parse', '--verify', '--quiet', name, check=False)
-            if bad and subprocess.run(['git', 'merge-base', '--is-ancestor', bad, tip], cwd=ROOT).returncode == 0:
-                raise SystemExit(f'{line["branch"]} contains {name}; refused')
+        refuse_history(line, tip)
+        equal = same_tree_as_merged(tip)
+        if equal:
+            git('merge', '--no-ff', '--no-commit', '-s', 'ours', tip)
+            finish(line, tip, [], how=f'Tree of {tip[:7]} equals the tree of {equal[:7]}, already merged (git rev-parse '
+                                      f'{tip[:7]}^{{tree}} = {equal[:7]}^{{tree}}): recorded with -s ours, no content change.')
+            continue
         subprocess.run(['git', '-c', 'rerere.enabled=false', 'merge', '--no-ff', '--no-commit', tip], cwd=ROOT,
                        capture_output=True, text=True)
         resolved, left = resolve(line)
