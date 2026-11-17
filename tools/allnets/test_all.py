@@ -179,7 +179,7 @@ def stage_artifacts(r):
     merged = r.out / 'manifest-merged.json'
     r.suite('artifacts', 'manifest-merged', ['sh', '-c', f'{sys.executable} {art} manifest {ROOT / "out"} > {merged}'], retry_busy=False)
     lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
-    bases = [('freeze-cc2511a', 'cc2511a', [])] + [(n, e['commit'], ART_SOURCES.get(n, [])) for n, e in lock.items()]
+    bases = [('freeze-cc2511a', 'cc2511a', ['contracts/'])] + [(n, e['commit'], ART_SOURCES.get(n, [])) for n, e in lock.items()]
     for name, commit, sources in bases:
         d = r.out / f'art-{name}'
         build = (f'rm -rf {d} && mkdir -p {d} && git -C {ROOT} archive {commit} | tar -x -C {d} && '
