@@ -210,6 +210,8 @@ def stage_offline(r):
         r.suite('offline', f'{path.parent.name}/{path.stem}', py('-m', 'unittest', path.stem), cwd=path.parent)
     r.suite('offline', 'signatario-stable/test_ops_templates', py('tools/signatario-stable/test_ops_templates.py', '.'))
     r.suite('offline', 'signatario-tron/test_tron_tools', py('tools/signatario-tron/test_tron_tools.py'))
+    r.suite('offline', 'deploy-pontes/test_ceremony_kit', py('tools/deploy-pontes/test_ceremony_kit.py'))
+    r.suite('offline', 'ops/test_bundle+test_bridgectl', py('-m', 'unittest', 'test_bundle', 'test_bridgectl'), cwd=ROOT / 'ops')
 
 
 def stage_ethereum(r):

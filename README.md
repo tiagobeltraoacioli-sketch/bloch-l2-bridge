@@ -23,16 +23,16 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 <!-- allnets-launch-table:begin -->
 | Route | L2 token | Launch status | Open findings (Medium or above) |
 |---|---|---|---|
-| ethereum | bUSDC | launchable | - |
-| arbitrum-one | bUSDC.arb | launchable | - |
+| ethereum | bUSDC | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
+| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
 | base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
 | bitcoin | bBTC | held | - |
 | bnb | bUSDC.bnb | out | - |
-| linea | bUSDC.linea | launchable | - |
-| op-mainnet | bUSDC.op | launchable | - |
+| linea | bUSDC.linea | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
+| op-mainnet | bUSDC.op | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
 | solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-9 (Medium, open (371 fixing)) |
 | stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending) |
-| tron | bUSDT.trx | held | - |
+| tron | bUSDT.trx | held | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
 
 Open findings below Medium, listed on request (they do not hold the route):
 

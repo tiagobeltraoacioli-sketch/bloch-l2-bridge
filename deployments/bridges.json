@@ -64,12 +64,19 @@
         "deployments/mainnet/busdc-vault-mainnet.config.json"
       ],
       "launch": {
-        "v1": true,
-        "state": "launchable",
+        "v1": false,
+        "state": "not-launchable-until-fixed",
         "sourceState": "launchable",
         "source": "routes.py (the frozen Ethereum bridge)",
         "reason": "the Ethereum bridge (bUSDC V3), freeze cc2511a",
-        "openFindings": []
+        "openFindings": [
+          {
+            "id": "F381-1",
+            "severity": "Medium",
+            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+            "owner": 374
+          }
+        ]
       },
       "sourceDomain": "ethereum-mainnet",
       "sourceChainId": "1"
@@ -130,12 +137,19 @@
         "deployments/arbitrum-one/bridge.network.json"
       ],
       "launch": {
-        "v1": true,
-        "state": "launchable",
+        "v1": false,
+        "state": "not-launchable-until-fixed",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it.",
-        "openFindings": []
+        "openFindings": [
+          {
+            "id": "F381-1",
+            "severity": "Medium",
+            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+            "owner": 374
+          }
+        ]
       },
       "sourceDomain": "arbitrum-one",
       "sourceChainId": "42161"
@@ -397,12 +411,19 @@
         "deployments/linea/bridge.network.json"
       ],
       "launch": {
-        "v1": true,
-        "state": "launchable",
+        "v1": false,
+        "state": "not-launchable-until-fixed",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": []
+        "openFindings": [
+          {
+            "id": "F381-1",
+            "severity": "Medium",
+            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+            "owner": 374
+          }
+        ]
       },
       "sourceDomain": "linea-mainnet",
       "sourceChainId": "59144"
@@ -463,12 +484,19 @@
         "deployments/op-mainnet/bridge.network.json"
       ],
       "launch": {
-        "v1": true,
-        "state": "launchable",
+        "v1": false,
+        "state": "not-launchable-until-fixed",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": []
+        "openFindings": [
+          {
+            "id": "F381-1",
+            "severity": "Medium",
+            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+            "owner": 374
+          }
+        ]
       },
       "sourceDomain": "op-mainnet",
       "sourceChainId": "10"
@@ -687,7 +715,14 @@
         "sourceState": "held",
         "source": "route-file",
         "reason": "NOT LAUNCHABLE until an external audit of this route and the owner key ceremony (unaudited; nothing deployed; addresses TBD-deploy). Open: R342-TRX-5/-6 (Info: the deployed bytecode is the TRON-compiler build, not executable by forge; three producers only), the compiler PGP signature, a release simulated against mainnet state; the fixed fee 14 / 70 / 71 is final only at the ceremony (two fresh TRX prices).",
-        "openFindings": []
+        "openFindings": [
+          {
+            "id": "F381-1",
+            "severity": "Medium",
+            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+            "owner": 374
+          }
+        ]
       },
       "sourceDomain": "tron-mainnet",
       "sourceChainId": "728126428"

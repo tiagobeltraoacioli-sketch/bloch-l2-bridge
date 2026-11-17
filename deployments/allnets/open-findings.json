@@ -1,7 +1,7 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T08:30:00Z",
+  "asOf": "2026-11-17T09:00:00Z",
   "findings": [
     {
       "id": "R330-SOL-1",
@@ -62,6 +62,22 @@
       "reviewer": 376,
       "what": "sol_guardiao.py eth_source: the recipient findings (each followed by continue) come before the release-before-final test, and recipient_verdict reads the router logs only up to the guardian's own finalized block",
       "source": "agents/330-bridge-solana-review-r17.md fourth pass (376 FINAL at 93edeee)"
+    },
+    {
+      "id": "F381-1",
+      "routes": [
+        "ethereum",
+        "arbitrum-one",
+        "op-mainnet",
+        "linea",
+        "tron"
+      ],
+      "severity": "Medium",
+      "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
+      "owner": 374,
+      "reviewer": 379,
+      "what": "relayer credential mode: under a real systemd LoadCredential (mode 0440) vigia.py's private_file refuses the keystore password, so every relayer exits at start (liveness, no funds); the check is in the shared relayer tools/signatario-stable/vigia.py, so every route whose relayer it is (Ethereum, the EVM networks, TRON) is held, not only the Ethereum bundles 381 packaged",
+      "source": "agents/381-bridge-operator-pkg-r18.md findings table; cross-area 2026-11-17 06:10 UTC (381); coordinator"
     }
   ],
   "removed": [
