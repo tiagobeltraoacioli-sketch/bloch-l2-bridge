@@ -53,5 +53,13 @@
       "`anchor_max_age` are the registry's by chain id (a config that omits them gets them; one that contradicts them is refused at": "Not a ceremony change: the line comes from the EVM audit line 9187656, which the ceremony kit 380 merged as its base (60c6767); the EVM owner 372 rewrote it in the re-cut audit line d6ad227 (R329-EVM-3P-1, reviewed FINAL by 379), which is merged here. The newer owner's text wins.",
       "start, R329-EVM-3), `--interval`, `max_release_signs_per_hour` and `refused_retry` default to the network's pacing (an": "Not a ceremony change: the line comes from the EVM audit line 9187656, which the ceremony kit 380 merged as its base (60c6767); the EVM owner 372 rewrote it in the re-cut audit line d6ad227 (R329-EVM-3P-1, reviewed FINAL by 379), which is merged here. The newer owner's text wins."
     }
+  },
+  "staged:056fea5aa38f431a5c80d0212d2c999138ad82ce": {
+    "docs/audit-rfp-r12/phase2-bridge.manifest.tsv": {
+      "A2\t1960\t1545\t1453\t37f04225ec60e114e73484cb74d5aa9ecfdba717b59b383d7af7a20c8bf0a856\ttools/signatario-stable/vigia.py": "Generated rows: the manifest is regenerated from the merged tree (scripts/audit-rfp/manifest.py over the staged tree), so the shared-tools line's rows for files the EVM line and the integration also changed are replaced by the rows of the merged files; checked by the integration stage (regeneration equals the committed file).",
+      "# total A2\t8967\t7039\t6364": "Generated rows: the manifest is regenerated from the merged tree (scripts/audit-rfp/manifest.py over the staged tree), so the shared-tools line's rows for files the EVM line and the integration also changed are replaced by the rows of the merged files; checked by the integration stage (regeneration equals the committed file).",
+      "A2\t1806\t1409\t1338\t26e1cac01cb0d0cde94391d3a973d30eec79cbd0ade6741b0b67b7d1f9b57abe\ttools/signatario-stable/vigia.py": "Generated rows: the manifest is regenerated from the merged tree (scripts/audit-rfp/manifest.py over the staged tree), so the shared-tools line's rows for files the EVM line and the integration also changed are replaced by the rows of the merged files; checked by the integration stage (regeneration equals the committed file).",
+      "# total A2\t8422\t6611\t5996": "Generated rows: the manifest is regenerated from the merged tree (scripts/audit-rfp/manifest.py over the staged tree), so the shared-tools line's rows for files the EVM line and the integration also changed are replaced by the rows of the merged files; checked by the integration stage (regeneration equals the committed file)."
+    }
   }
 }

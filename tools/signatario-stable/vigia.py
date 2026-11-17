@@ -118,6 +118,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -159,22 +160,69 @@ def log(**kv):
 PUBLIC_CHAINS = {'l2': 700770, 'eth': 1}  # L2 mainnet, Ethereum mainnet: raw relayer keys are refused there
 
 
+CREDENTIAL_NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}')
+
+
+def _systemd_credential(p):
+    """True if `p` is a file named directly in $CREDENTIALS_DIRECTORY (the path, not a link resolution). systemd
+    `LoadCredential=` makes that directory read-only and hands each credential as 0440 (systemd 255), owned by root and
+    readable by the service through an ACL (agent 381, F381-1): a group bit there is systemd's, not an operator's
+    mistake."""
+    base = os.environ.get('CREDENTIALS_DIRECTORY')
+    if not base:
+        return False
+    return os.path.normpath(os.path.abspath(str(p.parent))) == os.path.normpath(os.path.abspath(base))
+
+
 def private_file(path, what):
-    """`path` exists and has no group or other permission bits (a key must be private to the service user)."""
+    """`path` is a key, keystore or password file that only the service can read.
+
+    Everywhere: a regular file, owned by the service user, with no group or other permission bit (chmod 600).
+    Inside $CREDENTIALS_DIRECTORY only (a systemd credential, round 18, F381-1): also a regular file that is not a
+    symbolic link, owned by root or the service user, with read bits for owner and group only (0440 or stricter),
+    in a directory owned by root or the service user that neither group nor others can write."""
     p = Path(path)
-    mode = p.stat().st_mode & 0o777
+    uid = os.getuid()
+    if _systemd_credential(p):
+        d = os.lstat(str(p.parent))
+        if not stat.S_ISDIR(d.st_mode) or d.st_uid not in (0, uid) or d.st_mode & 0o022:
+            raise SystemExit(f'{what} {p}: $CREDENTIALS_DIRECTORY must be a directory of root or this user that '
+                             f'group and others cannot write (mode {stat.S_IMODE(d.st_mode):04o}, owner {d.st_uid})')
+        st = os.lstat(str(p))
+        mode = stat.S_IMODE(st.st_mode)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in (0, uid):
+            raise SystemExit(f'{what} {p}: a credential must be a regular file (not a link) of root or this user')
+        if mode & ~0o440 and (mode & 0o077 or st.st_uid != uid):
+            raise SystemExit(f'{what} {p} has mode {mode:04o}: a credential may be 0440 or stricter, or private to '
+                             f'this user (0600)')
+        if mode & 0o040 and st.st_gid not in (0, os.getgid()):
+            # R329-SHARED-2 (agent 379): a group read bit is acceptable only for root's group (systemd) or the
+            # service's own primary group; any other group's members could read the key.
+            raise SystemExit(f'{what} {p}: group-readable by group {st.st_gid}, which is neither root nor this '
+                             f'service\'s own group {os.getgid()}')
+        return str(p)
+    st = p.stat()
+    mode = stat.S_IMODE(st.st_mode)
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit(f'{what} {p} is not a regular file')
     if mode & 0o077:
         raise SystemExit(f'{what} {p} has mode {mode:04o}: make it private to its owner (chmod 600)')
+    if st.st_uid != uid:
+        raise SystemExit(f'{what} {p} belongs to user {st.st_uid}, not to this service user {uid}')
     return str(p)
 
 
 def credential(value):
-    """A path, or `credential:NAME` for systemd LoadCredential= (read from $CREDENTIALS_DIRECTORY/NAME)."""
+    """A path, or `credential:NAME` for systemd LoadCredential= (read from $CREDENTIALS_DIRECTORY/NAME). NAME is a
+    plain file name: no '/', no '..', no leading '-' or '.'."""
     if isinstance(value, str) and value.startswith('credential:'):
         base = os.environ.get('CREDENTIALS_DIRECTORY')
         if not base:
             raise SystemExit(f'{value}: $CREDENTIALS_DIRECTORY is not set (LoadCredential= in the unit)')
-        return str(Path(base) / value[len('credential:'):])
+        name = value[len('credential:'):]
+        if not CREDENTIAL_NAME.fullmatch(name):
+            raise SystemExit(f'{value}: a credential name is a plain file name')
+        return str(Path(base) / name)
     return value
 
 
