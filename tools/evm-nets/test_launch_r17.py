@@ -186,6 +186,19 @@ class Launch(unittest.TestCase):
             self.assertIsNone(launch.signer_settings(r))
 
 
+class ChainIdForm(unittest.TestCase):
+    def test_refusal_takes_only_an_integer_chain_id(self):
+        # R329-EVM-3P-1: int(8453.0) and int(True) would coerce a value its caller compared in another form.
+        for bad in (8453.0, 56.0, 10.0, True, False, 0, -1, None, '8453.0', '0x2105', [8453]):
+            self.assertIsNotNone(launch.refusal(bad), bad)
+            self.assertIn('not a positive integer', launch.refusal(bad), bad)
+        self.assertIsNone(launch.refusal(1))
+        self.assertIsNone(launch.refusal(10))
+        self.assertIsNone(launch.refusal('42161'))
+        self.assertIn('not launchable', launch.refusal(8453))
+        self.assertIn('not launchable', launch.refusal('56'))
+
+
 @unittest.skipUnless(CAST.exists(), 'cast not found')
 class DeployGate(unittest.TestCase):
     def vault(self, cfg, command='validate', *extra, env=None, token_cfg=None):
