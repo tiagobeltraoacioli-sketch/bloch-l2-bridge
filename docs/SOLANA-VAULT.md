@@ -608,15 +608,16 @@ names 20 bytes no wallet hashes to and can never be paid; a commitment to a toke
 paid into the associated token account OF that token account, which no key controls.
 
 **Where the destination is checked: `contracts/solana/SolanaBurnRouter.sol`.** Exits are made with
-`approve(router, amount)` on the token, then `router.burnTo(uint64 amount, string recipient)`, the recipient being
-the base58 text a Solana wallet shows. The router decodes it, requires 32 bytes in canonical base58, not zero and
-ON the Ed25519 curve, computes the commitment itself, burns through the token and logs
-`SolanaExit(bytes32 indexed burnId, address indexed from, uint64 amount, address commitment, string recipient)`
-in the same transaction. Every associated token account, and every other program-derived address, is off the
-curve by construction, so pasting a token account's address is refused before anything is burned; so is an
-Ethereum address, in any spelling. The router has no owner, no storage and holds nothing between calls. It has
-the shape of `StellarBurnRouter` and `BitcoinBurnRouter`: `token()`, a pure function from the destination text to
-the 20 bytes (`commitment(string)`), `burnTo(uint64, string)`, and one `<Network>Exit` log.
+`approve(router, amount)` on the token, then `router.burnTo(uint64 amount, string recipient, uint64 nonce, bytes
+proof)` (round 17; section 11.3 for `nonce` and `proof`), the recipient being the base58 text a Solana wallet
+shows. The router decodes it, requires 32 bytes in canonical base58, not zero and ON the Ed25519 curve, computes
+the commitment itself, burns through the token and logs `SolanaExit(bytes32 indexed burnId, address indexed from,
+uint64 amount, address commitment, string recipient, uint64 nonce, bytes proof, bytes32 exitHash)` in the same
+transaction. Every associated token account, and every other program-derived address, is off the curve by
+construction, so pasting a token account's address is refused before anything is burned; so is an Ethereum
+address, in any spelling. The router has no owner and holds nothing between calls; its only storage is one
+counter per caller (`nextNonce`). It keeps the shape of `StellarBurnRouter` and `BitcoinBurnRouter`: `token()`,
+a function from the destination text to the 20 bytes (`commitment(string)`), `burnTo`, one `<Network>Exit` log.
 
 What the curve check does not do: it does not prove that anyone holds the key (a mistyped address fails base58
 canonical form or the curve check with probability about one half, not always); a token account created at a
@@ -640,32 +641,31 @@ are `view`, no longer `pure`, because they read the immutable mint) also refuses
 - `solanaMint`, the SPL mint this route's vault holds;
 - the program ids the bridge itself names: classic SPL Token, Token-2022, Associated Token Account.
 
-**What the signers do: a burn is certified only when a wallet is known for it** (`tools/signatario-solana/
-sol_recipient.py`, applied by the Solana half before it signs, by the sign daemon before it rebuilds anything, by
-the relayer before it pays). A wallet is 32 bytes, not zero, on the curve, not of small order, not on the list of
-addresses known not to be wallets, hashing to the burn's 20 bytes; and what the chain shows at it must be a wallet
-(11.2). It is
-looked for in the router's `SolanaExit` log of that burn id, then in a `SolanaRecipient` log of
-`SolanaRecipientRegistry` for those 20 bytes, then in an operator's hint file. Where it comes from does not
-matter, because the hash decides. On a public cluster the Solana half refuses to run without `l2_rpc` and
-`burn_router`.
+**What the signers do (round 17): a burn is certified only for a destination with a proof of its key**
+(`tools/signatario-solana/sol_recipient.py`, applied by the Solana half before it signs, by the sign daemon before
+it rebuilds anything, by `sol_vault.py approve` before it delivers a certificate, by the relayer before it pays,
+and by the guardian watch on every approval and payment). The target of a release is:
 
-**A burn made directly on the token** (outside the router) is therefore one of three things:
+1. the burn's own destination, when the burn went through the router (its `SolanaExit` log, in the burn's own
+   transaction, names the same burn id, amount and 20 bytes) and that destination passes three rules: a wallet
+   address (32 bytes, canonical base58, on the curve, not of small order, not on the list of known non-wallets,
+   hashing to the burn's 20 bytes); a VALID PROOF of its key in the log (11.3), verified in process; a wallet on
+   Solana at `finalized` (11.2);
+2. otherwise the burn is HELD, and the target is the destination of the latest `SolanaRedirect` log of the burn's
+   own BURNER (11.6), when it passes the same three rules.
 
-| Its 20 bytes | What happens |
-|---|---|
-| The commitment of a wallet, and the wallet is announced on the registry (by the burner or anyone: `announce(bytes32)`) | Certified, approved and paid like any other exit. This is the recovery rule: announce the wallet |
-| The commitment of a wallet nobody has published | HELD: not certified, not approved, alerted by every sign daemon (`release-held-no-wallet`). Paid once the wallet is announced |
-| Not a commitment of any wallet (an Ethereum address, the commitment of a token account) | HELD for good by the same rule. Nothing is paid to anyone, the amount stays in the vault's `total_locked`, and it is visible: the alert names the burn. It is not silently approved, and it cannot be paid into an account nobody controls |
-| The commitment of an on-curve address that is not a wallet on Solana (a mint, a token account or a program at a keypair address), or of a small-order point, announced or not | HELD by the destination rule of 11.2, for as long as the chain shows that. The same holds for such a burn made THROUGH the router, when the router could not know |
+`SolanaRecipientRegistry` announcements and operator hint files are NO LONGER READ (they were in rounds 16 and
+the first half of 17): an announcement carries no proof of a key. The registry contract stays in the repository,
+unchanged, and nothing depends on it. The Solana half, the daemons and `sol_vault.py` refuse to run without
+`l2_rpc`, `burn_router`, `burn_router_code_keccak` (the pinned router, 11.6), `l2_chain_id` and `token`, on every
+cluster.
 
-The third row is a loss for the holder that this design does not undo: paying it would need a release whose
-recipient differs from the one in the burn, and the unchanged signer (`signatario.py`) refuses to sign a release
-that is not exactly the burn's (`the Ethereum half signed another release`). A recovery path (a signed claim by
-the burner naming a wallet, certified as a release with a substituted recipient, and accepted by the guardian
-watch) is a change to the frozen signer and is not built; until it is, the defence is that no interface of the
-bridge calls `token.burn` and the router refuses the mistake. The rehearsal shows all four rows on a validator.
-Whether to build that refund path is an owner decision (ceremony checklist 15).
+**A burn made directly on the token** (outside the router) names no destination with a proof. Whatever its 20
+bytes are, it is HELD (`direct-burn`): not certified, not approved, alerted by every sign daemon
+(`release-held-direct-burn`), its amount kept in the vault's `total_locked` and shown by the reserves monitor. It
+is recoverable by its burner (the `from` of its `Burned` log) through `redirectHeldBurn` with a proof (11.6); an
+Ethereum address typed by habit, a token account's commitment, the identity point: all the same. What stays
+unrecoverable is said in 11.6.
 
 ### 11.2 The destination is read on Solana (review 330, R330-SOL-1)
 
@@ -696,36 +696,71 @@ holds its key. The payment itself is permissionless once approved (`execute_rele
 the gate; the relayer's checks are a second look, not a lock.
 
 **A hold is visible with its reason.** `sol_vault.py burn-status --l2-rpc URL --token 0x.. --router 0x..
---registry 0x.. (--burn 0xID | --nonce N | --all)` prints, per L2 burn: `state` (`paid`, `approved`, `waiting`,
-`held`), and for a held one `hold` (`no-wallet` or `destination-not-a-wallet`) and `reason` in words (for
+--router-code-keccak 0x.. --l2-chain-id N [--holds DB] (--burn 0xID | --nonce N | --all)` prints, per L2 burn:
+`state` (`paid`, `approved`, `waiting`, `held`), and for a held one `hold` (`direct-burn`, `invalid-proof`,
+`not-a-wallet-address`, `destination-not-a-wallet`, `no-router-log`, or `redirect-<code>` for a redirect that is
+refused too), `reason` in words, `latched` (with `--holds`) and `recoverable` (how its burner redirects it) (for
 example "the destination exists on Solana and is not a wallet: an account owned by the classic SPL Token program
 with 82 bytes of data"). `sol_vault.py reserves` with the same options lists every held burn with its reason and
 `heldTotal`, which explains that part of `lockedMinusSupply`. The sign daemons' alerts carry the same text.
 
-### 11.3 Proof of the destination key (the bridge page; for the frontend)
+### 11.3 Proof of the destination key: part of the exit (round 17; coordinator's decision)
 
-The only proof that somebody holds the key of an address is a signature made with it. The bridge page therefore:
+The only proof that somebody holds the key of an address is a signature made with it. Since round 17 that
+signature travels INSIDE the exit: `burnTo(amount, recipient, nonce, proof)`.
 
-1. takes the destination from a CONNECTED Solana wallet (never from a text field);
-2. asks that wallet to sign, with `signMessage`, exactly this one line of printable ASCII (no trailing newline):
+**What is signed.** One line of printable ASCII, no trailing newline, byte for byte the router's view
+`exitMessage(burner, amount, recipient, nonce)`:
 
-   `Bloch bridge exit: pay bUSDC.sol exits to my Solana wallet <WALLET>. L2 account <0x…>. Router <0x…>. Chain 700770. Issued <UNIX>.`
+`Bloch bridge exit v1: pay <amount> units burned by <burner> to my Solana wallet <recipient>. Nonce <nonce>. Router <router>. Chain <chain id>. Route <route>.`
 
-   `<WALLET>` the base58 address; `<0x…>` the user's L2 account and the router address, lowercase, 0x + 40 hex;
-   `<UNIX>` the current time in seconds. Reference text and verification:
-   `python3 tools/signatario-solana/sol_proof.py exit-message --wallet W --l2-account 0x.. --router 0x.. --issued T`
-   and `sol_proof.py verify --address W --message TEXT --signature SIG`;
-3. verifies the 64-byte Ed25519 signature itself, in the page, against the wallet's public key over the UTF-8
-   bytes of the line (a wallet that signs the Solana off-chain message envelope instead, as hardware wallets
-   through the Solana app do, signs `0xff "solana offchain"`, a zero byte for the version, a zero byte for the
-   format, the length as two little-endian bytes, then the line: accept both, as `sol_proof.py` does), and refuses
-   a signature older than 10 minutes;
-4. only then calls `approve` and `SolanaBurnRouter.burnTo(amount, <WALLET>)`.
+`<amount>` in the token's smallest unit (6 decimals: 25000000 is 25 bUSDC.sol), decimal; `<burner>` the L2 account
+that sends the transaction and `<router>` the router, `0x` + 40 lowercase hex; `<recipient>` the base58 wallet;
+`<nonce>` `nextNonce(burner)`, which the call consumes; `<chain id>` `block.chainid` (700770 on the L2);
+`<route>` the token's `sourceRoute()`, `0x` + 64 lowercase hex. A redirect signs `redirectMessage(burner, burnId,
+recipient, nonce)`: `Bloch bridge redirect v1: pay burn <burn id> made by <burner> to my Solana wallet
+<recipient>. Nonce <nonce>. Router <router>. Chain <chain id>. Route <route>.` Domain separation: the first words
+differ between the two kinds and from every other text this bridge has anyone sign (the fee-owner proof begins
+`Bloch bridge fee-owner proof v1:`); `0x42` (`B`) cannot begin a Solana transaction message signed by a wallet
+for the network (the off-chain envelope begins `0xff`); and the line names the router, the chain and the route,
+so a signature serves no other router, network or bridge route; the nonce, the burner and the amount (or the burn
+id) bind it to one exit of one account: it cannot be replayed for another burn, burner or network.
 
-The page should also read the address on Solana and refuse anything that exists and is not a System account
-without data, so that the user is told before burning what the signers would hold afterwards. A wallet that
-cannot sign a message cannot use the page for an exit. The signature is checked by the page only: the L2 cannot
-verify Ed25519, the router does not see it, and the signers do not ask for it.
+**Proof bytes** = `tag (1) | Ed25519 signature (64) [| application domain (32)]`, 65 or 97 bytes:
+
+| Tag | The signature covers | Produced by |
+|---|---|---|
+| 0 | the UTF-8 bytes of the line | a browser wallet's `signMessage` (wallet adapter) |
+| 1 | `0xff "solana offchain" \| 0x00 (version) \| 0x00 (format: restricted ASCII) \| length u16 LE \| line` | `solana sign-offchain-message` (Agave CLI 4.4.1); the legacy off-chain format of hardware wallets' Solana app |
+| 2 | `0xff "solana offchain" \| 0x00 \| application domain (32) \| 0x00 \| 0x01 (one signer) \| signer (32) \| length u16 LE \| line` | the off-chain message specification with an application domain |
+
+**Why the router does not verify it.** The L2 has no Ed25519 precompile; a verifier written in Solidity costs on
+the order of a million gas per signature (field arithmetic over 2^255 - 19 and SHA-512 on 64-bit words), which
+would price a small exit out and sit near the L2's 5,000,000 gas per transaction. The router checks the proof's
+SHAPE (tag and length: `BadProof`), consumes the nonce (`BadNonce`), publishes the proof in `SolanaExit` and binds
+it into `exitHash = keccak256(abi.encode(keccak256("BLOCH-SVM-EXIT-v1"), chainid, router, route, burnId, from,
+amount, commitment, nonce, keccak256(abi.encode(keccak256(recipient), keccak256(proof)))))`. (The token's own 20
+bytes cannot carry the proof: the vault program recomputes them from the wallet alone, and its image is fixed.)
+
+**Who verifies it.** Every signer (`sol_half.py`), the sign daemon, the relayer, `sol_vault.py approve` and the
+guardian watch, each from the router's log at the L2 block the Bloch half verified as final, in process
+(`sol_proof.exit_proof_valid`: RFC 8032, canonical S, a key on the curve and not of small order; never a
+subprocess). A burn whose proof does not verify is HELD (`invalid-proof`) and LATCHED (11.7): its burner can
+redirect it (11.6). An address nobody holds a key for cannot produce the signature: this closes the residual of
+R330-SOL-1 for every exit through the router, whatever interface sent it.
+
+**The bridge page** reads `nextNonce(account)`, builds the line (and compares it with the router's
+`exitMessage` view), has the CONNECTED wallet sign it, verifies the signature itself before `approve`, and says:
+exits go to a Solana wallet you control, never an exchange deposit address or a token account. It should also
+read the address on Solana and refuse anything that exists and is not a System account without data (11.2).
+Test vectors: `deployments/solana/exit-proof-vectors.json` (two throwaway wallets with their seeds; an exit and a
+redirect under each tag; 14 invalid cases), checked by `test_exit_rule.py` and `solidity-tests/SolanaExitProof.t.sol`.
+Reference tools: `sol_proof.py exit-message`, `redirect-message`, `exit-proof`.
+
+**What a wallet shows.** The line is short (about 330 bytes for an exit, 380 for a redirect) and printable ASCII,
+so a wallet that displays off-chain messages displays it as text; with the Solana app of a hardware wallet the
+line is signed in the off-chain envelope (tag 1). NOT verified here on a Ledger device or any browser wallet (no
+device in this work); verified with the Agave 4.4.1 CLI and with key files.
 
 ### 11.4 Cases that are the recipient's own doing (review 330, R330-SOL-6)
 
@@ -737,18 +772,67 @@ approved and unpaid; nothing is lost from the vault. Tested (`r330_sol_6_…` in
 
 ### 11.5 What remains, said plainly
 
-An on-curve address for which NOBODY holds a key, that is not of small order and not on a list, looks to every
-reader of the chain exactly like a wallet that was never used: it is absent, or, since anyone may send lamports
-to any address, a System account with a balance and no data. The signers cannot tell the two apart, and neither
-can the router, the relayer or the vault. A burn through the router to such an address is certified and paid into
-a token account nobody can spend from.
+Since round 17 an exit through the router is paid only to an address whose key signed its line, so "an address
+nobody holds a key for" is no longer payable (the residual of R330-SOL-1 in round 17's first half). What remains:
 
-The wallet signature of 11.3 closes this for exits made through the bridge page, and only for those: a user who
-calls the router from another interface, a script or an integration gets the router's checks and the signers'
-read, not the proof of a key. This is the residual of R330-SOL-1 and it is not closed by anything in this
-repository. (Requiring on-chain evidence of a key, such as a transaction the address signed, would close it for
-used wallets and would refuse every fresh one; it also needs transaction history that many nodes prune. Not
-adopted.)
+- a destination's key holder can turn its own address into a mint or another account AFTER the signers read it
+  (only the key holder can: an account is created at an on-curve address only with its signature); the relayer
+  then refuses to pay (`approved-destination-not-a-wallet`) and the guardian raises `release-destination`, but the
+  payment is permissionless once approved: that is the key holder's own doing (11.4);
+- five signers who skip the rule can still approve anything the vault accepts; the guardian's findings
+  (`release-mismatch:unproven-…`, `release-mismatch:…` for another recipient, `release-destination:…`) and a
+  pause during the large-release delay are the defence, as for every other route;
+- a wallet whose owner signed and then lost the key: paid, and lost by its owner;
+- what 11.6 lists as unrecoverable.
+
+### 11.6 Held burns are recoverable by their burner: `redirectHeldBurn` (round 17)
+
+`redirectHeldBurn(bytes32 burnId, string recipient, uint64 nonce, bytes proof)` on the router names another
+wallet for a held burn, with that wallet's proof over `redirectMessage(msg.sender, burnId, recipient, nonce)`. It
+moves nothing and records nothing about burns; it consumes the caller's nonce and logs `SolanaRedirect`. Anyone may
+call it (so that a contract that burned can redirect too), and the signers honour it only when:
+
+- its `from` is the burn's own burner (for a router exit, the `from` of `SolanaExit`; for a direct burn, the
+  `from` of `Burned`); a stranger's redirect counts for nothing;
+- the burn is HELD (its own destination failed a rule, or it was made directly on the token): a redirect never
+  changes a payable exit;
+- no approval exists for the burn: never after an approval (the signer's equivocation record also refuses a
+  second release for a nonce unless the earlier certificate has expired and the new one follows a newer redirect,
+  so two certificates for one burn are never live together);
+- it is the burner's LATEST finalized redirect (highest router nonce); an older one counts for nothing, valid or
+  not (a newer invalid redirect holds the burn again until a newer valid one);
+- its destination passes the three rules of 11.1.
+
+The same call claims a burn made directly on the token. The router pin: every tool checks that the code at
+`burn_router` hashes to `burn_router_code_keccak` (computed offline by `sol_vault.py router-pin` from the
+compiler's artifact and the three immutables), that `solanaMint()`, `route()` and `token()` are this route's, and
+that the L2 answers `l2_chain_id` (R330-SOL-3P-3).
+
+What stays unrecoverable: a burn whose burner can no longer send an L2 transaction (a lost L2 key; a contract that
+burned and has no way to call the router); and nothing else held is lost: its USDC never left the vault.
+
+### 11.7 Holds are latched (review 330, R330-SOL-3P-1)
+
+What the chain shows at an address can change: a token account at a keypair address can be closed by its owner,
+and the address is then absent, "a fresh wallet". A signer (and the relayer, in the same database file) that has
+once found a destination of a burn not payable for reason 2 (no valid proof) or 3 (not a wallet on Solana)
+records it in its database (`held` in the Solana half's `db`), keyed by the burn id (or `<burn id>:r<nonce>` for a
+redirect), and from then on refuses that destination for that burn whatever the chain shows later. A latched burn
+leaves the hold only by its burner's redirect to another destination, or by an operator's explicit, logged action
+naming the burn: `sol_half.py --config HALF.json release-hold --burn 0xID [--redirect N] --note TEXT` (recorded
+in `released_holds` with the time and the note). One operator clearing its latch is not a threshold.
+
+### 11.8 `approve` always applies the rule; the guardian judges every approval (R330-SOL-3P-2)
+
+`sol_vault.py approve` has no flag that skips the recipient rule: it reads the burn on the L2, the router's log,
+the proof, the destination on Solana and (with `--holds`) the latch, and delivers a certificate only for exactly
+the recipient the rule allows now. The guardian watch compares every approval and payment with its burn AND with
+the rule, on its own nodes: `release-mismatch:…` (another recipient), `release-mismatch:unproven-…` (no valid proof
+behind the recipient: hard; a pause voids an unpaid approval), `release-destination:…` (the destination is not a
+wallet on Solana: SOFT by default, because a destination's key holder can turn its address into a mint after the
+signers read it at no cost, and a hard finding would let anyone buy a 72 h pause that way; HARD with
+`pause_on_destination: true`). A round without the L2 judges no recipient ('unjudged') and the next round that
+reads the L2 does (round 18: a blind round's verdict was cached as 'ok' before).
 
 ## 12. Token-2022 versus classic SPL Token; the issuer's powers
 
@@ -838,3 +922,43 @@ Mainnet-beta's public RPC reported `solana-core` 4.4.0 on 2026-11-16.
 Recorded alternative for the certificate: the syscall `sol_secp256k1_recover` recovers a key inside the program,
 needs no instruction introspection and makes the transaction smaller. The coordinator decided the native
 secp256k1 program, and that is what is built; the audit should weigh the two.
+
+## 16. Validator cases of every guardian finding and relayer refusal (round 18)
+
+`tools/signatario-solana/rehearse_local.py` (`REQUIRED_CASES`) holds the table below; a full run (no `--skip-*`
+flag) FAILS when a row has no passing check in it. "Where" is the section of the rehearsal that stages it.
+
+| Case | Tool | What is staged | Where |
+|---|---|---|---|
+| `release-held-direct-burn` | sign daemon | burns made directly on the token (Ethereum address, token-account commitment, correct commitment, the mint, the identity point) | Daemons |
+| `release-held-destination` | sign daemon | a router exit to another mint, signed by the mint's key | Daemons |
+| `release-held-invalid-proof` | sign daemon | an exit to a keyless address; an exit whose proof another key made | Daemons |
+| `release-held-not-a-wallet-address` | sign daemon | an exit to the wrapped SOL mint (listed, unknown to the router) | Daemons |
+| `release-held-redirect-invalid-proof` | sign daemon | the burner's latest redirect without a valid proof | Exit rule, 3P-1 |
+| `release-held-provenance` | sign daemon | a burn under a mint chain the deposits do not back | Rollback |
+| `latched-hold` | sign daemons | a held token-account destination closed by its owner stays held | Exit rule, 3P-1 |
+| `redirect-by-stranger-ignored` | sign daemons | a stranger's redirect with a valid proof of its own key | Redirects |
+| `redirect-after-approval-ignored` | sign daemons | the burner's redirect of an approved burn | Exit rule, 3P-2 |
+| `certificate-withheld-destination` | relayer | five signatures exist, then the destination becomes a mint | Exit rule, 3P-2 |
+| `approve-refused-destination` | `sol_vault.py approve` | the same certificate, no flag | Exit rule, 3P-2 |
+| `approval-mismatch` | relayer | five keys approve another recipient and amount | Forged approval |
+| `approved-without-wallet` | relayer | five keys approve a direct burn as it is | Committee outside the rule |
+| `approved-destination-not-a-wallet` | relayer | the approval of 3P-2 | Exit rule, 3P-2 |
+| `recipient-account-missing` | relayer | a redirected wallet without its token account | Exit rule, 3P-1 |
+| `backup-shares-fee-payer` | relayer | a backup configured with the primary's fee payer | Backup relayer |
+| `release-unknown` | guardian | an approval for a burn that never happened | Rollback |
+| `release-mismatch` | guardian | an approval that differs from its burn | Forged approval |
+| `release-mismatch:recipient` | guardian | an approval to the thief for a real burn's nonce and amount | Committee outside the rule |
+| `release-mismatch:unproven` | guardian | the approval of a direct burn | Committee outside the rule |
+| `release-destination` | guardian | the standing approval of 3P-2 (soft) | Exit rule, 3P-2 |
+| `release-mismatch:destination` | guardian | the same with `pause_on_destination` (hard) | Exit rule, 3P-2 |
+| `release-before-final` | guardian | an approval of a burn the L2 has not finalized | Committee outside the rule |
+| `mint-chain` | guardian | an unbacked mint after a rollback | Rollback |
+
+Not staged on the validator, with the test that covers each instead (`REQUIRED_ELSEWHERE` in the driver):
+`release-held-no-router-log` (unreachable on chain: the router logs in the transaction of every burn it makes;
+`test_exit_rule.Rule`), `release-held-redirect-destination` (the code path of `release-held-destination` for a
+redirect key; `test_exit_rule.Latch`), the other `certificate-withheld-*` codes (the same branch),
+`watch-gap-exceeds-retention` and the guardian's refusals of a slow `--interval` or a retention below the floor
+(outside a rehearsal only; `test_r330_review.R330Sol3Retention`), `deposit-record-changed` (needs a rollback that
+rewrites a finalized deposit record; not staged), `vault-pause-failed` (not staged).

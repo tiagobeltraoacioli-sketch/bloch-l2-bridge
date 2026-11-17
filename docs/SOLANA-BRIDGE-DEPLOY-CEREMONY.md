@@ -145,13 +145,16 @@ On 2026-11-16 the fee address `BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8` did
 mainnet-beta, and neither did its USDC account `2VMpYFjydEYUu1Jw8KhfxBGDT7zRUkBqjKc6DZziqayg`. Both are fixed by
 the vault's address for good: every fee of this bridge can only ever be swept to that one account. If nobody
 holds the key of the address, the fees are collected for nobody, and it cannot be corrected after `init`. So the
-owner, who holds the key, does two things first. `init` refuses until both are done.
+owner, who holds the key, signs one line with it first; `init` refuses without that proof and creates the USDC
+account itself (step 2).
 
-**Step 1: a signature made with the key.** Print the text to sign (it names the address, its token account, the
-mint, the cluster and today's date):
+**Step 1: a signature made with the key.** Print the text to sign (it names the address, the bridge route, which
+follows from the program id and this configuration, the cluster's genesis hash, the purpose, and today's date; a
+proof older than 30 days is refused by `init`, so sign it within 30 days of the deployment; the program id must be
+decided first, section 5):
 
 ```
-python3 tools/signatario-solana/sol_proof.py fee-owner-message --config deployments/solana/busdc-sol-vault.config.json
+python3 tools/signatario-solana/sol_proof.py fee-owner-message --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID
 ```
 
 Sign that one line, exactly as printed between the quotes of `"message"`, with the key of the fee address. With
@@ -168,7 +171,7 @@ On any machine, offline, verify it and write the proof file:
 python3 tools/signatario-solana/sol_proof.py verify --address BMnorAB28mGPthJkbC2iLxbEpWYRCHafgNzV3o8eAJL8 --message "PASTE THE MESSAGE LINE HERE" --signature PASTE_THE_SIGNATURE_HERE --out fee-owner-proof.json
 ```
 ```
-python3 tools/signatario-solana/sol_proof.py check-fee-owner --config deployments/solana/busdc-sol-vault.config.json --proof fee-owner-proof.json
+python3 tools/signatario-solana/sol_proof.py check-fee-owner --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID --proof fee-owner-proof.json
 ```
 
 Both must answer `"ok": true`. The verification uses no network and no key; a signature of another key, of
@@ -176,8 +179,10 @@ another text, or anything that is not a 64-byte signature is refused. The proof 
 the ceremony record. If the key cannot be produced, STOP: choose another fee address (an owner decision) and
 change `vault.fees.owner` before anything is deployed.
 
-**Step 2: the USDC account of the fee address.** Anyone may pay for it (about 0.00204 SOL); the vault need not
-exist and the program id may still be undecided:
+**Step 2: the USDC account of the fee address: no manual step.** `init` (section 6) creates the fee address's
+USDC associated token account when it is absent (anyone may create the associated token account of any owner;
+the deployer's fee payer pays about 0.00204 SOL; idempotent) and then verifies it at `finalized`. The same creation
+can be run alone beforehand, and the account checked:
 
 ```
 python3 tools/signatario-solana/sol_vault.py create-fee-account --config deployments/solana/busdc-sol-vault.config.json --rpc $RPC --fee-payer deployer.json
@@ -392,7 +397,28 @@ The first must print the token; the second the mint's 32 bytes; the third and th
 two commands the first must print `0xdF5a03Ae91Aca56d37572127c03e371a9563F8A0` (the fee wallet's commitment, a
 vector of the test suite) and the second must REVERT: that address is a token account.
 
-The registry is how a burn made directly on the token becomes payable (its wallet is announced there).
+Since round 17 every tool also pins the router by its RUNTIME code: compute the pin offline from the artifact of
+the audited build and the three constructor values, compare it with the deployed code, and put it into every
+signer's Solana half, the relayers and the guardians as `burn_router_code_keccak`:
+
+```
+forge build --ast
+```
+```
+python3 tools/signatario-solana/sol_vault.py router-pin --config deployments/solana/busdc-sol-vault.config.json --program-id $PROGRAM_ID --artifact out/SolanaBurnRouter.sol/SolanaBurnRouter.json --token $TOKEN
+```
+```
+cast keccak $(cast code $ROUTER --rpc-url $L2_RPC)
+```
+
+The two values must be equal, and `creationCodeKeccak` must print
+`0xb6ce6ba3d3d6e97ae9f5e21969c47c2ceec6199de141d14915520254b968bea4` (solc 0.8.24, this repository's
+`foundry.toml`). Exits carry the destination key's proof (`docs/SOLANA-VAULT.md` 11.3); held burns are recovered
+by their burners with `redirectHeldBurn` (11.6).
+
+The registry is NOT used by any tool since round 17 (an announcement carries no proof of a key; a burn made
+directly on the token is recovered by its burner's `redirectHeldBurn`). Deploying it is optional and changes
+nothing for the signers; the commands below are kept for a deployment that wants the contract on chain anyway.
 
 `contracts/solana/SolanaRecipientRegistry.sol` has no constructor argument, no owner and no state. It is deployed
 once on the L2 by any funded account, and its address goes into `registry.address` of the token config and into
