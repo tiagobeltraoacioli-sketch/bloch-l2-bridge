@@ -347,5 +347,55 @@ class OptionValues(unittest.TestCase):
                     sombra.Sombra.plain('0x12', opt)
 
 
+class AlertCommand(unittest.TestCase):
+    """`alert_command`: text from outside never becomes an option of the operator's pager program."""
+
+    def modules(self):
+        import guardiao
+        import reservas
+        import sombra
+        return guardiao, sombra, reservas
+
+    def test_honest_alerts_keep_their_arguments(self):
+        for m in self.modules():
+            with self.subTest(m.__name__):
+                self.assertEqual(m.alert_argv(['pager', '--title', '{id}', '{detail}', 'bridge {id}: {detail}'],
+                                              'pause-failed', 'cannot read the pause state'),
+                                 ['pager', '--title', 'pause-failed', 'cannot read the pause state',
+                                  'bridge pause-failed: cannot read the pause state'])
+                self.assertEqual(m.alert_argv(['pager', '--detail={detail}'], 'x', '-o /tmp/f'),
+                                 ['pager', '--detail=-o /tmp/f'])  # the operator's own option keeps its value
+
+    def test_a_detail_that_starts_like_an_option_is_not_one(self):
+        tail = 'x' * 400 + '--config=/tmp/evil'  # the alert keeps the LAST 300 characters: the tail decides the start
+        for m in self.modules():
+            for detail in ('--help', '-o/etc/cron.d/x', '-K /tmp/evil', tail[-18:], tail):
+                with self.subTest(m.__name__, detail=detail[-20:]):
+                    argv = m.alert_argv(['pager', '{id}', '{detail}'], '-q', detail)
+                    self.assertEqual(argv[0], 'pager')
+                    self.assertFalse(any(a.startswith('-') for a in argv[1:]), argv)
+                    self.assertEqual(argv[2].lstrip(' '), detail[-300:])
+
+    def test_the_daemons_use_it(self):
+        import guardiao
+        import reservas
+        import sombra
+        ran = []
+        fake = Mock(side_effect=lambda argv, **kw: ran.append(argv) or Mock(returncode=0, stderr=''))
+        g = guardiao.Guardian.__new__(guardiao.Guardian)
+        g.cfg = {'alert_command': ['pager', '{detail}']}
+        s = sombra.Sombra.__new__(sombra.Sombra)
+        s.cfg = {'alert_command': ['pager', '{detail}']}
+        r = reservas.Monitor.__new__(reservas.Monitor)
+        r.cfg = {'alert_command': ['pager', '{detail}']}
+        for module, daemon in ((guardiao, g), (sombra, s), (reservas, r)):
+            real, module.subprocess.run = module.subprocess.run, fake
+            try:
+                daemon.notify('pause-failed', '--help')
+            finally:
+                module.subprocess.run = real
+        self.assertEqual(ran, [['pager', ' --help']] * 3)
+
+
 if __name__ == '__main__':
     unittest.main()
