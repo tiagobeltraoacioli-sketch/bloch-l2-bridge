@@ -6,15 +6,24 @@
                           (--artifact is a forge artifact, or FILE.bin = the hex creation code `solc --bin` writes)
   tron_deploy.py create   --config CFG.json --artifact ART.json --node URL --keystore K --password-file P [--broadcast]
   tron_deploy.py verify   --config CFG.json --artifact ART.json --node URL --vault T...
+  tron_deploy.py fee      --config CFG.json [--node URL] [--trx-usdt PRICE]
+                          The fixed release fee recomputed from the measured energy of a release, the chain's unit
+                          prices and USDT's dynamic-energy factor (from the config's record, or read NOW from the
+                          operator's node with --node), and the TRX price (the config's, or --trx-usdt). Exit 1 when
+                          the configured fee is below the rule.
 
 validate  refuses an undecided value (null, TBD-owner, TBD-deploy), a bad Base58Check address, an address used in two
           roles, and, on TRON mainnet (chain id 728126428), anything but the decided shape: USDT
           TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t, transfer mode 1, 7 signers with 5 to release and 6 to switch or
-          unpause, 3 guardians, a fee of at most 30 bps each way plus a fixed release fee (not zero, at most half
-          of l2MinBurn) with a recipient that holds no other role, and
+          unpause, 3 guardians, a fee of at most 30 bps each way plus a fixed release fee with a recipient that
+          holds no other role. The fixed fee must be at least the rule's value (the worst-case cost of one release
+          to its relayer, times 1.5: `release_fee_rule`, docs/BRIDGE-TRON-USDT.md section 5) and at most 20% of
+          l2MinBurn, the smallest exit; and
           `consume_user_resource_percent` 100 (the deployer never pays for other people's calls).
 plan      prints the constructor arguments, the creation code hashes and the transaction settings. Nothing is sent.
-create    builds the CreateSmartContract transaction HERE (tronlib), shows it, and with --broadcast signs and sends it,
+create    on mainnet first recomputes the fixed-fee rule from the node's CURRENT chain parameters and USDT energy factor
+          and the TRX price given with --trx-usdt, and refuses a configured fee below it. It then
+          builds the CreateSmartContract transaction HERE (tronlib), shows it, and with --broadcast signs and sends it,
           then waits for the SOLIDIFIED receipt. Without --broadcast it only simulates nothing and prints the plan
           and the transaction id it would sign.
 verify    reads the deployed contract back: the creation code the chain stored (TRON keeps it) must equal the
@@ -37,6 +46,9 @@ CTOR = ('constructor(bytes32,bytes32,bytes32,address,uint64,uint8,address[],uint
         '(uint64,uint64,uint8,uint64,uint64,uint64),(address[],uint64,uint64),'
         '(uint8,uint64,address,(address,uint16,uint16,uint64)))')
 MAX_FEE_BPS = 30
+FEE_MARGIN_PERCENT = 150       # the fixed fee covers 1.5 times the cost of a release at today's chain parameters
+FEE_MAX_SHARE_PERCENT = 20     # and is at most this share of the smallest exit (l2MinBurn)
+UNIT = 1_000_000               # 1 USDT, and 1 TRX in sun
 
 
 class Refuse(Exception):
@@ -58,6 +70,73 @@ def addr(v, what):
         return tronlib.evm_address(need(v, what))
     except tronlib.TronError as e:
         raise Refuse(f'{what}: {e}') from e
+
+
+def release_fee_rule(basis, chain=None, trx_usdt_micro=None):
+    """The fixed release fee the rule requires, from what a release costs its relayer in the WORST case: no staked or
+    rented energy (every unit bought by burning TRX), the recipient never held USDT (a new storage slot in the token).
+
+      energy  = releaseEnergyBase                      a whole vault.release measured on a stock TVM, penalties excluded
+                - tokenBase                             the part spent inside the token (1 transfer to a fresh address
+                                                        and 4 balanceOf), which on mainnet carries the token's
+                + tokenBase * (10000 + factor) / 10000  dynamic-energy factor (USDT: 34000 = the chain maximum = x4.4)
+      cost    = energy * energyFeeSun + releaseBytes * transactionFeeSun          (sun; 1 TRX = 1e6 sun)
+      in USDT = cost * trxUsdtMicro / 1e6                                         (units of 1e-6 USDT)
+      fee     = cost in USDT * 150%, rounded UP to a whole USDT
+      l2MinBurn >= fee * 100 / 20   (the fee is at most 20% of the smallest exit); minDeposit net of its fee >= l2MinBurn
+
+    `basis` is the config's record (`vault.provenance.fees.basis`); `chain` replaces its recorded chain values with
+    ones read now from a node; `trx_usdt_micro` replaces its recorded price. Integer arithmetic, rounded up."""
+    m, c = basis['measured'], {**basis['chain'], **(chain or {})}
+    price = int(trx_usdt_micro if trx_usdt_micro is not None else basis['trxUsdtMicro'])
+    for k in ('releaseEnergyBase', 'tokenTransferFreshBase', 'tokenBalanceOfBase', 'releaseBytes'):
+        if int(m[k]) <= 0:
+            raise Refuse(f'fee basis: measured.{k} must be positive')
+    token_base = int(m['tokenTransferFreshBase']) + 4 * int(m['tokenBalanceOfBase'])
+    if not token_base < int(m['releaseEnergyBase']) or price <= 0 or int(c['energyFeeSun']) <= 0 or int(c['transactionFeeSun']) < 0 \
+            or int(c['usdtEnergyFactor']) < 0:
+        raise Refuse('fee basis: values out of range')
+    token_energy = -(-token_base * (10_000 + int(c['usdtEnergyFactor'])) // 10_000)
+    energy = int(m['releaseEnergyBase']) - token_base + token_energy
+    cost_sun = energy * int(c['energyFeeSun']) + int(m['releaseBytes']) * int(c['transactionFeeSun'])
+    cost_units = -(-cost_sun * price // UNIT)
+    with_margin = -(-cost_units * FEE_MARGIN_PERCENT // 100)
+    fee = -(-with_margin // UNIT) * UNIT
+    return {'energy': energy, 'energyInToken': token_energy, 'energyInVault': int(m['releaseEnergyBase']) - token_base,
+            'costSun': cost_sun, 'costTrx': cost_sun / UNIT, 'trxUsdtMicro': price, 'costUsdtUnits': cost_units,
+            'marginPercent': FEE_MARGIN_PERCENT, 'requiredFlatUnits': fee, 'minL2MinBurnUnits': fee * 100 // FEE_MAX_SHARE_PERCENT,
+            'chain': {k: int(c[k]) for k in ('energyFeeSun', 'transactionFeeSun', 'usdtEnergyFactor')}}
+
+
+def check_fee(rel_flat, l2_min_burn, rule, when):
+    if rel_flat < rule['requiredFlatUnits']:
+        raise Refuse(f"the fixed release fee ({rel_flat / UNIT:g} USDT) is below the rule {when}: a release costs its relayer "
+                     f"{rule['costTrx']:.3f} TRX = {rule['costUsdtUnits'] / UNIT:.3f} USDT ({rule['energy']} energy), times 1.5 and "
+                     f"rounded up = {rule['requiredFlatUnits'] // UNIT} USDT. Set releaseFlat to at least that, l2MinBurn to at least "
+                     f"{rule['minL2MinBurnUnits'] // UNIT} USDT, and minDeposit above it")
+    if rel_flat * 100 > FEE_MAX_SHARE_PERCENT * l2_min_burn:
+        raise Refuse(f'the fixed release fee ({rel_flat / UNIT:g} USDT) is above 20% of l2MinBurn ({l2_min_burn / UNIT:g} USDT): raise '
+                     f'l2MinBurn to at least {rel_flat * 100 // FEE_MAX_SHARE_PERCENT / UNIT:g} USDT')
+
+
+def live_chain(node, token):
+    """The three chain values of the rule, read now from the operator's own node (head state)."""
+    params = {p['key']: p.get('value', 0) for p in node.post('getchainparameters').get('chainParameter', [])}
+    state = node.post('getcontractinfo', {'value': tronlib.tron_hex(token), 'visible': False}).get('contract_state', {})
+    if 'getEnergyFee' not in params or 'getTransactionFee' not in params:
+        raise Refuse('the node did not return the chain parameters getEnergyFee and getTransactionFee')
+    # a contract with no dynamic-energy record has factor 0; with the proposal off (getAllowDynamicEnergy 0) the factor is not applied
+    factor = int(state.get('energy_factor', 0)) if int(params.get('getAllowDynamicEnergy', 0)) else 0
+    return {'energyFeeSun': int(params['getEnergyFee']), 'transactionFeeSun': int(params['getTransactionFee']), 'usdtEnergyFactor': factor,
+            'dynamicEnergyMaxFactor': int(params.get('getDynamicEnergyMaxFactor', 0))}
+
+
+def price_micro(text):
+    """A TRX price in USDT as text ('0.3054') -> micro-USDT per TRX, exactly."""
+    whole, _, frac = str(text).strip().partition('.')
+    if not whole.isdigit() or (frac and not frac.isdigit()) or len(frac) > 6:
+        raise Refuse('--trx-usdt is a decimal price of one TRX in USDT with at most 6 decimals, for example 0.3054')
+    return int(whole) * UNIT + int(frac.ljust(6, '0') or 0)
 
 
 def shape(cfg):
@@ -93,6 +172,18 @@ def shape(cfg):
         raise Refuse('minDeposit net of the deposit fee is below l2MinBurn')
     if rel_flat < 0 or rel_flat > int(pol['l2MinBurn']) // 2:
         raise Refuse('the fixed release fee is above half of l2MinBurn (the vault refuses it)')
+    rule = None
+    if mainnet:
+        basis = fees.get('basis')
+        if not isinstance(basis, dict):
+            raise Refuse('mainnet: fees.basis is missing: the measured energy of a release, the chain values and the TRX '
+                         'price the fixed fee was computed from (docs/BRIDGE-TRON-USDT.md section 5)')
+        try:
+            rule = release_fee_rule(basis)
+        except (KeyError, TypeError, ValueError) as e:
+            raise Refuse(f'fee basis: {type(e).__name__}: {e}') from e
+        if rel_flat != 0:   # zero is refused below with its own message
+            check_fee(rel_flat, int(pol['l2MinBurn']), rule, "at the config's recorded chain values and price")
     if int(v['provenance']['mode']) != 1 or int(v['provenance']['releaseDelay']) != 0 or v['provenance'].get('mintVerifier'):
         raise Refuse('the launch design is provenance mode 1, releaseDelay 0, no mintVerifier')
     deploy = cfg['deploy']
@@ -117,7 +208,8 @@ def shape(cfg):
             'policy': tuple(int(pol[x]) for x in ('windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay', 'minDeposit', 'l2MinBurn')),
             'guardians': sorted(guardians, key=lambda a: int(a, 16)),
             'pause': (int(v['guard']['pauseDuration']), int(v['guard']['pauseCooldown'])),
-            'fees': (recipient, dep_bps, rel_bps, rel_flat), 'deploy': deploy}
+            'fees': (recipient, dep_bps, rel_bps, rel_flat), 'deploy': deploy, 'fee_rule': rule,
+            'fee_basis': fees.get('basis') if mainnet else None}
 
 
 def check_token_config(s, token_cfg):
@@ -168,7 +260,7 @@ def report(ok, **fields):
 def main():
     a = sys.argv[1:]
     opt = lambda n, d=None: a[a.index(n) + 1] if n in a else d  # noqa: E731
-    if not a or a[0] not in ('validate', 'plan', 'create', 'verify') or '--config' not in a:
+    if not a or a[0] not in ('validate', 'plan', 'create', 'verify', 'fee') or '--config' not in a:
         raise SystemExit(__doc__)
     cfg = json.loads(Path(opt('--config')).read_text())
     try:
@@ -177,7 +269,20 @@ def main():
             check_token_config(s, json.loads(Path(opt('--token-config')).read_text()))
         if a[0] == 'validate':
             report(True, chainId=s['chain'], mainnet=s['mainnet'], feeRecipient=tronlib.base58(s['fees'][0]),
-                   signers=[tronlib.base58(x) for x in s['signers']], guardians=[tronlib.base58(x) for x in s['guardians']])
+                   signers=[tronlib.base58(x) for x in s['signers']], guardians=[tronlib.base58(x) for x in s['guardians']],
+                   releaseFlat=s['fees'][3], feeRule=s['fee_rule'])
+        if a[0] == 'fee':
+            if s['fee_basis'] is None:
+                raise Refuse('the fee rule is recorded and checked for TRON mainnet configs only')
+            chain = None
+            if opt('--node'):
+                node = tronlib.Node(opt('--node'), opt('--solidity'), cast=opt('--cast'), allow_remote='--allow-remote-node' in a)
+                chain = live_chain(node, s['token'])
+            rule = release_fee_rule(s['fee_basis'], chain, price_micro(opt('--trx-usdt')) if opt('--trx-usdt') else None)
+            check_fee(s['fees'][3], s['policy'][5], rule, 'at the values read now' if chain or opt('--trx-usdt') else
+                      "at the config's recorded chain values and price")
+            report(True, configuredFlat=s['fees'][3], l2MinBurn=s['policy'][5], minDeposit=s['policy'][4], rule=rule,
+                   chainReadFromNode=bool(chain), headroomUnits=s['fees'][3] - rule['costUsdtUnits'])
         node = tronlib.Node(opt('--node', 'http://127.0.0.1:1'), opt('--solidity'), cast=opt('--cast'),
                             allow_remote='--allow-remote-node' in a)
         full, plan = creation(node, s, opt('--artifact'))
@@ -194,6 +299,14 @@ def main():
                 else ['--private-key', Path(opt('--private-key-file')).read_text().strip()]
             if s['mainnet'] and not opt('--keystore'):
                 raise Refuse('TRON mainnet: a keystore is required')
+            if s['mainnet']:
+                # the fee is immutable once created: recompute the rule from what the chain charges NOW
+                if not opt('--trx-usdt'):
+                    raise Refuse('TRON mainnet: --trx-usdt PRICE (one TRX in USDT today, with its source in the ceremony '
+                                 'record) is required: the fixed release fee is recomputed before the creation')
+                rule = release_fee_rule(s['fee_basis'], live_chain(node, s['token']), price_micro(opt('--trx-usdt')))
+                check_fee(s['fees'][3], s['policy'][5], rule, 'at the values read now from this node')
+                plan = {**plan, 'feeRuleNow': rule}
             me = node.run(node.cast, 'wallet', 'address', *wallet).lower()
             if me != s['deployer']:
                 raise Refuse(f'this key is {tronlib.base58(me)}, the config names deployer {tronlib.base58(s["deployer"])}')

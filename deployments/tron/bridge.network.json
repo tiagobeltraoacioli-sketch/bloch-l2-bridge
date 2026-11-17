@@ -72,9 +72,9 @@
     "cap": "100000000000",
     "window": "10000000000",
     "windowSeconds": 86400,
-    "minDeposit": "21000000",
+    "minDeposit": "66000000",
     "maxDeposit": "10000000000",
-    "l2MinBurn": "20000000",
+    "l2MinBurn": "65000000",
     "l2MaxBurn": "10000000000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
@@ -84,8 +84,8 @@
     "releaseBps": 5,
     "recipient": "TCQ2d5gxTczSeN2oeni16JwMW7HWLzXEKc",
     "paidOn": "source",
-    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient. A release also pays a FIXED fee of 8 USDT (8000000 units, vault releaseFlatFee()) on top of releaseBps: a burn of A pays out A - floor(A * 5 / 10000) - 8000000. The schema has no field for a fixed fee; frontends must read it here or from the vault",
-    "networkFee": "the depositor pays the deposit transaction in TRX (about 115,000 energy on a private TVM, before USDT's dynamic-energy penalty on mainnet, plus an approval: on the order of 15 TRX); the relayer pays the release transaction (about 200,000 energy on mainnet, about 20 TRX), which the fixed release fee covers"
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient. A release also pays a FIXED fee of 13 USDT (13000000 units, vault releaseFlatFee()) on top of releaseBps: a burn of A pays out A - floor(A * 5 / 10000) - 13000000. The schema has no field for a fixed fee; frontends must read it here or from the vault",
+    "networkFee": "the depositor pays the deposit transaction in TRX (114,428 energy for a first deposit and about 83,000 after it on a stock private TVM, before USDT's dynamic-energy factor on mainnet, plus an approval: an ESTIMATE of 25 TRX in all at mainnet's factor, not measured there); the relayer pays the release transaction: 257,319 energy and 1,563 bytes on mainnet when it stakes nothing and the recipient never held USDT (27.3 TRX at 100 sun per energy; computed from a measured release and mainnet's own token costs), which the fixed release fee covers 1.5 times"
   },
   "finality": {
     "rule": "A deposit is attested only when the signer's own java-tron node serves it from the solidified state (/walletsolidity): its block has been confirmed by more than 70% of the 27 block producers (19).",
@@ -117,7 +117,7 @@
     "l2Function": "burn(uint64 amount, address sourceRecipient)",
     "recipientEncoding": "the 20-byte form of the TRON address: Base58Check-decode the T... address, check its checksum, drop the leading 0x41 byte",
     "typicalSeconds": 3600,
-    "paysAsset": "USDT (TRC-20), the burned amount less 0.05% and less the fixed 8 USDT; if the issuer charges its own transfer fee (0 today, at most 20 bps and 50 USDT) the recipient also bears that",
+    "paysAsset": "USDT (TRC-20), the burned amount less 0.05% and less the fixed 13 USDT (the smallest exit is 65 USDT, so the fixed fee is at most 20% of an exit); if the issuer charges its own transfer fee (0 today, at most 20 bps and 50 USDT) the recipient also bears that",
     "notes": [
       "USDT on TRON pays a recipient the issuer has blacklisted (the funds are then frozen at that address by the issuer, not by the bridge)",
       "while the issuer has blacklisted the vault or paused the token, no release can be paid; burns stay payable and are paid when the condition ends. An issuer transfer fee does not stop exits (the recipient bears it); it stops deposits",

@@ -44,6 +44,10 @@ import tron_log_index as li  # noqa: E402
 import tronlib  # noqa: E402
 
 U = R.U
+# The launch values of deployments/tron/busdt-trx-vault.config.json (the main rehearsal keeps its own smaller amounts):
+# a fixed release fee of 13 USDT, a minimum burn of 65 and a minimum deposit of 66.
+R.FLAT, R.MIN_DEPOSIT, R.MIN_BURN = 13 * U, 66 * U, 65 * U
+DEPOSITS, BURN = (100 * U, 150 * U), 70 * U
 check, out = R.check, R.out
 record = {'samples': [], 'energy': [], 'notes': {}}
 
@@ -137,7 +141,7 @@ def producers(net):
     blocks, amounts = [], []
 
     # P2. natural lag: a deposit is in the head state first, and in the solidified state only when its block is solidified
-    amounts.append(100 * U)
+    amounts.append(DEPOSITS[0])
     d0 = net.deposit(amounts[0], label='vault.deposit (first)')
     blocks.append(d0['block'])
     gap, wrong = 0, []
@@ -169,7 +173,7 @@ def producers(net):
     record['notes']['stalled'] = {'solidified': [s0, s1], 'head': [h0, h1]}
     check('P4 with one of three producers stopped the head keeps advancing and the solidified block does not move',
           s1 == s0 and h1 >= h0 + 4, (s0, s1, h0, h1))
-    amounts.append(50 * U)
+    amounts.append(DEPOSITS[1])
     d1 = net.deposit(amounts[1], label='vault.deposit')
     blocks.append(d1['block'])
     readings, wrong = [], []
@@ -262,14 +266,18 @@ def energies(net, amounts):
                       ('vault.release to a holder (the same address again)', fresh1),
                       ('vault.release to a second address that never held USDT', fresh2)):
         before = net.usdt_bal(to)
-        burn = net.burn(net.key['alice'], 30 * U, to)
+        burn = net.burn(net.key['alice'], BURN, to)
         net.sign_all()
         d = net.settle_release(burn, timeout=120)
-        ok = d is not None and d.get('closed') == 'landed' and net.usdt_bal(to) - before == R.paid_of(30 * U)
+        ok = d is not None and d.get('closed') == 'landed' and net.usdt_bal(to) - before == R.paid_of(BURN)
         done[label] = (ok, note(label, (d or {}).get('receipt') or {}) if d else None)
     e = {k: v[1] for k, v in done.items()}
-    check('E2 three releases through the daemons (5-of-7 certificate, relayed): each pays the burned amount less 5 bps and the '
-          'fixed fee, and its energy and bandwidth are recorded', all(v[0] for v in done.values()), done)
+    check('E2 three releases of 70 USDT through the daemons (5-of-7 certificate, relayed), on a vault with the launch values '
+          '(fixed fee 13, minimum burn 65, minimum deposit 66): each pays 70 less 5 bps less 13 = 56.965 USDT, and its energy '
+          'and bandwidth are recorded', all(v[0] for v in done.values()) and R.paid_of(BURN) == 56_965_000
+          and net.vint('releaseFlatFee()') == 13 * U and net.vint('l2MinBurn()') == 65 * U and net.vint('minDeposit()') == 66 * U, done)
+    low = net.sim('alice', net.vault, 'deposit(uint64,bytes32)', 65 * U, '0x' + '00' * 12 + net.a['alice'][2:])
+    check('E2b a deposit of 65 USDT (below the minimum of 66) is refused by the vault', low[0] is False, low)
     fresh, holder, fresh_again = (e[k]['energy_total'] if e[k] else 0 for k in done)
     check('E3 a release to an address that never held USDT costs more energy than one to a holder (a new storage slot in the '
           'token), and two fresh recipients cost the same', fresh > holder > 0 and abs(fresh - fresh_again) <= 64, (fresh, holder, fresh_again))
