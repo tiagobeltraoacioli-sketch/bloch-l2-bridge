@@ -285,5 +285,44 @@ class RelayerLatchKeyOfAnEarlierRedirect(unittest.TestCase):
         self.assertEqual([x['id'] for x in self.logs][-1:], ['approved-destination-not-a-wallet'])
         self.assertTrue(self.logs[-1]['latched'], "judged under the ORIGINAL destination's latch")
 
+
+class GuardianLagsTheSigners(unittest.TestCase):
+    """R330-SOL-4P-9 (review 376, on c90c6f8): an honest approval whose burn (or redirect) is past THIS guardian's
+    L2 `finalized` head is judged by the recipient rule on logs read only up to that head: the router's log is not
+    there yet, and the finding is `release-mismatch:unproven-…` / `release-mismatch:…`, hard with grace 0 (vault and
+    token paused), instead of the parent's `release-before-final` with its configured severity and grace, which
+    exist for exactly this lag. (The developer's own rehearsal case `release-before-final` fails this way.)"""
+
+    setUp = GuardianBlindRound.setUp
+
+    def findings_at(self, burn, recipient20, fin):
+        b = dict(burn, eth_recipient=burn['recipient'])
+        record = {'nonce': burn['nonce'], 'seq': 1, 'state': 1, 'recipient': recipient20, 'amount': burn['amount'],
+                  'native_burn': S.unhex(burn['burn_id'], 32), 'key': 'record', 'ready_at': 0}
+        self.g.records = lambda: []
+        self.g.release_records = lambda: [record]
+        self.node.token_balance = lambda address: {'mint': self.node.config.mint, 'owner': self.node.a.vault, 'amount': 10**12}
+        self.node.vault['void_through_seq'] = 0
+        self.g._senders = None
+        _, _, findings = self.g.eth_source([b], fin=fin)
+        return [(f[0], f[1].rsplit('-', 2)[0] if 'approval' in f[1] else f[1], f[2]) for f in findings]
+
+    def test_control_the_same_approval_judged_at_a_head_past_the_burn_is_clean(self):
+        honest = self.l2.exit('an honest exit, just final for the signers')
+        self.assertEqual(self.findings_at(honest, S.unhex(honest['recipient'], 20), fin=honest['block']), [])
+
+    def test_r376_sol_4p_9_a_guardian_one_block_behind_pauses_on_an_honest_approval(self):
+        honest = self.l2.exit('an honest exit, just final for the signers')
+        found = self.findings_at(honest, S.unhex(honest['recipient'], 20), fin=honest['block'] - 1)
+        self.assertEqual(found, [('hard', 'release-mismatch:unproven-approval', 0)],
+                         'DEFECT: hard, grace 0, on a lag the parent tolerates with release-before-final (which the '
+                         '`continue` after the recipient finding never reaches)')
+
+    def test_r376_sol_4p_9_the_same_for_an_approval_of_a_redirect_the_guardian_has_not_finalized(self):
+        held = self.l2.direct(S.account_id(K.wallet_of('held 4p9')[1]))
+        r = self.l2.redirect(held, 'redirected 4p9')
+        found = self.findings_at(held, S.account_id(r['wallet']), fin=r['block'] - 1)
+        self.assertEqual(found, [('hard', 'release-mismatch:approval', 0)])
+
 if __name__ == '__main__':
     unittest.main()
