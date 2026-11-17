@@ -22,10 +22,12 @@ replay cannot know, because the Bitcoin chain does not carry it, is whether thos
                still unpaid after `max_wait_seconds` is reported as stalled. It is an alert, not a rule: the window,
                a guardian pause or seven offline signers also delay payments.
 
-`historical=False` (the signer) reads every term at one block, the finalized one. Then a set-aside whose burner
-called the router after it cannot be re-judged (its earlier terms are gone) and is skipped, never reported: the
-signer must not hold the vault on a false alarm. The reserves monitor reads at each set-aside's own block and judges
-every one. UNAUDITED.
+`historical=False` reads every term at one block, the finalized one. Then a set-aside whose burner called the router
+after it cannot be re-judged (its earlier terms are gone) and is skipped, never reported. The signer runs
+historical=True with a reader that answers None when its own L2 cannot serve the set-aside's block: judged where the
+state exists, skipped (never a false alarm) where it does not. Found by the rehearsal (X3): judged at the finalized
+block only, a rogue set-aside became invisible to every signer as soon as its burner made the call that it needs to
+be paid. The reserves monitor reads at each set-aside's own block and judges every one. UNAUDITED.
 """
 import btc_policy as pol
 
@@ -74,6 +76,8 @@ def audit_thread(vault, entries, burns, terms_at, burn_time, historical=True, sk
                 continue  # btc_reservas reports a set-aside of a burn the L2 does not have as `held`
             if historical:
                 t = terms_at(b, marker.aside_block)
+                if t is None:
+                    continue  # the caller's L2 cannot serve that block (a signer's view): not judged, never a false alarm
             else:
                 t = terms_at(b, None)
                 if t['updated_block'] > marker.aside_block:

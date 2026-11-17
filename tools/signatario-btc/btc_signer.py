@@ -446,20 +446,28 @@ def cmd_sign(cfg, args):
                 refuse('the release window is full; retry later', used=used, limit=p['windowLimitSats'])
             # 4e. The thread so far against the finalized L2 (review R342-BTC-2): this signer does not add a transaction to
             # a thread in which five keys already signed outside the L2-side rules (a set-aside the rule did not allow,
-            # a late payment without its burner's call, a payout above its burner's ceiling). Judged at this signer's
-            # finalized block only, so it never holds on a false alarm (btc_audit: historical=False); the reserves
-            # monitor judges every set-aside at its own block. Confirmed transactions are audited once.
+            # a late payment without its burner's call, a payout above its burner's ceiling). Each set-aside is judged at the
+            # set-aside's own L2 block where this signer's L2 serves it, skipped where it does not, so it never holds
+            # on a false alarm; the reserves monitor judges every one. Confirmed transactions are audited once.
             l2_view, fin = final_token[0], int(final_token[1], 16)
             log = {b['nonce']: b for b in l2_view.burns(int(cfg.get('token_from_block', 0)), fin)}
 
             def at_final(b, block):
-                return terms({'nativeBurn': b['burn_id'], 'nonce': b['nonce'], 'recipient': '0x' + b['recipient'].hex()},
-                             {'from': b['from']})
+                """Terms at the finalized block (block None), or at a past block if this L2 view serves it, else None."""
+                if block is None:
+                    return terms({'nativeBurn': b['burn_id'], 'nonce': b['nonce'], 'recipient': '0x' + b['recipient'].hex()},
+                                 {'from': b['from']})
+                if not 0 < block <= fin:
+                    return None
+                try:
+                    return btc_l2.burn_terms(exits, router, b['from'], b['burn_id'], b['nonce'], b['recipient'], hex(block))
+                except btc_l2.L2Error:
+                    return None
             journal_now = journal_load(cfg['journal'])
             audited = set(journal_now.get('audited', []))
             try:
                 bad = btc_audit.audit_thread(vault, view.entries, log, at_final, lambda b: l2_view.block_time(b['block']),
-                                             historical=False, skip=audited)
+                                             historical=True, skip=audited)
             except btc_l2.L2Error as e:
                 refuse(f'hold: {e}')
             # an operator who investigated a violation releases the hold by naming its transaction in the config

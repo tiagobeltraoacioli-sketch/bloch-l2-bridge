@@ -1024,10 +1024,15 @@ def run(rig):
     rig.l2_mine(3)
     r = rig.vault_tx(1, burns=[wrong], tag='k-claim')
     rig.mine(1)
-    check('K4 the burner claims on the router (a transaction from the burning account, set once) and is paid to the address '
-          'claimed, only once the claim is final on the L2: the mistaken burn is rescued',
-          again is None and r_early['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0
-          and received(to_claim) == 500_000 - 500 - (vault.payout_vb + vault.overhead_vb), (r_early['propose'][1], r))
+    # Restated in round 18 (router of review 342's fixes): the router now stores one claim per (burner, nonce, address),
+    # so a second claim of the burner for another address no longer reverts; the signers honour only the FIRST claim
+    # of a burner without code, so the property "set once" is kept where it decides: the payout goes to the first.
+    check('K4 the burner claims on the router (a transaction from the burning account; its first claim is the one honoured) '
+          'and is paid to the address claimed, only once the claim is final on the L2: the mistaken burn is rescued; its '
+          'later claim for another address pays nothing there',
+          again is not None and r_early['propose'][0] != 0 and r['combine'] and r['combine'][0] == 0
+          and received(to_claim) == 500_000 - 500 - (vault.payout_vb + vault.overhead_vb) and received(thief_addr) == 0,
+          (r_early['propose'][1], r))
 
     # An unclaimed direct burn is NEVER paid, however long it waits, although here it names a real key hash.
     named_addr, named = user_hash()

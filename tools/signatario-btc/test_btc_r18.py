@@ -78,6 +78,10 @@ class ThreadAudit(unittest.TestCase):
         self.assertEqual(self.audit(v, entries, now, then), [])
         # a signer that only has the finalized block cannot judge it, and says nothing
         self.assertEqual(self.audit(v, entries, now, historical=False), [])
+        # a signer whose L2 view cannot serve the set-aside block (its reader answers None) skips it too
+        burns = {n: {'nonce': n, 'units': 1_000} for n in range(1, 10)}
+        self.assertEqual(btc_audit.audit_thread(v, entries, burns, lambda b, blk: now[b['nonce']] if blk is None else None,
+                                                lambda b: 0, True), [])
         # but a claimed burn at block 10 with a payable ceiling is found by the monitor
         then = {(1, 10): router_terms(50, 8)}
         self.assertEqual([x['rule'] for x in self.audit(v, entries, now, then)], ['set-aside-outside-the-rule'])
