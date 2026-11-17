@@ -20,16 +20,16 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 <!-- allnets-launch-table:begin -->
 | Route | L2 token | Launch status | Open findings (Medium or above) |
 |---|---|---|---|
-| ethereum | bUSDC | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open) |
-| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified) |
-| base | bUSDC.base | held | R329-EVM-1 (Medium, fixed-unverified) |
-| bitcoin | bBTC | not-launchable-until-fixed | R342-BTC-1 (Medium, open) |
-| bnb | bUSDC.bnb | out | R329-EVM-1 (Medium, fixed-unverified) |
-| linea | bUSDC.linea | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified), R329-EVM-4 (Medium, open) |
-| op-mainnet | bUSDC.op | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open), R329-EVM-1 (Medium, fixed-unverified), R329-EVM-4 (Medium, open) |
-| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual) |
-| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-3P-1 (Medium, open) |
-| tron | bUSDT.trx | not-launchable-until-fixed | R332-SHARED-847 (unassessed, open) |
+| ethereum | bUSDC | launchable | - |
+| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
+| base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
+| bitcoin | bBTC | not-launchable-until-fixed | R342-BTC-1 (Medium, open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)), R342-BTC-2P-1 (Medium, open), R342-BTC-2P-2 (Medium, open) |
+| bnb | bUSDC.bnb | out | - |
+| linea | bUSDC.linea | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
+| op-mainnet | bUSDC.op | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
+| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, open) |
+| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-1 (Medium, open) |
+| tron | bUSDT.trx | undeclared | - |
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before

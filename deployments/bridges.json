@@ -64,19 +64,12 @@
         "deployments/mainnet/busdc-vault-mainnet.config.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "routes.py (the frozen Ethereum bridge)",
         "reason": "the Ethereum bridge (bUSDC V3), freeze cc2511a",
-        "openFindings": [
-          {
-            "id": "R332-SHARED-847",
-            "severity": "unassessed",
-            "state": "open",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "ethereum-mainnet",
       "sourceChainId": "1"
@@ -144,15 +137,9 @@
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it.",
         "openFindings": [
           {
-            "id": "R332-SHARED-847",
-            "severity": "unassessed",
-            "state": "open",
-            "owner": 374
-          },
-          {
-            "id": "R329-EVM-1",
-            "severity": "Medium",
-            "state": "fixed-unverified",
+            "id": "R329-EVM-3P-1",
+            "severity": "Low (merge hold)",
+            "state": "fixed-not-on-audit-line",
             "owner": 372
           }
         ]
@@ -223,9 +210,9 @@
         "reason": "Held until one release lands inside the 256-block window (about 51 s; 49 s to join) with the production signer path at 0.2 s blocks. Measured by reviewer 329 on a paced fork, signers one after another: paid at 31.6 s of 49 s only with 4 s of work per signature (every signer warm); not paid in 300 s with 12 s of work (5 rounds, at most 4 signatures); not paid in 301 s with 26 s of work, the cold-cache rebuild of today (4 rounds, at most 2 signatures).",
         "openFindings": [
           {
-            "id": "R329-EVM-1",
+            "id": "R329-EVM-3P-2",
             "severity": "Medium",
-            "state": "fixed-unverified",
+            "state": "open",
             "owner": 372
           }
         ]
@@ -296,6 +283,18 @@
           {
             "id": "R342-BTC-1",
             "severity": "Medium",
+            "state": "open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)",
+            "owner": 370
+          },
+          {
+            "id": "R342-BTC-2P-1",
+            "severity": "Medium",
+            "state": "open",
+            "owner": 370
+          },
+          {
+            "id": "R342-BTC-2P-2",
+            "severity": "Medium",
             "state": "open",
             "owner": 370
           }
@@ -363,14 +362,7 @@
         "sourceState": "out",
         "source": "evm-launch-registry",
         "reason": "Out of bridge v1 (developer 320, reviewers 325 and 329, coordinator): the only asset is a custodial 18-decimal peg token, held through a wrapper that is new unaudited code, and every recipient needs a second transaction.",
-        "openFindings": [
-          {
-            "id": "R329-EVM-1",
-            "severity": "Medium",
-            "state": "fixed-unverified",
-            "owner": 372
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "bnb-smart-chain",
       "sourceChainId": "56"
@@ -438,21 +430,9 @@
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
         "openFindings": [
           {
-            "id": "R332-SHARED-847",
-            "severity": "unassessed",
-            "state": "open",
-            "owner": 374
-          },
-          {
-            "id": "R329-EVM-1",
-            "severity": "Medium",
-            "state": "fixed-unverified",
-            "owner": 372
-          },
-          {
-            "id": "R329-EVM-4",
-            "severity": "Medium",
-            "state": "open",
+            "id": "R329-EVM-3P-1",
+            "severity": "Low (merge hold)",
+            "state": "fixed-not-on-audit-line",
             "owner": 372
           }
         ]
@@ -523,21 +503,9 @@
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
         "openFindings": [
           {
-            "id": "R332-SHARED-847",
-            "severity": "unassessed",
-            "state": "open",
-            "owner": 374
-          },
-          {
-            "id": "R329-EVM-1",
-            "severity": "Medium",
-            "state": "fixed-unverified",
-            "owner": 372
-          },
-          {
-            "id": "R329-EVM-4",
-            "severity": "Medium",
-            "state": "open",
+            "id": "R329-EVM-3P-1",
+            "severity": "Low (merge hold)",
+            "state": "fixed-not-on-audit-line",
             "owner": 372
           }
         ]
@@ -610,6 +578,12 @@
             "severity": "Medium",
             "state": "open-residual",
             "owner": 371
+          },
+          {
+            "id": "R330-SOL-4P-3",
+            "severity": "Medium",
+            "state": "open",
+            "owner": 371
           }
         ]
       },
@@ -678,7 +652,7 @@
         "reason": "the route's bridge.network.json carries no `launch` block",
         "openFindings": [
           {
-            "id": "R331-XLM-3P-1",
+            "id": "R331-XLM-4P-1",
             "severity": "Medium",
             "state": "open",
             "owner": 373
@@ -743,18 +717,11 @@
       ],
       "launch": {
         "v1": false,
-        "state": "not-launchable-until-fixed",
+        "state": "undeclared",
         "sourceState": "undeclared",
         "source": "none",
         "reason": "the route's bridge.network.json carries no `launch` block",
-        "openFindings": [
-          {
-            "id": "R332-SHARED-847",
-            "severity": "unassessed",
-            "state": "open",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "tron-mainnet",
       "sourceChainId": "728126428"

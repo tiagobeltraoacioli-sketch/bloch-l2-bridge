@@ -137,6 +137,9 @@ def stage_integration(r):
     r.suite('integration', 'test_routes', py('test_routes.py'), cwd=ROOT / 'tools/deploy-pontes')
     r.suite('integration', 'remerge-status', py('tools/allnets/remerge.py', '--status'),
             expect=lambda t, c: 'MOVED' not in t)
+    for lst in ('phase2-bridge', 'phase2b-bridge'):
+        r.suite('integration', f'manifest-{lst}', ['sh', '-c', f'{sys.executable} -I scripts/audit-rfp/manifest.py . HEAD '
+                f'docs/audit-rfp-r12/{lst}.list | cmp - docs/audit-rfp-r12/{lst}.manifest.tsv'])
     r.suite('integration', 'route-file-identity', py(str(HERE / 'test_all.py'), '--identity'))
 
 

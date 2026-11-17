@@ -1,31 +1,127 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T04:30:00Z",
+  "asOf": "2026-11-17T05:30:00Z",
   "findings": [
-    {"id": "R332-SHARED-847", "routes": ["ethereum", "arbitrum-one", "op-mainnet", "linea", "tron"], "severity": "unassessed",
-     "state": "open", "owner": 374, "reviewer": 379,
-     "what": "tools/signatario-stable/signatario.py:847 (release_in) accepts a signature by the exit code of `cast wallet verify`; a value `-h` plus 130 characters passes. Severity not yet stated by its owner; counted as blocking until it is.",
-     "source": "agents/R16-CROSS-AREA.md 2026-11-17 01:10 UTC (agent 332); BRIEF-ROUND18.md task 374; shared-tools line ec79cf8 (fix of the alert_command class, refreeze) merged here"},
-    {"id": "R329-EVM-1", "routes": ["arbitrum-one", "op-mainnet", "linea", "base", "bnb"], "severity": "Medium",
-     "state": "fixed-unverified", "owner": 372, "reviewer": 379,
-     "what": "launch status of Base and BNB Smart Chain not enforced by the tree; fixed by 337 at 10b8147 (launch blocks in networks.json and bridge.network.json, refusals in every tool), carried by the audit tip 9187656; third pass of reviewer 329/379 pending",
-     "source": "agents/329-bridge-evm-review-r17.md findings table; agents/R16-CROSS-AREA.md 2026-11-17 02:10 UTC (agent 337)"},
-    {"id": "R329-EVM-4", "routes": ["op-mainnet", "linea"], "severity": "Medium",
-     "state": "open", "owner": 372, "reviewer": 379,
-     "what": "the signer's L2 rebuild time per release is modelled, not measured, exported or alerted; no refusal of a round it cannot finish inside the release window",
-     "source": "agents/329-bridge-evm-review-r17.md findings table; BRIEF-ROUND18.md task 372"},
-    {"id": "R342-BTC-1", "routes": ["bitcoin"], "severity": "Medium",
-     "state": "open", "owner": 370, "reviewer": 378,
-     "what": "a relayer can set aside every exit whose maxFeeRate is below the top of the signers' fee band and replace a pending payout; set-aside must follow an objective rule every signer checks from finalized data",
-     "source": "agents/342-bridge-btc-tron-review-r17.md findings table (demonstration b9592ee)"},
-    {"id": "R330-SOL-1", "routes": ["solana"], "severity": "Medium",
-     "state": "open-residual", "owner": 371, "reviewer": 376,
-     "what": "an on-curve destination that nobody holds a key for cannot be told from a fresh wallet; the residual closes only with the destination-key proof bound into the exit (task 371 item 3) and the page's proof (task 363)",
-     "source": "agents/330-bridge-solana-review-r17.md 3P.5 'Before launch' item 1; BRIEF-ROUND18.md tasks 371 and 363"},
-    {"id": "R331-XLM-3P-1", "routes": ["stellar"], "severity": "Medium",
-     "state": "open", "owner": 373, "reviewer": 377,
-     "what": "the guardian calls a second valid claim of the same burner a forgery, and publish_claim may publish a claim the quorum did not use",
-     "source": "agents/331-bridge-stellar-review-r17.md third pass findings table and 3P.5"}
+    {
+      "id": "R342-BTC-1",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Medium",
+      "state": "open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)",
+      "owner": 370,
+      "reviewer": 378,
+      "what": "a relayer can set aside every exit whose maxFeeRate is below the top of the signers' fee band and replace a pending payout; set-aside must follow an objective rule every signer checks from finalized data",
+      "source": "agents/342-bridge-btc-tron-review-r17.md findings table (demonstration b9592ee)"
+    },
+    {
+      "id": "R330-SOL-1",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Medium",
+      "state": "open-residual",
+      "owner": 371,
+      "reviewer": 376,
+      "what": "an on-curve destination that nobody holds a key for cannot be told from a fresh wallet; the residual closes only with the destination-key proof bound into the exit (task 371 item 3) and the page's proof (task 363)",
+      "source": "agents/330-bridge-solana-review-r17.md 3P.5 'Before launch' item 1; BRIEF-ROUND18.md tasks 371 and 363"
+    },
+    {
+      "id": "R329-EVM-3P-1",
+      "routes": [
+        "arbitrum-one",
+        "op-mainnet",
+        "linea"
+      ],
+      "severity": "Low (merge hold)",
+      "state": "fixed-not-on-audit-line",
+      "owner": 372,
+      "reviewer": 379,
+      "what": "a non-int JSON chain id skips the launch gate of vault_pontes.py; fixed on the EVM working line 82fb701 and closed by 379 there; the audit line taken here (9187656) does not carry the fix. The reviewer asked the integrator not to merge the EVM line into main before it: counted as blocking until the re-cut audit line is merged.",
+      "source": "cross-area 2026-11-17 04:19 and 04:53 UTC (agent 379)"
+    },
+    {
+      "id": "R329-EVM-3P-2",
+      "routes": [
+        "base"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 372,
+      "reviewer": 379,
+      "what": "Base signer prototype: warm_stale checks only values the writer of warm_dir supplies; Base must not be lifted on this prototype (the prototype is never merged here)",
+      "source": "cross-area 2026-11-17 04:41 UTC (agent 379)"
+    },
+    {
+      "id": "R342-BTC-2P-1",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 370,
+      "reviewer": 378,
+      "what": "late payments ranked by one byte among all set-aside burns: 256 abandoned set-aside burns make every later one unpayable",
+      "source": "cross-area 2026-11-17 04:35 and 04:48 UTC (agent 378); demonstration a2c70ae"
+    },
+    {
+      "id": "R342-BTC-2P-2",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 370,
+      "reviewer": 378,
+      "what": "a pending vault transaction paying a burn whose ceiling equals its rate is irreplaceable; after a fee spike the thread waits for it",
+      "source": "same lines (agent 378)"
+    },
+    {
+      "id": "R330-SOL-4P-3",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 371,
+      "reviewer": 376,
+      "what": "existing approvals and payments are judged against the latest redirect only: a burner can make every honest guardian pause the vault and the token for 72 h, repeatedly",
+      "source": "cross-area 2026-11-17 04:50 UTC (agent 376)"
+    },
+    {
+      "id": "R331-XLM-4P-1",
+      "routes": [
+        "stellar"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 373,
+      "reviewer": 377,
+      "what": "a queued release to an address that cannot receive is never executed and never redirected; only a guardian pause frees it",
+      "source": "cross-area 2026-11-17 05:20 UTC (agent 377)"
+    }
+  ],
+  "removed": [
+    {
+      "id": "R332-SHARED-847",
+      "why": "severity stated Low by its owner (agents/341-bridge-signer-verify-r17.md section 1.4); fixed in 0f07e10 (merged here at a263425); reviewer 379 found the shared fix sound (cross-area 04:41 UTC, R329-SHARED-1 Info only)",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R329-EVM-1",
+      "why": "closed by reviewer 379, third pass interim (cross-area 2026-11-17 04:41 UTC; agents/329-bridge-evm-review-r17.md 3P)",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R329-EVM-4",
+      "why": "closed by reviewer 379, same line",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R331-XLM-3P-1",
+      "why": "closed by reviewer 377, fourth pass ('3P-1 class closed', cross-area 2026-11-17 05:20 UTC) at 87d8ed6",
+      "on": "2026-11-17"
+    }
   ]
 }
