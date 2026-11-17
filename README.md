@@ -23,13 +23,21 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 | ethereum | bUSDC | launchable | - |
 | arbitrum-one | bUSDC.arb | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
 | base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
-| bitcoin | bBTC | not-launchable-until-fixed | R342-BTC-1 (Medium, open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)), R342-BTC-2P-1 (Medium, open), R342-BTC-2P-2 (Medium, open) |
+| bitcoin | bBTC | undeclared | - |
 | bnb | bUSDC.bnb | out | - |
 | linea | bUSDC.linea | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
 | op-mainnet | bUSDC.op | not-launchable-until-fixed | R329-EVM-3P-1 (Low (merge hold), fixed-not-on-audit-line) |
 | solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-3 (Medium, open) |
 | stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-1 (Medium, open) |
 | tron | bUSDT.trx | undeclared | - |
+
+Open findings below Medium, listed on request (they do not hold the route):
+
+| Finding | Route | Severity | What |
+|---|---|---|---|
+| R342-BTC-2P-8 | bitcoin | Low | the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited |
+| R342-BTC-2P-6 | bitcoin | Info (regression, explained) | the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test |
+| R342-BTC-2P-7 | bitcoin | Info (latent) | whether a direct burner has code is read at today's block, not at the burn |
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before

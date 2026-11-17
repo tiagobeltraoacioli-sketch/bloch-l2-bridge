@@ -5,7 +5,8 @@
 
 Stages (default: every stage; a stage whose toolchain is not named in TOOLS.json is recorded NOT RUN with the reason,
 never silently skipped and never counted as a pass):
-  integration   registry check, test_registry, mergecheck over every merge, the never-merge and forbidden-path rules,
+  integration   registry check, test_registry, the cross-route matrix, mergecheck over every merge, regress.py
+                (per-file test and assertion counts never below the freeze or any merged line tip), the never-merge and forbidden-path rules,
                 route-file identity (every path a line owns is byte-identical to that line's merged tip), test_routes
   forge         `forge test --offline` (whole tree), A239Metamorphic isolated on shanghai and cancun
   artifacts     creation and runtime keccak of every contract: the frozen tree cc2511a and every line tip are built
@@ -134,6 +135,7 @@ def stage_integration(r):
     r.suite('integration', 'test_registry', py('-m', 'unittest', 'test_registry'), cwd=HERE)
     r.suite('integration', 'test_cross_route', py('-m', 'unittest', 'test_cross_route'), cwd=HERE)
     r.suite('integration', 'mergecheck', py('tools/allnets/mergecheck.py'))
+    r.suite('integration', 'regress-counts', py('tools/allnets/regress.py'))
     r.suite('integration', 'test_routes', py('test_routes.py'), cwd=ROOT / 'tools/deploy-pontes')
     r.suite('integration', 'remerge-status', py('tools/allnets/remerge.py', '--status'),
             expect=lambda t, c: 'MOVED' not in t)

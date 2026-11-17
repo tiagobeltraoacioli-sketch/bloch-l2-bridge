@@ -1,20 +1,8 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T05:30:00Z",
+  "asOf": "2026-11-17T05:45:00Z",
   "findings": [
-    {
-      "id": "R342-BTC-1",
-      "routes": [
-        "bitcoin"
-      ],
-      "severity": "Medium",
-      "state": "open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)",
-      "owner": 370,
-      "reviewer": 378,
-      "what": "a relayer can set aside every exit whose maxFeeRate is below the top of the signers' fee band and replace a pending payout; set-aside must follow an objective rule every signer checks from finalized data",
-      "source": "agents/342-bridge-btc-tron-review-r17.md findings table (demonstration b9592ee)"
-    },
     {
       "id": "R330-SOL-1",
       "routes": [
@@ -52,30 +40,6 @@
       "reviewer": 379,
       "what": "Base signer prototype: warm_stale checks only values the writer of warm_dir supplies; Base must not be lifted on this prototype (the prototype is never merged here)",
       "source": "cross-area 2026-11-17 04:41 UTC (agent 379)"
-    },
-    {
-      "id": "R342-BTC-2P-1",
-      "routes": [
-        "bitcoin"
-      ],
-      "severity": "Medium",
-      "state": "open",
-      "owner": 370,
-      "reviewer": 378,
-      "what": "late payments ranked by one byte among all set-aside burns: 256 abandoned set-aside burns make every later one unpayable",
-      "source": "cross-area 2026-11-17 04:35 and 04:48 UTC (agent 378); demonstration a2c70ae"
-    },
-    {
-      "id": "R342-BTC-2P-2",
-      "routes": [
-        "bitcoin"
-      ],
-      "severity": "Medium",
-      "state": "open",
-      "owner": 370,
-      "reviewer": 378,
-      "what": "a pending vault transaction paying a burn whose ceiling equals its rate is irreplaceable; after a fee spike the thread waits for it",
-      "source": "same lines (agent 378)"
     },
     {
       "id": "R330-SOL-4P-3",
@@ -122,6 +86,51 @@
       "id": "R331-XLM-3P-1",
       "why": "closed by reviewer 377, fourth pass ('3P-1 class closed', cross-area 2026-11-17 05:20 UTC) at 87d8ed6",
       "on": "2026-11-17"
+    },
+    {
+      "id": "R342-BTC-1",
+      "why": "closed by reviewer 378, second pass FINAL on codex/bridge-btc-r17-20261117 c50b8f3 (fit for external audit as a frozen line; no Critical/High/Medium open; regtest 93/93, unit 68, forge 605/0/1), relayed by the coordinator 2026-11-17",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R342-BTC-2P-1",
+      "why": "closed by reviewer 378, second pass FINAL on codex/bridge-btc-r17-20261117 c50b8f3 (fit for external audit as a frozen line; no Critical/High/Medium open; regtest 93/93, unit 68, forge 605/0/1), relayed by the coordinator 2026-11-17",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R342-BTC-2P-2",
+      "why": "closed by reviewer 378, second pass FINAL on codex/bridge-btc-r17-20261117 c50b8f3 (fit for external audit as a frozen line; no Critical/High/Medium open; regtest 93/93, unit 68, forge 605/0/1), relayed by the coordinator 2026-11-17",
+      "on": "2026-11-17"
     }
-  ]
+  ],
+  "listed": [
+    {
+      "id": "R342-BTC-2P-8",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Low",
+      "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
+      "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
+    },
+    {
+      "id": "R342-BTC-2P-6",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info (regression, explained)",
+      "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
+      "source": "same"
+    },
+    {
+      "id": "R342-BTC-2P-7",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info (latent)",
+      "what": "whether a direct burner has code is read at today's block, not at the burn",
+      "source": "same"
+    }
+  ],
+  "noteListed": "listed: findings below Medium that the coordinator or a reviewer asked to be shown in main's README; they do not hold a route."
 }

@@ -275,30 +275,11 @@
       ],
       "launch": {
         "v1": false,
-        "state": "not-launchable-until-fixed",
+        "state": "undeclared",
         "sourceState": "undeclared",
         "source": "none",
         "reason": "the route's bridge.network.json carries no `launch` block",
-        "openFindings": [
-          {
-            "id": "R342-BTC-1",
-            "severity": "Medium",
-            "state": "open (fix in progress at 28dcff3/88dd664; reviewer 378 regtest 88 of 91 at 88dd664)",
-            "owner": 370
-          },
-          {
-            "id": "R342-BTC-2P-1",
-            "severity": "Medium",
-            "state": "open",
-            "owner": 370
-          },
-          {
-            "id": "R342-BTC-2P-2",
-            "severity": "Medium",
-            "state": "open",
-            "owner": 370
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "genesis:000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
       "sourceChainId": "10628944869218562084050143519444549580389464591454674019345556079"
@@ -725,6 +706,35 @@
       },
       "sourceDomain": "tron-mainnet",
       "sourceChainId": "728126428"
+    }
+  ],
+  "listedFindings": [
+    {
+      "id": "R342-BTC-2P-8",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Low",
+      "what": "the signer's own check of past set-asides fails open on an L2 view error at a past block and records the txids as audited",
+      "source": "agents/342-bridge-btc-tron-review-r17.md second pass"
+    },
+    {
+      "id": "R342-BTC-2P-6",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info (regression, explained)",
+      "what": "the adversarial random walk's coverage floor in test_review_r17_342.py was lowered (1,500 and 100 to 500 and 30), with the reason marked in the test",
+      "source": "same"
+    },
+    {
+      "id": "R342-BTC-2P-7",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info (latent)",
+      "what": "whether a direct burner has code is read at today's block, not at the burn",
+      "source": "same"
     }
   ]
 }

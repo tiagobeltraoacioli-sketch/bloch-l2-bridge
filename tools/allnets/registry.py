@@ -185,7 +185,8 @@ def build():
            'l2ChainId': L2_CHAIN, 'tokenCreationCodeKeccak': CREATION_KECCAK,
            'checks': ['C1 network ids', 'C2 L2 symbols and names', 'C3 source chain ids', 'C4 source-domain labels',
                       'C5 frozen token on 700770', 'C6 owner fee recipients', 'C7 one committee', 'C8 findings name routes'],
-           'routes': [{'id': n, **out[n]} for n in order]}
+           'routes': [{'id': n, **out[n]} for n in order],
+           'listedFindings': (load(str(FINDINGS.relative_to(ROOT))).get('listed', []) if FINDINGS.exists() else [])}
     return reg, errors
 
 
@@ -238,6 +239,11 @@ def readme_table(reg):
         l = r['launch']
         ids = ', '.join(f"{f['id']} ({f['severity']}, {f['state']})" for f in l['openFindings']) or '-'
         rows.append(f"| {r['id']} | {r['l2']['symbol']} | {l['state']} | {ids} |")
+    listed = reg.get('listedFindings', [])
+    if listed:
+        rows += ['', 'Open findings below Medium, listed on request (they do not hold the route):', '',
+                 '| Finding | Route | Severity | What |', '|---|---|---|---|']
+        rows += [f"| {f['id']} | {', '.join(f['routes'])} | {f['severity']} | {f['what']} |" for f in listed]
     return '\n'.join(rows)
 
 
