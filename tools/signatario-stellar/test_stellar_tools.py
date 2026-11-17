@@ -308,8 +308,11 @@ class Rig(unittest.TestCase):
         clock = lambda n: self.now - 10 - (300 - n) * 12  # noqa: E731
         FakeL2.state = {u: {'chain': CHAIN, 'fin': 236, 'head': 300, 'burns': [], 'claims': {}, 'time': clock}
                         for u in ('a', 'b')}
+        seen = tempfile.TemporaryDirectory()
+        self.addCleanup(seen.cleanup)
         self.cfg = {'stellar_rpc': 'x', 'network_passphrase': PASS, 'vault': VAULT, 'l2_rpc': 'a', 'l2_chain_id': CHAIN,
-                    'token': TOKEN, 'router': ROUTER, 'router_code_keccak': ROUTER_CODE}
+                    'token': TOKEN, 'router': ROUTER, 'router_code_keccak': ROUTER_CODE,
+                    'seen_file': str(Path(seen.name) / 'guardian-seen.json')}
         for name, fake in (('Net', FakeVault), ('L2', FakeL2)):
             patch = mock.patch.object(sn, name, fake)
             patch.start()
@@ -429,12 +432,22 @@ class SignerDestination(Rig):
         FakeL2.state['a'].update(router_code=ROUTER_CODE, fork=b'another history')
         self.assertIn('changed its final block', self.read(b))
 
-    def half(self, intent, **cfg):
+    ISSUER = g_address(b'issuer')
+    ASSET = {'asset_code': 'USDC', 'asset_issuer': ISSUER, 'asset_contract': sn.asset_contract_id(PASS, 'USDC', ISSUER)}
+
+    def half(self, intent, unable=None, asked=None, asset=True, **cfg):
+        """The half's recipient check. `unable`: {address: [problems]} of the ledger (default: everyone can receive);
+        `asked` collects the addresses whose receivability was read; `asset=False` leaves the asset keys out."""
         h = object.__new__(stellar_half.Half)
-        h.cfg = cfg
+        h.cfg = {**(self.ASSET if asset else {}), **cfg}
         h.net = mock.Mock(passphrase=PASS)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+
+        def ledger(net, a, code, issuer):
+            if asked is not None:
+                asked.append(a)
+            return (unable or {}).get(a, [])
+        with contextlib.redirect_stdout(out), mock.patch.object(sn, 'fee_account_problems', side_effect=ledger):
             try:
                 return h.stellar_recipient(intent, bytes.fromhex(intent['release']['recipient'][2:]))
             except SystemExit:
@@ -461,31 +474,45 @@ class SignerDestination(Rig):
 
 
     def test_round18_a_held_router_exit_is_paid_to_its_redirect_and_only_while_held(self):
-        issuer = g_address(b'issuer')
-        asset = {'asset_code': 'USDC', 'asset_issuer': issuer,
-                 'asset_contract': sn.asset_contract_id(PASS, 'USDC', issuer)}
         b = self.burn(1, 100, PAYEE)
         self.redirect(1, PAYEE2, 200)
         intent = {'release': {'nonce': 1, 'recipient': b['recipient']},
                   'l2': {'from': ROUTER, 'finalized_number': 236,
                          'stellar': {'recipient': PAYEE, 'via': 'router', 'router': ROUTER, 'redirect': PAYEE2}}}
-        unable = {PAYEE: ['no trustline'], PAYEE2: []}
-        with mock.patch.object(sn, 'fee_account_problems', side_effect=lambda net, a, c, i: unable[a]):
-            self.assertEqual(self.half(intent, **asset), (PAYEE2, 'redirect'))            # held: the redirect
-            self.assertEqual(self.half(intent, l2_rpc='a', **asset), (PAYEE2, 'redirect'))  # own RPC agrees
-            unable[PAYEE] = []
-            self.assertEqual(self.half(intent, **asset), (PAYEE, 'router'))                # not held: burnTo's address
-            unable.update({PAYEE: ['no account'], PAYEE2: ['no trustline']})
-            self.assertIn('cannot receive it either', self.half(intent, **asset))
-            unable[PAYEE2] = []
-            self.assertIn('needs `asset_code`', self.half(intent))                          # fail closed
-            self.assertIn('needs `asset_code`', self.half(intent, **{**asset, 'asset_issuer': g_address(b'other')}))
-            intent['l2']['stellar']['redirect'] = MALLORY                                   # not what the router holds
-            self.assertIn('another redirect', self.half(intent, l2_rpc='a', **asset))
-            intent['l2']['stellar']['redirect'] = '--help'
-            self.assertIn('no usable Stellar recipient', self.half(intent, **asset))
-        intent['l2']['stellar'].pop('redirect')
-        self.assertEqual(self.half(intent), (PAYEE, 'router'))   # no redirect: nothing about holding is asked
+        held = {PAYEE: ['no trustline']}
+        self.assertEqual(self.half(intent, unable=held), (PAYEE2, 'redirect'))               # held: the redirect
+        self.assertEqual(self.half(intent, unable=held, l2_rpc='a'), (PAYEE2, 'redirect'))   # own RPC agrees
+        self.assertEqual(self.half(intent), (PAYEE, 'router'))                               # not held: burnTo's address
+        self.assertIn('cannot receive it either', self.half(intent, unable={PAYEE: ['no account'],
+                                                                            PAYEE2: ['no trustline']}))
+        self.assertIn('needs `asset_code`', self.half(intent, unable=held, asset=False))     # fail closed
+        self.assertIn('needs `asset_code`', self.half(intent, unable=held, asset_issuer=g_address(b'other')))
+        intent['l2']['stellar']['redirect'] = MALLORY                                        # not what the router holds
+        self.assertIn('another redirect', self.half(intent, unable=held, l2_rpc='a'))
+        intent['l2']['stellar']['redirect'] = '--help'
+        self.assertIn('no usable Stellar recipient', self.half(intent, unable=held))
+
+    def test_4p1_the_half_never_signs_for_an_address_that_cannot_receive(self):
+        """R331-XLM-4P-1 (reviewer 377): for every way a recipient is read, the half asks the ledger and holds."""
+        b = self.burn(1, 100, PAYEE)
+        intent = {'release': {'nonce': 1, 'recipient': b['recipient']},
+                  'l2': {'from': ROUTER, 'finalized_number': 236,
+                         'stellar': {'recipient': PAYEE, 'via': 'router', 'router': ROUTER}}}
+        asked = []
+        self.assertIn('held:', self.half(intent, unable={PAYEE: ['no trustline']}, asked=asked))
+        self.assertEqual(asked, [PAYEE])
+        self.assertIn('needs `asset_code`', self.half(intent, asset=False))   # no asset keys: nothing is signed
+        self.assertEqual(self.half(intent), (PAYEE, 'router'))
+        d = self.burn(2, 110, direct=True)
+        self.claim(2, PAYEE, 200)
+        intent = {'release': {'nonce': 2, 'recipient': d['recipient']},
+                  'l2': {'from': BURNER, 'finalized_number': 236,
+                         'stellar': {'recipient': PAYEE, 'via': 'claim', 'router': ROUTER}}}
+        self.assertIn('claim again', self.half(intent, unable={PAYEE: ['no account']}, l2_rpc='a'))
+        self.assertEqual(self.half(intent, l2_rpc='a'), (PAYEE, 'claim'))
+        contract = sn.strkey_encode('contract', bytes(range(32)))       # a contract holds the asset without a trustline
+        self.assertEqual(stellar_half.Half.cannot_receive(mock.Mock(cfg=self.ASSET, net=mock.Mock(passphrase=PASS)),
+                                                          contract), [])
 
 
 class GuardianCheck(Rig):
@@ -521,6 +548,17 @@ class GuardianCheck(Rig):
     def stall(self, fin=229, head=229):
         for s in FakeL2.state.values():
             s.update(fin=fin, head=head)
+
+    def still(self, seconds, fin=None):
+        """This guardian's own record: its final L2 block has had its present number for `seconds` (Stellar ledger
+        clock). Round 18 (R331-XLM-4P-3): the stall rule counts that time, not the release's age."""
+        path = Path(self.cfg['seen_file'])
+        seen = json.loads(path.read_text()) if path.exists() else {'vault': VAULT, 'releases': {}}
+        seen['final'] = {'number': FakeL2.state['a']['fin'] if fin is None else fin, 'since': self.now - seconds}
+        path.write_text(json.dumps(seen))
+
+    def forget(self):
+        Path(self.cfg['seen_file']).unlink(missing_ok=True)
 
     # honest releases
     def test_an_honest_router_release_is_ok(self):
@@ -619,13 +657,17 @@ class GuardianCheck(Rig):
         still while the head moves."""
         for kw in ({'names': (10**9, '0x' + '11' * 32)}, {'named': False}):
             FakeVault.events_list, FakeVault.pendings = [], {}
+            self.forget()
             self.burn(1, 290, direct=True)                           # pending: above the final block 236
             self.release(self.forged(1), MALLORY, ledger=990, event='release_queued', **kw)   # 50 s old
             code, out = self.check(stall_deadline=100)
             self.assertEqual((code, out['findings']), (3, []), kw)   # paged at once, no pause yet
-            FakeVault.events_list[0]['ledger'] = 970                 # ... 150 s old, finality where it was
+            FakeVault.events_list[0]['ledger'] = 970                 # ... 150 s old
             for s in FakeL2.state.values():
                 s['head'] = 320                                      # the head moved on
+            code, out = self.check(stall_deadline=100)
+            self.assertEqual((code, out['findings']), (3, []), kw)   # restated (round 18): finality not still long
+            self.still(150)                                          # ... finality where it was for 150 s
             code, out = self.check(stall_deadline=100)
             self.assertEqual(code, 2, kw)
             self.assertIn('stall rule', out['findings'][0]['reason'])
@@ -634,8 +676,9 @@ class GuardianCheck(Rig):
 
     def test_3p2_by_default_the_deadline_is_half_the_release_delay_and_cannot_be_later(self):
         self.release(self.forged(1), MALLORY, ledger=300, event='release_queued', named=False)   # 3,500 s old
+        self.still(3500)                                             # finality still for 3,500 s: under 3,600
         self.assertEqual(self.check()[0], 3)
-        FakeVault.events_list[0]['ledger'] = 270                     # 3,650 s old: past 3,600
+        self.still(3650)                                             # 3,650 s: past 3,600
         self.assertEqual(self.check()[0], 2)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
@@ -648,6 +691,7 @@ class GuardianCheck(Rig):
     def test_3p2_the_price_a_guardian_whose_own_follower_stands_still_pauses_after_the_deadline(self):
         self.release(self.burn(1, 230, PAYEE), PAYEE, ledger=200, event='release_queued')   # honest, 4,000 s old
         self.stall()
+        self.still(4000)
         code, out = self.check()
         self.assertEqual(code, 2)                                    # the stated trade-off of the stall rule
         self.assertIn('stall rule', out['findings'][0]['reason'])
@@ -657,11 +701,75 @@ class GuardianCheck(Rig):
         self.stall()
         self.assertEqual(self.check()[0], 3)
 
+    def test_4p3_the_stall_rule_needs_the_final_view_behind_the_release_and_finality_standing_still(self):
+        """R331-XLM-4P-3 (reviewer 377): an honest final burn whose log this guardian's source does not serve is
+        paged (exit 3), never paused for, however long finality stands still."""
+        b = self.burn(1, 100, PAYEE)
+        self.release(b, PAYEE, ledger=270, event='release_queued')
+        self.still(4000)
+        self.assertEqual(self.check()[0], 0)
+        with mock.patch.object(FakeL2, 'logs', return_value=[]):
+            code, out = self.check()
+        self.assertEqual((code, out['findings']), (3, []))
+        self.assertIn('does not serve', out['cannot_judge'][0]['reason'])
+
+    def test_4p2_the_height_rule_finds_a_paid_forgery_once_finality_passes_the_head_it_was_first_seen_at(self):
+        """R331-XLM-4P-2 (reviewer 377; regression of 4ee58b3 closed without a clock): a forgery under an unused
+        nonce naming a block nobody reaches (or hidden behind another contract), already PAID (delay 0)."""
+        for kw in ({'names': (10**9, '0x' + '11' * 32)}, {'named': False}):
+            FakeVault.events_list, FakeVault.delay = [], 0
+            self.forget()
+            for s in FakeL2.state.values():
+                s.update(fin=236, head=300)
+            self.release(self.forged(5), MALLORY, ledger=1, **kw)
+            code, out = self.check(height_margin=10)
+            self.assertEqual((code, out['findings']), (3, []), kw)   # first seen at head 300: not yet
+            self.assertEqual(json.loads(Path(self.cfg['seen_file']).read_text())['releases'][out['cannot_judge'][0]['release']],
+                             {'head': 300})
+            for s in FakeL2.state.values():
+                s.update(fin=310, head=374)
+            self.assertEqual(self.check(height_margin=10)[0], 3, kw)  # final at the mark + margin: not past it
+            for s in FakeL2.state.values():
+                s.update(fin=311, head=375)
+            code, out = self.check(height_margin=10)
+            self.assertEqual(code, 2, kw)
+            self.assertIn('more than 10 blocks past block 300', out['findings'][0]['reason'])
+            self.assertEqual(self.check()[0], 3, kw)                 # the default margin (256) is not passed yet
+
+    def test_4p2_an_honest_release_is_never_found_by_the_height_rule(self):
+        """Both directions: a guardian that first sees an honest release while its whole node is a little behind
+        the burn (head below it) judges it ok once it catches up, and never reports it."""
+        b = self.burn(1, 250, PAYEE)
+        self.stall(fin=240, head=245)                                # the node's head is below the burn
+        self.release(b, PAYEE, ledger=990)
+        self.assertEqual(self.check(height_margin=10)[0], 3)
+        for fin, head in ((246, 250), (249, 255), (250, 260), (300, 320)):
+            self.stall(fin=fin, head=head)
+            self.assertEqual(self.check(height_margin=10, l2_clock_alert_seconds=0)[0], 3 if fin < 250 else 0, fin)
+        for bad in (0, -1, True, 'x', 10**7):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+                G.Guardian({**self.cfg, 'height_margin': bad}).check()
+            self.assertEqual(e.exception.code, 1, bad)
+
+    def test_4p2_seen_file_is_required_and_belongs_to_one_vault(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            G.Guardian({k: v for k, v in self.cfg.items() if k != 'seen_file'}).check()
+        self.assertEqual(e.exception.code, 1)
+        Path(self.cfg['seen_file']).write_text(json.dumps({'vault': 'C' + 'A' * 55, 'releases': {}}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            G.Guardian(self.cfg).check()
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn('another vault', out.getvalue())
+
     # 3P-3: no timestamp decides
     def test_3p3_a_block_stamped_far_ahead_changes_no_verdict_and_is_its_own_alert(self):
         self.burn(1, 290, direct=True)
         self.release(self.forged(1), MALLORY, ledger=970, event='release_queued', names=(10**9, '0x' + '11' * 32))
         self.release(self.forged(2), MALLORY, ledger=995, event='release_queued', names=(100, block_hash(100)))
+        self.still(150)
         before = self.check(stall_deadline=100)
         for s in FakeL2.state.values():
             s['time'] = lambda n: self.now + 600                     # every block stamped 10 minutes ahead
@@ -725,7 +833,7 @@ class GuardianCheck(Rig):
         code, out = self.check(stall_deadline=100)
         self.assertEqual((code, out['findings']), (3, []))
         self.assertIn('not final in this guardian', out['cannot_judge'][0]['reason'])
-        FakeVault.events_list[0]['ledger'] = 900                     # older than the deadline, finality where it was
+        self.still(150)                                              # finality has stood still past the deadline
         self.assertEqual(self.check(stall_deadline=100)[0], 2)
         for st in FakeL2.state.values():
             st['fin'] = 270                                          # the naming is final: ok

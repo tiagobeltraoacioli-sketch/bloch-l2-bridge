@@ -46,6 +46,8 @@ DIR = Path(os.environ.get('DIR', '/var/lib/bloch-l2-devnet4-stable'))
 BIN = os.environ.get('FOUNDRY_BIN', '/home/ubuntu/.foundry/bin')
 CAST, FORGE, ANVIL = f'{BIN}/cast', f'{BIN}/forge', f'{BIN}/anvil'
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import sigverify  # noqa: E402
 PROJECT = HERE.parent.parent
 L2_RPC = os.environ.get('L2_RPC', 'http://127.0.0.1:18945')
 ETH_PORT = int(os.environ.get('ETH_PORT', 18950))
@@ -223,8 +225,7 @@ def setup():
         rec = []
         for s in sigs:
             for name in ('eth1', 'eth2'):
-                if subprocess.run([CAST, 'wallet', 'verify', '--no-hash', '--address', keys[name], d, s],
-                                  capture_output=True).returncode == 0:
+                if sigverify.signed_by(d, s, keys[name]):  # in process: never a command's exit code (round 17)
                     rec.append((keys[name], s))
         rec.sort(key=lambda x: int(x[0], 16))
         eth_send(ANVIL_KEYS[0], st['vault'], 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu,

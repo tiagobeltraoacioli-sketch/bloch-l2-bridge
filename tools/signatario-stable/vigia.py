@@ -113,6 +113,7 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bridge_feed  # noqa: E402
+import sigverify  # noqa: E402
 from release_submission import ReleaseJournal, quantity as journal_quantity  # noqa: E402
 
 DEPOSITED = 'Deposited(bytes32,bytes32,uint64,address,uint64,bytes32)'
@@ -477,8 +478,18 @@ class Vigia:
             raise RuntimeError(f'cast {argv[0]}: {err.strip()[-300:]}')
         return out.strip()
 
+    @staticmethod
+    def values(*values):
+        """Positional values for a `cast` command line. `cast` reads an argument that starts with `-` as an option (`-h`
+        and `--help` print the help and exit 0; `--file` reads a local file), so such a value never reaches the command
+        (agent 341, round 17). Honest values are hex, unsigned integers, tuples and lists: none starts with `-`."""
+        out = [str(v) for v in values]
+        if any(v.startswith('-') for v in out):
+            raise RuntimeError('a value that would be read as a command-line option was refused')
+        return out
+
     def call(self, url, to, sig, *args):
-        data = self.cast_out('calldata', sig, *[str(a) for a in args])
+        data = self.cast_out('calldata', sig, *self.values(*args))
         return self.rpc(url, 'eth_call', [{'to': to, 'data': data}, 'latest'])
 
     def flag(self, url, to, sig, *args):
@@ -625,7 +636,7 @@ class Vigia:
                 self.save_finished()
 
     def call_at(self, url, to, sig, tag, *args):
-        data = self.cast_out('calldata', sig, *[str(a) for a in args])
+        data = self.cast_out('calldata', sig, *self.values(*args))
         return self.rpc(url, 'eth_call', [{'to': to, 'data': data}, tag])
 
     def final_flag(self, url, to, sig, *args):
@@ -807,15 +818,18 @@ class Vigia:
 
     # ── reading SHARED (untrusted: every file is checked against the chain before it counts) ──
     def verified(self, path, url, to):
-        """A partial from SHARED whose signature recovers to its signer, a current signer of `to`. Else None."""
+        """A partial from SHARED whose signature recovers to its signer, a current signer of `to`. Else None.
+        The signature is recovered in this process with the contracts' rule (65 bytes, low s, v 27 or 28; sigverify.py).
+        The exit code of `cast wallet verify`, used here until round 17, is 0 for the high-s twin of an honest signature
+        (and for v = 0 / 1): anyone could compute that twin from a published partial, and a relayer that counted it sent
+        a transaction the contract reverts, on every pass (agent 341)."""
         try:
             rec = json.loads(path.read_text())
             signer, digest, sig = rec['signer'], rec['digest'], rec['signature']
-            if not (ADDRESS.fullmatch(signer) and WORD.fullmatch(digest) and SIGNATURE.fullmatch(sig)):
+            if not sigverify.signed_by(digest, sig, signer):
                 return None
-            rc, _, _ = self.run([self.cast, 'wallet', 'verify', '--no-hash', '--address', signer, digest, sig])
-            return rec if rc == 0 and self.flag(url, to, 'isSigner(address)', signer) else None
-        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            return rec if self.flag(url, to, 'isSigner(address)', signer.lower()) else None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, RecursionError):
             return None
 
     def mint_partial(self, path, dep):
@@ -826,8 +840,12 @@ class Vigia:
                 or str(rec.get('token')).lower() != self.token:
             return None
         try:
-            want = self.call(url, self.token, 'mintDigest(bytes32,uint64,uint64,address)', dep,
-                             int(rec['deposit_nonce']), int(rec['amount']), rec['recipient'])
+            nonce, amount, recipient = rec['deposit_nonce'], rec['amount'], rec['recipient']
+            # strict before any of it reaches a command line: unsigned 64-bit integers and a 20-byte address
+            if any(isinstance(n, bool) or not isinstance(n, int) or not 0 <= n < 2**64 for n in (nonce, amount)) \
+                    or not isinstance(recipient, str) or not ADDRESS.fullmatch(recipient):
+                return None
+            want = self.call(url, self.token, 'mintDigest(bytes32,uint64,uint64,address)', dep, nonce, amount, recipient)
         except (KeyError, ValueError, TypeError, RuntimeError):
             return None
         return rec if want.lower() == rec['digest'].lower() else None
@@ -1614,7 +1632,7 @@ class Vigia:
                    'vault': self.vault, 'route': self.route}
 
         def decode(raw):
-            decoded = json.loads(self.cast_out('decode-transaction', raw))
+            decoded = json.loads(self.cast_out('decode-transaction', *self.values(raw)))
             # Foundry 1.7 wraps the decoded object in a JSON string.
             return json.loads(decoded) if isinstance(decoded, str) else decoded
 
@@ -1659,7 +1677,7 @@ class Vigia:
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         wallet = self.relayer_wallet(side)
         frm = self.cast_out('wallet', 'address', *wallet)
-        data = self.cast_out('calldata', *call)
+        data = self.cast_out('calldata', *self.values(*call))
         journal = None
         if release_id is not None:
             if side != 'eth' or to.lower() != self.vault:
