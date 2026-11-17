@@ -1,0 +1,31 @@
+{
+  "domain": "bloch.bridge.allnets.open-findings.v1",
+  "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
+  "asOf": "2026-11-17T04:30:00Z",
+  "findings": [
+    {"id": "R332-SHARED-847", "routes": ["ethereum", "arbitrum-one", "op-mainnet", "linea", "tron"], "severity": "unassessed",
+     "state": "open", "owner": 374, "reviewer": 379,
+     "what": "tools/signatario-stable/signatario.py:847 (release_in) accepts a signature by the exit code of `cast wallet verify`; a value `-h` plus 130 characters passes. Severity not yet stated by its owner; counted as blocking until it is.",
+     "source": "agents/R16-CROSS-AREA.md 2026-11-17 01:10 UTC (agent 332); BRIEF-ROUND18.md task 374; shared-tools line ec79cf8 (fix of the alert_command class, refreeze) merged here"},
+    {"id": "R329-EVM-1", "routes": ["arbitrum-one", "op-mainnet", "linea", "base", "bnb"], "severity": "Medium",
+     "state": "fixed-unverified", "owner": 372, "reviewer": 379,
+     "what": "launch status of Base and BNB Smart Chain not enforced by the tree; fixed by 337 at 10b8147 (launch blocks in networks.json and bridge.network.json, refusals in every tool), carried by the audit tip 9187656; third pass of reviewer 329/379 pending",
+     "source": "agents/329-bridge-evm-review-r17.md findings table; agents/R16-CROSS-AREA.md 2026-11-17 02:10 UTC (agent 337)"},
+    {"id": "R329-EVM-4", "routes": ["op-mainnet", "linea"], "severity": "Medium",
+     "state": "open", "owner": 372, "reviewer": 379,
+     "what": "the signer's L2 rebuild time per release is modelled, not measured, exported or alerted; no refusal of a round it cannot finish inside the release window",
+     "source": "agents/329-bridge-evm-review-r17.md findings table; BRIEF-ROUND18.md task 372"},
+    {"id": "R342-BTC-1", "routes": ["bitcoin"], "severity": "Medium",
+     "state": "open", "owner": 370, "reviewer": 378,
+     "what": "a relayer can set aside every exit whose maxFeeRate is below the top of the signers' fee band and replace a pending payout; set-aside must follow an objective rule every signer checks from finalized data",
+     "source": "agents/342-bridge-btc-tron-review-r17.md findings table (demonstration b9592ee)"},
+    {"id": "R330-SOL-1", "routes": ["solana"], "severity": "Medium",
+     "state": "open-residual", "owner": 371, "reviewer": 376,
+     "what": "an on-curve destination that nobody holds a key for cannot be told from a fresh wallet; the residual closes only with the destination-key proof bound into the exit (task 371 item 3) and the page's proof (task 363)",
+     "source": "agents/330-bridge-solana-review-r17.md 3P.5 'Before launch' item 1; BRIEF-ROUND18.md tasks 371 and 363"},
+    {"id": "R331-XLM-3P-1", "routes": ["stellar"], "severity": "Medium",
+     "state": "open", "owner": 373, "reviewer": 377,
+     "what": "the guardian calls a second valid claim of the same burner a forgery, and publish_claim may publish a claim the quorum did not use",
+     "source": "agents/331-bridge-stellar-review-r17.md third pass findings table and 3P.5"}
+  ]
+}

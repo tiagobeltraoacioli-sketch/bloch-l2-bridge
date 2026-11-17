@@ -52,6 +52,7 @@ MAINNET_CHAIN_ID = 700770
 DEV_CHAIN_IDS = (700771, 31337)
 GNB_MAINNET, GNB_TESTNET = 0x474E0001, 0x474E0002
 ETH_MAINNET = 1
+ETHEREUM_L2_TOKEN = ('Bloch Bridged USDC', 'bUSDC')  # deployments/mainnet/busdc-mainnet.config.json at cc2511a
 POLICY_SIGNERS, POLICY_THRESHOLD = 7, 5  # PONTES-MAINNET-CHECKLIST.md section 2 / section 6
 # Owner decisions 2026-11-02 (agents 171, 175; docs/BUSDC-MAINNET-V2.md 4.11): the unpause, verifier switch and locked remint
 # quorum is 6 of 7 on the token and the vault, and there are 3 L2 token guardians and 3 Ethereum vault guardians (BR-6).
@@ -388,6 +389,14 @@ def validate(cfg, rehearsal):
             refuse((name, symbol) == (want['name'], want['symbol']),
                    f'the L2 token of source chain {eth["chainId"]} is {want["symbol"]} ("{want["name"]}"), one token per network '
                    f'(tools/evm-nets/networks.json); the config names {symbol} ("{name}")')
+        if not rehearsal and eth['chainId'] == ETH_MAINNET:
+            # One token per source chain (integration of the bridge lines, agent 375, round 18): chain id 1 is the source
+            # of the Ethereum bridge's bUSDC only. Before this, any name and symbol passed with chain id 1, so another
+            # route's token config re-pointed at Ethereum validated (tools/deploy-pontes/test_routes.py). Strictly an
+            # added refusal: the committed Ethereum config, its canonical hash and its plan are unchanged.
+            refuse((name, symbol) == ETHEREUM_L2_TOKEN,
+                   f'the L2 token of source chain 1 is {ETHEREUM_L2_TOKEN[1]} ("{ETHEREUM_L2_TOKEN[0]}"), one token per '
+                   f'network; the config names {symbol} ("{name}")')
         if not rehearsal:
             # Fee schedule of 2026-11-17: the token's minBurn is the vault's l2MinBurn, held to the same floor (the vault
             # tool states the formula). The release fee rate is the vault's; the route's decided rate is used here.

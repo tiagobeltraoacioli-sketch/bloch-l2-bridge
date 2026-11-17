@@ -70,16 +70,19 @@ ROUTES = {
 }
 
 
+EVM_NETS = HERE.parent / 'evm-nets'  # the tools of this tree, whatever ROOT a test points the data at
+
+
 def _checker():
-    if str(ROOT / 'tools/evm-nets') not in sys.path:
-        sys.path.insert(0, str(ROOT / 'tools/evm-nets'))
+    if str(EVM_NETS) not in sys.path:
+        sys.path.insert(0, str(EVM_NETS))
     import network_json
     return network_json
 
 
 def _launch():
-    if str(ROOT / 'tools/evm-nets') not in sys.path:
-        sys.path.insert(0, str(ROOT / 'tools/evm-nets'))
+    if str(EVM_NETS) not in sys.path:
+        sys.path.insert(0, str(EVM_NETS))
     import launch
     return launch
 
