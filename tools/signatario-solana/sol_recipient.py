@@ -110,34 +110,50 @@ def destination(rpcs, wallet, addresses=None):
     'fundedSystemAccount'}. A reading failure raises S.RpcError: "the node did not answer" is never "absent".
 
     hold is None only when EVERY endpoint shows the address absent, or owned by the System program with no data
-    and not executable. `addresses` (solana_lib.Addresses) adds this vault's own accounts to what is refused."""
+    and not executable. `addresses` (solana_lib.Addresses) adds this vault's own accounts to what is refused.
+    Every endpoint is read (round 18, review 376 R330-SOL-4P-2): 'unanimous' is True when the hold comes from the
+    address itself (refused by name) or EVERY endpoint shows the non-wallet; only such a hold is latched. A hold
+    that one endpoint shows and another does not holds the burn for this read and is not latched."""
     wallet = bytes(wallet)
     own = {} if addresses is None else {
         addresses.config.mint: 'the mint this vault holds', addresses.program_id: 'the vault program',
         addresses.vault: 'the vault account', addresses.tokens: "the vault's token account",
         addresses.fee_account: "the fee owner's token account", addresses.program_data: "the vault program's data account"}
-    out = {'hold': None, 'exists': False, 'owner': None, 'dataLength': 0, 'lamports': 0, 'fundedSystemAccount': False}
+    out = {'hold': None, 'exists': False, 'owner': None, 'dataLength': 0, 'lamports': 0, 'fundedSystemAccount': False,
+           'unanimous': True}
     what = own.get(wallet) or NOT_WALLETS.get(wallet)
     if what or S.small_order(wallet) or not S.on_curve(wallet):
         out['hold'] = ('the destination is ' + what if what else 'the destination is a point of the curve for which no '
                        'private key can exist (small order)' if S.small_order(wallet) else
                        'the destination is not a point of the curve (a program-derived address)') + ': not a wallet'
         return out
-    funded = True
-    for rpc in rpcs if isinstance(rpcs, (list, tuple)) else [rpcs]:
+    funded, shown, wallets = True, None, 0
+    endpoints = rpcs if isinstance(rpcs, (list, tuple)) else [rpcs]
+    for rpc in endpoints:
         info = rpc.account_info(wallet, 'finalized')
         if info is None:
             funded = False
+            wallets += 1
             continue
-        out.update(exists=True, owner=S.b58encode(info['owner']), dataLength=len(info['data']), lamports=info['lamports'])
         if info['owner'] != S.SYSTEM_PROGRAM or info['data'] or info['executable']:
-            owner = OWNER_NAMES.get(info['owner'], 'the program ' + S.b58encode(info['owner']))
-            out['hold'] = (f'the destination exists on Solana and is not a wallet: an account owned by {owner}'
-                           + (f' with {len(info["data"])} bytes of data' if info['data'] else '')
-                           + (', executable' if info['executable'] else '')
-                           + ' (a wallet is absent from the chain or a System account without data)')
-            return out
+            if shown is None:
+                out.update(exists=True, owner=S.b58encode(info['owner']), dataLength=len(info['data']), lamports=info['lamports'])
+                owner = OWNER_NAMES.get(info['owner'], 'the program ' + S.b58encode(info['owner']))
+                shown = (f'the destination exists on Solana and is not a wallet: an account owned by {owner}'
+                         + (f' with {len(info["data"])} bytes of data' if info['data'] else '')
+                         + (', executable' if info['executable'] else '')
+                         + ' (a wallet is absent from the chain or a System account without data)')
+            continue
+        wallets += 1
+        if shown is None:
+            out.update(exists=True, owner=S.b58encode(info['owner']), dataLength=len(info['data']), lamports=info['lamports'])
         funded = funded and info['lamports'] > 0
+    if shown is not None:
+        out['unanimous'] = wallets == 0
+        out['hold'] = shown + ('' if wallets == 0 else f' (shown by {len(endpoints) - wallets} of {len(endpoints)} endpoints; '
+                                                       'the others show a wallet: held for this read, not latched)')
+        out['fundedSystemAccount'] = False
+        return out
     out['fundedSystemAccount'] = bool(out['exists'] and funded)
     return out
 
@@ -276,7 +292,7 @@ def exit_view(cfg, a, burn, to_block='finalized'):
     direct = sender != router
     start = cfg.get('router_from_block') or 0
     view = {'direct': direct, 'burner': sender if direct and is_address(sender) else None, 'original': None,
-            'redirect': None, 'redirects': 0}
+            'redirect': None, 'redirects': 0, 'proven': []}
     if not direct:
         exits = [decode_exit(e) for e in l2_logs(url, router, [topic(EXIT_EVENT), burn_id], start, to_block)]
         exits = [e for e in exits if e is not None]
@@ -299,6 +315,16 @@ def exit_view(cfg, a, burn, to_block='finalized'):
                                                  start, to_block)]
     found = sorted((r for r in found if r is not None and r['from'] == burner), key=lambda r: r['nonce'])
     view['redirects'] = len(found)
+    # Every redirect of the burner that passes rules 1 and 2 (round 18, review 376 R330-SOL-4P-3). What is CERTIFIED
+    # follows the latest redirect only; an approval or a payment that ALREADY exists is judged against the burn's
+    # own proven destination or ANY proven redirect of its burner, because a later redirect cannot undo an approval
+    # that was honest when it was made (a burner must not be able to turn it into a guardian pause).
+    view['proven'] = []
+    for r in found:
+        c = _candidate(r['text'], r['commitment'], r['proof'], lambda text, r=r: sol_proof.redirect_message(
+            text, burner, burn_id, r['nonce'], router, route, chain_id))
+        if c['problem'] is None:
+            view['proven'].append(dict(c, nonce=r['nonce']))
     if found:
         r = found[-1]  # the latest wins; an older redirect counts for nothing, valid or not
         view['redirect'] = _candidate(r['text'], r['commitment'], r['proof'], lambda text: sol_proof.redirect_message(
@@ -385,7 +411,8 @@ def decide(view, burn_id, holds, destination_of):
         dest = destination_of(candidate['wallet'])
         out['destination'] = dest
         if dest['hold']:
-            holds.latch(key, 'destination-not-a-wallet', dest['hold'], candidate['text'])
+            if dest.get('unanimous', True):  # R330-SOL-4P-2: one endpoint alone never latches a burn
+                holds.latch(key, 'destination-not-a-wallet', dest['hold'], candidate['text'])
             return 'destination-not-a-wallet', dest['hold']
         return None
 
@@ -422,6 +449,9 @@ def wallet_for_recipient(view, burn, recipient20):
         return redirect['wallet']
     if original is not None and original['problem'] is None and recipient20 == S.unhex(burn['recipient'], 20):
         return original['wallet']
+    for earlier in reversed(view.get('proven') or []):  # an existing approval for an earlier proven redirect
+        if S.account_id(earlier['wallet']) == recipient20:
+            return earlier['wallet']
     return None
 
 

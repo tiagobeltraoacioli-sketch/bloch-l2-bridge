@@ -446,7 +446,7 @@ class SolVigia(Vigia):
         key = burn_id if redirect is None else f"{burn_id}:r{redirect['nonce']}"
         latched = self.holds().get(key)
         dest = self.destination_read(wallet)
-        if dest['hold'] and latched is None:
+        if dest['hold'] and latched is None and dest.get('unanimous', True):  # R330-SOL-4P-2: never one endpoint alone
             self.holds().latch(key, 'destination-not-a-wallet', dest['hold'], S.b58encode(wallet))
         if dest['hold'] or latched is not None:
             log(kind='alert', severity='critical', id='approved-destination-not-a-wallet', burn=burn_id, nonce=b['nonce'],
