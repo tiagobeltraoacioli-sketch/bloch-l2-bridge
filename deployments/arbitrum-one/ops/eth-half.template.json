@@ -1,0 +1,22 @@
+{
+  "_about": "One per signer operator: the Ethereum half (eth_half.py). It reads only this operator's own Ethereum node. release_hold false: owner decision 2026-11-02 (agent 175): with BridgedStablecoinV3 over ProvenanceSourceVault the vault already refuses a burn after a credited forgery, and the hold would also stop honest releases. Round 16, Arbitrum One: the same module reads this operator's own Arbitrum One node; anchor and finality settings below are this network's (docs/BRIDGE-EVM-NETWORKS.md section 3).",
+  "eth_rpc": "TBD-owner (this operator's own Arbitrum One node)",
+  "eth_chain_id": 42161,
+  "vault": "TBD-owner (vault_pontes.py verify: ethHalf.vault)",
+  "vault_code_keccak": "TBD-owner (vault_pontes.py verify: ethHalf.vault_code_keccak)",
+  "vault_from_block": "TBD-owner (Ethereum block of the vault deployment)",
+  "keystore": "/etc/bloch-busdc-arbitrum-one-signer/eth-release.keystore",
+  "password_file": "/etc/bloch-busdc-arbitrum-one-signer/eth-release.password",
+  "db": "/var/lib/bloch-busdc-arbitrum-one-signer/eth-half-db.json",
+  "cast": "/opt/foundry/bin/cast",
+  "anchor_max_age": 200,
+  "valid_seconds": 1800,
+  "max_valid_seconds": 3600,
+  "provenance": true,
+  "release_hold": false,
+  "anchor_policy": "probe",
+  "anchor_depth": 2,
+  "finalized_margin": 0,
+  "deposit_cursor": true,
+  "_about_anchor": "depth 2 Ethereum block numbers (24 s of a 51 min window): ArbOS fills the value for a number only once it has seen the next one. These four anchor keys are the registry's (tools/evm-nets/networks.json): eth_half.py takes them by chain id and refuses a file that contradicts them."
+}

@@ -1,0 +1,59 @@
+{
+  "_about": "vigia.py relay (anyone; gas keys only, no authority). Same shape as the signer config; only these keys are read for relaying. `db` is required: `signatario.py combine` opens it. `l2_pins` is required on chain 700770: `signatario.py combine` refuses without it (agent 112, finding 1). Round 17, OP Mainnet: one relayer per network, with its own gas keys, nonce record and files.",
+  "token": "TBD-owner",
+  "source_vault": "TBD-owner",
+  "source_route": "TBD-owner",
+  "threshold": 5,
+  "vault_threshold": 5,
+  "l2_rpc": "TBD-owner",
+  "l2_tx_rpc": "https://l2rpc.blochl1.com",
+  "l2_chain_id": 700770,
+  "l2_pins": "mainnet-v2",
+  "eth_rpc": "TBD-owner (an RPC of OP Mainnet)",
+  "eth_chain_id": 10,
+  "source_chain_id": 10,
+  "shared_dir": "/var/lib/bloch-busdc-op-mainnet-relayer/signatures",
+  "db": "/var/lib/bloch-busdc-op-mainnet-relayer/relayer-db.json",
+  "feed": {
+    "_about": "docs/SIG-TRANSPORT.md. A relayer only reads: no publish_dir.",
+    "status_file": "/var/lib/bloch-busdc-op-mainnet-relayer/feed-status.json",
+    "peers": [
+      "TBD-owner (all seven operators' feeds, http://IP:8787)"
+    ],
+    "mint_signers": [
+      "TBD-owner (the token's 7 signers)"
+    ],
+    "release_signers": [
+      "TBD-owner (the vault's 7 signers)"
+    ]
+  },
+  "vault_from_block": "TBD-owner",
+  "token_from_block": "TBD-owner",
+  "_about_relayer_keys": "Encrypted keystores, mode 0600, owned by the relayer user; passwords through systemd LoadCredential= (deploy/signatario/bloch-busdc-op-mainnet-relay.service). vigia.py refuses raw hex relayer keys on chains 700770 and 1, because cast would carry them in argv (agent 174, fixed by agent 200).",
+  "l2_relayer_keystore": "/etc/bloch-busdc-op-mainnet-relayer/l2-gas.keystore",
+  "l2_relayer_password_file": "credential:l2-gas.password",
+  "eth_relayer_keystore": "/etc/bloch-busdc-op-mainnet-relayer/eth-gas.keystore",
+  "eth_relayer_password_file": "credential:eth-gas.password",
+  "cast": "/opt/foundry/bin/cast",
+  "round_margin": 600,
+  "provenance": true,
+  "mint_gas_limit": 600000,
+  "_about_gas_ceilings": "eth_max_gas_price_gwei 0.5: fee schedule of 2026-11-17 (coordinator). The relayer pays twice the node's eth_gasPrice quote, at most this; while the quote is above it nothing is sent, gas-price-ceiling is alerted and a release WAITS until the price is back under the ceiling (it is not lost). l2_max_gas_price_gwei is the default, not a decision.",
+  "l2_max_gas_price_gwei": 50,
+  "eth_max_gas_price_gwei": 0.5,
+  "_about_relay_role": "One primary relayer; the other six operators run backups, each with its own gas keys and nonce record, staggered by relay_backup_index (F229-10, agent 241). vigia.py refuses to relay on chain 700770 until relay_role is \"primary\" or \"backup\". relay_other_gas_addresses lists the other relayers' L2 and Ethereum gas addresses; a relayer on one of them refuses to start.",
+  "relay_role": "TBD-owner (\"primary\" on one operator, \"backup\" on the six others)",
+  "relay_backup_index": "TBD-owner (backups only: 1 to 6, distinct per operator)",
+  "l2_backup_step_s": 1200,
+  "eth_backup_step_s": 300,
+  "relay_other_gas_addresses": [
+    "TBD-owner (the other six relayers' l2 and eth gas addresses)"
+  ],
+  "eth_replace_after_s": 300,
+  "_about_scan_state": "Persisted log cursors and the finalized finished-item record (F229-11, agent 241). Default <shared_dir>/.scan; a changed hash at the cursor rescans.",
+  "scan_state_dir": "/var/lib/bloch-busdc-op-mainnet-relayer/signatures/.scan",
+  "scan_full_every_s": 86400,
+  "anchor_policy": "probe",
+  "anchor_max_age": 250,
+  "_about_pacing": "Run `vigia.py relay` without --interval (the network's 20 s is the default; a longer one is refused): a certificate must land within 256 blocks of its anchor."
+}

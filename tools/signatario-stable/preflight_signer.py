@@ -3,6 +3,12 @@
 
   preflight_signer.py --config SIGNER.json [--eth-half-config ETH-HALF.json] [--relayer-config RELAYER.json]
                       [--allow-remote-eth-rpc] [--rehearsal-pins] [--skip-dry-release] [--skip-binaries] [--json]
+                      [--network NAME]
+
+--network NAME (round 17): the configs are those of another EVM source network of tools/evm-nets/networks.json
+(arbitrum-one, op-mainnet, linea). The decided source chain id is then that network's; the network must be launchable
+(a network that is not, such as base or bnb, fails at once and nothing else is checked) and no file may contradict the
+anchor settings its signers share. Without it everything below is the Ethereum bridge, unchanged.
 
 Read-only. It signs nothing, sends nothing and prints no key material. Run it as the service user on the signer host,
 after the configs are filled and before the daemons are started. Exit 0: every check passed. Exit 1: at least one
@@ -126,10 +132,41 @@ def is_address(value):
         c in '0123456789abcdefABCDEF' for c in value[2:])
 
 
-def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries, rehearsal_pins=False):
+def for_chain(decided, chain):
+    """The decided values of the Ethereum bridge, with the source chain id of another launchable network (--network)."""
+    return decided if chain == 1 else {**decided, **{k: chain for k in ('source_chain_id', 'eth_chain_id') if k in decided}}
+
+
+def check_network(report, name, cfg, eth_half_cfg, relayer_cfg):
+    """--network NAME (round 17, reviews R329-EVM-1 and R329-EVM-3): the network must be launchable, and no operator file
+    may contradict the anchor settings its signers share (tools/evm-nets/networks.json). Returns its chain id, or None."""
+    try:
+        sys.path.insert(0, str(HERE.parent / 'evm-nets'))
+        import launch
+        spec = launch.registry()['networks'].get(name)
+    except (ImportError, Exception) as e:  # noqa: BLE001 - an untrusted registry is a failed check with its reason
+        report.add('network', f'{name}: the launch registry is readable and agrees with the recorded decisions', False, str(e)[:300])
+        return None
+    if spec is None:
+        report.add('network', f'{name} is a network of tools/evm-nets/networks.json', False, '')
+        return None
+    why = launch.refusal(spec['chainId'])
+    report.add('network', f'{name} is launchable in bridge v1', why is None, (why or '')[:400])
+    if why:
+        return None
+    for label, c, tool in (('signer', cfg, 'vigia'), ('eth-half', eth_half_cfg, 'eth_half'), ('relayer', relayer_cfg, 'vigia')):
+        if c is None:
+            continue
+        bad = launch.config_conflicts(spec['chainId'], c, tool)
+        report.add('network', f'{label} config does not contradict the registry anchor settings of {name}', not bad,
+                   ', '.join(f'{k} is {v!r}, the registry says {w!r}' for k, v, w in bad))
+    return spec['chainId']
+
+
+def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries, rehearsal_pins=False, chain=1):
     left = undecided(cfg)
     report.add('config', 'signer config has no TBD-owner value', not left, ', '.join(left))
-    for key, want in DECIDED_SIGNER.items():
+    for key, want in for_chain(DECIDED_SIGNER, chain).items():
         ok = cfg.get(key) == want and type(cfg.get(key)) is type(want)
         # A rehearsal on a private net cannot use the mainnet pins (the released follower follows mainnet only): its
         # l2_pins is an object. --rehearsal-pins reports that as a warning, so the dry release still runs.
@@ -168,10 +205,10 @@ def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries, rehearsal_p
         report.add('binaries', 'follower, produce-dev and settled-rpc are the pinned launch build', False, str(e)[:300])
 
 
-def check_eth_half(report, cfg, cfg_path, signer_cfg, allow_remote):
+def check_eth_half(report, cfg, cfg_path, signer_cfg, allow_remote, chain=1):
     left = undecided(cfg)
     report.add('config', 'eth-half config has no TBD-owner value', not left, ', '.join(left))
-    for key, want in DECIDED_ETH_HALF.items():
+    for key, want in for_chain(DECIDED_ETH_HALF, chain).items():
         report.add('config', f'eth-half {key} is {want!r}', cfg.get(key) == want and type(cfg.get(key)) is type(want),
                    repr(cfg.get(key)))
     report.add('config', 'eth-half reads the same Ethereum node as the signer', cfg.get('eth_rpc') == signer_cfg.get('eth_rpc'),
@@ -223,10 +260,10 @@ def check_journal(report, cfg, mounts='/proc/mounts'):
                    existing.is_dir() and os.access(existing, os.W_OK | os.X_OK), str(existing))
 
 
-def check_relayer(report, cfg, cfg_path, rehearsal_pins=False):
+def check_relayer(report, cfg, cfg_path, rehearsal_pins=False, chain=1):
     left = undecided(cfg)
     report.add('relayer', 'relayer config has no TBD-owner value', not left, ', '.join(left))
-    for key, want in DECIDED_RELAYER.items():
+    for key, want in for_chain(DECIDED_RELAYER, chain).items():
         if rehearsal_pins and key == 'l2_pins' and isinstance(cfg.get(key), dict):
             report.add('relayer', f'relayer {key} is {want!r}', False, 'an object (--rehearsal-pins)', warning=True)
             continue
@@ -298,11 +335,17 @@ def run(argv, signatario=HERE / 'signatario.py'):
     report = Report()
     cfg = load(cfg_path)
     rehearsal_pins = '--rehearsal-pins' in argv
-    check_signer(report, cfg, cfg_path, allow_remote, '--skip-binaries' in argv, rehearsal_pins)
+    chain = 1
+    if opt('--network'):
+        chain = check_network(report, opt('--network'), cfg, load(opt('--eth-half-config')) if opt('--eth-half-config') else None,
+                              load(opt('--relayer-config')) if opt('--relayer-config') else None)
+        if chain is None:
+            return report  # not launchable or unknown: nothing else is checked, and the outcome is `fail`
+    check_signer(report, cfg, cfg_path, allow_remote, '--skip-binaries' in argv, rehearsal_pins, chain)
     if opt('--eth-half-config'):
-        check_eth_half(report, load(opt('--eth-half-config')), opt('--eth-half-config'), cfg, allow_remote)
+        check_eth_half(report, load(opt('--eth-half-config')), opt('--eth-half-config'), cfg, allow_remote, chain)
     if opt('--relayer-config'):
-        check_relayer(report, load(opt('--relayer-config')), opt('--relayer-config'), rehearsal_pins)
+        check_relayer(report, load(opt('--relayer-config')), opt('--relayer-config'), rehearsal_pins, chain)
     if '--skip-dry-release' in argv:
         report.add('dry', 'dry release', True, 'skipped (--skip-dry-release)', warning=True)
     elif any(r['group'] in ('config', 'files', 'binaries') for r in report.failed):

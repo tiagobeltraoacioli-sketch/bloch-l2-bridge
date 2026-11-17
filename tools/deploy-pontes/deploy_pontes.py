@@ -94,6 +94,17 @@ class Refused(Exception):
     pass
 
 
+def evm_launch():
+    """tools/evm-nets/launch.py (the launch status and names of the other EVM source networks), or None in a tree without
+    it. Loaded only for a source chain id other than 1: an Ethereum config never reaches it."""
+    if not (ROOT / 'tools/evm-nets/launch.py').exists():
+        return None
+    if str(ROOT / 'tools/evm-nets') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'tools/evm-nets'))
+    import launch
+    return launch
+
+
 def refuse(cond, message):
     if not cond:
         raise Refused(message)
@@ -330,7 +341,39 @@ def validate(cfg, rehearsal):
                    f'(mintSwitch.threshold), config has {ms["threshold"]}')
         params['switchThreshold'], params['switchDelay'] = ms['threshold'], ms['delay']
         refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId is undecided')
-        refuse(rehearsal or eth['chainId'] == ETH_MAINNET, 'mainnet policy: ethereum.chainId must be 1')
+        # Round 16: the source may be one of the EVM networks of tools/evm-nets/networks.json (one token per network).
+        # Round 17 (reviews R329-EVM-1, R329-EVM-5): only a network whose launch status is launchable, with or without
+        # --rehearsal (no flag lifts it), and only under the token name and symbol the registry gives that network.
+        named = {}
+        if eth['chainId'] != ETH_MAINNET:
+            launch = evm_launch()
+            if launch is not None:
+                why = launch.refusal(eth['chainId'])
+                refuse(why is None, why)
+                try:
+                    named = {int(n['chainId']): n['l2'] for n in launch.launchable().values()}
+                except launch.LaunchError:
+                    named = {}  # an untrusted registry names no network; its decided chain ids were refused above
+        refuse(rehearsal or eth['chainId'] == ETH_MAINNET or eth['chainId'] in named,
+               'mainnet policy: ethereum.chainId must be 1' + (f' or one of {sorted(named)}' if named else ''))
+        if not rehearsal and eth['chainId'] in named:
+            want = named[eth['chainId']]
+            refuse((name, symbol) == (want['name'], want['symbol']),
+                   f'the L2 token of source chain {eth["chainId"]} is {want["symbol"]} ("{want["name"]}"), one token per network '
+                   f'(tools/evm-nets/networks.json); the config names {symbol} ("{name}")')
+        if not rehearsal:
+            # Fee schedule of 2026-11-17: the token's minBurn is the vault's l2MinBurn, held to the same floor (the vault
+            # tool states the formula). The release fee rate is the vault's; the route's decided rate is used here.
+            launch = evm_launch()
+            if launch is not None:
+                try:
+                    sched = launch.fee_schedule(eth['chainId'])
+                    floor = launch.min_burn_floor(eth['chainId'], sched['release_bps']) if sched else None
+                except launch.LaunchError as e:
+                    refuse(False, f'the relayer cost of a release cannot be read, so minBurn cannot be checked: {e}')
+                refuse(floor is None or lim['minBurn'] >= floor,
+                       f'limits.minBurn {lim["minBurn"]} is below {floor}: the measured relayer cost of one release at the gas ceiling '
+                       'divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula)')
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
         refuse(is_hash(eth['route']) and int(eth['route'], 16), 'ethereum.route is undecided (vault.routeId())')
         refuse(is_hash(eth['vaultCodeHash']), 'ethereum.vaultCodeHash is undecided')
