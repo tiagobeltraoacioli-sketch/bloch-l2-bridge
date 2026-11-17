@@ -72,6 +72,19 @@ def redact(url):
     return f'{u.scheme}://{u.hostname}' + (f':{u.port}' if u.port else '')
 
 
+def alert_argv(command, pid, detail):
+    """The argv of `alert_command` with {id} and {detail} filled in. The detail is text from outside (an RPC error, a
+    command's stderr, cut to its LAST 300 characters), so it can begin with `-`: an argument that the operator's
+    template did not start with `-` must not become an option of the pager program. Such an argument gets one leading
+    space (agent 341, round 17). Arguments of honest alerts are unchanged."""
+    out = []
+    for a in command:
+        a = str(a)
+        filled = a.replace('{id}', str(pid)).replace('{detail}', str(detail)[-300:])
+        out.append(' ' + filled if filled.startswith('-') and not a.startswith('-') else filled)
+    return out
+
+
 class Unverifiable(Exception):
     """A read failed: no evidence either way (never a reason to pause)."""
 
@@ -105,7 +118,7 @@ class Sombra:
         command = self.cfg.get('alert_command')
         if not command:
             return
-        argv = [str(a).replace('{id}', pid).replace('{detail}', str(detail)[-300:]) for a in command]
+        argv = alert_argv(command, pid, detail)
         try:
             done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
             if done.returncode:
