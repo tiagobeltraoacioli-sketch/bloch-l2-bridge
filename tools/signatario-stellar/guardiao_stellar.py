@@ -4,6 +4,7 @@ a Stellar transaction, so every guardian action is a signature over a vault dige
 
   guardiao_stellar.py --config G.json pause  --out CALL.json
   guardiao_stellar.py --config G.json check
+  guardiao_stellar.py --config G.json ack --release RELEASE_ID --operator NAME --note TEXT
 
 pause    signs `pause_digest(pause_count, valid_until)` (an Ethereum personal message) for the vault's current pause
          count; valid for `valid_seconds` (default 600, never above 3600: a pause is signed when it is needed, never
@@ -269,16 +270,37 @@ class Guardian:
                 'a burn made directly on the token was paid, and the account that burned has claimed no address on '
                 'the router, even at this guardian\'s newest block')
 
+    def ack(self, rid, operator, note):
+        """Acknowledge the open paid-not-latest-naming alert of release `rid` (a logged operator action): recorded in
+        seen_file and appended to `<seen_file>.ack.log`; the alert is then listed as acknowledged and no longer
+        counts in the exit code, until the burner names again."""
+        self.load_seen()
+        key = (self.seen.get('open_alerts') or {}).get(rid)
+        if key is None:
+            fail('no open paid-not-latest-naming alert for this release in seen_file (run check first)', release=rid)
+        if not isinstance(operator, str) or not operator.strip() or not isinstance(note, str) or not note.strip():
+            fail('ack needs --operator NAME and --note TEXT (who decided, and why)')
+        when = self.net.latest()['close_time']
+        entry = {'key': key, 'operator': operator.strip(), 'note': note.strip(), 'ledger_time': when}
+        self.seen.setdefault('acks', {})[rid] = entry
+        with open(str(self.seen_path) + '.ack.log', 'a') as log:
+            log.write(json.dumps({'release': rid, **entry}, sort_keys=True) + '\n')
+        self.save_seen()
+        print(json.dumps({'ok': True, 'acknowledged': rid, **entry}, indent=2))
+        raise SystemExit(0)
+
     def not_latest(self, burned, paid, latest):
         """R331 fourth pass (Low, the certificate binds no naming): a release paid to an address the burner named, but
         not to its LATEST naming at this guardian's final block. Not a forgery (the burner chose that address), so no
         pause; but five keys may have chosen among the burner's addresses, so a person asks the burner."""
-        self.__dict__.setdefault('alerts', []).append({'kind': 'paid-not-latest-naming', 'nonce': burned['nonce'], 'paid': paid, 'latest': latest,
+        self.__dict__.setdefault('alerts', []).append({'kind': 'paid-not-latest-naming', 'nonce': burned['nonce'],
+                            'release': getattr(self, 'current_release', None), 'paid': paid, 'latest': latest,
                             'text': 'this exit was paid to an address its burner named earlier, not to the latest one '
                                     'it named on the router; ask the burner whether that was intended'})
 
     def judge(self, e):
         """None when the release is a final L2 burn paid to its destination; a finding text; or CannotJudge."""
+        self.current_release = e['topics'][0]
         f = e['data']
         nonce, amount, recipient = int(f['nonce']), int(f['amount']), f['recipient']
         burn = sn.b32(f['native_burn']).hex()
@@ -465,7 +487,16 @@ class Guardian:
                                  f'it although the L2 sources answer (stall rule): {f["reason"]}'})
         self.save_seen()
         # An L2 block stamped ahead of the Stellar ledger clock changes no verdict; it is reported for a person.
-        alerts = list(self.alerts)
+        # R331-XLM-4P-7: an operator's logged acknowledgement (`ack`) of a paid-not-latest-naming alert, for that
+        # release and that exact paid / latest pair, keeps it in the output but out of the exit code; a newer
+        # naming raises it again.
+        acks = self.seen.setdefault('acks', {})
+        acknowledged = [a for a in self.alerts if a['kind'] == 'paid-not-latest-naming'
+                        and (acks.get(a['release']) or {}).get('key') == [a['paid'], a['latest']]]
+        alerts = [a for a in self.alerts if a not in acknowledged]
+        self.seen['open_alerts'] = {a['release']: [a['paid'], a['latest']] for a in alerts
+                                    if a['kind'] == 'paid-not-latest-naming' and a['release']}
+        self.save_seen()
         limit = int(self.cfg.get('l2_clock_alert_seconds', 120))
         head = getattr(self, 'head', None)
         if limit and head and head['timestamp'] > now + limit:
@@ -478,6 +509,7 @@ class Guardian:
                           'l2_finalized': fin and fin['number'], 'l2_finalized_hash': fin and fin['hash'],
                           'l2_sources': len(getattr(self, 'sources', [])), 'l2_view_problem': view_problem,
                           'findings': findings, 'cannot_judge': unjudged, 'voided': done, 'alerts': alerts,
+                          'acknowledged': acknowledged,
                           'stall_deadline': deadline,
                           'action': 'pause' if findings else 'alert-a-human-do-not-pause' if unjudged or blind
                           else 'alert-a-human' if alerts else 'none'}, indent=2))
@@ -495,6 +527,8 @@ def main():
             g.pause(args['--out'])
         elif 'check' in argv:
             g.check()
+        elif 'ack' in argv:
+            g.ack(args.get('--release'), args.get('--operator'), args.get('--note'))
         else:
             raise SystemExit(__doc__)
     except sn.StellarError as e:

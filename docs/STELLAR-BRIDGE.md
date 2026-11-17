@@ -328,7 +328,10 @@ A paid address that the burner named but that is not its LATEST naming at the gu
 claim; the `burnTo` address of an exit that also has a redirect) is no forgery and no pause, but an alert for a
 person (`paid-not-latest-naming`, exit 4 when nothing else is wrong; text "this exit was paid to an address its burner
 named earlier, not to the latest one it named on the router; ask the burner whether that was intended"): the
-certificate binds no naming, so five keys could have chosen among the burner's own addresses. Honest signers certify only what was final before they signed, so a final
+certificate binds no naming, so five keys could have chosen among the burner's own addresses. Once a person has asked the burner,
+the operator acknowledges that alert for that release (`guardiao_stellar.py ack --release ID --operator NAME --note
+TEXT`, appended to `<seen_file>.ack.log`; review 377, R331-XLM-4P-7): it stays listed under `acknowledged` and no
+longer counts in the exit code, so a later real exit 4 is not masked; a newer naming by the burner raises it again. Honest signers certify only what was final before they signed, so a final
 view that still does not reach a queued release after that time means one of two things, and both are reasons to
 pause before it is paid: the L2's finality stands still while releases land, or the release is forged in a way the
 final history cannot contradict yet (under the nonce of the forger's own pending burn; naming a block nobody will

@@ -862,6 +862,36 @@ class GuardianCheck(Rig):
         self.release(b, MALLORY)
         self.assertEqual(self.check()[0], 2)
 
+    def test_4p7_a_not_latest_alert_is_acknowledged_per_release_by_a_logged_operator_action(self):
+        """R331-XLM-4P-7 (Low, reviewer 377): one paid-not-latest-naming alert stayed up for ever, so every later
+        check exited 4 and a real exit 4 was masked. An operator acknowledges it for that release (and that paid /
+        latest pair); it stays in the output as acknowledged and no longer counts in the exit code. A new naming
+        raises it again. The acknowledgement is appended to a log next to seen_file."""
+        b = self.burn(1, 100, direct=True)
+        self.claim(1, PAYEE, 150)
+        self.claim(1, PAYEE2, 200)
+        rid = self.release(b, PAYEE)
+        code, out = self.check()
+        self.assertEqual(code, 4)
+        cfg = {**self.cfg}
+        o = io.StringIO()
+        with contextlib.redirect_stdout(o), self.assertRaises(SystemExit) as e:
+            G.Guardian(cfg).ack(rid, 'operator-1', 'asked the burner: intended')
+        self.assertEqual(e.exception.code, 0)
+        code, out = self.check()
+        self.assertEqual((code, out['alerts']), (0, []))
+        self.assertEqual([a['release'] for a in out['acknowledged']], [rid])
+        log = (Path(self.cfg['seen_file']).parent / (Path(self.cfg['seen_file']).name + '.ack.log')).read_text()
+        self.assertIn(rid, log)
+        self.assertIn('operator-1', log)
+        self.claim(1, MALLORY, 220)                                  # a newer naming: the alert is raised again
+        self.assertEqual(self.check()[0], 4)
+        for bad in (('nope', 'op', 'x'), (rid, '', 'x'), (rid, 'op', '')):   # unknown release, no operator, no note
+            o = io.StringIO()
+            with contextlib.redirect_stdout(o), self.assertRaises(SystemExit) as e:
+                G.Guardian(cfg).ack(*bad)
+            self.assertEqual(e.exception.code, 1, bad)
+
     def test_round18_a_redirected_router_exit(self):
         b = self.burn(1, 100, PAYEE)
         self.redirect(1, PAYEE2, 200)
