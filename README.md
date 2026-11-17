@@ -23,27 +23,30 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 <!-- allnets-launch-table:begin -->
 | Route | L2 token | Launch status | Open findings (Medium or above) |
 |---|---|---|---|
-| ethereum | bUSDC | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
-| arbitrum-one | bUSDC.arb | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
+| ethereum | bUSDC | launchable | - |
+| arbitrum-one | bUSDC.arb | launchable | - |
 | base | bUSDC.base | held | R329-EVM-3P-2 (Medium, open) |
 | bitcoin | bBTC | held | - |
 | bnb | bUSDC.bnb | out | - |
-| linea | bUSDC.linea | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
-| op-mainnet | bUSDC.op | not-launchable-until-fixed | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
-| solana | bUSDC.sol | not-launchable-until-fixed | R330-SOL-1 (Medium, open-residual), R330-SOL-4P-9 (Medium, open (371 fixing)) |
-| stellar | bUSDC.xlm | not-launchable-until-fixed | R331-XLM-4P-5 (High, fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending), R331-XLM-4P-4 (Medium, fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending) |
-| tron | bUSDT.trx | held | F381-1 (Medium, packaging fixed in ba23175 (staged path); tool side open (374 fixing)) |
+| linea | bUSDC.linea | launchable | - |
+| op-mainnet | bUSDC.op | launchable | - |
+| solana | bUSDC.sol | undeclared | - |
+| stellar | bUSDC.xlm | undeclared | - |
+| tron | bUSDT.trx | held | - |
 
 Open findings below Medium, listed on request (they do not hold the route):
 
 | Finding | Route | Severity | What |
 |---|---|---|---|
-| R330-SOL-4P-6 | solana | Low | docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing) |
-| R330-SOL-4P-7 | solana | Low | sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing) |
 | R342-BTC-2P-5 | bitcoin | Info | set-aside terms are read at the signer's own finalized block (docstring and rule wording) |
 | R342-BTC-2P-7 | bitcoin | Info (latent) | whether a direct burner has code is read at today's block, not at the burn |
 | R342-BTC-6 | bitcoin | Info | a burn whose fee ceiling never pays is shown as payable unless a fee rate is given; no page-readable status source |
 | R342-BTC-7 | bitcoin | Info | the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash |
+| R330-SOL-1 (residual) | solana | residual, per reviewer 376 | an on-curve destination nobody holds a key for cannot be told from a fresh wallet except by the destination-key proof; exits must carry it (router burnTo with the proof; the bridge page signs it) |
+| R330-SOL-4P-5 | solana | Info | exitHash is computed and logged by the router but read by no tool |
+| R330-SOL-4P-8 | solana | Info (rig hygiene) | the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host |
+| R329-SHARED-2 | ethereum, arbitrum-one, op-mainnet, linea, tron | Low (fixed in 807478f by 374; 379 re-check pending) | the group of a group-readable relayer credential was not checked (read exposure, not a write path) |
+| R331-XLM-4P-7 | stellar | Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm) | a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement) |
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before

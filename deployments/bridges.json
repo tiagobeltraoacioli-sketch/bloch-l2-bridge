@@ -64,19 +64,12 @@
         "deployments/mainnet/busdc-vault-mainnet.config.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "routes.py (the frozen Ethereum bridge)",
         "reason": "the Ethereum bridge (bUSDC V3), freeze cc2511a",
-        "openFindings": [
-          {
-            "id": "F381-1",
-            "severity": "Medium",
-            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "ethereum-mainnet",
       "sourceChainId": "1"
@@ -137,19 +130,12 @@
         "deployments/arbitrum-one/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it.",
-        "openFindings": [
-          {
-            "id": "F381-1",
-            "severity": "Medium",
-            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "arbitrum-one",
       "sourceChainId": "42161"
@@ -411,19 +397,12 @@
         "deployments/linea/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 139 s of 247 s at the fastest block pace (1 s) with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": [
-          {
-            "id": "F381-1",
-            "severity": "Medium",
-            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "linea-mainnet",
       "sourceChainId": "59144"
@@ -484,19 +463,12 @@
         "deployments/op-mainnet/bridge.network.json"
       ],
       "launch": {
-        "v1": false,
-        "state": "not-launchable-until-fixed",
+        "v1": true,
+        "state": "launchable",
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
-        "openFindings": [
-          {
-            "id": "F381-1",
-            "severity": "Medium",
-            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "op-mainnet",
       "sourceChainId": "10"
@@ -556,24 +528,11 @@
       ],
       "launch": {
         "v1": false,
-        "state": "not-launchable-until-fixed",
+        "state": "undeclared",
         "sourceState": "undeclared",
         "source": "none",
         "reason": "the route's bridge.network.json carries no `launch` block",
-        "openFindings": [
-          {
-            "id": "R330-SOL-1",
-            "severity": "Medium",
-            "state": "open-residual",
-            "owner": 371
-          },
-          {
-            "id": "R330-SOL-4P-9",
-            "severity": "Medium",
-            "state": "open (371 fixing)",
-            "owner": 371
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "solana-mainnet",
       "sourceChainId": "51590065195979758212148511635863778762156068118565365102773110171893804236268"
@@ -634,24 +593,11 @@
       ],
       "launch": {
         "v1": false,
-        "state": "not-launchable-until-fixed",
+        "state": "undeclared",
         "sourceState": "undeclared",
         "source": "none",
         "reason": "the route's bridge.network.json carries no `launch` block",
-        "openFindings": [
-          {
-            "id": "R331-XLM-4P-5",
-            "severity": "High",
-            "state": "fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending",
-            "owner": 373
-          },
-          {
-            "id": "R331-XLM-4P-4",
-            "severity": "Medium",
-            "state": "fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending",
-            "owner": 373
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "0xb3b1412aaf716368dd5aacf749d8347fd3d40bf579ed136293e3f2b80e7b13de",
       "sourceChainId": "55527100184162397446267447655670856106844621679976070008664532462234000271737"
@@ -715,38 +661,13 @@
         "sourceState": "held",
         "source": "route-file",
         "reason": "NOT LAUNCHABLE until an external audit of this route and the owner key ceremony (unaudited; nothing deployed; addresses TBD-deploy). Open: R342-TRX-5/-6 (Info: the deployed bytecode is the TRON-compiler build, not executable by forge; three producers only), the compiler PGP signature, a release simulated against mainnet state; the fixed fee 14 / 70 / 71 is final only at the ceremony (two fresh TRX prices).",
-        "openFindings": [
-          {
-            "id": "F381-1",
-            "severity": "Medium",
-            "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-            "owner": 374
-          }
-        ]
+        "openFindings": []
       },
       "sourceDomain": "tron-mainnet",
       "sourceChainId": "728126428"
     }
   ],
   "listedFindings": [
-    {
-      "id": "R330-SOL-4P-6",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Low",
-      "what": "docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing)",
-      "source": "376 fourth pass"
-    },
-    {
-      "id": "R330-SOL-4P-7",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Low",
-      "what": "sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing)",
-      "source": "376 fourth pass"
-    },
     {
       "id": "R342-BTC-2P-5",
       "routes": [
@@ -782,6 +703,55 @@
       "severity": "Info",
       "what": "the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash",
       "source": "same"
+    },
+    {
+      "id": "R330-SOL-1 (residual)",
+      "routes": [
+        "solana"
+      ],
+      "severity": "residual, per reviewer 376",
+      "what": "an on-curve destination nobody holds a key for cannot be told from a fresh wallet except by the destination-key proof; exits must carry it (router burnTo with the proof; the bridge page signs it)",
+      "source": "agents/330-bridge-solana-review-r17.md (376)"
+    },
+    {
+      "id": "R330-SOL-4P-5",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Info",
+      "what": "exitHash is computed and logged by the router but read by no tool",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R330-SOL-4P-8",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Info (rig hygiene)",
+      "what": "the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R329-SHARED-2",
+      "routes": [
+        "ethereum",
+        "arbitrum-one",
+        "op-mainnet",
+        "linea",
+        "tron"
+      ],
+      "severity": "Low (fixed in 807478f by 374; 379 re-check pending)",
+      "what": "the group of a group-readable relayer credential was not checked (read exposure, not a write path)",
+      "source": "agents/329-bridge-evm-review-r17.md"
+    },
+    {
+      "id": "R331-XLM-4P-7",
+      "routes": [
+        "stellar"
+      ],
+      "severity": "Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm)",
+      "what": "a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement)",
+      "source": "agents/331-bridge-stellar-review-r17.md"
     }
   ]
 }

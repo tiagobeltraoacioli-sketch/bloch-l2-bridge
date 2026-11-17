@@ -1,20 +1,8 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17.",
-  "asOf": "2026-11-17T09:00:00Z",
+  "asOf": "2026-11-17T20:00:00Z",
   "findings": [
-    {
-      "id": "R330-SOL-1",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Medium",
-      "state": "open-residual",
-      "owner": 371,
-      "reviewer": 376,
-      "what": "an on-curve destination that nobody holds a key for cannot be told from a fresh wallet; the residual closes only with the destination-key proof bound into the exit (task 371 item 3) and the page's proof (task 363)",
-      "source": "agents/330-bridge-solana-review-r17.md 3P.5 'Before launch' item 1; BRIEF-ROUND18.md tasks 371 and 363"
-    },
     {
       "id": "R329-EVM-3P-2",
       "routes": [
@@ -26,58 +14,6 @@
       "reviewer": 379,
       "what": "Base signer prototype: warm_stale checks only values the writer of warm_dir supplies; Base must not be lifted on this prototype (the prototype is never merged here)",
       "source": "cross-area 2026-11-17 04:41 UTC (agent 379)"
-    },
-    {
-      "id": "R331-XLM-4P-5",
-      "routes": [
-        "stellar"
-      ],
-      "severity": "High",
-      "state": "fixed in 1d41a73 (373, as R373-1); rehearsal reruns and 377's re-check pending",
-      "what": "every event scan of the route stopped at the first empty getEvents page: after ~14 h without a vault event a guardian sees no release (a forgery is never judged) and deposits are not found",
-      "source": "cross-area 2026-11-17 05:23 UTC (373) and 06:45 UTC (377); coordinator: Stellar stays not launchable until the re-check",
-      "owner": 373,
-      "reviewer": 377
-    },
-    {
-      "id": "R331-XLM-4P-4",
-      "routes": [
-        "stellar"
-      ],
-      "severity": "Medium",
-      "state": "fixed in df54a72 (373; tip 1d78d30); 377 verdict on a clean rehearsal pending",
-      "owner": 373,
-      "reviewer": 377,
-      "what": "see agents/331-bridge-stellar-review-r17.md section 4P",
-      "source": "cross-area 2026-11-17 06:45 UTC (377)"
-    },
-    {
-      "id": "R330-SOL-4P-9",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Medium",
-      "state": "open (371 fixing)",
-      "owner": 371,
-      "reviewer": 376,
-      "what": "sol_guardiao.py eth_source: the recipient findings (each followed by continue) come before the release-before-final test, and recipient_verdict reads the router logs only up to the guardian's own finalized block",
-      "source": "agents/330-bridge-solana-review-r17.md fourth pass (376 FINAL at 93edeee)"
-    },
-    {
-      "id": "F381-1",
-      "routes": [
-        "ethereum",
-        "arbitrum-one",
-        "op-mainnet",
-        "linea",
-        "tron"
-      ],
-      "severity": "Medium",
-      "state": "packaging fixed in ba23175 (staged path); tool side open (374 fixing)",
-      "owner": 374,
-      "reviewer": 379,
-      "what": "relayer credential mode: under a real systemd LoadCredential (mode 0440) vigia.py's private_file refuses the keystore password, so every relayer exits at start (liveness, no funds); the check is in the shared relayer tools/signatario-stable/vigia.py, so every route whose relayer it is (Ethereum, the EVM networks, TRON) is held, not only the Ethereum bundles 381 packaged",
-      "source": "agents/381-bridge-operator-pkg-r18.md findings table; cross-area 2026-11-17 06:10 UTC (381); coordinator"
     }
   ],
   "removed": [
@@ -130,27 +66,34 @@
       "id": "R330-SOL-4P-3",
       "why": "confirmed fixed by reviewer 376, fourth pass FINAL at 93edeee (relayed by the coordinator)",
       "on": "2026-11-17"
+    },
+    {
+      "id": "R330-SOL-1",
+      "why": "reviewer 376: no Medium or above open; the residual is listed below as 376 states it",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R331-XLM-4P-5",
+      "why": "re-checked closed by reviewer 377 (same)",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R331-XLM-4P-4",
+      "why": "re-checked closed by reviewer 377 (Stellar b43cc08 fit for external audit; relayed by the coordinator)",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "R330-SOL-4P-9",
+      "why": "reviewer 376: no Medium or above open on Solana at eac2b35 (relayed by the coordinator)",
+      "on": "2026-11-17"
+    },
+    {
+      "id": "F381-1",
+      "why": "fix b4ff916 (374) and Tron ffcbe2e confirmed safe by reviewer 379 (relayed by the coordinator)",
+      "on": "2026-11-17"
     }
   ],
   "listed": [
-    {
-      "id": "R330-SOL-4P-6",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Low",
-      "what": "docs/SOLANA-VAULT.md 11.3: the hardware-wallet off-chain format and what a wallet shows are stated inexactly (371 fixing)",
-      "source": "376 fourth pass"
-    },
-    {
-      "id": "R330-SOL-4P-7",
-      "routes": [
-        "solana"
-      ],
-      "severity": "Low",
-      "what": "sol_vigia.py execute picks the latch key from the latest redirect only, while the 4P-3 fix may pay an earlier proven redirect (371 fixing)",
-      "source": "376 fourth pass"
-    },
     {
       "id": "R342-BTC-2P-5",
       "routes": [
@@ -186,6 +129,55 @@
       "severity": "Info",
       "what": "the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash",
       "source": "same"
+    },
+    {
+      "id": "R330-SOL-1 (residual)",
+      "routes": [
+        "solana"
+      ],
+      "severity": "residual, per reviewer 376",
+      "what": "an on-curve destination nobody holds a key for cannot be told from a fresh wallet except by the destination-key proof; exits must carry it (router burnTo with the proof; the bridge page signs it)",
+      "source": "agents/330-bridge-solana-review-r17.md (376)"
+    },
+    {
+      "id": "R330-SOL-4P-5",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Info",
+      "what": "exitHash is computed and logged by the router but read by no tool",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R330-SOL-4P-8",
+      "routes": [
+        "solana"
+      ],
+      "severity": "Info (rig hygiene)",
+      "what": "the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host",
+      "source": "376 fourth pass"
+    },
+    {
+      "id": "R329-SHARED-2",
+      "routes": [
+        "ethereum",
+        "arbitrum-one",
+        "op-mainnet",
+        "linea",
+        "tron"
+      ],
+      "severity": "Low (fixed in 807478f by 374; 379 re-check pending)",
+      "what": "the group of a group-readable relayer credential was not checked (read exposure, not a write path)",
+      "source": "agents/329-bridge-evm-review-r17.md"
+    },
+    {
+      "id": "R331-XLM-4P-7",
+      "routes": [
+        "stellar"
+      ],
+      "severity": "Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm)",
+      "what": "a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement)",
+      "source": "agents/331-bridge-stellar-review-r17.md"
     }
   ],
   "noteListed": "listed: findings below Medium that the coordinator or a reviewer asked to be shown in main's README; they do not hold a route.",
