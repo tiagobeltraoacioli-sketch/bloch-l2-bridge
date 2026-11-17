@@ -1,0 +1,13 @@
+{
+  "base": "cc2511a",
+  "note": "Merge order. Every branch is read-only for the integrator. `never` lists branches that must not be merged (history holds a parked contract).",
+  "never": ["codex/bridge-evm-nets-r16-20261116"],
+  "lines": [
+    {"id": "shared-tools", "routes": ["ethereum"], "branch": "codex/bridge-signer-verify-r17-20261117", "agent": 341},
+    {"id": "evm-nets", "routes": ["arbitrum-one", "op-mainnet", "linea", "base", "bnb"], "branch": "codex/bridge-evm-nets-r17-20261117", "agent": 337},
+    {"id": "bitcoin", "routes": ["bitcoin"], "branch": "codex/bridge-btc-r17-20261117", "agent": 332},
+    {"id": "tron", "routes": ["tron"], "branch": "codex/bridge-tron-r17-20261117", "agent": 332},
+    {"id": "solana", "routes": ["solana"], "branch": "codex/bridge-solana-r17-20261117", "agent": 336},
+    {"id": "stellar", "routes": ["stellar"], "branch": "codex/bridge-stellar-r17-20261117", "agent": 338}
+  ]
+}
