@@ -277,7 +277,12 @@ def unit_runtime(spec):
 
 def keccak(hexdata):
     import os
+    import re
     import subprocess
+    # The value may be a node's answer (verify-unit): a text starting with `-` would be an option of `cast` (agent 374's
+    # class), so only 0x-prefixed hex reaches the command line.
+    if not isinstance(hexdata, str) or not re.fullmatch(r'0x(?:[0-9a-fA-F]{2})*', hexdata):
+        raise SystemExit(f'refused: code to hash is not 0x-prefixed hex: {str(hexdata)[:40]!r}')
     cast = Path(os.environ.get('FOUNDRY_BIN', Path.home() / '.foundry/bin')) / 'cast'
     return subprocess.run([str(cast), 'keccak', hexdata], capture_output=True, text=True, check=True).stdout.strip().lower()
 

@@ -88,6 +88,29 @@ when one key serves both chains), `max_valid_seconds` (default 3600), `db`, `eth
 Tests: `python3 test_signatario.py <foundry project>` (two anvil chains: 11155111 with the vault (contracts/usdt) and a
 6-decimal mock token, 700771 with `BridgedStablecoin`; Ethereum half test double).
 
+## Signature checks (round 17)
+
+No signature is judged by a command's exit code. `cast wallet verify` exits 0 when the signature argument is read as
+`-h` or `--help` (it prints its help), and for signatures every contract of this bridge refuses: the high-s twin of a
+real signature (computable by anyone), `v` = 0 / 1 or 37 / 38, a missing `0x`. `sigverify.py` (standard library; the
+secp256k1 and Keccak code of `bridge_feed.py`) parses the text strictly (`0x` + 64 / 40 / 130 hex digits), requires
+`0 < r < n`, `0 < s <= n/2`, `v` 27 or 28, and recovers the signer in this process: the rule of the vault's and the
+token's `ecrecover` check. It is used by
+
+- `signatario.py release` for the Ethereum half's signature (must recover to the pinned `eth_signer`);
+- `signatario.py combine` for every partial (must recover to its `signer`; one signer counts once);
+- `vigia.py` for every partial read from SHARED, before the chain is asked whether the signer is a current signer;
+- `tools/deploy-pontes/key_inventory.py` for the key attestations (EIP-191; there, and only there, the two equivalent
+  encodings a wallet may emit are normalised first, because no contract reads an attestation).
+
+A value that `cast` would read as an option (a leading `-`) is refused before any command runs, in every tool that
+passes chain, peer or file values on a command line (`signatario.py`, `eth_half.py`, `vigia.py`, `guardiao.py`,
+`sombra.py`, `reservas.py`, `deploy_pontes.py`, `vault_pontes.py`). The command lines of honest values are unchanged.
+
+Tests: `python3 -m unittest test_sigverify_r17` (offline, 25 tests) and `python3 test_signer_verify_r17.py <foundry
+project>` (two anvils, 23 checks: a stranger's high-s twin in SHARED no longer wedges a mint or a release; forged
+partials do not count in `combine`; the vault refuses the same forgeries on chain).
+
 ## Automation
 
 `vigia.py --config CFG sign|relay [--once]` runs the signer and a relayer without anyone in the loop (same

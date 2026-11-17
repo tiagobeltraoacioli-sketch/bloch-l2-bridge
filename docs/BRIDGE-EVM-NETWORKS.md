@@ -475,8 +475,8 @@ network (own configuration directory, own databases, own shared directory, own g
    `eth-half.template.json`, `signer.template.json`, `relayer.template.json` (own directories, databases, feed and
    gas keys per network: no file is shared with the Ethereum bridge's daemons). **The anchor settings are not operator
    choices** (review R329-EVM-3): `anchor_policy`, `anchor_depth`, `anchor_max_age` and `finalized_margin` are taken
-   from `networks.json` by the chain id, by `eth_half.py` and by `vigia.py` alike. A file that omits them gets the
-   registry's values; a file that contradicts them is refused at start (before, a signer file without
+   from `networks.json` by the chain id, by `eth_half.py` and by `vigia.py` alike. A file that omits one the
+   registry sets, or contradicts one, is refused at start (round 18; round 17 filled an omitted key) (before, a signer file without
    `anchor_policy` took the Ethereum rule, and on Arbitrum One no round could ever be joined). `probe` is refused on
    chain 1. `preflight_signer.py --network NAME` checks the same before go-live.
 3. **Timers and budgets** (`signer` in `networks.json`; review R329-EVM-6). Run the daemons WITHOUT `--interval`: the
@@ -668,6 +668,7 @@ python3 tools/evm-nets/network_json.py check deployments/$NET/bridge.network.jso
 | `tools/deploy-pontes/vault_pontes.py`, `deploy_pontes.py` | see `git diff cc2511a` | changed: source networks, launch status, fee and token-name pins from the registry; a chain-1 config is validated as before |
 | `tools/evm-nets/launch.py` | new | the launch decision in code and the registry lookups: **read this first** |
 | `tools/evm-nets/` (registry, generator, checker, timing monitor, fork and Nitro rehearsals, tests) | new | tooling, moves no funds |
+| Agent 374's shared signer-tools fix (`codex/bridge-signer-verify-r17-20261117`, merged in round 18: `sigverify.py`, `plain()` in the deploy tools, guarded `alert_command`) | see `git diff cc2511a` | only the two code commits `0f07e10` and `8bc9ed8` are on this line; the Ethereum line's refreeze record (`ec79cf8`: Phase 2 manifest, list, refreeze document) is not, because its hashes name the Ethereum tree (review R329-EVM-3P-4). Tests: `tools/signatario-stable/test_sigverify_r17.py` (25), `test_signer_verify_r17.py .` (anvil, 23) |
 
 `contracts/evmnets/ScaledUnitToken.sol` serves only BNB Smart Chain, which is out of v1: an auditor of Arbitrum One,
 OP Mainnet and Linea can leave it out of scope. `tools/evm-nets/r329_nitro_sim.py` and `solidity-tests/R329NitroSim.sol`
