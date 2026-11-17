@@ -331,27 +331,27 @@ cast nonce $TOKEN_DEPLOYER --rpc-url $L2_RPC
 
 Both must print `0`. The attestations, as for every other key:
 
-<!-- step owner vault-msg -->
+<!-- step owner vdep-msg -->
 ```
 export MSG=$(python3 tools/deploy-pontes/key_inventory.py message --role eth-vault-deployer --index 1 --operator owner --address $VAULT_DEPLOYER --date $DAY)
 ```
-<!-- step owner vault-sig -->
+<!-- step owner vdep-sig -->
 ```
 export SIG=$(cast wallet sign $VAULT_WALLET "$MSG")
 ```
-<!-- step owner vault-record -->
+<!-- step owner vdep-record -->
 ```
 python3 tools/deploy-pontes/ceremony_kit.py record --role eth-vault-deployer --index 1 --operator owner --address $VAULT_DEPLOYER --date $DAY --custody hardware-wallet --signature $SIG > ceremony-out/records/owner-eth-vault-deployer.json
 ```
-<!-- step owner token-msg -->
+<!-- step owner tdep-msg -->
 ```
 export MSG=$(python3 tools/deploy-pontes/key_inventory.py message --role l2-token-deployer --index 1 --operator owner --address $TOKEN_DEPLOYER --date $DAY)
 ```
-<!-- step owner token-sig -->
+<!-- step owner tdep-sig -->
 ```
 export SIG=$(cast wallet sign $TOKEN_WALLET "$MSG")
 ```
-<!-- step owner token-record -->
+<!-- step owner tdep-record -->
 ```
 python3 tools/deploy-pontes/ceremony_kit.py record --role l2-token-deployer --index 1 --operator owner --address $TOKEN_DEPLOYER --date $DAY --custody hardware-wallet --signature $SIG > ceremony-out/records/owner-l2-token-deployer.json
 ```

@@ -337,7 +337,7 @@ def flow(rig):
     for s in ('vault-deployer', 'token-deployer'):
         owner.run(s)
     check('[6] both deployers have nonce 0', owner.run('vault-deployer-nonce') == '0' and owner.run('token-deployer-nonce') == '0')
-    for s in ('vault-msg', 'vault-sig', 'vault-record', 'token-msg', 'token-sig', 'token-record'):
+    for s in ('vdep-msg', 'vdep-sig', 'vdep-record', 'tdep-msg', 'tdep-sig', 'tdep-record'):
         owner.run(s)
 
     # ── 7. intake ──
