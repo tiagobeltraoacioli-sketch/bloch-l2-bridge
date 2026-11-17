@@ -1122,6 +1122,36 @@ class Rehearsal:
         r = self.half(0, 'release', '--intent', str(self.write_intent(rel, ctx)))
         check('a signer refuses to certify the closed nonce', not r['ok'] and 'already has a release' in r.get('reason', ''), answer=r)
 
+        section('Round 18: sweep refused while the fee owner has no token account (its owner closed it after init)')
+        # 32e124c staged this before init; since round 17 init creates the account, so the case is the owner closing it
+        # later (an empty classic token account can be closed by its owner). The swept fees must never go elsewhere.
+        fee_ata = self.a.fee_account
+        dep = self.deposit(20 * U)  # a deposit: its fee accrues in the vault
+        balance = self.sol.balance(fee_ata)
+        if balance:
+            dump = S.associated_token_address(self.thief.public, self.mint)  # created at setup
+            ix = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(fee_ata, False, True), S.Meta(dump, False, True),
+                                                 S.Meta(self.fee_owner.public, True)], b'\x03' + balance.to_bytes(8, 'little'))
+            code, res = self.sol.tx(self.payer, [ix], extra=[self.fee_owner])
+            assert code is None, res
+        close = S.Instruction(S.TOKEN_PROGRAM, [S.Meta(fee_ata, False, True), S.Meta(self.fee_owner.public, False, True),
+                                                S.Meta(self.fee_owner.public, True)], bytes([9]))
+        code, res = self.sol.tx(self.payer, [close], extra=[self.fee_owner])
+        check('the fee owner closes its (emptied) USDC token account after init', code is None and self.sol.balance(fee_ata) is None,
+              code=code)
+        accrued = self.state()['feesAccrued']
+        r = self.vault('sweep', *self.pay)
+        check('sweep is refused by the tool while the fee owner has no token account; the fees stay accrued in the vault',
+              not r['ok'] and 'no associated token account' in r.get('reason', '') and self.state()['feesAccrued'] == accrued
+              and accrued > 0, answer=r)
+        code, _ = self.sol.tx(self.payer, [self.ix.sweep_fees()])
+        check('and by the program, whoever sends it', code is not None and self.state()['feesAccrued'] == accrued, code=code)
+        r = self.vault('create-fee-account', *self.pay)
+        self.sol.wait_finalized(self.sol.rpc.slot('confirmed'), 0)
+        r2 = self.vault('sweep', *self.pay)
+        check('create-fee-account restores it (anyone may) and the accrued fees are swept to the fee owner',
+              r['ok'] and r2['ok'] and self.sol.balance(fee_ata) == accrued, create=r, sweep=r2)
+
         section('R330: a plain validator restart between attestation, certificate and payment')
         wallet = self.walletB.public
         dep = self.deposit(30 * U)
