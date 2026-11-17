@@ -859,11 +859,9 @@ verdict and its merge into `main` by the integrator (agent 375), and none before
 
 ## 17. Rehearsal record
 
-`deploy/ceremony/rehearse_ceremony.py` (round 18) runs sections 2 to 14 as written:
-
-```
-FOUNDRY_BIN=<directory of cast, forge, anvil 1.7.1> python3 deploy/ceremony/rehearse_ceremony.py
-```
+`deploy/ceremony/rehearse_ceremony.py` (round 18) runs sections 2 to 14 as written; run it with
+`FOUNDRY_BIN=<directory of cast, forge, anvil 1.7.1> python3 deploy/ceremony/rehearse_ceremony.py` (this file has no
+code block that is not a marked step, and the rehearsal checks that).
 
 Result on 2026-11-17 (agent 380; details in `agents/380-bridge-ceremony-r18.md`): 128 of 128 marked blocks run,
 49 of 49 checks pass, `CEREMONY REHEARSAL OK`: 27 key records from 12 hosts and the owner re-verified; configs filled
