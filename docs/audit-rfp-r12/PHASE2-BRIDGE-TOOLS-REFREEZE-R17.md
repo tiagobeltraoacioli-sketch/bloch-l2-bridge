@@ -92,3 +92,18 @@ Ethereum block first (left to the guardian suites' owner; no check was changed).
 
 Not done / not proven: the suites were run on the Mac only (not on 45.77.142.123); `scripts/tests` (419) was run at
 `0f07e10`, not at `ec79cf8` (no file under `scripts/` changed after it).
+
+## 6. Round 18 addition: systemd credentials (`b4ff916`, agent 374, finding F381-1 of agent 381)
+
+`vigia.py private_file` refused the 0440 file that systemd `LoadCredential=` hands the relayer (owned by root,
+readable by the service through an ACL), so the committed `deploy/signatario/bloch-busdc-relay.service` could not
+start (Medium, liveness; shown by agent 381 under real systemd). Now a file named directly in
+`$CREDENTIALS_DIRECTORY` is accepted when it is a regular file (not a link) of root or the service user, mode 0440 or
+stricter or private to its owner, in a directory of root or the service user that group and others cannot write.
+Everywhere else the rule is unchanged (no group or other bit) and now also requires a regular file owned by the
+service user. `credential:NAME` must be a plain file name. `preflight_signer.py` accepts `credential:` values as text
+(it runs before the unit) and needed no change.
+
+New offline suite `tools/signatario-stable/test_credentials_r18` 11 tests (before the fix: 7 failures, 2 errors).
+Phase 2 manifest regenerated: only the `vigia.py` row changed (1,801 lines, nSLOC 1,336); contracts and the Phase 2B
+manifest unchanged.
