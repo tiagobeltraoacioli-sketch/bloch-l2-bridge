@@ -13,6 +13,7 @@ import os
 import stat
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # ── base58 ──────────────────────────────────────────────────────────────────
@@ -114,6 +115,68 @@ def on_curve(key):
     return w == 0 or pow(w, (_P - 1) // 2, _P) == 1
 
 
+# The eight points of small order (1, 2, 4, 8) have these five y coordinates; whatever the sign bit and whether or
+# not y is written reduced, an address with one of them is a point NO private key can exist for: a public key is a
+# multiple of the base point by a clamped scalar, which is never in the small subgroup (review 330, R330-SOL-1).
+_SMALL_ORDER_Y = frozenset((0, 1, _P - 1, 0x05fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826,
+                            0x7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7))
+
+
+def small_order(key):
+    """True if the 32 bytes are one of the small-order points of the curve (in any spelling): nobody holds a key."""
+    return on_curve(key) and (int.from_bytes(key, 'little') & ((1 << 255) - 1)) % _P in _SMALL_ORDER_Y
+
+
+# ── Ed25519 verification (offline proofs of key control; pure Python, no key is ever handled here) ──────────────
+_L = 2**252 + 27742317777372353535851937790883648493
+_SQRT_M1 = pow(2, (_P - 1) // 4, _P)
+
+
+def _decompress(key):
+    n = int.from_bytes(key, 'little')
+    sign, y = n >> 255, n & ((1 << 255) - 1)
+    if y >= _P:
+        return None
+    x2 = (y * y - 1) * pow(_D * y * y + 1, _P - 2, _P) % _P
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P:
+        x = x * _SQRT_M1 % _P
+    if (x * x - x2) % _P or (x == 0 and sign):
+        return None
+    return ((_P - x) if x & 1 != sign else x, y)
+
+
+def _edwards_add(a, b):
+    (x1, y1), (x2, y2) = a, b
+    t = _D * x1 * x2 * y1 * y2 % _P
+    return ((x1 * y2 + x2 * y1) * pow(1 + t, _P - 2, _P) % _P, (y1 * y2 + x1 * x2) * pow(1 - t, _P - 2, _P) % _P)
+
+
+def _edwards_mul(k, point):
+    out = (0, 1)
+    while k:
+        if k & 1:
+            out = _edwards_add(out, point)
+        point = _edwards_add(point, point)
+        k >>= 1
+    return out
+
+
+_BASE = _decompress((4 * pow(5, _P - 2, _P) % _P).to_bytes(32, 'little'))
+
+
+def ed25519_verify(public, message, signature):
+    """RFC 8032 verification, strict: canonical encodings of the key, of R and of S; a small-order key is refused."""
+    if len(public) != 32 or len(signature) != 64 or small_order(public):
+        return False
+    a, r = _decompress(public), _decompress(signature[:32])
+    s = int.from_bytes(signature[32:], 'little')
+    if a is None or r is None or s >= _L:
+        return False
+    k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), 'little') % _L
+    return _edwards_mul(s, _BASE) == _edwards_add(r, _edwards_mul(k, a))
+
+
 def find_program_address(seeds, program_id):
     for bump in range(255, -1, -1):
         h = sha256(b''.join(seeds) + bytes([bump]) + program_id + b'ProgramDerivedAddress')
@@ -192,6 +255,56 @@ def unhex(text, length=None, what='value'):
     if length is not None and len(data) != length:
         raise Refused(f'{what} must be {length} bytes', got=text)
     return data
+
+
+# ── which cluster this is (review 330, R330-SOL-2) ──────────────────────────
+# Genesis hashes of the public clusters, each read from its own public endpoint (getGenesisHash) on 2026-11-17.
+MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
+PUBLIC_GENESIS = {MAINNET_GENESIS: 'mainnet-beta', 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG': 'devnet',
+                  '4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY': 'testnet'}
+
+
+def is_loopback(url):
+    host = (urllib.parse.urlsplit(str(url)).hostname or '').lower()
+    return host in ('localhost', '::1') or host.startswith('127.')
+
+
+def rehearsal(doc, urls=(), genesis=None):
+    """Whether the vault file describes a rehearsal, decided by the CLUSTER and never by the flag alone.
+
+    `solana.rehearsal: true` relaxes rules that exist for real funds (two agreeing endpoints for a mint, the burn
+    router and an L2 endpoint for a release, the mainnet policy of the configuration). It is therefore refused,
+    not obeyed, when the genesis hash (the file's, and the node's when given) is a public cluster's, and when any
+    endpoint is not on loopback: a rehearsal is a local private cluster and nothing else. With the flag false or
+    absent every production rule applies, whatever the cluster."""
+    if not bool((doc.get('solana') or {}).get('rehearsal')):
+        return False
+    hashes = {str(doc['solana'].get('genesisHash'))} | ({b58encode(genesis)} if genesis is not None else set())
+    for text in hashes:
+        if text in PUBLIC_GENESIS:
+            raise Refused('`solana.rehearsal: true` is refused on a public cluster: the genesis hash is '
+                          f'{PUBLIC_GENESIS[text]}\'s. The production rules cannot be switched off there', genesisHash=text)
+    remote = [u for u in urls if not is_loopback(u)]
+    if remote:
+        raise Refused('`solana.rehearsal: true` is refused with an endpoint that is not on loopback: a rehearsal is '
+                      'a local private cluster. The production rules cannot be switched off for a remote cluster',
+                      endpoints=len(remote))
+    return True
+
+
+# ── how long a paid release record must stay readable (review 330, R330-SOL-3) ──
+# The guardian watch compares a paid record (amount, recipient, burn) with its L2 burn only while the record
+# exists; once closed, one bit is left. `record_retention` must therefore outlast the longest time a guardian may
+# go without a completed round. The floor is derived from the watch interval: a paid record stays readable for at
+# least RETENTION_WATCH_ROUNDS rounds of the slowest watch allowed (so a guardian that is down for a long weekend
+# still reads every paid record in full when it returns), and never less than a guardian pause (what was paid just
+# before a pause stays inspectable for the whole pause). 4,320 rounds of 60 s = 259,200 s = 3 days.
+GUARDIAN_WATCH_INTERVAL = 60
+RETENTION_WATCH_ROUNDS = 4320
+
+
+def retention_floor(pause_duration=0, watch_interval=GUARDIAN_WATCH_INTERVAL):
+    return max(RETENTION_WATCH_ROUNDS * int(watch_interval), int(pause_duration))
 
 
 # ── configuration ───────────────────────────────────────────────────────────
@@ -304,7 +417,13 @@ class Config:
                 (n == 7 and self.threshold == 5 and self.switch_threshold == 6, 'mainnet policy: 7 signers, 5 release, 6 unpause'),
                 (g == 3, 'mainnet policy: exactly 3 guardians'),
                 (self.deposit_fee_bps == 5 and self.release_fee_bps == 5, 'mainnet policy: 5 + 5 bps'),
-                (on_curve(self.fee_owner), 'the fee owner is not a wallet address (off curve)'),
+                (on_curve(self.fee_owner) and not small_order(self.fee_owner),
+                 'the fee owner is not a wallet address (off the curve, or a point without a key)'),
+                (self.record_retention >= retention_floor(self.pause_duration),
+                 f'mainnet policy: recordRetention {self.record_retention} is below the floor '
+                 f'{retention_floor(self.pause_duration)} s ({RETENTION_WATCH_ROUNDS} guardian watch rounds of '
+                 f'{GUARDIAN_WATCH_INTERVAL} s, and never less than pauseDuration): a paid record could be closed '
+                 'before a guardian read it'),
             ]
         return [text for ok, text in checks if not ok]
 
@@ -722,6 +841,16 @@ class Rpc:
         if value is None:
             return slot, None, None, 0
         return slot, pubkey(value['owner']), base64.b64decode(value['data'][0]), int(value['lamports'])
+
+    def account_info(self, key, commitment):
+        """The account as the node shows it: None when absent, else owner, data, lamports and the executable flag."""
+        out = self.call('getAccountInfo', [b58encode(key), {'encoding': 'base64', 'commitment': commitment}])
+        value = out['value']
+        if value is None:
+            return None
+        return {'owner': pubkey(value['owner']), 'data': base64.b64decode(value['data'][0]),
+                'lamports': int(value['lamports']), 'executable': bool(value.get('executable')),
+                'slot': int(out['context']['slot'])}
 
     def last_block(self, commitment, at_or_below=None):
         """(slot, blockhash) of the newest block at this commitment (skipped slots have no block)."""

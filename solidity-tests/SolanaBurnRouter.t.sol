@@ -49,12 +49,14 @@ contract SolanaBurnRouterTest {
     RouterMockToken token;
     SolanaBurnRouter router;
     address constant USER = address(0xB0B);
+    /// The USDC mint on Solana, EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v (the route's mint).
+    bytes32 constant USDC_MINT = 0xc6fa7af3bedbad3a3d65f36aabc97431b1bbe4c2d2f6e0e47ca60203452f5d61;
 
     event SolanaExit(bytes32 indexed burnId, address indexed from, uint64 amount, address commitment, string recipient);
 
     function setUp() public {
         token = new RouterMockToken();
-        router = new SolanaBurnRouter(ISolanaBridgedToken(address(token)));
+        router = new SolanaBurnRouter(ISolanaBridgedToken(address(token)), USDC_MINT);
         token.mint(USER, 1_000_000_000);
         vm.prank(USER);
         token.approve(address(router), type(uint256).max);
@@ -140,7 +142,9 @@ contract SolanaBurnRouterTest {
 
     function test_constructorNeedsAContract() public {
         vm.expectRevert(SolanaBurnRouter.BadConfig.selector);
-        new SolanaBurnRouter(ISolanaBridgedToken(address(0x1234)));
+        new SolanaBurnRouter(ISolanaBridgedToken(address(0x1234)), USDC_MINT);
+        vm.expectRevert(SolanaBurnRouter.BadConfig.selector);
+        new SolanaBurnRouter(ISolanaBridgedToken(address(token)), bytes32(0));
     }
 
     /// The commitment is the registry's and the vault's: keccak256("BLOCH-SVM-ACCOUNT-ID-v1" || wallet), low 20 bytes.

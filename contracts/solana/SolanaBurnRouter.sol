@@ -25,11 +25,31 @@ interface ISolanaBridgedToken {
 ///      curve, and are not zero. Every associated token account, and every other program-derived address, is
 ///      OFF the curve by construction, so the most likely mistake (pasting a token account's address) is
 ///      refused. A wallet that is itself a program-derived address (a multisig vault, for example) is refused
-///      too: such a holder exits to a key wallet. An on-curve address proves nothing about who holds its key;
-///      a token account created at a keypair address is on the curve and is not detected.
+///      too: such a holder exits to a key wallet.
+///
+///      Review 330 (R330-SOL-1): "on the curve" is not "a wallet". Refused here as well, because this contract
+///      can know them without reading Solana: the eight points of small order (the identity point and seven
+///      others, in any spelling: no private key can exist for them), the SPL mint this route's vault holds
+///      (`solanaMint`, the answer to "what is the USDC address on Solana"), and the program ids the bridge
+///      itself names (classic SPL Token, Token-2022, Associated Token Account).
+///      What this contract CANNOT know: whether any other on-curve address is a wallet. A mint or a token
+///      account created at a keypair address, or a point nobody holds a key for, passes here. The signers read
+///      the destination on Solana at `finalized` and HOLD the burn unless it is absent or a plain System
+///      account (tools/signatario-solana/sol_recipient.py), and a held burn has no refund path: a page must
+///      take the destination from a connected wallet and have it sign a message before it calls `burnTo`
+///      (docs/SOLANA-VAULT.md, "Proof of the destination key").
 ///      No storage, no owner, never holds tokens between calls. UNAUDITED. Not for deployment.
 contract SolanaBurnRouter {
     ISolanaBridgedToken public immutable token;
+    /// The SPL mint the Solana vault of this route holds (32 bytes): never a destination.
+    bytes32 public immutable solanaMint;
+
+    bytes32 private constant TOKEN_PROGRAM = 0x06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9;
+    bytes32 private constant TOKEN_2022_PROGRAM = 0x06ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928d8a18bfc;
+    bytes32 private constant ATA_PROGRAM = 0x8c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8dbe9f859;
+    /// y coordinates of the two pairs of points of order 8 (the others of small order have y = 0, 1 and P - 1).
+    uint256 private constant ORDER8_Y1 = 0x05fc536d880238b13933c6d305acdfd5f098eff289f4c345b027b2c28f95e826;
+    uint256 private constant ORDER8_Y2 = 0x7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7;
 
     /// Domain tag of the commitment; the Solana program and the tools use the same bytes (`ID_ACCOUNT`).
     string public constant ACCOUNT_ID_DOMAIN = "BLOCH-SVM-ACCOUNT-ID-v1";
@@ -44,14 +64,16 @@ contract SolanaBurnRouter {
     error NotASolanaWallet();
     error TransferFailed();
 
-    constructor(ISolanaBridgedToken token_) {
-        if (address(token_).code.length == 0) revert BadConfig();
+    constructor(ISolanaBridgedToken token_, bytes32 solanaMint_) {
+        if (address(token_).code.length == 0 || solanaMint_ == bytes32(0)) revert BadConfig();
         token = token_;
+        solanaMint = solanaMint_;
     }
 
     /// @notice The 32-byte wallet behind `recipient`. Reverts unless it is the canonical base58 text of 32 bytes
-    ///         that are a point of the Ed25519 curve and not zero.
-    function walletOf(string calldata recipient) public pure returns (bytes32) {
+    ///         that are a point of the Ed25519 curve, not of small order, and none of the addresses this
+    ///         contract knows not to be wallets (the route's mint, the token programs).
+    function walletOf(string calldata recipient) public view returns (bytes32) {
         bytes calldata s = bytes(recipient);
         uint256 n = s.length;
         if (n < 32 || n > 44) revert NotASolanaWallet();
@@ -67,12 +89,16 @@ contract SolanaBurnRouter {
         uint256 length;
         for (uint256 v = acc; v != 0; v >>= 8) ++length;
         if (acc == 0 || zeros + length != 32) revert NotASolanaWallet();
-        if (!_onCurve(bytes32(acc))) revert NotASolanaWallet();
-        return bytes32(acc);
+        bytes32 key = bytes32(acc);
+        if (key == solanaMint || key == TOKEN_PROGRAM || key == TOKEN_2022_PROGRAM || key == ATA_PROGRAM) {
+            revert NotASolanaWallet();
+        }
+        if (!_keyPoint(key)) revert NotASolanaWallet();
+        return key;
     }
 
     /// @notice The 20 bytes an L2 burn must name to be paid to `recipient` on Solana.
-    function commitment(string calldata recipient) public pure returns (address) {
+    function commitment(string calldata recipient) public view returns (address) {
         return address(uint160(uint256(keccak256(abi.encodePacked(ACCOUNT_ID_DOMAIN, walletOf(recipient))))));
     }
 
@@ -97,8 +123,10 @@ contract SolanaBurnRouter {
 
     /// Whether the 32 bytes decompress to an Ed25519 point, as the Solana runtime decides it for program-derived
     /// addresses: y is the little-endian value without its top bit, and x^2 = (y^2 - 1) / (d y^2 + 1) must have
-    /// a root, that is (y^2 - 1)(d y^2 + 1) is zero or a quadratic residue.
-    function _onCurve(bytes32 key) private pure returns (bool) {
+    /// a root, that is (y^2 - 1)(d y^2 + 1) is zero or a quadratic residue; and the point is not one of the
+    /// eight of small order (y = 0, 1, P - 1 or one of the two order-8 values, reduced, whatever the sign bit),
+    /// for which no private key exists. y = 1 and y = P - 1 are exactly the points where y^2 - 1 is zero.
+    function _keyPoint(bytes32 key) private pure returns (bool) {
         uint256 le;
         uint256 be = uint256(key);
         for (uint256 i; i < 32; ++i) {
@@ -106,11 +134,12 @@ contract SolanaBurnRouter {
             be >>= 8;
         }
         uint256 y = (le & ((1 << 255) - 1)) % P;
+        if (y == 0 || y == ORDER8_Y1 || y == ORDER8_Y2) return false;
         uint256 yy = mulmod(y, y, P);
         uint256 u = addmod(yy, P - 1, P);
         uint256 v = addmod(mulmod(D, yy, P), 1, P);
         uint256 w = mulmod(u, v, P);
-        if (w == 0) return true;
+        if (w == 0) return false; // u == 0: y = 1 or P - 1 (small order); v == 0 cannot happen (-1/d is no square)
         // Euler's criterion: w^((P - 1) / 2), with (P - 1) / 2 = 2^254 - 10.
         uint256 e = (P - 1) / 2;
         uint256 r = 1;
