@@ -536,6 +536,10 @@ def run(args):
     # ── F381-1 after 374's fix (b4ff916): the committed relayer unit with `credential:` starts and relays ──
     committed_relayer_case(dep, alice, alice_key)
 
+    # ── upgrade, rollback, failed upgrade with automatic rollback, on a healthy instance (before the incident drills:
+    #    an upgrade during an open CRIT is rolled back by design, seen in run 7) ──
+    upgrade_drills(bundles)
+
     # ── alert hook: a killed daemon (restart counted), then a forged mint (guardian finding) ──
     ex('a381-relayer', 'systemctl kill -s KILL bloch-bridge-ethereum-relayer.service')
     hook_lines = lambda: ex('a381-relayer', 'journalctl -t bloch-bridge-alert --since -6min -o cat --no-pager', ok=False).stdout  # noqa: E731
@@ -556,9 +560,6 @@ def run(args):
     log('guardian journal after the forgery (tail): ' + gj[-600:].replace('\n', ' | '))
     rj = ex('a381-reserves', 'journalctl -t bloch-bridge-alert --since -12min -o cat --no-pager', ok=False).stdout
     log('reserves hook lines: ' + rj[-400:].replace('\n', ' | '))
-
-    # ── upgrade, rollback, failed upgrade with automatic rollback (reserves and relayer) ──
-    upgrade_drills(bundles)
 
     # ── stop: the staged secrets disappear ──
     rc, doc, _ = bridgectl('a381-s1', 'ethereum-signer', 'stop', 'ethereum-signer')
@@ -691,11 +692,15 @@ def f381_1():
             '-p RuntimeDirectory=f381rt -p ReadOnlyPaths=/root/f381 '
             '/bin/sh -c \'stat -c "%a %U:%G %n" $CREDENTIALS_DIRECTORY/*; '
             'cp /root/f381/relayer.json /run/f381rt/r.json 2>/dev/null; '
-            'python3 -E -s /opt/bloch-bridge/ethereum-relayer/current/tools/signatario-stable/vigia.py --config /root/f381/relayer.json relay --once\'')
+            'python3 -E -s CODE/tools/signatario-stable/vigia.py --config /root/f381/relayer.json relay --once\'')
     ex(c, 'chmod 755 /root')
-    done = ex(c, unit, ok=False, timeout=300)
+    control = ex(c, unit.replace('CODE', '/opt/bloch-bridge/ethereum-relayer/current').replace('a381-f381-1', 'a381-f381-1-cc2511a'), ok=False, timeout=300)
+    ctext = control.stdout + control.stderr
+    check('F381-1 control: the route code at cc2511a (in the bundle) still refuses the 0440 credential',
+          '440 root:root' in ctext and 'has mode 0440' in ctext, ctext[-600:])
+    done = ex(c, unit.replace('CODE', '/opt/bloch-l2-bridge'), ok=False, timeout=300)
     text = done.stdout + done.stderr
-    (WORK / 'f381-1.txt').write_text(text)
+    (WORK / 'f381-1.txt').write_text('== cc2511a (bundle)\n' + ctext + '\n== HEAD with b4ff916\n' + text)
     # Restated after 374's fix b4ff916 (run 6 showed the refusal; agents/381-evidence/run6/f381-1.txt): the property now
     # checked is that the 0440 credential systemd hands over is accepted, the stage before any send.
     check('F381-1 (after b4ff916): systemd still hands the credential as 0440 root, and vigia.py no longer refuses it',
