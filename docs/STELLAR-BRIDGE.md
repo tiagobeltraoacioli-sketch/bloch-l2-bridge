@@ -304,9 +304,21 @@ Findings by the final history (block numbers and finality only; no clock of any 
 - the named block is final in the guardian's view and holds no such burn, or the final chain has another hash at
   that height.
 
-The stall rule (R331-XLM-3P-2). A release that is still QUEUED, that the guardian could not judge although its L2
-sources answer and agree, and that is older than `stall_deadline` on the Stellar ledger clock (the release event's
-ledger to the latest ledger) is a finding. Honest signers certify only what was final before they signed, so a final
+The height rule (round 18, reviewer 377's R331-XLM-4P-2; block numbers only). The guardian keeps its own small state
+file (`seen_file`, required): the newest L2 block (the lowest head of its agreeing sources) at which it first saw
+each release. A release whose nonce holds no burn at a FINAL block more than `height_margin` blocks (default 256)
+past that recorded height is a finding, queued or already paid. An honest release's burn was final for its signers
+before the release existed, so it lies below every current node's head; the rule misfires only for a guardian whose
+every source was more than `height_margin` blocks behind the burn when it first saw the release (a false pause, no
+loss). This restores what revision 3's later-block rules did for a forgery naming an unreachable block or hidden
+behind another contract, without any timestamp.
+
+The stall rule (R331-XLM-3P-2, narrowed in round 18 by R331-XLM-4P-3 to the brief's "after a stated time without L2
+finality progress"). A release that is still QUEUED, that the guardian cannot judge BECAUSE its final view is behind
+the release (the nonce, or the burner's naming of the address paid, is above its final block), while its final L2
+block has not moved for longer than `stall_deadline` on the Stellar ledger clock (recorded in `seen_file`) and its
+sources answer and agree, is a finding. A cannot-judge of any other cause (a source that does not serve a log) is
+paged and never paused for. Honest signers certify only what was final before they signed, so a final
 view that still does not reach a queued release after that time means one of two things, and both are reasons to
 pause before it is paid: the L2's finality stands still while releases land, or the release is forged in a way the
 final history cannot contradict yet (under the nonce of the forger's own pending burn; naming a block nobody will
@@ -320,7 +332,7 @@ findings on a lagging guardian. Both rules and the host clock are gone. An L2 he
 `l2_clock_alert_seconds` (120) ahead of the Stellar ledger clock is reported as its own alert (`alerts`, exit 4 when
 nothing else is wrong) for a person to look at; no verdict depends on it.
 
-Cannot judge: the final view is behind the burn, or behind the claim of a direct burn; a source does not answer,
+Cannot judge: the final view is behind the burn, or behind the burner's naming of the address paid; a source does not answer,
 serves another chain, or the sources disagree; `require_two_l2_sources` is set and one source is configured; the
 token's or the router's code is not the pinned one; the L2 cannot serve the burn's log.
 
@@ -497,7 +509,8 @@ Each operator additionally runs:
   no bridge key.
 - Guardians: `guardiao_stellar.py check` on a timer much shorter than the release delay (every 5 minutes for a
   2-hour delay), against the guardian's own L2 follower and, where it has one, a second independent source
-  (`l2_rpc_others`), with `l2_chain_id`, `token`, `router`, `router_code_keccak` and `token_code_keccak` pinned.
+  (`l2_rpc_others`), with `l2_chain_id`, `token`, `router`, `router_code_keccak` and `token_code_keccak` pinned,
+  and its own `seen_file` (a writable file of that guardian alone; never shared, never copied between guardians).
   Exit 2 is a finding: sign `pause` and any relayer submits it. Exit 3 is "cannot judge": page a person at once; the
   check itself turns it into a finding (exit 2) for a queued release after `stall_deadline` (section 4c). Exit 4:
   an alert for a person (an L2 block stamped ahead), no pause. Any other non-zero exit: the tool failed; alert. A pause is not a hold: it voids every queued release and every
