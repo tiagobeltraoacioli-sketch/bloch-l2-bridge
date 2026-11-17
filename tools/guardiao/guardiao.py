@@ -307,6 +307,8 @@ class Guardian:
 
     def call(self, url, to, sig, *args, block='latest'):
         key = (sig, *[str(a) for a in args])
+        if any(a.startswith('-') for a in key[1:]):  # `cast` would read it as an option (`--help` exits 0): agent 341, round 17
+            raise Unverifiable(f'cast calldata {sig}: a value that would be read as a command-line option was refused')
         if key not in self._calldata:
             self._calldata[key] = self.cast_out('calldata', *key)
         data = self._calldata[key]
