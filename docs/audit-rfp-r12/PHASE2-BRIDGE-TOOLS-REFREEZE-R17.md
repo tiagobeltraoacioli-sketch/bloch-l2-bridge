@@ -137,3 +137,10 @@ is removed from `_stage_verifier`). `scripts/tests` on the host, crates present:
 (419 before, OK only under 022); with the host's own offline registry: 401 run, 3 errors (the downloads). The crates
 are obtained, on an online host, with `CARGO_HOME=<dir> ~/.cargo/bin/cargo +1.94.1 fetch --locked` at the repository
 root; nothing is vendored. Phase 2 manifest: byte-equal.
+
+Round 19, R408-3 (Info, reviewer 408; tests only): the directory-OWNER half of the F381-1 rule had no test (with
+`d.st_uid not in (0, uid)` removed every suite passed). `test_credentials_r18` gains
+`test_a_credentials_directory_of_another_user_is_refused` (only the directory's owner differs; root's and the
+service's own directory accepted as controls; it fails under that mutant) and
+`test_a_credentials_directory_others_can_read_but_not_write_is_accepted` (0755, 0750, 0700, 0500 accepted):
+14 -> 16 tests, OK under umask 000, 002, 022 and 077. `vigia.py` unchanged; Phase 2 manifest byte-equal.
