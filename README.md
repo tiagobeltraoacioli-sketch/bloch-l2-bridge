@@ -19,8 +19,11 @@ BNB Smart Chain out of v1): index [docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.m
 **not launchable until fixed** while a finding of severity Medium or above is open in
 `deployments/allnets/open-findings.json`. The table below is the one table of every open finding per route, with its
 severity and the route's launch status, from the reviewers' last passes (EVM networks and shared tools: review
-329 / 379; Solana: 330 / 376; Stellar: 331 / 377; Bitcoin and TRON: 342 / 378); it is generated from that file and
-checked against the registry by `tools/allnets/test_registry.py`. `held` and `out` come from the route's own source
+329 / 379 / 408; Solana: 330 / 376; Stellar: 331 / 377; Bitcoin and TRON: 342 / 378); it is generated from that file and
+checked against the registry by `tools/allnets/test_registry.py`. The notes under the table say what it does not
+cover: the operator-packages and ceremony-kit lines had no reviewer pass of their own. The generator reads the file
+fail-closed: a missing file, a missing or misspelled `findings` or `listed` key, a wrong type or an unknown key
+stops it and nothing is written. `held` and `out` come from the route's own source
 and are not lifted by closing findings: every held route also waits for its external audit and the owner's key
 ceremony.
 
@@ -28,15 +31,15 @@ ceremony.
 | Route | L2 token | Launch status | Open findings (Medium or above) | Open findings below Medium |
 |---|---|---|---|---|
 | ethereum | bUSDC | launchable | - | R329-SHARED-1 (Info), F374-1 (Info (test flake)) |
-| arbitrum-one | bUSDC.arb | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-11 (residual) (Info) |
-| base | bUSDC.base | held | R325-EVM-1 (High, open), R329-EVM-3P-2 (Medium, open) | - |
-| bitcoin | bBTC | held | - | R342-BTC-4 (Info), R342-BTC-5 (Info), R342-BTC-2P-5 (Info), R342-BTC-2P-7 (Info (latent)), R342-BTC-6 (Info), R342-BTC-7 (Info) |
-| bnb | bUSDC.bnb | out | R325-EVM-1 (High, open), R325-EVM-2 (Medium, partly-fixed) | - |
-| linea | bUSDC.linea | launchable | - | R329-EVM-3P-3 (Info) |
-| op-mainnet | bUSDC.op | launchable | - | R329-EVM-3P-3 (Info) |
+| arbitrum-one | bUSDC.arb | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-11 (residual) (Info), R325-EVM-6 (Info (stands)) |
+| base | bUSDC.base | held | R325-EVM-1 (High, open), R329-EVM-3P-2 (Medium, open) | R325-EVM-6 (Info (stands)) |
+| bitcoin | bBTC | held | - | R342-BTC-4 (Info), R342-BTC-5 (Info), R342-BTC-2P-5 (Info), R342-BTC-2P-7 (Info (latent)), R342-BTC-6 (Info), R342-BTC-7 (Info), R342-BTC-2P-3 (residual) (Info (residual of a fixed Low)) |
+| bnb | bUSDC.bnb | out | R325-EVM-1 (High, open), R325-EVM-2 (Medium, partly-fixed) | R325-EVM-10 (Info (stands)) |
+| linea | bUSDC.linea | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
+| op-mainnet | bUSDC.op | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
 | solana | bUSDC.sol | held | - | R374-1 (Info (question, answered by a test)), R330-SOL-1 (residual) (residual, per reviewer 376), R330-SOL-4P-5 (Info), R330-SOL-4P-8 (Info (rig hygiene)) |
-| stellar | bUSDC.xlm | held | - | R331-XLM-4P (Info, no id) (Info), R331-XLM-4P-7 (Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm)) |
-| tron | bUSDT.trx | held | - | R342-TRX-5 (Info), R342-TRX-6 (Info) |
+| stellar | bUSDC.xlm | held | - | R331-XLM-4P (Info, no id) (Info), R331-XLM-4P-7 (Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed)) |
+| tron | bUSDT.trx | held | - | R342-TRX-5 (Info), R342-TRX-6 (Info), R342-TRX-4 (limit) (Info (stated limit of a fixed Low)) |
 
 What each finding below Medium says (they do not hold the route):
 
@@ -46,20 +49,30 @@ What each finding below Medium says (they do not hold the route):
 | F374-1 | ethereum | Info (test flake) | `test_settle_quorum` "mint hold: the token and the vault both pause" can fail on a loaded machine (two on-demand anvils: the Ethereum head older than the L2 mint block); the guardian is right, the test should mine one Ethereum block first |
 | R329-EVM-3P-3 | arbitrum-one, linea, op-mainnet | Info | the signer's window hold is lifted by `measure` runs that do not time the source half: a persistently slow source node re-holds after each release (liveness only, alerts fire) |
 | R325-EVM-11 (residual) | arbitrum-one | Info | closed for the vault's anchor check and the signer's anchor rule under real Nitro execution; a release through the daemons over a Nitro node with a nonzero parent-chain data fee is still not shown |
+| R325-EVM-6 | arbitrum-one, base, linea, op-mainnet | Info (stands) | trust statement: provenance is read at `finalized` and, with the `probe` anchor policy, at the head |
+| R325-EVM-10 | bnb | Info (stands) | `ScaledUnitToken` (the BNB-only wrapper) is in the tree unaudited and unused in v1 |
 | R342-BTC-4 | bitcoin | Info | the window can still be held, bounded to 12 hours or a day, behind a claimed burn in its large-release delay or waiting for the daily window (stated design limit) |
 | R342-BTC-5 | bitcoin | Info | the launch-pin run exercises `verified_burns` on one burn only; `cmd_sign` has never been entered with launch pins on a settled private L2 |
 | R342-BTC-2P-5 | bitcoin | Info | set-aside terms are read at the signer's own finalized block (docstring and rule wording) |
 | R342-BTC-2P-7 | bitcoin | Info (latent) | whether a direct burner has code is read at today's block, not at the burn |
 | R342-BTC-6 | bitcoin | Info | a burn whose fee ceiling never pays is shown as payable unless a fee rate is given; no page-readable status source |
 | R342-BTC-7 | bitcoin | Info | the router address and code hash are per-signer configuration; the reserves monitor takes the router address without its code hash |
+| R342-BTC-2P-3 (residual) | bitcoin | Info (residual of a fixed Low) | a replayed fresh copy of a signed proposal still makes the signer read its nodes (no quota cost any more) |
 | R342-TRX-5 | tron | Info | the TRON-compiler build is reproducible and pinned but not executable in the EVM, so no forge test runs the bytecode that would be deployed; the pin is a repository file, not a constant of the tool; the compiler's PGP signature is unchecked |
 | R342-TRX-6 | tron | Info | solidified state shown on three stock producers only; the catch-up on an operator node and a release simulated against mainnet state are not shown |
+| R342-TRX-4 (limit) | tron | Info (stated limit of a fixed Low) | the two TRX price sources and their times are typed by the operator; the ceremony record must name them |
 | R374-1 | solana | Info (question, answered by a test) | off-chain acceptance of high s and recovery ids 0 / 1 must equal the native secp256k1 program's rule; 371 added `test_secp_rule.py` (`54e8e63`), not re-derived by reviewer 376 |
 | R330-SOL-1 (residual) | solana | residual, per reviewer 376 | an on-curve destination nobody holds a key for cannot be told from a fresh wallet except by the destination-key proof; exits must carry it (router burnTo with the proof; the bridge page signs it) |
 | R330-SOL-4P-5 | solana | Info | exitHash is computed and logged by the router but read by no tool |
 | R330-SOL-4P-8 | solana | Info (rig hygiene) | the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host |
 | R331-XLM-4P (Info, no id) | stellar | Info | rehearsal driver: other alert kinds no longer fail the direct-burn alert check (one narrowed assertion, `b43cc08`; 377: not a weakened product check) |
-| R331-XLM-4P-7 | stellar | Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm) | a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement) |
+| R331-XLM-4P-7 | stellar | Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed) | a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement) |
+
+What this table does not cover, and findings closed without their own reviewer pass:
+
+- The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.
+- F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.
+- Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal.
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before

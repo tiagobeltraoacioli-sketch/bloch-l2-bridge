@@ -726,6 +726,27 @@
       "source": "agents/329-bridge-evm-review-r17.md sections 1, 3 and 3P.0"
     },
     {
+      "id": "R325-EVM-6",
+      "routes": [
+        "arbitrum-one",
+        "base",
+        "linea",
+        "op-mainnet"
+      ],
+      "severity": "Info (stands)",
+      "what": "trust statement: provenance is read at `finalized` and, with the `probe` anchor policy, at the head",
+      "source": "agents/329-bridge-evm-review-r17.md section 1"
+    },
+    {
+      "id": "R325-EVM-10",
+      "routes": [
+        "bnb"
+      ],
+      "severity": "Info (stands)",
+      "what": "`ScaledUnitToken` (the BNB-only wrapper) is in the tree unaudited and unused in v1",
+      "source": "agents/329-bridge-evm-review-r17.md section 1"
+    },
+    {
       "id": "R342-BTC-4",
       "routes": [
         "bitcoin"
@@ -780,6 +801,15 @@
       "source": "same"
     },
     {
+      "id": "R342-BTC-2P-3 (residual)",
+      "routes": [
+        "bitcoin"
+      ],
+      "severity": "Info (residual of a fixed Low)",
+      "what": "a replayed fresh copy of a signed proposal still makes the signer read its nodes (no quota cost any more)",
+      "source": "agents/342-bridge-btc-tron-review-r17.md P2.2 (378)"
+    },
+    {
       "id": "R342-TRX-5",
       "routes": [
         "tron"
@@ -796,6 +826,15 @@
       "severity": "Info",
       "what": "solidified state shown on three stock producers only; the catch-up on an operator node and a release simulated against mainnet state are not shown",
       "source": "agents/342-bridge-btc-tron-review-r17.md section 1, 2.5 and P2.5"
+    },
+    {
+      "id": "R342-TRX-4 (limit)",
+      "routes": [
+        "tron"
+      ],
+      "severity": "Info (stated limit of a fixed Low)",
+      "what": "the two TRX price sources and their times are typed by the operator; the ceremony record must name them",
+      "source": "agents/342-bridge-btc-tron-review-r17.md P2.2 (378)"
     },
     {
       "id": "R374-1",
@@ -847,9 +886,14 @@
       "routes": [
         "stellar"
       ],
-      "severity": "Low (fixed in baa5391 by 373, unrehearsed; 377 to confirm)",
+      "severity": "Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed)",
       "what": "a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement)",
       "source": "agents/331-bridge-stellar-review-r17.md"
     }
+  ],
+  "coverageNotes": [
+    "The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.",
+    "F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.",
+    "Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal."
   ]
 }

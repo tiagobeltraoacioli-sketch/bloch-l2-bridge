@@ -1,6 +1,7 @@
 """Tests of the bridges' registry (tools/allnets/registry.py). Each cross-route check is shown to fail on a tree
 that breaks it (failing-first: every mutation below must produce exactly the named check's refusal)."""
 import copy
+import io
 import json
 from pathlib import Path
 import sys
@@ -164,6 +165,89 @@ class Registry(unittest.TestCase):
             with mock.patch.object(registry, 'FINDINGS', f):
                 _, errors = registry.build()
         self.assertTrue(any(e.startswith('C8 finding X-2') for e in errors), errors)
+
+    # R408-1 (reviewer 408, round 19): the findings file is read fail-closed.
+
+    def build_with(self, change, raw=None):
+        doc = json.loads(registry.FINDINGS.read_text())
+        change(doc)
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'open-findings.json'
+            if raw is None:
+                f.write_text(json.dumps(doc))
+            elif raw is not False:
+                f.write_text(raw)
+            with mock.patch.object(registry, 'FINDINGS', f):
+                return registry.build()
+
+    HIGH = {'id': 'X-HOLD', 'routes': ['linea'], 'severity': 'High', 'state': 'open', 'owner': 0, 'reviewer': 0,
+            'what': 'x', 'source': 'x'}
+
+    def test_control_a_finding_under_findings_holds_a_launchable_route(self):
+        reg, errors = self.build_with(lambda d: d['findings'].append(dict(self.HIGH)))
+        self.assertEqual(errors, [])
+        linea = next(r for r in reg['routes'] if r['id'] == 'linea')['launch']
+        self.assertEqual((linea['state'], linea['v1']), ('not-launchable-until-fixed', False))
+
+    def test_a_missing_or_misspelled_findings_key_stops_the_generator(self):
+        def misspelled(d):
+            d['findings'].append(dict(self.HIGH))
+            d['Findings'] = d.pop('findings')
+        cases = {
+            'misspelled': misspelled,
+            'missing': lambda d: d.pop('findings'),
+            'listed missing': lambda d: d.pop('listed'),
+            'findings not a list': lambda d: d.__setitem__('findings', {}),
+            'listed null': lambda d: d.__setitem__('listed', None),
+            'unknown key beside them': lambda d: d.__setitem__('finding', []),
+            'entry not an object': lambda d: d['findings'].append('X-HOLD'),
+            'entry without routes': lambda d: d['findings'].append({k: v for k, v in self.HIGH.items() if k != 'routes'}),
+            'routes not a list': lambda d: d['findings'].append({**self.HIGH, 'routes': 'linea'}),
+            'entry without state': lambda d: d['findings'].append({k: v for k, v in self.HIGH.items() if k != 'state'}),
+            'listed entry without severity': lambda d: d['listed'].append({'id': 'X', 'routes': ['tron'], 'what': 'x'}),
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(SystemExit) as stop:
+                    self.build_with(change)
+                self.assertIn('C8', str(stop.exception))
+
+    def test_a_missing_or_unreadable_findings_file_stops_the_generator(self):
+        for name, raw in (('missing', False), ('empty', ''), ('not json', '{'), ('a list', '[]')):
+            with self.subTest(name):
+                with self.assertRaises(SystemExit) as stop:
+                    self.build_with(lambda d: None, raw=raw)
+                self.assertIn('C8', str(stop.exception))
+
+    def test_the_cli_fails_closed_on_a_misspelled_key(self):
+        # reviewer 408's rig (tools/allnets/r408_findings_key.py on its review branch), as a test: `show`, `check` and
+        # `write` exit non-zero, print no launchable linea and write nothing.
+        doc = json.loads(registry.FINDINGS.read_text())
+        doc['findings'].append(dict(self.HIGH))
+        doc['Findings'] = doc.pop('findings')
+        with tempfile.TemporaryDirectory() as d:
+            f, out, readme = Path(d) / 'open-findings.json', Path(d) / 'bridges.json', Path(d) / 'README.md'
+            f.write_text(json.dumps(doc))
+            readme.write_text(registry.README.read_text())
+            for mode in ('show', 'check', 'write'):
+                with self.subTest(mode), mock.patch.object(registry, 'FINDINGS', f), \
+                        mock.patch.object(registry, 'OUT', out), mock.patch.object(registry, 'README', readme), \
+                        mock.patch('sys.stdout', new_callable=io.StringIO) as printed:
+                    with self.assertRaises(SystemExit) as stop:
+                        registry.main([mode])
+                    self.assertIn('C8', str(stop.exception))
+                    self.assertNotIn('v1=true', printed.getvalue())
+            self.assertFalse(out.exists())
+            self.assertEqual(readme.read_text(), registry.README.read_text())
+
+    def test_coverage_notes_are_in_the_readme_table(self):
+        notes = json.loads(registry.FINDINGS.read_text())['coverageNotes']
+        self.assertTrue(notes)
+        for note in notes:
+            self.assertIn(note, registry.readme_table(self.reg))
+        text = registry.readme_table(self.reg)
+        for word in ('F381-2', 'operator-packages', 'ceremony', 'baa5391'):
+            self.assertIn(word, text)
 
 if __name__ == '__main__':
     unittest.main()

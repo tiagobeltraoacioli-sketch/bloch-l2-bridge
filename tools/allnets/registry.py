@@ -32,7 +32,9 @@ BRIEF-ROUND16.md architecture point 2 rests on:
   C6 the fee recipient of each route is the owner's address for that network kind (BRIEF-ROUND18.md owner facts)
   C7 the committee is one committee: same scheme, threshold, switch threshold, guardian power and pause on every route
   C8 every finding (Medium or above, and the listed ones below Medium) names known routes only and states its
-     severity with a known first word (Critical, High, Medium in `findings`; Low, Info, residual in `listed`)
+     severity with a known first word (Critical, High, Medium in `findings`; Low, Info, residual in `listed`); the
+     findings file itself is read fail-closed (findings_doc: a missing file, a missing or misspelled `findings` or
+     `listed` key, a wrong type or an unknown top-level key stops the generator: nothing is written or printed)
 Standard library only. Reads files; writes only deployments/bridges.json and the launch table between the markers of README.md.
 """
 import json
@@ -136,8 +138,41 @@ def route_entry(net, path, doc):
     }
 
 
+FINDINGS_KEYS = {'domain', 'note', 'asOf', 'findings', 'removed', 'listed', 'noteListed', 'removedListed', 'coverageNotes'}
+ENTRY_KEYS = {'findings': ('id', 'routes', 'severity', 'state', 'owner'), 'listed': ('id', 'routes', 'severity', 'what')}
+
+
 def findings_doc():
-    return json.loads(FINDINGS.read_text()) if FINDINGS.exists() else {}
+    """The findings file, read fail-closed (R408-1, reviewer 408): the generator STOPS, writing and printing nothing,
+    unless the file exists, is a JSON object with no key outside FINDINGS_KEYS, and carries both lists `findings` and
+    `listed`, every entry an object with its required keys and `routes` a list. A missing or misspelled `findings` key
+    must never read as "no finding holds any route" (before round 19 the missing key stopped it with a KeyError; a
+    missing file did not: now both stop)."""
+    def stop(why):
+        raise SystemExit(f'C8 {FINDINGS.name}: {why}; nothing generated')
+    try:
+        doc = json.loads(FINDINGS.read_text())
+    except (OSError, ValueError) as e:
+        stop(f'cannot be read as JSON ({type(e).__name__})')
+    if not isinstance(doc, dict):
+        stop('is not a JSON object')
+    unknown = sorted(set(doc) - FINDINGS_KEYS)
+    if unknown:
+        stop(f'unknown key(s) {unknown} (known: {sorted(FINDINGS_KEYS)})')
+    for group, keys in ENTRY_KEYS.items():
+        if not isinstance(doc.get(group), list):
+            stop(f'`{group}` must be present and a list')
+        for n, f in enumerate(doc[group]):
+            if not isinstance(f, dict) or any(k not in f for k in keys):
+                stop(f'`{group}`[{n}] must be an object with {keys}')
+            if not isinstance(f['routes'], list) or not f['routes'] or not all(isinstance(r, str) for r in f['routes']):
+                stop(f'`{group}`[{n}] ({f["id"]}): `routes` must be a non-empty list of route ids')
+            if not isinstance(f['severity'], str):
+                stop(f'`{group}`[{n}] ({f["id"]}): `severity` must be text')
+    notes = doc.get('coverageNotes', [])
+    if not isinstance(notes, list) or not all(isinstance(n, str) and n and '\n' not in n for n in notes):
+        stop('`coverageNotes` must be a list of one-line texts')
+    return doc
 
 
 HOLDING, BELOW = ('Critical', 'High', 'Medium'), ('Low', 'Info', 'residual')
@@ -146,7 +181,7 @@ HOLDING, BELOW = ('Critical', 'High', 'Medium'), ('Low', 'Info', 'residual')
 def build():
     files = routes.network_files()
     fdoc = findings_doc()
-    findings, listed = fdoc.get('findings', []), fdoc.get('listed', [])
+    findings, listed = fdoc['findings'], fdoc['listed']
     errors, out = [], {}
     out['ethereum'] = ethereum_route()
     for net, (path, doc, found) in files.items():
@@ -199,7 +234,7 @@ def build():
            'checks': ['C1 network ids', 'C2 L2 symbols and names', 'C3 source chain ids', 'C4 source-domain labels',
                       'C5 frozen token on 700770', 'C6 owner fee recipients', 'C7 one committee', 'C8 findings name routes'],
            'routes': [{'id': n, **out[n]} for n in order],
-           'listedFindings': listed}
+           'listedFindings': listed, 'coverageNotes': fdoc.get('coverageNotes', [])}
     return reg, errors
 
 
@@ -260,6 +295,10 @@ def readme_table(reg):
         rows += ['', 'What each finding below Medium says (they do not hold the route):', '',
                  '| Finding | Route | Severity | What |', '|---|---|---|---|']
         rows += [f"| {f['id']} | {', '.join(f['routes'])} | {f['severity']} | {f['what']} |" for f in listed]
+    notes = reg.get('coverageNotes', [])
+    if notes:
+        rows += ['', 'What this table does not cover, and findings closed without their own reviewer pass:', '']
+        rows += [f'- {n}' for n in notes]
     return '\n'.join(rows)
 
 
