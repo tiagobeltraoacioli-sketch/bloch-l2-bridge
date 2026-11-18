@@ -136,6 +136,34 @@ class Credentials(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     vigia.private_file(str(p), 'x')
 
+    def test_a_credentials_directory_of_another_user_is_refused(self):
+        # R408-3 (reviewer 408): the OWNER half of the directory rule, alone. Only the directory's owner is changed
+        # (the credential stays this user's, 0400): whoever owns the directory can replace the files in it.
+        p = self.credential_file('l2-gas.password', 0o400)
+        stranger = os.getuid() + 4242
+        with self._as({self.creds}, uid=stranger):
+            with self.assertRaises(SystemExit) as e:
+                vigia.private_file(str(p), 'x')
+            self.assertIn('$CREDENTIALS_DIRECTORY must be a directory of root or this user', str(e.exception))
+            self.assertIn(f'owner {stranger}', str(e.exception))
+            with self.assertRaises(SystemExit):
+                self.wallet('credential:l2-gas.password')
+        for owner in (0, os.getuid()):  # controls: root's directory (systemd) and the service's own are accepted
+            with self.subTest(owner=owner), self._as({self.creds}, uid=owner):
+                self.assertEqual(vigia.private_file(str(p), 'x'), str(p))
+
+    def test_a_credentials_directory_others_can_read_but_not_write_is_accepted(self):
+        # R408-3: the accepted side of the mode rule beyond 0700 / 0500 (the old relayer-key fixture showed 0755 only
+        # by accident of the umask): 0755 and 0750 are not writable by group or others.
+        p = self.credential_file('l2-gas.password', 0o440)
+        for mode in (0o755, 0o750, 0o700, 0o500):
+            with self.subTest(mode=oct(mode)):
+                self.creds.chmod(mode)
+                try:
+                    self.assertEqual(vigia.private_file(str(p), 'x'), str(p))
+                finally:
+                    self.creds.chmod(0o500)
+
     def test_a_writable_credentials_directory_is_refused(self):
         p = self.credential_file('l2-gas.password', 0o440)
         for mode in (0o720, 0o702, 0o777):
