@@ -152,16 +152,37 @@ def expected_source_asset(chain_id, name, symbol):
     return None
 
 
+def route_assets(chain_id):
+    """Every asset a route of this tree holds on `chain_id`, in lower case: the first route's and the further routes'."""
+    known = {USDC_ETHEREUM} if chain_id == ETH_MAINNET else set()
+    launch = evm_launch()
+    if launch is not None and chain_id != ETH_MAINNET:
+        try:
+            known |= {n['asset']['address'].lower() for n in launch.launchable().values() if int(n['chainId']) == chain_id}
+        except launch.LaunchError:
+            pass
+    ar = asset_routes()
+    if ar is not None:
+        known |= {a for (c, a) in ar.DECIDED if c == chain_id}  # from the code table: no file can hide a route's asset
+    return known
+
+
 def check_source_asset(plan, eth):
-    """Refuses when the source vault holds another asset than this token's route names (see expected_source_asset)."""
+    """Refuses a token planned over a vault that holds ANOTHER route's asset (see expected_source_asset): bUSDC over the
+    USDT vault of its chain, bUSDT over the USDC vault. Returns the vault's asset when the check ran. A vault over a
+    token that is no route's asset on that chain is not this check's business (the mainnet path rehearsed on a local
+    chain with a stand-in token; before round 20 the tool never read the vault's asset): the vault tool pins it."""
     if plan['chain'].get('rehearsal'):
         return None
-    want = expected_source_asset(plan['sourceVault']['chainId'], plan['expected']['name'], plan['expected']['symbol'])
+    chain = plan['sourceVault']['chainId']
+    want = expected_source_asset(chain, plan['expected']['name'], plan['expected']['symbol'])
     if want is None:
         return None
     got = str(json.loads(eth.call(plan['sourceVault']['address'], 'token()', block='latest', returns='(address)'))[0]).lower()
-    refuse(got == want, f'the vault {plan["sourceVault"]["address"]} holds the asset {got}; the L2 token {plan["expected"]["symbol"]} '
-           f'belongs over a vault of {want}. A token over another route\'s vault would mint that route\'s deposits a second time')
+    refuse(got == want or got not in route_assets(chain),
+           f'the vault {plan["sourceVault"]["address"]} holds the asset {got}, which is another route\'s on chain {chain}; the L2 token '
+           f'{plan["expected"]["symbol"]} belongs over a vault of {want}. A token over another route\'s vault would mint that '
+           'route\'s deposits a second time')
     return got
 
 

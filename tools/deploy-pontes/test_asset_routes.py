@@ -37,6 +37,7 @@ ROUTES = ('ethereum-usdt', 'arbitrum-one-usdt', 'op-mainnet-usdt')
 USDC = {1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
         10: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85'}
 HELD = 'independent review, external audit and the owner\'s key ceremony are pending'
+USDT_ETH = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
 
 
 @contextlib.contextmanager
@@ -464,6 +465,74 @@ class Lifted(unittest.TestCase):
                 self.assertEqual(ex(s['chainId'], s['l2']['name'], s['l2']['symbol']), s['asset']['address'].lower())
         self.assertIsNone(ex(31337, 'Anything', 'x'))
         self.assertIsNone(ex(728126428, 'Bloch Bridged USDT (Tron)', 'bUSDT.trx'))
+
+
+class VaultAsset(unittest.TestCase):
+    """deploy_pontes.check_source_asset: a token is never planned or verified over another route's vault."""
+    VAULT = '0x' + '5a' * 20
+
+    class Eth:
+        def __init__(self, token):
+            self.token, self.calls = token, []
+
+        def call(self, to, sig, *args, block='latest', returns=None):
+            self.calls.append((to, sig, block))
+            return json.dumps([self.token])
+
+    def plan(self, chain, name, symbol, rehearsal=False):
+        return {'chain': {'rehearsal': rehearsal}, 'sourceVault': {'chainId': chain, 'address': self.VAULT},
+                'expected': {'name': name, 'symbol': symbol}}
+
+    def verdict(self, plan, token):
+        eth = self.Eth(token)
+        try:
+            return deploy_pontes.check_source_asset(plan, eth), eth.calls
+        except deploy_pontes.Refused as e:
+            return str(e), eth.calls
+
+    def test_each_first_route_s_token_is_refused_over_the_usdt_vault_of_its_chain(self):
+        first = {1: ('Bloch Bridged USDC', 'bUSDC'), 42161: ('Bloch Bridged USDC (Arbitrum)', 'bUSDC.arb'),
+                 10: ('Bloch Bridged USDC (OP Mainnet)', 'bUSDC.op')}
+        for (chain, usdt), (rid, _) in AR.DECIDED.items():
+            got, calls = self.verdict(self.plan(chain, *first[chain]), usdt)
+            with self.subTest(route=rid):
+                self.assertIn('another route', got)
+                self.assertIn('a second time', got)
+                self.assertEqual(calls, [(self.VAULT, 'token()', 'latest')])
+            self.assertEqual(self.verdict(self.plan(chain, *first[chain]), USDC[chain])[0], USDC[chain].lower())
+            self.assertEqual(self.verdict(self.plan(chain, *first[chain]), USDC[chain].lower())[0], USDC[chain].lower())
+
+    def test_each_further_route_s_token_is_refused_over_the_usdc_vault_of_its_chain(self):
+        with lifted(*ROUTES):
+            for rid in ROUTES:
+                s = AR.registry()['routes'][rid]
+                p = self.plan(s['chainId'], s['l2']['name'], s['l2']['symbol'])
+                with self.subTest(route=rid):
+                    self.assertIn('another route', self.verdict(p, USDC[s['chainId']])[0])
+                    self.assertEqual(self.verdict(p, s['asset']['address'])[0], s['asset']['address'].lower())
+
+    def test_the_refusal_does_not_depend_on_the_registry_file(self):
+        with mock.patch.object(AR, 'REGISTRY', Path('/nonexistent/asset-routes.json')):
+            got, _ = self.verdict(self.plan(1, 'Bloch Bridged USDC', 'bUSDC'), '0xdAC17F958D2ee523a2206206994597C13D831ec7')
+        self.assertIn('another route', got)
+
+    def test_a_stand_in_token_on_a_local_chain_with_a_mainnet_id_is_not_refused(self):
+        """tools/deploy-pontes/rehearse_anvil.py runs the mainnet path on anvil under chain ids 1 and 700770 with a
+        stand-in token: a vault over a token that is no route's asset is left to the vault tool, as before round 20."""
+        got, calls = self.verdict(self.plan(1, 'Bloch Bridged USDC', 'bUSDC'), '0x5fbdb2315678afecb367f032d93f642f64180aa3')
+        self.assertEqual(got, '0x5fbdb2315678afecb367f032d93f642f64180aa3')
+        self.assertEqual(len(calls), 1)
+
+    def test_a_rehearsal_plan_and_a_source_no_file_describes_read_nothing(self):
+        self.assertEqual(self.verdict(self.plan(1, 'Bloch Bridged USDC', 'bUSDC', rehearsal=True), USDT_ETH), (None, []))
+        self.assertEqual(self.verdict(self.plan(31337, 'Any', 'x'), USDT_ETH), (None, []))
+        self.assertEqual(self.verdict(self.plan(728126428, 'Bloch Bridged USDT (Tron)', 'bUSDT.trx'), USDT_ETH), (None, []))
+
+    def test_the_assets_known_on_each_chain(self):
+        self.assertEqual(deploy_pontes.route_assets(1), {USDC[1].lower(), USDT_ETH.lower()})
+        self.assertEqual(deploy_pontes.route_assets(42161), {USDC[42161].lower(), '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9'})
+        self.assertEqual(deploy_pontes.route_assets(10), {USDC[10].lower(), '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58'})
+        self.assertEqual(deploy_pontes.route_assets(31337), set())
 
 
 class RouteFiles(unittest.TestCase):
