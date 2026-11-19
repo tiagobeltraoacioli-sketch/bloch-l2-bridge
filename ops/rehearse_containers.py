@@ -577,7 +577,10 @@ def committed_relayer_case(dep, alice, alice_key):
     config, code at /opt/bloch-l2-bridge from this checkout's HEAD), in place of the bundle's relayer for one deposit."""
     c = 'a381-relayer'
     arch = WORK / 'bundles' / 'tools-head.tar'
-    sh('git', '-C', REPO, 'archive', '-o', arch, 'HEAD', 'tools/signatario-stable', 'deploy/signatario/bloch-busdc-relay.service')
+    # Round 20 (agent 421, F421-5): with the registry module, as an operator's checkout has it: the daemons refuse a source
+    # chain other than 1 without tools/evm-nets/launch.py beside them (this drill failed without it at the new revision).
+    sh('git', '-C', REPO, 'archive', '-o', arch, 'HEAD', 'tools/signatario-stable', 'tools/evm-nets/launch.py', 'tools/evm-nets/networks.json',
+       'tools/evm-nets/signer_timing.py', 'deploy/signatario/bloch-busdc-relay.service')
     bridgectl(c, 'ethereum-relayer', 'stop', 'ethereum-relayer')
     script = '''set -e
 useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin bloch-relayer
