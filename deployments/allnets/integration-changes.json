@@ -135,7 +135,7 @@
       "line": "evm-nets",
       "path": "tools/evm-nets/test_limits_r20.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "5465b96c420439faf96448c2d4dad60f49d145cd",
+      "blob": "8b5536c42764890f88676770d4fafc5519c61996",
       "decision": "launch-limits-2026-11-19"
     }
   ]
