@@ -182,7 +182,8 @@ class EthRig(rf.Rig):
 
         # 0. the committed mainnet configs are refused: the route is held
         rc, r = tool(VTOOL, 'validate', '--config', ne.VAULT_CONFIG)
-        check('[held] the committed vault config is refused (undecided values)', rc == 1 and 'undecided' in r.get('reason', ''), r)
+        check('[held] the committed vault config is refused: held (asked before anything else of the config is read)',
+              rc == 1 and 'not launchable in v1 (held)' in r.get('reason', ''), r)
         filled, _ = self.vault_config('held', {})
         filled['ethereum'] = {'chainId': 1, 'rehearsal': False}
         (self.work / 'held.vault.config.json').write_text(json.dumps(filled))

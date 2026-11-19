@@ -35,8 +35,9 @@ import native_ether as ne  # noqa: E402
 ROUTE = ROOT / 'deployments/ethereum-eth'
 USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
 FROZEN_TOKEN = '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7'
-# Canonical SHA-256 of the committed Ethereum USDC configs at main 135bdba (vault_pontes.canonical / config_sha256):
-# this route's tool changes must not move them.
+# Canonical SHA-256 of the committed Ethereum USDC configs at main 135bdba (vault_pontes.canonical / config_sha256), the
+# base of this line. This line changes neither file; the launch-limits line of round 20 does (other caps and windows),
+# so the two hashes are compared only while the files still hold the values of 135bdba.
 USDC_VAULT_SHA = '479e5d22cfd449e37692db4ad4e068e0a9234a23e5337bbe1a2ce77f44f058b2'
 USDC_TOKEN_SHA = '0xfee6eb833e913735b7164e12a9ca4b17d3b954eea37965e317ebcf75693e412b'
 
@@ -299,8 +300,12 @@ class Files(unittest.TestCase):
         for key in ('address', 'codeHash', 'route', 'fromBlock'):
             self.assertEqual(self.route['custody'][key], 'TBD-deploy')
         self.assertEqual(self.route['l2']['token'], 'TBD-deploy')
-        self.assertIn('undecided', vault_verdict(v))      # the committed template itself validates nowhere
+        # the committed templates validate nowhere: held first, and undecided even with both records lifted
+        self.assertIn('not launchable in v1 (held)', vault_verdict(v))
         self.assertIsNotNone(token_verdict(self.token))
+        with records(code=OPEN, file=OPEN_FILE):
+            self.assertIn('undecided', vault_verdict(v))
+            self.assertIsNotNone(token_verdict(self.token))
 
 
 class Generated(unittest.TestCase):
@@ -411,7 +416,9 @@ class VaultTool(unittest.TestCase):
             self.assertIn('do not pair', vault_verdict(fx.filled_vault(fx.filled()), token_cfg=filled_token()))
 
     def test_the_usdc_route_is_untouched(self):
-        self.assertEqual(hashlib.sha256(vault_pontes.canonical(json.loads(fx.VAULT_CFG.read_text())).encode()).hexdigest(), USDC_VAULT_SHA)
+        vault_cfg = json.loads(fx.VAULT_CFG.read_text())
+        if (vault_cfg['vault']['cap'], vault_cfg['vault']['policy']['windowLimit']) == (100_000_000_000, 10_000_000_000):
+            self.assertEqual(hashlib.sha256(vault_pontes.canonical(vault_cfg).encode()).hexdigest(), USDC_VAULT_SHA)
         token = fx.filled()
         self.assertIsNone(vault_verdict(fx.filled_vault(token), token_cfg=token))
         self.assertEqual(vault_pontes.PROVENANCE_CONTRACT, 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault')
@@ -450,7 +457,9 @@ class TokenTool(unittest.TestCase):
 
     def test_the_usdc_token_config_is_untouched(self):
         self.assertIsNone(token_verdict(fx.filled()))
-        self.assertEqual(deploy_pontes.config_sha256(json.loads(fx.TOKEN_CFG.read_text())), USDC_TOKEN_SHA)
+        token_cfg = json.loads(fx.TOKEN_CFG.read_text())
+        if (token_cfg['limits']['supplyCap'], token_cfg['limits']['bucketCapacity']) == (100_000_000_000, 10_000_000_000):
+            self.assertEqual(deploy_pontes.config_sha256(token_cfg), USDC_TOKEN_SHA)
         self.assertEqual(deploy_pontes.ETHEREUM_L2_TOKEN, ('Bloch Bridged USDC', 'bUSDC'))
 
 

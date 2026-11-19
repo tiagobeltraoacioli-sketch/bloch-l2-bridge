@@ -115,7 +115,7 @@ unchanged vault passes the whole suite).
 | `scripts/eth/mutants.py` | 20 one-defence-removed mutants, each killed by its pinned tests | 20 |
 | `tools/deploy-pontes/test_native_ether.py` | the launch gate, the numbers, the generated route files, the deploy tools | 26 |
 | `tools/deploy-pontes/test_ceremony_kit_native_ether.py` | the owner's ceremony kit on this route (needs `cast` to sign test inputs) | 9 |
-| `tools/native-ether/test_bundle_native_ether.py` | the operator bundles of the held route | 9 |
+| `tools/native-ether/test_bundle_native_ether.py` | the operator bundles of the held route | 8 |
 | `tools/native-ether/rehearse_fork.py` | section 6 of `docs/BRIDGE-ETH.md` | see there |
 
 ## 5. Gas measured (private anvil, Shanghai rules, committed bytecode, 2026-11-19)

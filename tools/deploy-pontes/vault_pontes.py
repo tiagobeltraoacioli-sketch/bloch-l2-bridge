@@ -153,6 +153,14 @@ def validate(cfg, rehearsal, token_cfg=None):
     # Review R329-EVM-3P-1: the chain id is a JSON integer before anything compares it. 8453.0 equals 8453 in Python
     # and `true` equals 1, so a float or a boolean would match a row while skipping the launch check.
     refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId must be a positive JSON integer')
+    # Round 20 (agent 412): the native-ether route `ethereum-eth`, known by its vault contract. Outside a rehearsal it
+    # is accepted on Ethereum mainnet only, and only while BOTH launch records say launchable (it is held): asked here,
+    # before anything else of the config is read, so that a held route is refused with its own reason.
+    native = isinstance(cfg.get('vault'), dict) and native_ether.is_native_contract(cfg['vault'].get('contract'))
+    if native and not rehearsal:
+        why = native_ether.refusal()
+        refuse(why is None, why)
+        refuse(eth['chainId'] == ETH_MAINNET, f'{native_ether.CONTRACT} is the vault of the {native_ether.ROUTE_ID} route: chain id 1 only')
     nets = source_networks()
     if launch and not rehearsal and eth['chainId'] != ETH_MAINNET:
         why = launch.refusal(eth['chainId'])
@@ -165,26 +173,15 @@ def validate(cfg, rehearsal, token_cfg=None):
     exact_keys(cfg['source'], ['revision'], 'source')
     refuse(isinstance(cfg['source']['revision'], str) and re.fullmatch(r'[0-9a-f]{40}', cfg['source']['revision']),
            'source.revision is undecided (full git commit hash)')
+    if native and not rehearsal:
+        # this route's own row (label, asset label, token word, vault contract) instead of the network's first route's
+        net = (native_ether.SOURCE_LABEL, native_ether.ASSET_LABEL, native_ether.MARKER, (native_ether.CONTRACT,))
 
     v = cfg['vault']
     provenance = v.get('contract') in PROVENANCE_CONTRACTS
-    native = native_ether.is_native_contract(v.get('contract'))
-    if native and not rehearsal:
-        # The native-ether route: Ethereum mainnet only, and only while both launch records say launchable.
-        why = native_ether.refusal()
-        refuse(why is None, why)
-        refuse(eth['chainId'] == ETH_MAINNET, f'{native_ether.CONTRACT} is the vault of the {native_ether.ROUTE_ID} route: chain id 1 only')
-        net = (native_ether.SOURCE_LABEL, native_ether.ASSET_LABEL, native_ether.MARKER, (native_ether.CONTRACT,))
     exact_keys(v, ['contract', 'sourceDomainLabel', 'nativeDomainLabel', 'assetLabel', 'token', 'cap',
                    'transferMode', 'signers', 'policy', 'guard'] + (['provenance'] if provenance else []), 'vault')
     refuse(v['contract'] in (CONTRACT,) + PROVENANCE_CONTRACTS, f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
-    if native:
-        # The constructor refuses any token but the marker and any transfer mode but 0 (ETH-2), on every chain.
-        refuse(str(v.get('token')).lower() == native_ether.MARKER,
-               f'vault.token of {native_ether.CONTRACT} must be the native-ether marker {native_ether.MARKER}')
-        if not rehearsal:
-            bad = native_ether.vault_policy_errors(v)
-            refuse(not bad, f'the {native_ether.ROUTE_ID} route: ' + '; '.join(bad))
     if net is not None:
         refuse(v['contract'] in net[3], f'vault.contract on chain {eth["chainId"]} must be {" or ".join(net[3])}')
     if provenance:
@@ -209,6 +206,13 @@ def validate(cfg, rehearsal, token_cfg=None):
                    f'vault.provenance.fees on chain {eth["chainId"]} must be recipient {want[0]}, depositBps {want[1]}, '
                    f'releaseBps {want[2]} (the owner\'s fee address and rates, tools/evm-nets/networks.json); the config has '
                    f'{str(fe["recipient"]).lower()}, {fe["depositBps"]}, {fe["releaseBps"]}')
+    if native:
+        # The constructor refuses any token but the marker and any transfer mode but 0 (ETH-2), on every chain.
+        refuse(str(v.get('token')).lower() == native_ether.MARKER,
+               f'vault.token of {native_ether.CONTRACT} must be the native-ether marker {native_ether.MARKER}')
+        if not rehearsal:
+            bad = native_ether.vault_policy_errors(v)
+            refuse(not bad, f'the {native_ether.ROUTE_ID} route: ' + '; '.join(bad))
     labels = (v['sourceDomainLabel'], v['nativeDomainLabel'], v['assetLabel'])
     refuse(all(isinstance(x, str) and x for x in labels), 'a vault domain label is undecided')
     refuse(v['sourceDomainLabel'] != v['nativeDomainLabel'], 'source and native domains must differ')
@@ -432,14 +436,14 @@ def verify(cfg, norm, url, address, block, unused=False):
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
         refuse(state.get('totalClaimable', '0') == '0', 'a used vault (payments are waiting for their recipients)')
-    code_hash = cast('keccak', *plain(code)).lower()
-    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
     if native_ether.is_native_contract(v['contract']):
         # What the vault holds against what it owes, at the same block (ETH-6): never short; a surplus is forced ether.
         held = int(rpc(url, 'eth_getBalance', [address, at]), 16)
         refuse(held >= int(state['owedWei']), f'the vault holds {held} wei and owes {state["owedWei"]}: short of its books')
         refuse(held - int(state['owedWei']) == int(state['surplusWei']), 'surplusWei() differs from balance - owedWei()')
         state['balanceWei'] = str(held)
+    code_hash = cast('keccak', *plain(code)).lower()
+    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
             'busdcEthereum': {'chainId': cfg['ethereum']['chainId'], 'vault': address.lower(), 'route': route,
