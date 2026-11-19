@@ -255,25 +255,147 @@ class L2Load(unittest.TestCase):
         for what, change in keeps.items():
             self.assertTrue(launch.l2_load(self.edited(change))['ok'], what)
 
-    def test_what_the_bound_does_not_cover_is_stated_as_figures(self):
+    def test_what_the_count_bound_does_not_cover_is_stated_as_figures(self):
         load = launch.l2_load()
         # (1) a day that starts with full buckets admits two windows of mints
         self.assertEqual(load['first_day_total'], 2187 + 1030 + 116)
         self.assertGreater(load['first_day_total'], load['capacity'])
-        # (2) by DECLARED gas the same worst case does not fit the block gas of the L2 launch configuration: the relayer
-        # declares mint_gas_limit 600,000 per mint and drain_gas_limit 2,000,000 per drain (vigia.py defaults, the
-        # relayer template), and the L2 producer selects by declared gas within 15,000,000 a block (settler
-        # configuration of bloch-l2-evm b17b3ae), 48 blocks a day. Finding F421-2: stated, not solved here.
-        gas = load['declared_gas']
-        self.assertEqual((gas['mint_gas_limit'], gas['drain_gas_limit'], gas['block_gas'], gas['capacity']),
-                         (600_000, 2_000_000, 15_000_000, 720_000_000))
-        self.assertEqual(gas['mints'], 1030 * 600_000)
-        self.assertEqual(gas['executions'], 116 * 2_000_000)
-        self.assertEqual(gas['relayer_total'], 850_000_000)
-        self.assertFalse(gas['fits'])
-        relayer = json.loads((ROOT / 'deployments/mainnet/busdc-ops/relayer.template.json').read_text())
-        self.assertEqual(relayer['mint_gas_limit'], gas['mint_gas_limit'])
-        self.assertIn("self.cfg.get('drain_gas_limit', 2_000_000)", (ROOT / 'tools/signatario-stable/vigia.py').read_text())
+        # (2) the relayer sends one executeMint per L2 block and drains behind it, so the credit transactions can be more
+        # than one per nine mints: 278, not 116, and the count 2,349. Of the documented 3,072 that is 76.5%, ABOVE the
+        # three-quarter line the rule draws with the one-per-nine figure; of the launch configuration's 128 a block
+        # (6,144) it is 38%. Stated for the coordinator; the gas rule below uses this larger pattern.
+        self.assertEqual((load['transactions_relayer_pattern'], load['tx_capacity_launch_config']), (2349, 6144))
+        self.assertGreater(load['transactions_relayer_pattern'], load['limit'])
+        self.assertLess(load['transactions_relayer_pattern'], load['capacity'])
+
+
+class L2Gas(unittest.TestCase):
+    """Finding F421-2, closed by measurement (coordinator, 2026-11-19): the summed worst case of DECLARED gas a day of
+    the four launchable routes against the L2's block gas a day, refused above the same 75% line. The relayers' limits
+    are the gas measured on an L2 replica made by the released binaries (l2-gas-measured-2026-11-19.json) plus 25%."""
+
+    MEASURED = json.loads((HERE / 'l2-gas-measured-2026-11-19.json').read_text())
+
+    def test_the_capacity_is_the_l2_launch_configuration_s(self):
+        self.assertEqual((launch.L2_BLOCK_GAS, launch.L2_BLOCKS_PER_DAY, launch.L2_GAS_CAPACITY, launch.L2_GAS_SHARE_BPS),
+                         (15_000_000, 48, 720_000_000, 7500))
+        self.assertEqual(launch.L2_GAS_SHARE_BPS, launch.L2_BRIDGE_SHARE_BPS)   # the same line as the transaction count
+
+    def test_the_limits_are_the_measured_need_plus_a_quarter_and_the_templates_carry_them(self):
+        need, lim = self.MEASURED['need'], self.MEASURED['limits']
+        self.assertEqual((launch.RELAYER_MINT_GAS, launch.RELAYER_EXECUTE_GAS, launch.RELAYER_DRAIN_GAS, launch.USER_BURN_GAS),
+                         (lim['mint_gas_limit'], lim['execute_gas_limit'], lim['drain_gas_limit'], lim['user_burn_gas_assumed']))
+        for limit, needed in ((launch.RELAYER_MINT_GAS, need['mint']), (launch.RELAYER_EXECUTE_GAS, need['executeMint_head_plus_8']),
+                              (launch.RELAYER_DRAIN_GAS, need['drain_8_credits'])):
+            self.assertGreaterEqual(limit * 4, needed * 5)            # at least 25% above the need
+            self.assertLess(limit - 10_000, -(-needed * 5 // 4))      # and no more than the rounding to 10,000
+        self.assertGreaterEqual(launch.RELAYER_MINT_GAS, need['mint_first_ever'])   # even the first mint a token sees fits
+        self.assertGreaterEqual(launch.USER_BURN_GAS * 2, need['burn'] * 3)
+        for name in LAUNCHABLE:
+            path = ROOT / ('deployments/mainnet/busdc-ops' if name == 'ethereum' else f'deployments/{name}/ops') / 'relayer.template.json'
+            t = json.loads(path.read_text())
+            self.assertEqual((t['mint_gas_limit'], t['execute_gas_limit'], t['drain_gas_limit']),
+                             (launch.RELAYER_MINT_GAS, launch.RELAYER_EXECUTE_GAS, launch.RELAYER_DRAIN_GAS), name)
+
+    def test_the_measurements_are_what_the_limits_claim(self):
+        # the need of each kind is not below anything a run measured (gas used, and the estimates the runs took)
+        runs = self.MEASURED['runs']
+        need = self.MEASURED['need']
+        self.assertEqual(sorted(runs), ['bound1', 'bound2', 'bound3', 'contested1', 'estimates1', 'estimates2', 'estimates3', 'try1'])
+        mints = 0
+        for name, run in runs.items():
+            self.assertEqual(run['creation_keccak'], '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7', name)
+            for step, row in run['steps'].items():
+                top = row['gas_used_max']
+                if step.startswith('mint: first ever'):
+                    self.assertLessEqual(top, need['mint_first_ever'], (name, step))
+                elif step.startswith('mint:') and 'candidates' not in step and 'must fail safe' not in step and '0..11' not in step:
+                    self.assertLessEqual(top, need['mint'], (name, step))
+                    mints += row['transactions']
+                elif step.startswith('executeMint(head): head + 8'):
+                    self.assertLessEqual(top, need['executeMint_head_plus_8'], (name, step))
+                elif step.startswith('drain(): 8') or step.startswith('drain(): 5') or step == 'drain(): after the failed one':
+                    self.assertLessEqual(top, need['drain_8_credits'], (name, step))
+                elif step.startswith('burn:'):
+                    self.assertLessEqual(top, need['burn'], (name, step))
+                if 'must fail safe' in step and name not in ('estimates3', 'try1'):   # (those two short runs had nothing left to drain)
+                    self.assertEqual(row['status'], [0], (name, step))
+            est = run.get('estimates') or {}
+            if isinstance(est.get('drain() with 8 due'), int):
+                self.assertLessEqual(est['drain() with 8 due'], need['drain_8_credits'], name)
+            for key in ('estimate_second_mint', 'estimate_first_burn', 'estimate_later_burn'):
+                if isinstance(run.get(key), int):
+                    self.assertLessEqual(run[key], need['mint'] if 'mint' in key else need['burn'], (name, key))
+        self.assertGreater(mints, 6000)   # three runs to MAX_PENDING and the shorter ones
+        for name in ('bound1', 'bound2', 'bound3'):
+            self.assertEqual((runs[name]['token_max_pending'], runs[name]['pending_at_bound'], runs[name]['pending_after_failures']), (2048, 2048, 2048))
+        self.assertEqual(runs['estimates3']['estimates']['executeMint(head) with 8 due behind']['with block 0x7'], 472034)
+
+    def test_the_relayer_s_credit_transactions(self):
+        # one executeMint per L2 block with a due mint; a first drain when a block has more than nine; then one per eight
+        for mints, want in ((0, (0, 0)), (9, (9, 0)), (41, (41, 0)), (48, (48, 0)), (49, (48, 0)), (57, (48, 1)), (247, (48, 22)),
+                            (495, (48, 49)), (480, (48, 48)), (488, (48, 49)), (990, (48, 111))):
+            self.assertEqual(launch.relayer_credit_txs(mints), want, mints)
+            e, d = want
+            self.assertLessEqual(mints, e * 9 + d * 8 if mints > 48 else mints)   # enough credits for every mint
+        with self.assertRaises(launch.LaunchError):
+            launch.relayer_credit_txs(-1)
+
+    def test_the_worst_case_of_the_four_routes_fits_under_three_quarters_of_the_block_gas(self):
+        gas = launch.l2_load()['declared_gas']
+        want = {'ethereum': (495, 48, 49, 500, 230_480_000), 'arbitrum-one': (247, 48, 22, 250, 128_090_000),
+                'op-mainnet': (247, 48, 22, 250, 128_090_000), 'linea': (41, 41, 0, 41, 38_950_000)}
+        for name, (mints, executes, drains, burns, total) in want.items():
+            r = gas['routes'][name]
+            self.assertEqual((r['mints'], r['executes'], r['drains'], r['burns'], r['gas']), (mints, executes, drains, burns, total), name)
+            self.assertEqual(r['gas'], mints * 250_000 + executes * 600_000 + drains * 570_000 + burns * 100_000, name)
+        self.assertEqual((gas['mints'], gas['executes'], gas['drains'], gas['burns'], gas['transactions']), (1030, 185, 93, 1041, 2349))
+        self.assertEqual((gas['total'], gas['capacity'], gas['limit']), (525_610_000, 720_000_000, 540_000_000))
+        self.assertTrue(gas['ok'])
+        self.assertEqual(gas['margin'], 194_390_000)                 # 27.0% of the day's block gas is left
+        self.assertLess(gas['limit'] - gas['total'], 15_000_000)     # and under the 75% line by less than one block: stated
+        # per block: one drain, even at the worst measured for an incident (2.25 million), is far below one block
+        self.assertEqual(gas['one_block_fits'], {'relayer_mints': 60, 'drains': 26})
+        self.assertLess(2_250_000 * 6, launch.L2_BLOCK_GAS)
+        # stated, not rules: the first day with full buckets; every supply burned at once by its holders
+        self.assertEqual(gas['first_day_total'], 855_140_000)
+        self.assertGreater(gas['first_day_total'], gas['capacity'])
+        supply_burns = 500_000 * U // (100 * U) + 2 * (250_000 * U // (100 * U)) + 250_000 * U // (600 * U)
+        self.assertEqual(supply_burns, 10_416)
+        self.assertGreater(supply_burns * launch.USER_BURN_GAS, gas['capacity'])
+
+    def edited(self, change):
+        reg = copy.deepcopy(REGISTRY)
+        change(reg)
+        tmp = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(reg, tmp)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return tmp.name
+
+    def test_a_registry_whose_routes_together_declare_more_gas_is_untrusted(self):
+        # a minimum deposit of 80 USDC on one network keeps the queue bound and the transaction-count rule (2,259 of 2,304)
+        # and breaks only the gas (65 more mints and 7 more drains a day: 545.9 million)
+        path = self.edited(lambda r: r['networks']['arbitrum-one'].update(minDeposit=80 * U))
+        with self.assertRaises(launch.LaunchError) as e:
+            launch.registry(path)
+        self.assertIn('gas a day on the L2', str(e.exception))
+        self.assertNotIn('MAX_PENDING', str(e.exception))
+        self.assertNotIn('transactions a day', str(e.exception))
+        for chain in (42161, 10, 59144):
+            self.assertIsNotNone(launch.refusal(chain, path))
+        with self.assertRaises(launch.LaunchError):
+            launch.limits(1, path)
+        self.assertTrue(launch.l2_load(self.edited(lambda r: r['networks']['arbitrum-one'].update(minDeposit=102 * U)))['declared_gas']['ok'])
+
+    def test_a_larger_limit_or_a_smaller_block_breaks_it(self):
+        from unittest import mock
+        for name, value in (('RELAYER_MINT_GAS', 300_000), ('RELAYER_DRAIN_GAS', 2_000_000), ('USER_BURN_GAS', 150_000),
+                            ('L2_GAS_CAPACITY', 48 * 12_000_000)):
+            with mock.patch.object(launch, name, value):
+                with self.assertRaises(launch.LaunchError, msg=name):
+                    launch.registry()
+        launch.registry()
 
 
 class Files(unittest.TestCase):
