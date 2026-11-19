@@ -5,7 +5,7 @@ A1	861	667	527	271fd445c73f4160151ba1647c0291816cade6dc10916d64dfbbb2fa2df74915	
 A1	288	212	197	02fe9fb0ce928a2f186ce9be94150b2e99c4409b6dd6a3090fcd43ed4d0adc91	contracts/usdt/RecoverableReleaseVerifier.sol
 A1	60	36	33	ea5839368bc079a63647e4a0e9d29104afd318364e43e667869ae639491b27c9	contracts/usdt/SP1ReleaseVerifier.sol
 A2	1398	1129	1049	fbd1cb58649d0ca515d2e019b61ed3ebde9e16ea13ceebc7d290d510979bb511	tools/guardiao/guardiao.py
-A2	2008	1577	1482	032d04b12bc8011f3c0fce48708fbbf7ffccdcae90ca069f39b9db375eaf45b7	tools/signatario-stable/vigia.py
+A2	2029	1587	1488	e1cd3d525602d97340dad3574ab4a9c0b3db4bfec2721953caeba7b325cd9a05	tools/signatario-stable/vigia.py
 A2	995	789	705	93adb9e34cd325f5f094eaa8b7f89f8a602fc61e64671c6b012086b48113916b	tools/signatario-stable/signatario.py
 A2	494	408	366	c7e9804663a3c1ab582d3c4829f65989da64489062dde3f8ad91328708ce245c	tools/signatario-stable/release_submission.py
 A2	979	783	663	9f49afa3a05a2462d769412dbea955a7f00a825c04acd310defab005e5ac5490	tools/deploy-pontes/deploy_pontes.py
@@ -25,13 +25,13 @@ A-cfg	117	-	-	f7e7ccfa85d49f7eafa3fa567f90f30a466d4d133352ace95983d3eb1dd9d7e5	d
 A-cfg	109	-	-	48f1b7f6734c64c60ea6423a54ee6b21f1f4b153a66dcb2a7b6d132adad04887	deployments/mainnet/busdc-vault-mainnet.config.json
 A-cfg	17	-	-	46b7e622487418fd8178a58e4b28acf4b0bb966f0d486e3c386fab0dbe9a9a59	deployments/mainnet/busdc-ops/eth-half.template.json
 A-cfg	34	-	-	51057688af436a13ad8b60f7f8c5bd52005c5030cdfbb6aed7da8efcf557d194	deployments/mainnet/busdc-ops/guardiao.template.json
-A-cfg	56	-	-	b14d05f6e09ea517b1c282faa8fceaebd603f282ed5c4fe43377794edb7e4619	deployments/mainnet/busdc-ops/relayer.template.json
+A-cfg	59	-	-	46090bb28951daf0692f85acdbdfc56be10a7ad2b81753ba2348910894e814c8	deployments/mainnet/busdc-ops/relayer.template.json
 A-cfg	330	-	-	0f38b2b74b9dba49dd22e300a832da5cf8a3aea612b812ab3d90debbfad2487c	deployments/mainnet/busdc-keys.inventory.template.json
 A-cfg	75	-	-	2cf4b941d964e70dc27b84317cf8105fa724ee7941d4e219e47cd5a7fea0733c	deployments/mainnet/busdc-ops/signer.template.json
 A-cfg	19	-	-	4ef22fb2d9894091811dd74be8214ff0b2e2901806a2b5249f56991f922dd421	deployments/mainnet/busdc-ops/sombra.template.json
 A-cfg	17	-	-	c67b74d0f470513b7aa0c4a1cdd75edbe3aaeee4d9ce2d5665d864841aa6ce22	deployments/mainnet/busdc-ops/reservas.template.json
 A-cfg	34	-	-	f4aaef5e83a8d4d8b17bdcbb9d586ec992570e1ec6cda20c205f8cc8f956d85c	deployments/mainnet/lc-verifier.review.json
 # total A1	2289	1715	1500
-# total A2	9307	7288	6508
+# total A2	9328	7298	6514
 # total A2opt	1639	1247	1040
-# total A-cfg	808	0	0
+# total A-cfg	811	0	0
