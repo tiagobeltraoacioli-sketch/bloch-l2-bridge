@@ -95,6 +95,26 @@ each stand-in with the real contract call by call); **G** = `tools/signatario-st
 | 13 | Why each route has the vault it has | The Tether-aware vault cannot be deployed over USD₮0 or the OP token (they lack `isBlackListed` and `deprecated`); the frozen vault over Ethereum USDT would take a deposit into a blacklisted vault and stop every exit while the issuer's fee is on | F `R411Usdt0VaultTest.test_the_tether_aware_vault_refuses_this_token_at_deployment`, `R411OpUsdtVaultTest.test_the_tether_aware_vault_refuses_this_token_at_deployment`, `…ChoiceTest.test_control_…` |
 | 14 | The stand-in tokens are faithful | Each stand-in is deployed beside the real contract on the fork and both are driven through the same calls by the same accounts | R "the … stand-in of the forge suites answers N of N probe calls as the real contract": Ethereum 30, Arbitrum One 23, OP Mainnet 12 |
 
+### Rehearsals on loopback forks with the real tokens
+
+`python3 tools/evm-nets/rehearse_route.py <route>`: two loopback anvils (a fork of the source network, a plain one
+standing in for the L2), throwaway keys, the real daemons (`signatario.py` with `eth_half.py`, `vigia.py` sign and
+relay, `guardiao.py`, `reservas.py`), the unchanged contract artifacts. Steps 1 to 10 are the EVM network rehearsal's
+(deposit, no attestation before finality, credit after the 12 h delay, burn, release with the fee to the owner's
+address, replay, forged and under-quorum certificates, limits, guardian pause and 6-of-7 unpause, a deposit that
+disappears after attestation); step 11 is the token's issuer, with the vault in each role. Each route runs under a
+rehearsal chain id (it is held). Run of 2026-11-19 on the build host at commit `5dc29d0`:
+
+| Route | Fork block | Chain id of the run | Result | Step 11 checks | Stand-in = real | Gas: deposit / release |
+|---|---|---|---|---|---|---|
+| `ethereum-usdt` | 26,446,698 | 900,000,001 | **59 / 59** | 23 | 30 of 30 calls | 152,113 / 208,076 |
+| `arbitrum-one-usdt` | 525,516,424 | 900,042,161 | **55 / 55** | 17 | 23 of 23 calls | 154,138 / 206,714 (execution only) |
+| `op-mainnet-usdt` | 159,731,887 | 900,000,010 | **46 / 46** | 9 | 12 of 12 calls | 134,016 / 193,755 (execution only) |
+
+The release on Ethereum costs 208,076 gas with the Tether-aware vault and the real token, against the 207,000 the
+launch registry records for the USDC route (`relayCost.ethereum`), from which the deploy tools derive the least
+minimum burn: 0.5% more, on a floor of about 0.76 USDT against a minimum burn of 100.
+
 ## 4. A release the token refuses: the path of the claim
 
 The vault keeps no queue. A release is identified by its burn nonce and its burn id; `releasedNonce` and `releasedBurn`
