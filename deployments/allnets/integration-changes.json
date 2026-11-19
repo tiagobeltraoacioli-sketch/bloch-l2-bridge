@@ -10,7 +10,8 @@
       "line": "operator-pkg",
       "path": "docs/OPERATOR-PACKAGES.md",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "0dc1956bd8dc783f58b2e32d8072a813eb081a1c",
+      "blob": "a23c21149e816760df7c466b6eea69ae237e590e",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -18,13 +19,15 @@
       "path": "ops/rehearse_containers.py",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
       "blob": "0b9bf3c3eda549036b2cd71a1a3a19bf71a4755f",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "operator-pkg",
       "path": "ops/routes.json",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "5b18583381aba6fe9fb21b43f1442ce33b38af88",
+      "blob": "c25525c1dc519fa64f71faad0baaf9c7ac1da9ce",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -32,48 +35,63 @@
       "path": "ops/test_bundle.py",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
       "blob": "c52bc0107170567ee833a64a90578f174949e61e",
+      "mode": "100644",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "ceremony",
+      "path": "deploy/ceremony/rehearse_ceremony.py",
+      "lineTip": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
+      "blob": "5e9c21e63ffe5071a5967504816c86d6f82388c3",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "ceremony",
       "path": "docs/BRIDGE-OWNER-CEREMONY.md",
       "lineTip": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
-      "blob": "48270941f180ca12fbea11cfd8bce45dd2b8589b",
+      "blob": "efaf1a25372b9bc8ae919618c6c1f11205f8e49f",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "ceremony",
       "path": "tools/deploy-pontes/ceremony_kit.py",
       "lineTip": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
-      "blob": "00fcec8fe292b5e96c48d3248db7e2b6f0a12d9c",
+      "blob": "ae265b1847607d5864a622ccfb40b53d61eaa4cf",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "ceremony",
       "path": "tools/deploy-pontes/test_ceremony_kit.py",
       "lineTip": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
-      "blob": "e32809b8b1a895c2c40013b2d9b89199ea3e0b4b",
+      "blob": "f3510e10d38e070b2867c25e1582b9d16a116750",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/bridge.network.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "94a6be4ab333f5e29aad9f996e94fe1c77c1a080",
+      "blob": "92fe271609266019a5e9bac6d4a787229241d527",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "1f8bc56f967c5e058e2cb174e1901a9de39b5e15",
+      "blob": "51c8ae38fca5d67be01de10b8f1c61efbff86319",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/busdc-vault.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "bf21dac452b6d6b2a4bb2b64a868b6232c5eef02",
+      "blob": "d660d0da77f23e0d612b3c1e704531de57ae72e4",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -81,6 +99,7 @@
       "path": "deployments/arbitrum-one/ops/relayer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "6bee375d74049ec442c2e13a97a761eae0e4fd9c",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -88,6 +107,7 @@
       "path": "deployments/arbitrum-one/ops/signer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "dc97ca294435c2c20b525e55dd0d55b962ca6515",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -95,6 +115,7 @@
       "path": "deployments/linea/bridge.network.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "5b70ccb4075588499675bcdef19bbb1e37408179",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -102,6 +123,7 @@
       "path": "deployments/linea/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "222057a5154390739b3e1b2fa2acddcf36d24000",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -109,6 +131,7 @@
       "path": "deployments/linea/busdc-vault.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "4c89bf57f988fe02f4c70797f04a94ef44a478a9",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -116,6 +139,7 @@
       "path": "deployments/linea/ops/relayer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "c908e881190fbb9fa9c0aa24b56b920c8a52328a",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -123,27 +147,31 @@
       "path": "deployments/linea/ops/signer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "6c4ddaa801ae9dc1863bb59b6dd1814e69732e6c",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/op-mainnet/bridge.network.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "5e5f6ffd1028867d2e6f41325b40cdb69711913c",
+      "blob": "f6f95631071ba4d4bb1f5a65158ab641c957bb33",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/op-mainnet/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "d4b743bb9230ea30003d610c05d556c2b0a4a6ca",
+      "blob": "50b705f49d2f1e072d5f52ef6e6f0e2de1b2ce31",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/op-mainnet/busdc-vault.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "b1d7e63f4717e8163b6330628b4a2b2b5e538127",
+      "blob": "27de18f461516fb1c328c18a7db9dbb2a0775ee4",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -151,6 +179,7 @@
       "path": "deployments/op-mainnet/ops/relayer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "ccb9edeb9b324fd4fa26ea4afa9f3eb94eaacf80",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -158,6 +187,7 @@
       "path": "deployments/op-mainnet/ops/signer.template.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "ad58d1d1cf6edf00137c2f6531208ec69e12f1be",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
@@ -165,20 +195,23 @@
       "path": "tools/evm-nets/evm_nets.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "adfb645daa07f90b46a80144ef5ce8e6c716ba30",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/launch.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "bda9b54537e267c4928cea363e607ac790671365",
+      "blob": "74d09b5e3cb2e1b55716a55a7d8543dd1a28b688",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/networks.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "7f66154350dcb4e9d728e73a0dbb03d36ad21630",
+      "blob": "05691e7377b31490231f7e6d18ba5518015a6143",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -186,34 +219,47 @@
       "path": "tools/evm-nets/rehearse_fork.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
       "blob": "4431f1f1533e034d32689eed49802f5c1e787251",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/test_evm_nets.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "6c5266a38faefaedbe8ccce52676854d457b763f",
+      "blob": "545bcf224f5bfa8a11c70256b20e235e40b376ea",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "tools/evm-nets/test_forge_params_r20.py",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "43ee083d0ff7c6b873701ca613bde4174e32f351",
+      "mode": "100644",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/test_launch_r17.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "3f6368856e9929d2901f715d56c05e39795eb4e6",
+      "blob": "5fd0620fc1016afeca5aa7c9eaa9fa7cadf04487",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/test_limits_r20.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "2e7e18f473a42a6b0f44ad3cedd300a8628632e8",
+      "blob": "05a24fc70f962119382003a7a07ec68c653ea7f2",
+      "mode": "100644",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/test_queue_bound_r20.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "bf800cd18df94dda5f73e5ed675f7db1def5cb37",
+      "blob": "e9a63b333e83c21be44118b830aba878190bbed0",
+      "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     }
   ]
