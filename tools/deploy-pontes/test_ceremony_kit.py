@@ -30,10 +30,13 @@ def check(name, cond, detail=''):
 
 
 def refused(fn, needle=''):
+    # Round 20 (agent 421): strict. Until then this returned `needle in str(e) or str(e)`, which is true for ANY refusal,
+    # so no check of this file held the reason it names (how reviewer 420's mutant K1 survived). Every check passes
+    # with the strict form.
     try:
         fn()
     except ck.Refused as e:
-        return needle in str(e) or str(e)
+        return needle in str(e)
     return False
 
 
