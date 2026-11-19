@@ -311,11 +311,17 @@ def identity_record(decision):
     """Rewrite the `changes` list of integration-changes.json from the tree: one record per owned file that differs
     from its line's merged tip at HEAD, with its blob at HEAD. The decision must already be stated in the file (its
     text is written by hand, in a reviewed commit); files recorded before keep their decision."""
-    doc = load_changes(ROOT)
-    if decision not in doc['decisions']:
+    # The old `changes` list is read only for each file's decision and is replaced whole, so a list written before the
+    # `mode` key existed (review R420-1) can be recorded again; the result is then read back fail-closed.
+    try:
+        doc = json.loads((ROOT / CHANGES).read_text())
+        decisions, before = doc['decisions'], doc['changes']
+        old = {(c['line'], c['path']): c['decision'] for c in before}
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(f'{CHANGES} cannot be read ({type(e).__name__}: {e})')
+    if not isinstance(decisions, dict) or decision not in decisions:
         raise SystemExit(f'state decision {decision!r} in {CHANGES} `decisions` first')
     lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
-    old = {(c['line'], c['path']): c['decision'] for c in doc['changes']}
     changes = []
     for line, paths in OWNED.items():
         tip = lock[line]['commit']
@@ -326,6 +332,7 @@ def identity_record(decision):
                             'decision': old.get((line, f), decision)})
     doc['changes'] = changes
     (ROOT / CHANGES).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + '\n')
+    load_changes(ROOT)
     print(f'recorded {len(changes)} integration change(s) in {CHANGES}')
     print(f'NOT pinned: {PINS} is written by hand, one "MODE BLOB LINE PATH" line per record, in a reviewed commit; until then '
           '--identity fails for every entry that changed (review R420-1)')
