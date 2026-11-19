@@ -1,5 +1,5 @@
 {
-  "_about": "Operator bundles (agent 381, round 18): one installable bundle per (route, role). ops/bundle.py builds a bundle from the route's committed tools and config templates at a git revision; ops/bridgectl.py installs, checks, starts, upgrades, rolls back and health-checks it on the host. Placeholders: {inst} = <route>-<role>, {release} = /opt/bloch-bridge/{inst}/current, {etc} = /etc/bloch-bridge/{inst}, {state} = /var/lib/bloch-bridge/{inst}, {run} = /run/bloch-bridge-{inst} (staged secrets, tmpfs, removed when the unit stops), {cast} = /opt/foundry/bin/cast, {py} = /usr/bin/python3 -E -s. docs/OPERATOR-PACKAGES.md explains every field.",
+  "_about": "Operator bundles (agent 381, round 18): one installable bundle per (route, role). Round 20 (agent 421): every route's `source_rev` is the revision whose daemons carry the CURRENT L2 pin set and whose operator templates are the ones of this tree (tools/signatario-stable/test_l2_pins_r20.py holds that, file by file); it moves, in a reviewed commit, whenever one of those files changes, and to the launch revision of `main` before any operator installs. ops/bundle.py builds a bundle from the route's committed tools and config templates at a git revision; ops/bridgectl.py installs, checks, starts, upgrades, rolls back and health-checks it on the host. Placeholders: {inst} = <route>-<role>, {release} = /opt/bloch-bridge/{inst}/current, {etc} = /etc/bloch-bridge/{inst}, {state} = /var/lib/bloch-bridge/{inst}, {run} = /run/bloch-bridge-{inst} (staged secrets, tmpfs, removed when the unit stops), {cast} = /opt/foundry/bin/cast, {py} = /usr/bin/python3 -E -s. docs/OPERATOR-PACKAGES.md explains every field.",
   "format": 1,
   "facts": {
     "_about": "Fixed public facts: the only literal values (besides TBD-owner, layout paths and decided parameters) a rendered config may hold. Each one names its source.",
@@ -8,7 +8,7 @@
       "https://l2rpc.blochl1.com": "public L2 send gateway, decided for l2_tx_rpc (docs/BUSDC-MAINNET-V2.md:348)",
       "http://80.240.16.185:8080": "public Bloch L1 RPC (BRIEF.md)",
       "http://199.247.22.8:8080": "public Bloch L1 RPC (BRIEF.md)",
-      "mainnet-v2": "L2 finality pins of the launch build (tools/signatario-stable/l2_finality.py)",
+      "mainnet-v3": "L2 finality pins of the L2 release that is live, bloch-l2-2026-11-17-launch-native-906336fd (tools/signatario-stable/l2_finality.py CURRENT_MAINNET_PINS; round 20, agent 421)",
       "rebuild": "l2_source decided for mainnet signers (docs/BRIDGE-V3-OPERATOR-RUNBOOK.md section 3)",
       "stable": "guardian kind of the stablecoin bridges (tools/guardiao/guardiao.py)",
       "soft": "release_before_final decided value (deployments/mainnet/busdc-ops/guardiao.template.json)",
@@ -64,8 +64,8 @@
   "routes": {
     "ethereum": {
       "asset": "bUSDC (Ethereum USDC vault -> BridgedStablecoinV3 on the L2 700770)",
-      "launch_status": "audit candidate (bloch-l2-bridge main cc2511a); not deployed",
-      "source_rev": "cc2511aff60056393b92f6dc94e80a045a6c3c37",
+      "launch_status": "launch revision candidate, UNAUDITED (round 20: the daemons with the L2 pins of the live release, mainnet-v3, and the operator templates of the fee schedule; until 2026-11-19 this was the audit candidate main cc2511a, whose daemons pin the L2 release of 2026-11-03); not deployed",
+      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
       "roles": {
         "signer": {
           "summary": "One of the 7 automatic signers: vigia.py sign (signatario.py + eth_half.py) and its read-only signature feed.",
@@ -649,8 +649,8 @@
     },
     "arbitrum-one": {
       "asset": "bUSDC.arb (Arbitrum One USDC vault -> BridgedStablecoinV3 on the L2 700770)",
-      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
-      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
+      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
       "inherit": "ethereum",
       "substitute": [
         [
@@ -761,8 +761,8 @@
     },
     "op-mainnet": {
       "asset": "bUSDC.op (OP Mainnet USDC vault -> BridgedStablecoinV3 on the L2 700770)",
-      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
-      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
+      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
       "inherit": "ethereum",
       "substitute": [
         [
@@ -873,8 +873,8 @@
     },
     "linea": {
       "asset": "bUSDC.linea (Linea USDC vault -> BridgedStablecoinV3 on the L2 700770)",
-      "launch_status": "launchable per tools/evm-nets/networks.json at the audit line 9187656 (codex/bridge-evm-nets-r17-audit-20261117); not deployed",
-      "source_rev": "9187656dd021848bf85b7102605af8720333787d",
+      "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
+      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
       "inherit": "ethereum",
       "substitute": [
         [

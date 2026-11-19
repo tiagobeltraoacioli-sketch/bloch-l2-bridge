@@ -696,8 +696,17 @@ def f381_1():
     ex(c, 'chmod 755 /root')
     control = ex(c, unit.replace('CODE', '/opt/bloch-bridge/ethereum-relayer/current').replace('a381-f381-1', 'a381-f381-1-cc2511a'), ok=False, timeout=300)
     ctext = control.stdout + control.stderr
-    check('F381-1 control: the route code at cc2511a (in the bundle) still refuses the 0440 credential',
-          '440 root:root' in ctext and 'has mode 0440' in ctext, ctext[-600:])
+    # Round 20 (agent 421; NOT rerun in containers): the bundle's source revision moved from cc2511a to the revision
+    # with the current L2 pins, which holds 374's fix b4ff916. The control on the old code only exists while the bundle
+    # is built from cc2511a (`--rev`); from the committed source revision the bundle code must accept the credential too.
+    record = json.loads(ex(c, 'cat /opt/bloch-bridge/ethereum-relayer/install.json').stdout)
+    installed = next((h.get('source_rev', '') for h in reversed(record.get('history', [])) if h.get('release') == record.get('current')), '')
+    if installed.startswith('cc2511a'):
+        check('F381-1 control: the route code at cc2511a (in the bundle) still refuses the 0440 credential',
+              '440 root:root' in ctext and 'has mode 0440' in ctext, ctext[-600:])
+    else:
+        check(f'F381-1 control: the route code in the bundle ({installed[:12]}, after b4ff916) accepts the 0440 credential',
+              '440 root:root' in ctext and 'has mode 0440' not in ctext, ctext[-600:])
     done = ex(c, unit.replace('CODE', '/opt/bloch-l2-bridge'), ok=False, timeout=300)
     text = done.stdout + done.stderr
     (WORK / 'f381-1.txt').write_text('== cc2511a (bundle)\n' + ctext + '\n== HEAD with b4ff916\n' + text)

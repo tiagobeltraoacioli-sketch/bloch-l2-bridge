@@ -22,10 +22,21 @@ file, a journald drop-in, and a manifest with the SHA-256 and mode of every file
 
 | Route | Source revision | Roles packaged | State |
 |---|---|---|---|
-| `ethereum` (bUSDC) | `cc2511a` (main, the audit candidate) | signer, relayer, guardian (guardiao + optional sombra), reserves | rehearsed under systemd (section 8) |
-| `arbitrum-one` (bUSDC.arb), `op-mainnet` (bUSDC.op), `linea` (bUSDC.linea) | `9187656` (audit line `codex/bridge-evm-nets-r17-audit-20261117`) | signer, relayer, guardian (guardiao), reserves | built and checked offline; same daemons as Ethereum; not rehearsed in containers |
+| `ethereum` (bUSDC) | `fa63200` since round 20 (agent 421): the daemons with the L2 pins of the live L2 release (`mainnet-v3`) and the templates of the fee schedule; UNAUDITED; it becomes the launch revision of `main` before any operator installs. Until 2026-11-19: `cc2511a` (main, the audit candidate), which sections 4 to 8 below were run with | signer, relayer, guardian (guardiao + optional sombra), reserves | rehearsed under systemd (section 8) |
+| `arbitrum-one` (bUSDC.arb), `op-mainnet` (bUSDC.op), `linea` (bUSDC.linea) | `fa63200` since round 20, as Ethereum. Until 2026-11-19: `9187656` (audit line `codex/bridge-evm-nets-r17-audit-20261117`) | signer, relayer, guardian (guardiao), reserves | built and checked offline; same daemons as Ethereum; not rehearsed in containers |
 | `base`, `bnb` | none | none | refused by the route's own launch status (Base held, BNB Smart Chain out of v1) |
 | `bitcoin`, `tron`, `solana`, `stellar` | none | none | not packaged: see section 9 |
+
+**Round 20 (agent 421, 2026-11-19): why the source revision moved.** A bundle ships the daemons and the templates of its
+`source_rev`, not of the tree `bundle.py` runs in. At `cc2511a` the signer daemons pin the L2 release of 2026-11-03
+(`mainnet-v2`), which never went live, and the relayer template still has the 300 gwei Ethereum gas ceiling from before
+the fee schedule of 2026-11-17 (2 gwei): an operator who installed that bundle could certify nothing and would relay
+with the wrong ceiling. `ops/routes.json` `facts` now lists only the current pin name, so `bundle.py` refuses to build a
+signer or relayer bundle from a revision whose templates carry another, and
+`tools/signatario-stable/test_l2_pins_r20.py` holds every packaged route's `source_rev` to this tree: the pin-bearing
+daemons and every operator template must be byte for byte the same. When one of them changes, `source_rev` moves in a
+reviewed commit (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a). The container rehearsal of section 8 ran with the
+bundles of `cc2511a` and was NOT repeated with the new revision (its F381-1 control is restated in the script, not rerun).
 
 The EVM networks inherit the Ethereum roles (`inherit` in `ops/routes.json`) with their own committed templates
 (`deployments/<network>/ops/*.template.json`), their own feed port, no sombra (the light client is Ethereum's), and the

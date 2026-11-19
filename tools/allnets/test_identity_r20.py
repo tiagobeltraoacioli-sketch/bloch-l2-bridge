@@ -199,7 +199,10 @@ class Identity(unittest.TestCase):
 class ThisTree(unittest.TestCase):
     def test_the_recorded_changes_of_this_tree_are_exact_and_only_what_round_20_decided(self):
         doc = test_all.load_changes(ROOT)
-        self.assertEqual(set(doc['decisions']), {'launch-limits-2026-11-19'})
+        # Later the same day (agent 421): the signers' L2 re-pin (F410-2) and the mint queue bound (F410-1), one more decision.
+        self.assertEqual(set(doc['decisions']), {'launch-limits-2026-11-19', 'l2-repin-and-queue-bound-2026-11-19'})
+        for text in ('2026-11-19', 'Coordinator', 'mainnet-v3', 'F410-2', 'F410-1', '25 USDC', 'MAX_PENDING', 'Base and BNB'):
+            self.assertIn(text, doc['decisions']['l2-repin-and-queue-bound-2026-11-19'], text)
         for text in ('2026-11-19', 'owner', 'coordinator', '500,000', '250,000', 'audit'):
             self.assertIn(text, doc['decisions']['launch-limits-2026-11-19'], text)
         lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
@@ -208,8 +211,37 @@ class ThisTree(unittest.TestCase):
             self.assertEqual(c['lineTip'], lock[c['line']]['commit'], c['path'])
             self.assertRegex(c['blob'], r'^[0-9a-f]{40}$')
             by_line.setdefault(c['line'], set()).add(c['path'])
-        # only the EVM-network line and the ceremony kit; never a held route's line, never Base or BNB
-        self.assertEqual(set(by_line), {'evm-nets', 'ceremony'})
+        # only the EVM-network line, the ceremony kit and, for the re-pin, the operator-package line: the pin NAME in the
+        # list of public facts a rendered config may hold, the revision the bundles are built from (a bundle ships the
+        # daemons of `source_rev`: without moving it the re-pin reaches no operator), and what stated the old revision
+        # (two tests, one rehearsal control, the document's table); never a held route's line, never Base or BNB
+        self.assertEqual(set(by_line), {'evm-nets', 'ceremony', 'operator-pkg'})
+        self.assertEqual(by_line['operator-pkg'], {'ops/routes.json', 'ops/test_bundle.py', 'ops/rehearse_containers.py',
+                                                   'docs/OPERATOR-PACKAGES.md'})
+        self.assertEqual({c['decision'] for c in doc['changes'] if c['line'] == 'operator-pkg'}, {'l2-repin-and-queue-bound-2026-11-19'})
+        tip = lock['operator-pkg']['commit']
+
+        def changed(path):
+            diff = subprocess.run(['git', '-C', str(ROOT), 'diff', '--no-color', '-U0', tip, 'HEAD', '--', path],
+                                  capture_output=True, text=True, check=True).stdout
+            return [l for l in diff.splitlines() if l[:1] in '+-' and not l.startswith(('+++', '---'))]
+        # ops/routes.json: nothing but the pin name, the four source revisions with their status text, and the note
+        lines = changed('ops/routes.json')
+        self.assertEqual(len([l for l in lines if l.startswith('-')]), 10, lines)
+        self.assertEqual(len([l for l in lines if l.startswith('+')]), 10, lines)
+        for l in lines:
+            self.assertTrue(any(k in l for k in ('"mainnet-v2"', '"mainnet-v3"', '"source_rev"', '"launch_status"', '"_about"')), l)
+        manifest = json.loads((ROOT / 'ops/routes.json').read_text())
+        was = json.loads(subprocess.run(['git', '-C', str(ROOT), 'show', f'{tip}:ops/routes.json'], capture_output=True, text=True, check=True).stdout)
+        for route in manifest['routes']:
+            for doc_ in (manifest, was):
+                doc_['routes'][route].pop('source_rev'), doc_['routes'][route].pop('launch_status')
+        manifest.pop('_about'), was.pop('_about')
+        was['facts']['values'] = {('mainnet-v3' if k == 'mainnet-v2' else k): (manifest['facts']['values']['mainnet-v3'] if k == 'mainnet-v2' else v)
+                                  for k, v in was['facts']['values'].items()}
+        self.assertEqual(manifest, was)   # every unit, credential, port, hardening line and role is what the line shipped
+        self.assertEqual(len(changed('ops/test_bundle.py')), 9)            # the pin name (2) and the relayer ceiling (1 + 6)
+        self.assertEqual(len(changed('ops/rehearse_containers.py')), 13)   # the F381-1 control (2 + 11)
         for path in by_line['evm-nets']:
             self.assertTrue(path.startswith(('tools/evm-nets/', 'deployments/arbitrum-one/', 'deployments/op-mainnet/',
                                              'deployments/linea/')), path)
@@ -222,9 +254,11 @@ class ThisTree(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             rc = test_all.identity()
         self.assertEqual(rc, 0, buf.getvalue())
-        for line in ('bitcoin', 'tron', 'solana', 'stellar', 'operator-pkg'):
+        for line in ('bitcoin', 'tron', 'solana', 'stellar'):
             for p in test_all.OWNED[line]:
                 self.assertRegex(buf.getvalue(), rf'{line}\s+{p}\s+identical to ', (line, p))
+        self.assertRegex(buf.getvalue(), r'operator-pkg\s+docs/OPERATOR-PACKAGES.md\s+1 file\(s\) differ from ')
+        self.assertRegex(buf.getvalue(), r'operator-pkg\s+ops\s+3 file\(s\) differ from ')
         for p in ('deployments/base', 'deployments/bnb'):
             self.assertRegex(buf.getvalue(), rf'evm-nets\s+{p}\s+identical to ', p)
 

@@ -90,10 +90,15 @@ class Bundles(unittest.TestCase):
         self.assertIs(g['vault_pause_on_mint'], True)
         self.assertIs(f('ethereum', 'signer', 'eth-half.json')['release_hold'], False)
         rel = f('ethereum', 'relayer', 'relayer.json')
-        self.assertEqual((rel['l2_max_gas_price_gwei'], rel['eth_max_gas_price_gwei']), (50, 300))
+        # Round 20 (agent 421): the bundles are built from the revision that carries the current L2 pins, whose relayer
+        # template has the gas ceiling of the fee schedule of 2026-11-17 (2 gwei on Ethereum). At the earlier source
+        # revision cc2511a the template still said 300, which is what this line held until then.
+        self.assertEqual((rel['l2_max_gas_price_gwei'], rel['eth_max_gas_price_gwei']), (50, 2))
+        old = json.loads(bundle.read_at(bundle.rev_parse('cc2511aff60056393b92f6dc94e80a045a6c3c37'), 'deployments/mainnet/busdc-ops/relayer.template.json'))
+        self.assertEqual((old['l2_max_gas_price_gwei'], old['eth_max_gas_price_gwei'], old['l2_pins']), (50, 300, 'mainnet-v2'))
         self.assertTrue(rel['relay_role'].startswith('TBD-owner'))
         s = f('ethereum', 'signer', 'signer.json')
-        self.assertEqual((s['threshold'], s['vault_threshold'], s['l2_pins'], s['l2_source']), (5, 5, 'mainnet-v2', 'rebuild'))
+        self.assertEqual((s['threshold'], s['vault_threshold'], s['l2_pins'], s['l2_source']), (5, 5, 'mainnet-v3', 'rebuild'))
 
     def test_every_secret_is_a_staged_credential(self):
         for (route, role), (files, man) in self.built.items():
