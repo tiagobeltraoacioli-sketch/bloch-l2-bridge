@@ -212,8 +212,19 @@ in the agent report (`agents/412-bridge-eth-r20.md`).
   construction and the route is held; the rehearsal deploys the vault through `vault_pontes.py args` and `forge
   create` instead. `docs/BRIDGE-OWNER-CEREMONY.md` (the owner's step-by-step text) is not extended to this route.
 - The registry (`deployments/bridges.json`, `tools/allnets/registry.py`, `tools/deploy-pontes/routes.py`) is not
-  changed by this line: on this branch alone it does not know a second route on chain id 1. Section 5 of the agent
-  report lists what the several-routes-per-network change must provide and which checks fail until it is merged.
+  changed by this line: on this branch alone it does not know a second route on chain id 1, so `registry.py check`,
+  `test_registry`, `test_routes` and the schema check of this route's file fail here by construction. With the
+  several-routes-per-network line of round 20 merged and two hunks in its `routes.py` (the route's own `launch` block
+  taken when it says NOT launchable; a table entry), the registry lists the route as `held` and every check passes
+  (trial merge in the agent report).
+- The limits of the Ethereum USDC route became chain-keyed rules in the launch-limits line of round 20. Merged with
+  this line they must not be applied to the native-ether vault (three small hunks, in the agent report); while the
+  route is held nothing depends on it, because the hold is asked first.
+- The frozen vault's forge suites were not ported mechanically to this vault (the TRON route did that for its
+  vault): they move a token and state fees rounded down. The differential fuzz stands in for them on everything the
+  two vaults share.
+- The Rust custody-deployment verifiers (`src/`, `scripts/custody_deployment_*`) and the light-client tools know
+  nothing of this vault; `preflight_signer.py` was not run for the route.
 - No light-client verifier for this route; the one-way switch stays unused.
 - The minimum burn is an owner input (section 4). The limits were sized at one price reading.
 - `PUSH_GAS` against wallets other than Safe 1.4.1 and SimpleAccount v0.6: not measured.

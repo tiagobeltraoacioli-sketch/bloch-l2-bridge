@@ -16,7 +16,7 @@ Line counts by `wc -l` at the branch tip.
 |---|---|---|---|
 | `contracts/eth/NativeEtherSourceVault.sol` | 953 | The vault. `contracts/usdt/ProvenanceSourceVault.sol` plus changes ETH-1 to ETH-10: 152 lines added, 60 removed, about half of them comment (`python3 scripts/eth/vault_diff.py` prints and pins the diff) | **Yes, first.** Read the diff, not the file |
 | `tools/signatario-stable/native_ether.py` | 245 | The launch gate (two records), the measured relayer cost, the decided limits and the minimum-burn formula | Yes |
-| `tools/deploy-pontes/vault_pontes.py` | +44 | The vault contract accepted; mainnet configs refused while held and then held to the decided values; `verify` reads the ether balance against `owedWei()` | Yes: the added lines |
+| `tools/deploy-pontes/vault_pontes.py` | +48 | The vault contract accepted; mainnet configs refused while held and then held to the decided values; `verify` reads the ether balance against `owedWei()` | Yes: the added lines |
 | `tools/deploy-pontes/deploy_pontes.py` | +18 | A mainnet config naming `bETH` refused while held | Yes: the added lines |
 | `tools/deploy-pontes/ceremony_kit.py` | +90 | The route's own schedule and creation-code pin; `vault-run` refuses the held route at its first step | Yes: the added lines |
 | `tools/signatario-stable/eth_half.py` | +17 | On chain id 1 a vault whose `token()` is the marker is refused while held | Yes |

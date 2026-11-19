@@ -109,7 +109,9 @@ class Kit(unittest.TestCase):
         token, vault, relayer = base.configs()
         t, v, _ = ck.fill(self.inv, token, vault, REV, 10**9)
         got = ck.schedule(t, v, relayer)
-        self.assertEqual(set(got), {'decision', 'checked', 'smallestDepositNet', 'smallestExitPaid', 'openOwnerDecision'})
+        self.assertEqual(got['decision'], 'schedule-ok')
+        for key in ('route', 'unitWei', 'minBurnFloor', 'decidedLimits'):      # nothing of the ether route's answer
+            self.assertNotIn(key, got)
         self.assertEqual(got['checked']['minDeposit'], 101_000_000)
         self.assertEqual(got['checked']['relayerEthCeilingGwei'], 2)
         self.assertEqual(ck.SCHEDULE['l2MinBurn'], 100_000_000)

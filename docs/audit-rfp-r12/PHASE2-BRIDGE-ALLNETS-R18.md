@@ -48,7 +48,7 @@ USDC route takes exactly the path it took before. Rows that differ from `135bdba
 
 | File | Lines added | What | Reached by the USDC route |
 |---|---|---|---|
-| `tools/deploy-pontes/vault_pontes.py` | 44 | `NativeEtherSourceVault` accepted as a vault contract; a mainnet config of it refused while the route is held, then held to the route's decided values; `verify` also reads its unit, push gas, claims and ether balance | Only the new pairing check with the token config (a config naming `bETH` must sit over the native-ether vault and no other): false on both sides for `bUSDC` |
+| `tools/deploy-pontes/vault_pontes.py` | 48 | `NativeEtherSourceVault` accepted as a vault contract; a mainnet config of it refused while the route is held, then held to the route's decided values; `verify` also reads its unit, push gas, claims and ether balance | Only the new pairing check with the token config (a config naming `bETH` must sit over the native-ether vault and no other): false on both sides for `bUSDC` |
 | `tools/deploy-pontes/deploy_pontes.py` | 18 | a mainnet config naming `bETH` is refused while held | No: the branch is taken only for that token name |
 | `tools/signatario-stable/eth_half.py` | 17 | on chain id 1, after the pinned-code check, one more read (`token()`); a vault that answers the native-ether marker is refused while held | Yes, the one read: the USDC vault answers USDC and the half goes on as before; a vault that does not answer `token()` is refused |
 | `tools/signatario-stable/vigia.py` | 5 | no token-transfer simulation for a vault whose `token()` is the marker | No |
