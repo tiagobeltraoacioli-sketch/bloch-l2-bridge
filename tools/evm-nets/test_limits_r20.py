@@ -152,6 +152,23 @@ class Records(unittest.TestCase):
         path = self.edited(lambda r: None)
         self.assertEqual(launch.limits(1, path)['cap'], 500_000 * U)
 
+    def test_a_decision_that_breaks_the_rule_is_refused_even_when_both_records_agree(self):
+        # the ten-window rule and the positive-integer rule hold for the code record too: were LIMITS itself changed
+        # together with networks.json, the registry would still be refused
+        for what, cap, window, needle in (('eleven windows', 550_000 * U, 50_000 * U, 'is not 10 x windowLimit'),
+                                          ('one window', 50_000 * U, 50_000 * U, 'is not 10 x windowLimit'),
+                                          ('a zero window', 0, 0, 'must be positive integers')):
+            path = self.edited(lambda r: r['limits']['ethereum'].update(cap=cap, windowLimit=window))
+            with mock.patch.dict(launch.LIMITS, {1: (cap, window)}):
+                with self.assertRaises(launch.LaunchError, msg=what) as e:
+                    launch.registry(path)
+                self.assertIn(needle, str(e.exception), what)
+        path = self.edited(lambda r: r['limits'].update(windowsPerCap=5))
+        with mock.patch.object(launch, 'WINDOWS_PER_CAP', 5):  # both records say five windows: the caps no longer fit it
+            with self.assertRaises(launch.LaunchError) as e:
+                launch.registry(path)
+            self.assertIn('is not 5 x windowLimit', str(e.exception))
+
     def test_the_deploy_tools_refuse_every_route_while_the_registry_limits_are_edited(self):
         path = self.edited(self.EDITS['a larger Ethereum cap'])
         with mock.patch.object(launch, 'REGISTRY', Path(path)):
