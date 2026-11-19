@@ -265,6 +265,23 @@ class Eth:
         if got != self.cfg['vault_code_keccak'].lower():
             refuse('the vault code differs from the pinned build', block=str(block), got=got,
                    pinned=self.cfg['vault_code_keccak'])
+        self.native_ether_gate(ref)
+
+    def native_ether_gate(self, ref):
+        """Round 20 (agent 412): on Ethereum mainnet, a vault whose `token()` is the native-ether marker is the vault of
+        the `ethereum-eth` route (bETH), which is HELD: nothing is attested or signed for it, and no key of this file
+        lifts that (native_ether.py, shipped beside this module). Any other vault, and any other chain id, passes."""
+        if self.chain_id != 1:
+            return
+        answer = self.rpc('eth_call', [{'to': self.vault, 'data': '0xfc0c546a'}, ref])  # token()
+        if len(answer) != 66:
+            refuse('the vault does not answer token()', block=str(ref))
+        import native_ether
+        if '0x' + answer[-40:].lower() != native_ether.MARKER:
+            return
+        why = native_ether.daemon_refusal(self.chain_id)
+        if why is not None:
+            refuse(why, vault=self.vault)
 
     def release_digest(self, rel, context):
         """ContextBoundSourceVault.releaseDigest, computed here."""

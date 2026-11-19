@@ -1,0 +1,117 @@
+{
+  "domain": "bloch.bridge.mainnet-deploy.v1",
+  "bridge": "stable",
+  "notes": {
+    "rationale": "docs/BRIDGE-ETH.md",
+    "units": "1 bETH = 1 ETH = 1e6 units (6 decimals); one unit = 1e12 wei on Ethereum",
+    "limits": "supplyCap 280 ETH = the vault cap; bucket 28 ETH refilled in 24 h (324 units a second, the integer below 28e6 / 86400) = the vault windowLimit; minBurn 7 ETH = the vault l2MinBurn",
+    "l2Build": "L2 deposit-only launch build: release bloch-l2-2026-11-03-next-native-78d4921c, bloch-l2-evm build commit `926d2cf` against native 78d4921c (follower cdf5da5c, produce-dev e3f1a290, settled-rpc 53e88565; SHA256SUMS 6d3bd628, the owner's signing target); network.genesisHash = the pinned L2 genesis 632e45ae",
+    "vault": "deploy the Ethereum vault first (beth-vault.config.json, tools/deploy-pontes/vault_pontes.py); its verify output fills ethereum.vault/route/vaultCodeHash/vaultCap/vaultGuard",
+    "sequence": "docs/BRIDGE-ETH.md section 6",
+    "held": "HELD: deploy_pontes.py refuses this config without --rehearsal while the route's launch records say held (tools/signatario-stable/native_ether.py)",
+    "TBD-owner": "source.revision; deployer.address (fresh hardware-wallet key, nonce 0, never 0x703a...); deployer.fundedBy.safe (Bloch Inc Safe address); signers.set[0..6].operator and .address (7 fresh L2 mint keys from the key ceremony); guardians.set[0..2].operator and .address (3 fresh L2 token guardian keys); ethereum.vault, ethereum.route, ethereum.vaultCodeHash, ethereum.vaultCap (from vault_pontes.py verify); ethereum.vaultGuard.guardians (the 3 Ethereum vault guardian addresses, sorted ascending); tx.maxGasPriceWei (L2 fee market)",
+    "launchDesign": "the frozen BridgedStablecoinV3 (creation keccak 0xe560441f...1de7) over NativeEtherSourceVault mode 1: mint chain, guardian cancel, 6-of-7 unpause, T = 0 with the 12 h delay, MAX_PENDING 2,048. Honest mints are at least minDeposit (7.004 ETH) and the bucket admits 28 + 14 ETH per 12 h delay, so at most 6 honest mints queue",
+    "keys": "the same seven signer and three guardian keys as every route (docs/BRIDGE-V3-KEY-CEREMONY.md); every digest binds its chain, vault and token"
+  },
+  "network": {
+    "name": "bloch-l2-mainnet",
+    "chainId": 700770,
+    "genesisHash": "0x632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f468",
+    "rehearsal": false
+  },
+  "source": {
+    "revision": null
+  },
+  "deployer": {
+    "address": "TBD-owner",
+    "startNonce": 0,
+    "fundedBy": {
+      "entity": "Bloch Inc (Safe v1.4.1, 3-of-5)",
+      "safe": null
+    }
+  },
+  "mintSwitch": {
+    "threshold": 6,
+    "delay": 1209600
+  },
+  "token": {
+    "contract": "BridgedStablecoinV3",
+    "name": "Bloch Bridged Ether",
+    "symbol": "bETH"
+  },
+  "ethereum": {
+    "chainId": 1,
+    "vault": null,
+    "route": null,
+    "vaultCodeHash": null,
+    "vaultCap": null,
+    "vaultGuard": {
+      "guardians": "TBD-owner",
+      "pauseDuration": 259200,
+      "pauseCooldown": 259200
+    }
+  },
+  "signers": {
+    "threshold": 5,
+    "set": [
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      }
+    ]
+  },
+  "guardians": {
+    "pauseDuration": 259200,
+    "pauseCooldown": 259200,
+    "set": [
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      },
+      {
+        "operator": null,
+        "address": "TBD-owner"
+      }
+    ]
+  },
+  "limits": {
+    "supplyCap": 280000000,
+    "bucketCapacity": 28000000,
+    "refillPerSecond": 324,
+    "largeMintThreshold": 0,
+    "largeMintDelay": 43200,
+    "minBurn": 7000000
+  },
+  "tx": {
+    "gasLimit": 5000000,
+    "maxGasPriceWei": null
+  }
+}

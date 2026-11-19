@@ -108,6 +108,15 @@ def evm_launch():
     return launch
 
 
+def native_ether():
+    """tools/signatario-stable/native_ether.py: the launch status and names of the native-ether route `ethereum-eth`
+    (round 20, agent 412). Loaded only for a config that names its L2 token (bETH)."""
+    if str(ROOT / 'tools/signatario-stable') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'tools/signatario-stable'))
+    import native_ether as module
+    return module
+
+
 def refuse(cond, message):
     if not cond:
         raise Refused(message)
@@ -389,6 +398,15 @@ def validate(cfg, rehearsal):
             refuse((name, symbol) == (want['name'], want['symbol']),
                    f'the L2 token of source chain {eth["chainId"]} is {want["symbol"]} ("{want["name"]}"), one token per network '
                    f'(tools/evm-nets/networks.json); the config names {symbol} ("{name}")')
+        if not rehearsal and (name, symbol) == ('Bloch Bridged Ether', 'bETH'):
+            # Round 20 (agent 412): bETH is the token of the native-ether route `ethereum-eth` and of no other source.
+            # While that route is held this refuses every non-rehearsal config that names it, on any source chain, with
+            # the route's own reason; no flag lifts it. (Were it launchable, the name rule below would still need a
+            # reviewed change to admit a second token on chain id 1: the registry change of round 20.)
+            ne = native_ether()
+            why = ne.refusal()
+            refuse(why is None, why)
+            refuse(eth['chainId'] == ETH_MAINNET, f'bETH is the L2 token of the {ne.ROUTE_ID} route: source chain id 1 only')
         if not rehearsal and eth['chainId'] == ETH_MAINNET:
             # One token per source chain (integration of the bridge lines, agent 375, round 18): chain id 1 is the source
             # of the Ethereum bridge's bUSDC only. Before this, any name and symbol passed with chain id 1, so another

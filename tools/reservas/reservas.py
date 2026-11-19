@@ -82,6 +82,10 @@ class Unverifiable(Exception):
     pass
 
 
+# The marker a native-ether vault (contracts/eth/NativeEtherSourceVault.sol) answers as its `token()`. No code, no key.
+NATIVE_ETHER = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+
+
 def rpc(url, method, params):
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode()
     try:
@@ -153,6 +157,8 @@ class Monitor:
             n = self.finalized(url)
             locked = self.uint(url, vault, 'totalLocked()', n)
             asset = '0x' + rpc(url, 'eth_call', [{'to': vault, 'data': self.calldata('token()')}, hex(n)])[-40:]
+            if asset.lower() == NATIVE_ETHER:
+                return self.native_ether_backing(url, vault, n, locked)
             balance = self.uint(url, asset, 'balanceOf(address)', n, vault)
             return {'source_block': n, 'total_locked': locked, 'vault_balance': balance}, min(locked, balance)
         if b['kind'] == 'wgnb':
@@ -165,6 +171,23 @@ class Monitor:
             total = sum(int(u['value']) for u in r['utxos'])
             return {'utxos': len(r['utxos'])}, total
         raise Unverifiable(f'unknown kind {b["kind"]}')
+
+    def native_ether_backing(self, url, vault, n, locked):
+        """Round 20 (agent 412): a vault that holds ether itself (NativeEtherSourceVault; `token()` is the marker). Its
+        books are in units of `UNIT()` wei. What backs the L2 token is the ether the vault holds beyond what it owes to
+        others (accrued fees, payments waiting for their recipients), in whole units, and never more than totalLocked;
+        ether forced into the vault is a surplus the vault itself never counts, reported apart."""
+        unit = self.uint(url, vault, 'UNIT()', n)
+        if unit == 0:
+            raise Unverifiable('the native-ether vault answers UNIT() = 0')
+        wei = int(rpc(url, 'eth_getBalance', [vault, hex(n)]), 16)
+        fees = self.uint(url, vault, 'feesAccrued()', n)
+        claims = self.uint(url, vault, 'totalClaimable()', n)
+        free = wei // unit - fees - claims  # may be negative: the vault is short even of what it owes to others
+        owed = (locked + fees + claims) * unit
+        extra = {'source_block': n, 'total_locked': locked, 'vault_balance': wei // unit, 'vault_balance_wei': wei,
+                 'unit_wei': unit, 'fees_accrued': fees, 'total_claimable': claims, 'surplus_wei': max(wei - owed, 0)}
+        return extra, min(locked, free)
 
     def chain(self, b, l2_block, eth_block):
         """(clean, detail) of the V3 mint chain against the vault's deposit chain, both at finality."""

@@ -1,0 +1,152 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "route": {
+    "id": "ethereum-eth",
+    "asset": "eth"
+  },
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+  },
+  "network": {
+    "id": "ethereum",
+    "name": "Ethereum",
+    "kind": "evm",
+    "chainId": "1",
+    "nativeCurrency": {
+      "symbol": "ETH",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "ETH",
+    "name": "Ether",
+    "decimals": 18,
+    "id": "native",
+    "issuer": "none (the native currency of Ethereum)",
+    "issuerNative": true,
+    "issuerPowers": [],
+    "verified": [
+      {
+        "source": "the asset is the network's native currency: no contract, no issuer. The vault's token() is the marker 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE (no code; eth_getCode read on a local fork of Ethereum in tools/native-ether/rehearse_fork.py)",
+        "date": "2026-11-19"
+      },
+      {
+        "source": "https://ethereum.org/en/developers/docs/intro-to-ether/ (1 ether = 1e18 wei)",
+        "date": "2026-11-19"
+      }
+    ],
+    "unit": {
+      "adapter": "none: the vault itself counts units (contracts/eth/NativeEtherSourceVault.sol, UNIT)",
+      "decimals": 6,
+      "assetUnitsPerUnit": "1000000000000",
+      "note": "every amount of this file, of the vault and of the L2 token is in units of 1e12 wei (0.000001 ETH). A deposit sends exactly amount x 1e12 wei; a value that is not a whole number of units cannot be deposited"
+    }
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/eth/NativeEtherSourceVault.sol:NativeEtherSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged Ether",
+    "symbol": "bETH",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "280000000",
+    "window": "28000000",
+    "windowSeconds": 86400,
+    "minDeposit": "7004000",
+    "maxDeposit": "28000000",
+    "l2MinBurn": "7000000",
+    "l2MaxBurn": "28000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 10,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing, in ether; anyone calls sweepFees() and the vault pays the recipient. Each fee is rounded UP to the unit (0.000001 ETH), never in the user's favour",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 30 gwei: while the network's gas price is above that the release waits"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own Ethereum node reports as finalized (two epochs of Ethereum's own consensus).",
+    "tag": "finalized",
+    "confirmations": 0,
+    "typicalSeconds": 960,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient) payable",
+    "steps": [
+      "no approval: the asset is ether",
+      "call deposit(amount, l2Recipient) on the vault with value = amount x 1000000000000 wei exactly (amount is in units of 0.000001 ETH); any other value is refused (ValueMismatch) and nothing is ever refunded",
+      "state the L2 recipient explicitly, also when depositing from a smart-contract wallet: it is never taken from the sender",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% (rounded up to the unit) to l2Recipient"
+    ],
+    "refusals": [
+      "a plain transfer of ether to the vault (no deposit call): it reverts (DirectTransferRefused)",
+      "a value that is not exactly amount x 1e12 wei",
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "30",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "ether, the burned amount less 0.1% (rounded up to the unit), amount x 1e12 wei",
+    "notes": [
+      "the vault pays by sending ether to sourceRecipient with 30,000 gas: a plain account and a smart-contract wallet whose receive function fits in that gas are paid at once",
+      "if sourceRecipient refuses ether or needs more gas, the release still completes and the payment waits in the vault: anyone calls claimFor(sourceRecipient) (all gas forwarded, paid to sourceRecipient only), or sourceRecipient itself calls claim(to) to send it to another address. The event ReleaseDeferred(id, recipient, amount) says so; a page must show it and offer the claim",
+      "a contract that can neither receive ether nor call claim(to) can never take its payment: do not name one. The burn names the recipient and cannot be redirected by anyone else",
+      "the relayer pays at most 30 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (7 ETH): its 0.1% fee pays the relayer's worst-case release (227,000 gas) at the 30 gwei ceiling (docs/ETH-VAULT-DIFF.md section 5)"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://etherscan.io/tx/{tx}",
+      "address": "https://etherscan.io/address/{address}",
+      "block": "https://etherscan.io/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "NOT LAUNCHABLE IN V1 (held): Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying. A page, a pool builder or the DEX gate must not offer this route; every bridge tool refuses it (tools/signatario-stable/native_ether.py). The network's USDC route is another route with its own launch block.",
+    "UNAUDITED. Nothing is deployed. A further route of Ethereum: the network's first route is USDC (deployments/mainnet/). The custody contract is NativeEtherSourceVault (the Ethereum vault plus nine marked changes, docs/ETH-VAULT-DIFF.md); the L2 token is the frozen BridgedStablecoinV3, byte-identical.",
+    "bETH has SIX decimals: 1 bETH = 1 ETH, the smallest amount is 0.000001 ETH. Integrators must read decimals(); a pool or a page that assumes 18 decimals for an ether token misprices it by 1e12.",
+    "Limits are ether amounts sized on 2026-11-19 from the USD rule of that day for Ethereum USDC (cap 500,000 USD, window 50,000 USD per 24 h) at 1,777 USD per ETH (Coinbase 1,777.015 and Kraken 1,778.76, 03:32 UTC): cap 280 ETH, window 28 ETH per 24 h. They are immutable and float in USD with the price of ether: at twice the price the cap is 995,120 USD and the window 99,512 USD a day.",
+    "The vault's ether balance can exceed the cap by payments waiting for their recipients (totalClaimable) and by ether forced into it (surplusWei); neither is backing, neither is within the committee's reach."
+  ]
+}

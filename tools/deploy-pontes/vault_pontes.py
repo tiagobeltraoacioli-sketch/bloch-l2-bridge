@@ -56,6 +56,14 @@ PROVENANCE_CONTRACT = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSource
 # Round 16 (agent 320): the same vault on other EVM source networks. `ethereum` in a config then names that network.
 # tools/evm-nets/networks.json gives, per chain id, the domain label and the asset. Ethereum (chain 1) is unchanged.
 PROVENANCE_CONTRACTS = (PROVENANCE_CONTRACT,)
+# Round 20 (agent 412): the native-ether route `ethereum-eth` (bETH). Its vault, contracts/eth/NativeEtherSourceVault.sol,
+# holds ether itself and takes the same constructor arguments, with `token` the native-ether marker and transferMode 0.
+# tools/signatario-stable/native_ether.py holds its launch status (recorded twice), its decided limits and the measured
+# relayer cost; a non-rehearsal config of this contract is refused by validate, args and verify alike while the route is
+# held, with no flag to lift it. A config of any other contract never reaches that module.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'signatario-stable'))
+import native_ether  # noqa: E402
+PROVENANCE_CONTRACTS += (native_ether.CONTRACT,)
 # Round 17 (reviews R329-EVM-1, R329-EVM-2): tools/evm-nets/launch.py holds the launch status of each of those networks;
 # a network that is not launchable is refused by validate, args and verify alike, with no flag to lift it, and the
 # registry pins the fee recipient and rates of every vault config of those networks. Chain 1 never reaches that module.
@@ -160,9 +168,23 @@ def validate(cfg, rehearsal, token_cfg=None):
 
     v = cfg['vault']
     provenance = v.get('contract') in PROVENANCE_CONTRACTS
+    native = native_ether.is_native_contract(v.get('contract'))
+    if native and not rehearsal:
+        # The native-ether route: Ethereum mainnet only, and only while both launch records say launchable.
+        why = native_ether.refusal()
+        refuse(why is None, why)
+        refuse(eth['chainId'] == ETH_MAINNET, f'{native_ether.CONTRACT} is the vault of the {native_ether.ROUTE_ID} route: chain id 1 only')
+        net = (native_ether.SOURCE_LABEL, native_ether.ASSET_LABEL, native_ether.MARKER, (native_ether.CONTRACT,))
     exact_keys(v, ['contract', 'sourceDomainLabel', 'nativeDomainLabel', 'assetLabel', 'token', 'cap',
                    'transferMode', 'signers', 'policy', 'guard'] + (['provenance'] if provenance else []), 'vault')
     refuse(v['contract'] in (CONTRACT,) + PROVENANCE_CONTRACTS, f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
+    if native:
+        # The constructor refuses any token but the marker and any transfer mode but 0 (ETH-2), on every chain.
+        refuse(str(v.get('token')).lower() == native_ether.MARKER,
+               f'vault.token of {native_ether.CONTRACT} must be the native-ether marker {native_ether.MARKER}')
+        if not rehearsal:
+            bad = native_ether.vault_policy_errors(v)
+            refuse(not bad, f'the {native_ether.ROUTE_ID} route: ' + '; '.join(bad))
     if net is not None:
         refuse(v['contract'] in net[3], f'vault.contract on chain {eth["chainId"]} must be {" or ".join(net[3])}')
     if provenance:
@@ -239,7 +261,12 @@ def validate(cfg, rehearsal, token_cfg=None):
         net = pol['minDeposit'] - pol['minDeposit'] * v['provenance']['fees']['depositBps'] // 10_000
         refuse(net >= pol['l2MinBurn'], f'vault.policy.minDeposit nets {net} after the deposit fee, below l2MinBurn '
                '(the constructor refuses it; with a 5 bps deposit fee use minDeposit 101 USDC for l2MinBurn 100)')
-    if launch and not rehearsal and provenance:
+        if native:
+            # ETH-5: the native-ether vault rounds its fee UP; the same comparison with its own rounding.
+            net_up = pol['minDeposit'] - native_ether.fee_up(pol['minDeposit'], v['provenance']['fees']['depositBps'])
+            refuse(net_up >= pol['l2MinBurn'], f'vault.policy.minDeposit nets {net_up} after the deposit fee rounded up, below '
+                   'l2MinBurn (the constructor refuses it)')
+    if launch and not rehearsal and provenance and not native:
         # Fee schedule of 2026-11-17 (coordinator): no vault whose smallest exit pays out less than relaying it costs at
         # the relayer's gas ceiling. floor = ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps/10000)),
         # from tools/evm-nets/networks.json (`relay`, `relayCost`; chain 1: `relayCost.ethereum`).
@@ -300,6 +327,10 @@ def validate(cfg, rehearsal, token_cfg=None):
     if token_cfg is not None:
         lim, te = token_cfg.get('limits', {}), token_cfg.get('ethereum', {})
         tc = (token_cfg.get('token') or {}).get('contract')
+        tn = ((token_cfg.get('token') or {}).get('name'), (token_cfg.get('token') or {}).get('symbol'))
+        refuse(rehearsal or (tn == native_ether.L2_TOKEN) == native,
+               f'the L2 token {tn[1]} ("{tn[0]}") and the vault {v["contract"]} do not pair: '
+               f'{native_ether.L2_TOKEN[1]} is the token of the native-ether vault and of no other')
         refuse((tc == 'BridgedStablecoinV3') == provenance,
                f'token {tc} and vault {v["contract"]} do not pair: BridgedStablecoinV3 needs a ProvenanceSourceVault and only it')
         refuse(is_uint(lim.get('supplyCap')) and v['cap'] == lim['supplyCap'],
@@ -379,6 +410,10 @@ def verify(cfg, norm, url, address, block, unused=False):
                        'feeRecipient()(address)': (fe['recipient'] or ZERO).lower(),
                        'depositFeeBps()(uint16)': str(fe['depositBps']), 'releaseFeeBps()(uint16)': str(fe['releaseBps']),
                        'feesAccrued()(uint64)': None})
+    if native_ether.is_native_contract(v['contract']):
+        expect.update({'NATIVE_ETHER()(address)': native_ether.MARKER, 'UNIT()(uint256)': str(native_ether.UNIT_WEI),
+                       'PUSH_GAS()(uint256)': str(native_ether.PUSH_GAS), 'totalClaimable()(uint64)': None,
+                       'owedWei()(uint256)': None, 'surplusWei()(uint256)': None})
     checked, state = {}, {}
     for sig, want in expect.items():
         got = get(sig).lower()
@@ -396,8 +431,15 @@ def verify(cfg, norm, url, address, block, unused=False):
         # A new token over a used vault mints its old deposits again, and its burn nonces restart under releases already spent.
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
+        refuse(state.get('totalClaimable', '0') == '0', 'a used vault (payments are waiting for their recipients)')
     code_hash = cast('keccak', *plain(code)).lower()
     genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
+    if native_ether.is_native_contract(v['contract']):
+        # What the vault holds against what it owes, at the same block (ETH-6): never short; a surplus is forced ether.
+        held = int(rpc(url, 'eth_getBalance', [address, at]), 16)
+        refuse(held >= int(state['owedWei']), f'the vault holds {held} wei and owes {state["owedWei"]}: short of its books')
+        refuse(held - int(state['owedWei']) == int(state['surplusWei']), 'surplusWei() differs from balance - owedWei()')
+        state['balanceWei'] = str(held)
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
             'busdcEthereum': {'chainId': cfg['ethereum']['chainId'], 'vault': address.lower(), 'route': route,

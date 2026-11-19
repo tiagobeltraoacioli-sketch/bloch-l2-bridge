@@ -593,7 +593,18 @@ class Guardian:
         e = self.block(eth, 'finalized')[0]
         locked = uint(self.call(eth, vault, 'totalLocked()', block=e)[0])
         token = addr(self.call(eth, vault, 'token()', block=e)[0])
-        balance = uint(self.call(eth, token, 'balanceOf(address)', vault, block=e)[0])
+        if token.lower() == '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee':
+            # Round 20 (agent 412): a native-ether vault (NativeEtherSourceVault; its token() is this marker) holds ether
+            # itself and keeps its books in units of UNIT() wei. Backing of the L2 token = the ether held beyond what the
+            # vault owes to others (accrued fees, payments waiting for their recipients), in whole units.
+            unit = uint(self.call(eth, vault, 'UNIT()', block=e)[0])
+            if unit == 0:
+                raise Unverifiable('the native-ether vault answers UNIT() = 0')
+            wei = int(self.rpc(eth, 'eth_getBalance', [vault, hex(e)]), 16)
+            balance = wei // unit - uint(self.call(eth, vault, 'feesAccrued()', block=e)[0]) \
+                - uint(self.call(eth, vault, 'totalClaimable()', block=e)[0])
+        else:
+            balance = uint(self.call(eth, token, 'balanceOf(address)', vault, block=e)[0])
         route = b32(self.call(eth, vault, 'routeId()', block=e)[0])
         if route != self.route:
             raise Unverifiable(f'vault route {route} != token sourceRoute {self.route}')

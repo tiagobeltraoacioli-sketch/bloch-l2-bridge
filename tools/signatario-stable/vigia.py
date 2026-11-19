@@ -662,6 +662,11 @@ class Vigia:
                     mint_head=b['mint_head'], reason='the burn was made under a mint chain the vault deposits do not back')
             return True
         token = self.chain_read('token', lambda: '0x' + self.call(url, self.vault, 'token()')[-40:])
+        if token.lower() == '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee':
+            # Round 20 (agent 412): a native-ether vault (NativeEtherSourceVault; its token() is this marker). There is no
+            # token to refuse a transfer: a release always completes, and a recipient that does not take the ether gets
+            # a claim in the vault instead (ReleaseDeferred). Nothing is ever parked for this reason.
+            return False
         data = '0xa9059cbb' + b['recipient'][2:].rjust(64, '0') + f"{b['amount']:064x}"
         try:
             out = self.rpc(url, 'eth_call', [{'from': self.vault, 'to': token, 'data': data}, 'latest'])
