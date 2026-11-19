@@ -1,0 +1,368 @@
+{
+ "_about": "Answers of four public Bloch L1 RPCs to getl2settlement and of one to getchaininfo, read by agent 421 on 2026-11-19 07:53 UTC (mainnet, read-only). Recorded readings for test_l2_pins_r20: the pin set mainnet-v3 must agree with what the live L1 reported that day. Not a trust anchor: a signer reads its own L1 RPCs every time (l2_finality.l1_cross_check). Two of the four endpoints are named by placeholder (l1-rpc-3, l1-rpc-4); their answers are unchanged.",
+ "read_at_utc": "2026-11-19T07:53:47Z",
+ "getl2settlement": {
+  "http://80.240.16.185:8080": {
+   "asynchronous": true,
+   "native_height": 85102,
+   "network": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966",
+   "genesis": "9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415",
+   "chain_id": 700770,
+   "source": {
+    "block": "ec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc",
+    "slot": 280020,
+    "height": 84560,
+    "commitment": "c5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431",
+    "inbox_root": "aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd",
+    "inbox_count": 0,
+    "consumed_start": 0,
+    "consumed_end": 0,
+    "pending": [],
+    "request": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966\n9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415\nec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc\n280020\n84560\nc5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431\naeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd\n"
+   },
+   "profile": {
+    "activated": true,
+    "deposits": true,
+    "user_transactions": true
+   },
+   "inbox": {
+    "count": 0,
+    "consumed": 0,
+    "escrow_sat": "0"
+   },
+   "data_availability": [],
+   "withdrawals": {
+    "root": "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757",
+    "count": 0,
+    "roots": [],
+    "finalized_claims_from_height": 0,
+    "finalized_checkpoint": {
+     "epoch": 8766,
+     "root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_chain_rule_active": true
+    },
+    "claimable": null,
+    "claimable_large": null,
+    "delay_blocks": 64,
+    "matured": null,
+    "claimed": {
+     "count": 0,
+     "floor": 0,
+     "words": []
+    },
+    "large_claim_sat": "10000000000",
+    "large_delay_blocks": 2880,
+    "retention_blocks": 2880,
+    "matured_large": null,
+    "release_window": {
+     "window": 29,
+     "blocks": 2880,
+     "bps": 1000,
+     "floor_sat": "1000000000",
+     "released_sat": "0",
+     "cap_sat": "1000000000",
+     "remaining_sat": "1000000000"
+    },
+    "attestor_set": "1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b",
+    "attested_claim_sat": "10000000000",
+    "released_sat": "0",
+    "escrow_conserved": true
+   },
+   "accepted": {
+    "commitment": "e8a5ffa7f2025b2647dcae2a5848099eaab00bdb72129e465160e2611c7b5705",
+    "statement": "424c4f43483a45564d3a534554544c454d454e543a33f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c0302583119669953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e4151c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f07338ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e000000000000000000000000000000000000000000000000000000000000000000000000000ab1620000000000000001632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f4682ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab258a1c475a8ed80f83e9231b07674819af023a02e361af093cc7cfb1c2c92c136c618c9b80cebda5b5bda0b0c7d79e19dae8dc24e773aa94a2c135eb805ff0dc9f000000000002db400000000000000001ce03aaebb03896b231c4605ebfb8eaf7b8e76d0df15eae8e9553fee42e5f7668aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd000000000000000000000000000000000000000000000000631fadc856db46e03e0a80f48f053f496c57548c0b1a2fba6701432a2299d420c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a47056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b42156e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421000000000000000027ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d75700000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   }
+  },
+  "http://199.247.22.8:8080": {
+   "asynchronous": true,
+   "native_height": 85102,
+   "network": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966",
+   "genesis": "9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415",
+   "chain_id": 700770,
+   "source": {
+    "block": "ec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc",
+    "slot": 280020,
+    "height": 84560,
+    "commitment": "c5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431",
+    "inbox_root": "aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd",
+    "inbox_count": 0,
+    "consumed_start": 0,
+    "consumed_end": 0,
+    "pending": [],
+    "request": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966\n9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415\nec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc\n280020\n84560\nc5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431\naeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd\n"
+   },
+   "profile": {
+    "activated": true,
+    "deposits": true,
+    "user_transactions": true
+   },
+   "inbox": {
+    "count": 0,
+    "consumed": 0,
+    "escrow_sat": "0"
+   },
+   "data_availability": [],
+   "withdrawals": {
+    "root": "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757",
+    "count": 0,
+    "roots": [],
+    "finalized_claims_from_height": 0,
+    "finalized_checkpoint": {
+     "epoch": 8766,
+     "root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_chain_rule_active": true
+    },
+    "claimable": null,
+    "claimable_large": null,
+    "delay_blocks": 64,
+    "matured": null,
+    "claimed": {
+     "count": 0,
+     "floor": 0,
+     "words": []
+    },
+    "large_claim_sat": "10000000000",
+    "large_delay_blocks": 2880,
+    "retention_blocks": 2880,
+    "matured_large": null,
+    "release_window": {
+     "window": 29,
+     "blocks": 2880,
+     "bps": 1000,
+     "floor_sat": "1000000000",
+     "released_sat": "0",
+     "cap_sat": "1000000000",
+     "remaining_sat": "1000000000"
+    },
+    "attestor_set": "1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b",
+    "attested_claim_sat": "10000000000",
+    "released_sat": "0",
+    "escrow_conserved": true
+   },
+   "accepted": {
+    "commitment": "e8a5ffa7f2025b2647dcae2a5848099eaab00bdb72129e465160e2611c7b5705",
+    "statement": "424c4f43483a45564d3a534554544c454d454e543a33f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c0302583119669953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e4151c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f07338ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e000000000000000000000000000000000000000000000000000000000000000000000000000ab1620000000000000001632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f4682ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab258a1c475a8ed80f83e9231b07674819af023a02e361af093cc7cfb1c2c92c136c618c9b80cebda5b5bda0b0c7d79e19dae8dc24e773aa94a2c135eb805ff0dc9f000000000002db400000000000000001ce03aaebb03896b231c4605ebfb8eaf7b8e76d0df15eae8e9553fee42e5f7668aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd000000000000000000000000000000000000000000000000631fadc856db46e03e0a80f48f053f496c57548c0b1a2fba6701432a2299d420c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a47056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b42156e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421000000000000000027ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d75700000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   }
+  },
+  "http://l1-rpc-3.example:8080": {
+   "asynchronous": true,
+   "native_height": 85102,
+   "network": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966",
+   "genesis": "9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415",
+   "chain_id": 700770,
+   "source": {
+    "block": "ec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc",
+    "slot": 280020,
+    "height": 84560,
+    "commitment": "c5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431",
+    "inbox_root": "aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd",
+    "inbox_count": 0,
+    "consumed_start": 0,
+    "consumed_end": 0,
+    "pending": [],
+    "request": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966\n9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415\nec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc\n280020\n84560\nc5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431\naeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd\n"
+   },
+   "profile": {
+    "activated": true,
+    "deposits": true,
+    "user_transactions": true
+   },
+   "inbox": {
+    "count": 0,
+    "consumed": 0,
+    "escrow_sat": "0"
+   },
+   "data_availability": [],
+   "withdrawals": {
+    "root": "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757",
+    "count": 0,
+    "roots": [],
+    "finalized_claims_from_height": 0,
+    "finalized_checkpoint": {
+     "epoch": 8766,
+     "root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_chain_rule_active": true
+    },
+    "claimable": null,
+    "claimable_large": null,
+    "delay_blocks": 64,
+    "matured": null,
+    "claimed": {
+     "count": 0,
+     "floor": 0,
+     "words": []
+    },
+    "large_claim_sat": "10000000000",
+    "large_delay_blocks": 2880,
+    "retention_blocks": 2880,
+    "matured_large": null,
+    "release_window": {
+     "window": 29,
+     "blocks": 2880,
+     "bps": 1000,
+     "floor_sat": "1000000000",
+     "released_sat": "0",
+     "cap_sat": "1000000000",
+     "remaining_sat": "1000000000"
+    },
+    "attestor_set": "1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b",
+    "attested_claim_sat": "10000000000",
+    "released_sat": "0",
+    "escrow_conserved": true
+   },
+   "accepted": {
+    "commitment": "e8a5ffa7f2025b2647dcae2a5848099eaab00bdb72129e465160e2611c7b5705",
+    "statement": "424c4f43483a45564d3a534554544c454d454e543a33f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c0302583119669953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e4151c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f07338ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e000000000000000000000000000000000000000000000000000000000000000000000000000ab1620000000000000001632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f4682ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab258a1c475a8ed80f83e9231b07674819af023a02e361af093cc7cfb1c2c92c136c618c9b80cebda5b5bda0b0c7d79e19dae8dc24e773aa94a2c135eb805ff0dc9f000000000002db400000000000000001ce03aaebb03896b231c4605ebfb8eaf7b8e76d0df15eae8e9553fee42e5f7668aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd000000000000000000000000000000000000000000000000631fadc856db46e03e0a80f48f053f496c57548c0b1a2fba6701432a2299d420c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a47056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b42156e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421000000000000000027ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d75700000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   }
+  },
+  "http://l1-rpc-4.example:8080": {
+   "asynchronous": true,
+   "native_height": 85102,
+   "network": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966",
+   "genesis": "9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415",
+   "chain_id": 700770,
+   "source": {
+    "block": "ec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc",
+    "slot": 280020,
+    "height": 84560,
+    "commitment": "c5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431",
+    "inbox_root": "aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd",
+    "inbox_count": 0,
+    "consumed_start": 0,
+    "consumed_end": 0,
+    "pending": [],
+    "request": "f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c030258311966\n9953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e415\nec947c72fd249401784767936e4c410d974d118d830da72e56e5aaa3f8a6f7dc\n280020\n84560\nc5559a63917e07b51982f32bb34bb93d7cd069816128a7c0df1db8bf91ec3431\naeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd\n"
+   },
+   "profile": {
+    "activated": true,
+    "deposits": true,
+    "user_transactions": true
+   },
+   "inbox": {
+    "count": 0,
+    "consumed": 0,
+    "escrow_sat": "0"
+   },
+   "data_availability": [],
+   "withdrawals": {
+    "root": "27ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d757",
+    "count": 0,
+    "roots": [],
+    "finalized_claims_from_height": 0,
+    "finalized_checkpoint": {
+     "epoch": 8766,
+     "root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f",
+     "own_chain_rule_active": true
+    },
+    "claimable": null,
+    "claimable_large": null,
+    "delay_blocks": 64,
+    "matured": null,
+    "claimed": {
+     "count": 0,
+     "floor": 0,
+     "words": []
+    },
+    "large_claim_sat": "10000000000",
+    "large_delay_blocks": 2880,
+    "retention_blocks": 2880,
+    "matured_large": null,
+    "release_window": {
+     "window": 29,
+     "blocks": 2880,
+     "bps": 1000,
+     "floor_sat": "1000000000",
+     "released_sat": "0",
+     "cap_sat": "1000000000",
+     "remaining_sat": "1000000000"
+    },
+    "attestor_set": "1c06adbb7fef042f58d7efd11587689e324c036c3b467081a63b1cf79caccc4b",
+    "attested_claim_sat": "10000000000",
+    "released_sat": "0",
+    "escrow_conserved": true
+   },
+   "accepted": {
+    "commitment": "e8a5ffa7f2025b2647dcae2a5848099eaab00bdb72129e465160e2611c7b5705",
+    "statement": "424c4f43483a45564d3a534554544c454d454e543a33f47d3e498ff978e34471dafff5f94fe139fc3ff489b1a00f469c0302583119669953da73a2794e190b1c551a787f39d6486a288f40b69ecc361281d5a893e4151c3f8772d0bdfc22f33efce250a4f471343587859f815f083cfee69d3b6f07338ec1c804e67190434fdf72b723103d26938797e90e1b652d366a1b053e3d8f2b6e4c844007cbea4c5a3686f44cfb3b91362c146f3e87199a5229d619fae5c073389cfbde2516711668008cf00222398c6b2a3852266ca79c4ec42c5a6b39ac0e007139f7bc9459c45b40046780222398cd65470a499b29e72762162d6b39ac0e000000000000000000000000000000000000000000000000000000000000000000000000000ab1620000000000000001632e45ae778da371a88dc1ae430193aa77eabb67a11de18e84fea7d20d11f4682ad7e807ac2ea14e2f423572fcb9e0f168de4cb26b5bbbd2711caf34cb05c05d0ff59c1194f6d81be26dc288e4ba9bb721e46181787f3f9cffb0b029b281ab258a1c475a8ed80f83e9231b07674819af023a02e361af093cc7cfb1c2c92c136c618c9b80cebda5b5bda0b0c7d79e19dae8dc24e773aa94a2c135eb805ff0dc9f000000000002db400000000000000001ce03aaebb03896b231c4605ebfb8eaf7b8e76d0df15eae8e9553fee42e5f7668aeaaac645079e68181cbc33803e6bc21d565f016d3fecdb0845d0502e59b0ecd000000000000000000000000000000000000000000000000631fadc856db46e03e0a80f48f053f496c57548c0b1a2fba6701432a2299d420c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a47056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b42156e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421000000000000000027ae5ba08d7291c96c8cbddcc148bf48a6d68c7974b94356f53754ef6171d75700000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   }
+  }
+ },
+ "getchaininfo": {
+  "http://80.240.16.185:8080": {
+   "slot": 280604,
+   "epoch": 8768,
+   "slots_per_epoch": 32,
+   "wall_slot": 280604,
+   "finalized": {
+    "epoch": 8766,
+    "root": "61a00417158d55429542e78f529ce5fbb6137a585854ea2f171a044ed58d417f"
+   },
+   "hard_forks": {
+    "hf1_claim_finality": {
+     "activation_epoch": 7180,
+     "active": true
+    },
+    "hf1_frozen_set": {
+     "activation_epoch": 7180,
+     "active": true
+    },
+    "hf1_own_target": {
+     "activation_epoch": 7186,
+     "active": true
+    },
+    "hf2_slashing_v2": {
+     "activation_epoch": 7270,
+     "active": true
+    },
+    "hf2_growth_cap": {
+     "activation_epoch": 7270,
+     "active": true
+    },
+    "hf2_sig_canonical": {
+     "activation_epoch": 7270,
+     "active": true
+    },
+    "hf2_mldsa_pin": {
+     "activation_epoch": 7270,
+     "active": true
+    },
+    "hf3_kes_registration": {
+     "activation_epoch": 7360,
+     "active": true
+    },
+    "hf3_kes_enforce": {
+     "activation_epoch": 8620,
+     "active": true
+    },
+    "hf3_slh": {
+     "activation_epoch": 7360,
+     "active": true
+    },
+    "hf3_pq_migration": {
+     "activation_epoch": 7360,
+     "active": true
+    },
+    "hf3_lattice_emergency": {
+     "activation_epoch": null,
+     "active": false
+    },
+    "hf3_kes_vote_slot_epoch_binding": {
+     "activation_epoch": 8620,
+     "active": true
+    },
+    "hf3_kes_first_key_floor": {
+     "activation_epoch": 8620,
+     "active": true
+    },
+    "hf3_kes_register_epoch_binding": {
+     "activation_epoch": null,
+     "active": false
+    }
+   }
+  }
+ }
+}
