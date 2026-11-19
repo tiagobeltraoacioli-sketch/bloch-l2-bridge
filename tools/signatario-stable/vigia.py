@@ -19,6 +19,17 @@ limit per sender), `l2_max_gas_price_gwei` / `eth_max_gas_price_gwei` (the most 
 default 50 and 300: an RPC that lies about `eth_gasPrice`, or a run of replacements, cannot spend the gas key; above the ceiling
 nothing is sent and `gas-price-ceiling` is alerted), `max_drains_per_pass` (default 8) and `drain_gas_limit` (default 2,000,000).
 
+Declared L2 gas (round 20, finding F421-2). The L2 producer fills a block by DECLARED gas, so what a relayer declares
+is block space whether it is used or not. Three keys bound it: `mint_gas_limit` (every mint after the first of a run;
+default 600,000), `drain_gas_limit` (every `drain()`; default 2,000,000) and `execute_gas_limit` (no default). A send
+whose gas is estimated (the first mint of a run, every `executeMint`) declares 1.5 times the estimate, and with a
+limit set for its kind never more than that limit; if the ESTIMATE itself is above the limit the transaction is still
+sent at 1.5 times the estimate, with a critical alert `l2-gas-above-declared-limit`: liveness first, and the state that
+needs more gas than was measured (a contested slot after guardian cancels) is one an operator must see. A transaction
+that runs out of gas changes nothing on chain; its item is retried on a later pass with a fresh estimate. The mainnet
+templates carry the limits measured on an L2 replica (tools/evm-nets/l2-gas-measured-2026-11-19.json; launch.py holds
+them and the day's sum to the L2's block gas).
+
 Relayer gas keys. Each side (`l2`, `eth`) takes either `<side>_relayer_keystore` plus `<side>_relayer_password_file`
 (an encrypted keystore, as every other daemon), or, off the public chains only, `<side>_relayer_key` (a raw hex file).
 The key itself is never passed on a command line: `cast` gets `--keystore` and `--password-file` paths. A password file
@@ -282,6 +293,7 @@ class Vigia:
                           for side, default in (('l2', 50), ('eth', 300))}
         self.max_drains = int(self.cfg.get('max_drains_per_pass', 8))
         self.drain_gas = int(self.cfg.get('drain_gas_limit', 2_000_000))
+        self.execute_gas = int(self.cfg['execute_gas_limit']) if self.cfg.get('execute_gas_limit') is not None else None
         self.chains_checked = False
         self.relayer_lock = None
         # F229-9: a stuck Ethereum release is replaced at its own nonce after this long (agent 241).
@@ -1577,7 +1589,7 @@ class Vigia:
             return
         if not self.backup_due('l2', f'exec:{dep}'):
             return
-        tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
+        tx = self.send('l2', self.token, ['executeMint(bytes32)', dep], cap=self.execute_gas)
         self.shared.mkdir(parents=True, exist_ok=True)
         sent.write_text(tx + '\n')
         log(kind='relay-head', deposit=dep, slot=head, tx=tx)
@@ -1588,7 +1600,8 @@ class Vigia:
         if rc:
             log(kind='relay-mint', deposit=dep, error=comb.get('reason'))
             raise RuntimeError('combine refused')
-        tx = self.send('l2', self.token, comb['call'], gas=self.mint_gas if fixed_gas else None)
+        tx = self.send('l2', self.token, comb['call'], gas=self.mint_gas if fixed_gas else None,
+                       cap=self.mint_gas if 'mint_gas_limit' in self.cfg else None)
         (d / 'slot').write_text(f'{nonce}\n')
         (d / 'sent').write_text(tx + '\n')
         log(kind='relay-mint', deposit=dep, slot=nonce, tx=tx)
@@ -1748,7 +1761,7 @@ class Vigia:
             return
         if not self.backup_due('l2', f'exec:{dep}'):
             return
-        tx = self.send('l2', self.token, ['executeMint(bytes32)', dep])
+        tx = self.send('l2', self.token, ['executeMint(bytes32)', dep], cap=self.execute_gas)
         (d / 'execute-sent').write_text(tx + '\n')
         log(kind='relay-execute', deposit=dep, tx=tx)
         if self.provenance:
@@ -1913,13 +1926,13 @@ class Vigia:
                               context, selector, decode, lambda method, params: self.rpc(url, method, params),
                               acknowledge, self.max_price['eth'], released=released, alert=log)
 
-    def send(self, side, to, call, gas=None, replace=None, release_id=None):
+    def send(self, side, to, call, gas=None, replace=None, release_id=None, cap=None):
         """Sign and send. `replace=(nonce, price)` replaces our own pending transaction at that nonce (F229-9); it returns None
-        when the gas ceiling leaves no valid bump."""
+        when the gas ceiling leaves no valid bump. `cap` bounds the gas DECLARED for an estimated send (see the module text)."""
         with ExitStack() as locks:
-            return self.send_locked(side, to, call, gas, replace, release_id, locks)
+            return self.send_locked(side, to, call, gas, replace, release_id, locks, gas_cap=cap)
 
-    def send_locked(self, side, to, call, gas, replace, release_id, locks):
+    def send_locked(self, side, to, call, gas, replace, release_id, locks, gas_cap=None):
         url = self.l2_tx if side == 'l2' else self.cfg['eth_rpc']
         chain = self.cfg['l2_chain_id'] if side == 'l2' else self.cfg['eth_chain_id']
         wallet = self.relayer_wallet(side)
@@ -1962,7 +1975,15 @@ class Vigia:
                 ceiling=cap, nonce=nonce)  # a dropped one is filled at the ceiling
             price = cap
         if gas is None:
-            gas = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16) * 3 // 2
+            estimate = int(self.rpc(url, 'eth_estimateGas', [{'from': frm, 'to': to, 'data': data}]), 16)
+            gas = estimate * 3 // 2
+            if gas_cap is not None and estimate > gas_cap:
+                log(kind='alert', severity='critical', id='l2-gas-above-declared-limit', side=side, call=str(call[0])[:40],
+                    estimate=estimate, limit=gas_cap, declared=gas,
+                    reason='this transaction needs more gas than the limit measured for its kind: sent with 1.5 times its '
+                           'estimate; the L2 block space of the bridge is no longer bounded by the measured limits')
+            elif gas_cap is not None:
+                gas = min(gas, gas_cap)
         raw = self.cast_out('mktx', *wallet, '--chain', str(chain), '--nonce', str(nonce),
                             '--gas-limit', str(gas), '--gas-price', str(price), '--legacy', to, data)
         if journal is not None:

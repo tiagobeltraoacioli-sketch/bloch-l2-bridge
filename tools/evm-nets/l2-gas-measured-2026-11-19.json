@@ -1,0 +1,1129 @@
+{
+ "_about": "Gas of the bridge's L2 transactions, measured by agent 421 on 2026-11-19 on a private L2 replica made by the RELEASED binaries (bloch-l2-produce-dev 598873ae and bloch-l2-settled-rpc 53e88565 of bloch-l2-2026-11-17-launch-native-906336fd; mainnet rules, chain 700770, block gas 15,000,000, selection by declared gas) with the real BridgedStablecoinV3 (creation keccak 0xe560441f...1de7) at the Ethereum route's decided limits. Rig: tools/evm-nets/l2_gas_rig.py (no L1, loopback, throwaway keys). `gas_used` is what a receipt charges (after refunds); `need` is the gas LIMIT a transaction must carry (eth_estimateGas of the settled RPC at the head block), which is what a declared limit has to cover. Runs bound1..3: 2,048 mints each, to MAX_PENDING; estimates1..3: 120, 120 and 40 mints with estimates; contested1: a slot the guardians cancelled, with 32 candidates; try1: the first trial (60 mints).",
+ "need": {
+  "mint": 192448,
+  "mint_first_ever": 243907,
+  "executeMint_head_plus_8": 476000,
+  "drain_8_credits": 449857,
+  "burn": 66137,
+  "_note": "mint: the largest gas used over 3 x 2,047 mints at every queue depth (an estimate of a mint equals its use: 192,179 to 192,244 estimated for the second mint). mint_first_ever: estimate 243,899 to 243,907 (used 243,598 to 243,658). executeMint: estimate 472,034 for the first execution a token ever sees (used 374,984); a later one used 378,833, so its need is taken as 472,034 + 3,849 rounded up to 476,000. drain: estimate 449,857 (used 329,924 to 343,604). burn: estimate 66,137 (used 43,395 to 65,295)."
+ },
+ "limits": {
+  "mint_gas_limit": 250000,
+  "execute_gas_limit": 600000,
+  "drain_gas_limit": 570000,
+  "user_burn_gas_assumed": 100000,
+  "margin": "need x 1.25, rounded up to 10,000 (burn: need x 1.5)"
+ },
+ "fail_safe": "A mint declared 60,000 gas was included, used all 60,000, status 0, and queued nothing (try1, estimates1, estimates2); a drain declared 100,000 used all 100,000, status 0, credited nothing, and the next drain credited 8 (every run); a mint beyond MAX_PENDING reverts for 34,768 gas (bound1..3). pendingCount stayed 2,048 after both failures.",
+ "contested": "A drain that meets a contested slot probes at most 32 candidates: 267,883 gas used with nothing due (contested1), about 7,500 a probe. Eight contested slots in a row, each with 31 live candidates before a due one, would cost about 8 x (240,000 + 41,000) = 2.25 million gas in one drain: above drain_gas_limit (it then runs out of gas and changes nothing; anyone executes a due candidate directly with executeMint), far below one block (15,000,000). That state needs guardian cancels on eight consecutive slots and 256 quorum-signed candidates: an incident, not load.",
+ "observation": "eth_estimateGas of the settled RPC WITHOUT a block tag answered on an older state than the head in this replica (executeMint: NotReady) and correctly with the head block as tag. Not investigated further; vigia.py estimates without a tag.",
+ "runs": {
+  "bound1": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822592,
+     "gas_used_max": 4822592,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243658,
+     "gas_used_max": 243658,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189520,
+     "gas_used_max": 192340,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 1973,
+     "gas_used_min": 189488,
+     "gas_used_max": 192428,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1100..1124": {
+     "transactions": 25,
+     "gas_used_min": 189532,
+     "gas_used_max": 192396,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1150..1174": {
+     "transactions": 25,
+     "gas_used_min": 189532,
+     "gas_used_max": 192384,
+     "status": [
+      1
+     ]
+    },
+    "mint: one more than MAX_PENDING (must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34768,
+     "gas_used_max": 34768,
+     "status": [
+      0
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34792,
+     "gas_used_max": 34792,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 378824,
+     "gas_used_max": 378824,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 100000,
+     "gas_used_max": 100000,
+     "status": [
+      0
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 343604,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "pending_at_bound": 2048,
+   "pending_after_failures": 2048,
+   "estimates": {
+    "executeMint(head) with 8 due behind": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}",
+    "mint (next slot)": "queue full",
+    "drain() with 8 due": 449857
+   },
+   "final": {
+    "mintCount()": 74,
+    "pendingCount()": 1974,
+    "totalSupply()": 1400000000,
+    "burnNonce()": 5
+   }
+  },
+  "bound2": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822604,
+     "gas_used_max": 4822604,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243622,
+     "gas_used_max": 243622,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189484,
+     "gas_used_max": 192388,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 1973,
+     "gas_used_min": 189492,
+     "gas_used_max": 192428,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1100..1124": {
+     "transactions": 25,
+     "gas_used_min": 189516,
+     "gas_used_max": 192356,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1150..1174": {
+     "transactions": 25,
+     "gas_used_min": 189536,
+     "gas_used_max": 192376,
+     "status": [
+      1
+     ]
+    },
+    "mint: one more than MAX_PENDING (must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34756,
+     "gas_used_max": 34756,
+     "status": [
+      0
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34792,
+     "gas_used_max": 34792,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 378833,
+     "gas_used_max": 378833,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 100000,
+     "gas_used_max": 100000,
+     "status": [
+      0
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 343604,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "pending_at_bound": 2048,
+   "pending_after_failures": 2048,
+   "estimates": {
+    "executeMint(head) with 8 due behind": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}",
+    "mint (next slot)": "queue full",
+    "drain() with 8 due": 449857
+   },
+   "final": {
+    "mintCount()": 74,
+    "pendingCount()": 1974,
+    "totalSupply()": 1400000000,
+    "burnNonce()": 5
+   }
+  },
+  "bound3": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822592,
+     "gas_used_max": 4822592,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243646,
+     "gas_used_max": 243646,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189504,
+     "gas_used_max": 192380,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 1973,
+     "gas_used_min": 189496,
+     "gas_used_max": 192448,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1100..1124": {
+     "transactions": 25,
+     "gas_used_min": 189544,
+     "gas_used_max": 192384,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 1150..1174": {
+     "transactions": 25,
+     "gas_used_min": 189532,
+     "gas_used_max": 192384,
+     "status": [
+      1
+     ]
+    },
+    "mint: one more than MAX_PENDING (must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34768,
+     "gas_used_max": 34768,
+     "status": [
+      0
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 34804,
+     "gas_used_max": 34804,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 378833,
+     "gas_used_max": 378833,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 100000,
+     "gas_used_max": 100000,
+     "status": [
+      0
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 343604,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "pending_at_bound": 2048,
+   "pending_after_failures": 2048,
+   "estimates": {
+    "executeMint(head) with 8 due behind": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}",
+    "mint (next slot)": "queue full",
+    "drain() with 8 due": 449857
+   },
+   "final": {
+    "mintCount()": 74,
+    "pendingCount()": 1974,
+    "totalSupply()": 1400000000,
+    "burnNonce()": 5
+   }
+  },
+  "contested1": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822592,
+     "gas_used_max": 4822592,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 0..11": {
+     "transactions": 12,
+     "gas_used_min": 189496,
+     "gas_used_max": 243626,
+     "status": [
+      1
+     ]
+    },
+    "guardians: 2 of 3 cancel slot 9": {
+     "transactions": 2,
+     "gas_used_min": 82954,
+     "gas_used_max": 130600,
+     "status": [
+      1
+     ]
+    },
+    "mint: 16 candidates for the contested slot 9, 6 h later": {
+     "transactions": 16,
+     "gas_used_min": 193772,
+     "gas_used_max": 213702,
+     "status": [
+      1
+     ]
+    },
+    "mint: 16 more candidates for slot 9": {
+     "transactions": 16,
+     "gas_used_min": 193748,
+     "gas_used_max": 196604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): credits slots 0..8, then probes 32 not-due candidates of slot 9": {
+     "transactions": 1,
+     "gas_used_min": 392504,
+     "gas_used_max": 392504,
+     "status": [
+      1
+     ]
+    },
+    "drain(): at the contested slot, 32 probes, nothing due": {
+     "transactions": 1,
+     "gas_used_min": 267883,
+     "gas_used_max": 267883,
+     "status": [
+      1
+     ]
+    },
+    "drain(): again": {
+     "transactions": 1,
+     "gas_used_min": 267883,
+     "gas_used_max": 267883,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 6 h later, the candidates are due: one credits slot 9, slots 10 and 11 follow": {
+     "transactions": 1,
+     "gas_used_min": 194222,
+     "gas_used_max": 194222,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "contested_9": 1,
+   "candidates_9": 32
+  },
+  "estimates1": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822592,
+     "gas_used_max": 4822592,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243598,
+     "gas_used_max": 243598,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189500,
+     "gas_used_max": 192352,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 75,
+     "gas_used_min": 189496,
+     "gas_used_max": 192384,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 100..119": {
+     "transactions": 20,
+     "gas_used_min": 189484,
+     "gas_used_max": 192364,
+     "status": [
+      1
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 60000,
+     "gas_used_max": 60000,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 378833,
+     "gas_used_max": 378833,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 100000,
+     "gas_used_max": 100000,
+     "status": [
+      0
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 343604,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "estimate_first_mint": 243907,
+   "estimate_second_mint": 192179,
+   "pending_at_bound": 120,
+   "pending_after_failures": 120,
+   "estimates": {
+    "executeMint(head) with 8 due behind": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}",
+    "mint (next slot)": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9a63b597'}",
+    "drain() with 8 due": 449857,
+    "executeMint(head) later": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}"
+   },
+   "estimate_first_burn": 66137,
+   "estimate_later_burn": 66137,
+   "final": {
+    "mintCount()": 74,
+    "pendingCount()": 46,
+    "totalSupply()": 1400000000,
+    "burnNonce()": 5
+   }
+  },
+  "estimates2": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822604,
+     "gas_used_max": 4822604,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243606,
+     "gas_used_max": 243606,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189496,
+     "gas_used_max": 192352,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 75,
+     "gas_used_min": 189516,
+     "gas_used_max": 192372,
+     "status": [
+      1
+     ]
+    },
+    "mint: slots 100..119": {
+     "transactions": 20,
+     "gas_used_min": 189500,
+     "gas_used_max": 192356,
+     "status": [
+      1
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 60000,
+     "gas_used_max": 60000,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 378833,
+     "gas_used_max": 378833,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 100000,
+     "gas_used_max": 100000,
+     "status": [
+      0
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 343604,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "estimate_first_mint": 243907,
+   "estimate_second_mint": 192216,
+   "pending_at_bound": 120,
+   "pending_after_failures": 120,
+   "estimates": {
+    "executeMint(head) with 8 due behind": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}",
+    "mint (next slot)": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9a63b597'}",
+    "drain() with 8 due": 449857,
+    "executeMint(head) later": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}"
+   },
+   "estimate_first_burn": 66137,
+   "estimate_later_burn": 66137,
+   "final": {
+    "mintCount()": 74,
+    "pendingCount()": 46,
+    "totalSupply()": 1400000000,
+    "burnNonce()": 5
+   }
+  },
+  "estimates3": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822592,
+     "gas_used_max": 4822592,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243614,
+     "gas_used_max": 243614,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189488,
+     "gas_used_max": 192404,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 15,
+     "gas_used_min": 189512,
+     "gas_used_max": 192336,
+     "status": [
+      1
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 60000,
+     "gas_used_max": 60000,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 41460,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 26408,
+     "gas_used_max": 26408,
+     "status": [
+      0
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 41460,
+     "gas_used_max": 41460,
+     "status": [
+      1
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 41460,
+     "gas_used_max": 41460,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43371,
+     "gas_used_max": 43371,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "estimate_first_mint": 243899,
+   "estimate_second_mint": 192244,
+   "pending_at_bound": 40,
+   "pending_after_failures": 40,
+   "estimates": {
+    "executeMint(head) with 8 due behind": {
+     "with block 0x7": 472034,
+     "default": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9488aaa6'}"
+    },
+    "mint (next slot)": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9a63b597'} | 0x7: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9a63b59 | pending: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x9a63b59",
+    "drain() with 8 due": 449857,
+    "executeMint(head) later": "RuntimeError: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x7dc6505a'} | 0xa: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x7dc6505 | pending: eth_estimateGas: {'code': 3, 'message': 'execution reverted', 'data': '0x7dc6505"
+   },
+   "estimate_first_burn": 66137,
+   "estimate_later_burn": 66137,
+   "final": {
+    "mintCount()": 40,
+    "pendingCount()": 0,
+    "totalSupply()": 720000000,
+    "burnNonce()": 5
+   }
+  },
+  "try1": {
+   "steps": {
+    "create token": {
+     "transactions": 1,
+     "gas_used_min": 4822604,
+     "gas_used_max": 4822604,
+     "status": [
+      1
+     ]
+    },
+    "mint: first ever (slot 0, fresh recipient)": {
+     "transactions": 1,
+     "gas_used_min": 243638,
+     "gas_used_max": 243638,
+     "status": [
+      1
+     ]
+    },
+    "mint: 24 in one block (slots 1..24)": {
+     "transactions": 24,
+     "gas_used_min": 189520,
+     "gas_used_max": 192344,
+     "status": [
+      1
+     ]
+    },
+    "mint: at 25 a block, up to the pending bound": {
+     "transactions": 35,
+     "gas_used_min": 189508,
+     "gas_used_max": 192364,
+     "status": [
+      1
+     ]
+    },
+    "mint: declared gas 60,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 60000,
+     "gas_used_max": 60000,
+     "status": [
+      0
+     ]
+    },
+    "executeMint(head): head + 8 behind, first credits ever": {
+     "transactions": 1,
+     "gas_used_min": 374984,
+     "gas_used_max": 374984,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 8 credits": {
+     "transactions": 1,
+     "gas_used_min": 329924,
+     "gas_used_max": 329924,
+     "status": [
+      1
+     ]
+    },
+    "drain(): 5 in one block (8 credits each)": {
+     "transactions": 5,
+     "gas_used_min": 329924,
+     "gas_used_max": 343604,
+     "status": [
+      1
+     ]
+    },
+    "executeMint(head): head + 8 behind (later)": {
+     "transactions": 1,
+     "gas_used_min": 167559,
+     "gas_used_max": 167559,
+     "status": [
+      1
+     ]
+    },
+    "drain(): declared gas 100,000 (below the need: must fail safe)": {
+     "transactions": 1,
+     "gas_used_min": 41460,
+     "gas_used_max": 41460,
+     "status": [
+      1
+     ]
+    },
+    "drain(): after the failed one": {
+     "transactions": 1,
+     "gas_used_min": 41460,
+     "gas_used_max": 41460,
+     "status": [
+      1
+     ]
+    },
+    "burn: first ever (100 USDC)": {
+     "transactions": 1,
+     "gas_used_min": 65295,
+     "gas_used_max": 65295,
+     "status": [
+      1
+     ]
+    },
+    "burn: 3 in one block": {
+     "transactions": 3,
+     "gas_used_min": 48195,
+     "gas_used_max": 48195,
+     "status": [
+      1
+     ]
+    },
+    "burn: the rest of the balance": {
+     "transactions": 1,
+     "gas_used_min": 43395,
+     "gas_used_max": 43395,
+     "status": [
+      1
+     ]
+    }
+   },
+   "base_fee": "0x3b5dc100",
+   "creation_keccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+   "token_max_pending": 2048,
+   "pending_at_bound": 60,
+   "pending_after_failures": 60,
+   "final": {
+    "mintCount()": 60,
+    "pendingCount()": 0,
+    "totalSupply()": 1120000000,
+    "burnNonce()": 5
+   }
+  }
+ }
+}

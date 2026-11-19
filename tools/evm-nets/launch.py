@@ -100,12 +100,26 @@ L2_BLOCKS_PER_DAY = 48
 L2_TXS_PER_BLOCK = 64
 L2_TX_CAPACITY = L2_BLOCKS_PER_DAY * L2_TXS_PER_BLOCK   # 3,072 transactions a day
 L2_BRIDGE_SHARE_BPS = 7500     # the bridge's worst case may ask for at most three quarters of it
-# Declared gas (finding F421-2, stated by l2_load, not a rule yet): the relayer declares this much gas per mint and per
-# drain (vigia.py defaults; `mint_gas_limit` of the relayer template), and the L2 producer of the launch configuration
-# (bloch-l2-evm b17b3ae, install-settler-mainnet.py: max_block_gas) selects transactions by declared gas.
-RELAYER_MINT_GAS = 600_000
-RELAYER_DRAIN_GAS = 2_000_000
+# Declared gas (finding F421-2; coordinator decision of 2026-11-19: closed by measurement). The L2 producer fills a block
+# by DECLARED gas (released `bloch-l2-produce-dev --help`: "selected ... within --max-gas (declared gas)"), within
+# max_block_gas 15,000,000 (bloch-l2-evm b17b3ae, deployment/mainnet/install-settler-mainnet.py:278, where
+# max_block_txs is 128), one block per 1,800 s (the owner's launch command, `--min-block-interval 1800`): 720,000,000
+# gas a day. What the relayers declare was measured on an L2 replica made by the released binaries with the real token
+# (tools/evm-nets/l2_gas_rig.py; results in l2-gas-measured-2026-11-19.json): each limit below is the measured NEED (the
+# gas limit a transaction must have, which for a drain is 31% above the gas it is charged, because of refunds) plus
+# 25%, rounded up to 10,000. Why 25%: the cost is deterministic for a given state (three runs of 2,048 mints agree
+# within 3,000 gas, at every queue depth up to MAX_PENDING), so the margin is for what was not measured, not for
+# noise; a transaction that still runs out of gas changes nothing and is retried with a fresh estimate (vigia.py).
+# The relayer templates carry these three values (test_queue_bound_r20 holds them equal). A burn is the user's
+# transaction: its declared gas is not ours to set; 100,000 is 1.5 times the measured need of the dearest burn.
+RELAYER_MINT_GAS = 250_000      # need 192,448 (243,907 the first mint a token ever sees: that one is estimated)
+RELAYER_EXECUTE_GAS = 600_000   # executeMint crediting the head and MAX_DRAIN behind it: need 476,000
+RELAYER_DRAIN_GAS = 570_000     # drain() crediting MAX_DRAIN: need 449,857
+USER_BURN_GAS = 100_000         # need 66,137
 L2_BLOCK_GAS = 15_000_000
+L2_BLOCK_TXS_LAUNCH = 128
+L2_GAS_CAPACITY = L2_BLOCKS_PER_DAY * L2_BLOCK_GAS       # 720,000,000 declared gas a day
+L2_GAS_SHARE_BPS = 7500        # the same line as the transaction count: at most three quarters
 # Keys of the signer's source half (eth_half.py) and of the daemon (vigia.py) that every signer of one network must
 # share. `anchor_depth` exists only with the probe policy.
 ANCHOR_KEYS = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin')
@@ -144,6 +158,7 @@ def _load(path=None):
         _check_limits(reg, seen)
         _check_queue(reg, seen)
         _check_l2_load(reg, seen)
+        _check_l2_gas(reg, seen)
         return reg
     except LaunchError:
         raise
@@ -270,6 +285,22 @@ def l2_route_load(window, min_deposit, min_burn, deposit_bps):
     return {'mints': mints, 'executions': executions, 'burns': burns, 'total': mints + executions + burns}
 
 
+def relayer_credit_txs(mints, blocks=L2_BLOCKS_PER_DAY):
+    """(executeMint transactions, drain() transactions) a day, at most, that one route's relayer sends to credit `mints`
+    queued mints: vigia.py sends ONE executeMint per L2 block (the credit head moves only when a block is made), which
+    credits the head and up to MAX_DRAIN behind it, and then one drain() per further MAX_DRAIN due mints. The count is
+    largest when the mints fall due spread over every block: one execution in each block that has a due mint, a first
+    drain in each block that has more than 1 + MAX_DRAIN, and further drains of MAX_DRAIN."""
+    if not (_is_count(mints) and _is_count(blocks, 1)):
+        raise LaunchError(f'credit transactions cannot be computed for {mints!r} mints in {blocks!r} blocks')
+    if mints <= blocks:
+        return mints, 0
+    rest = mints - blocks
+    first = min(blocks, rest // (1 + MAX_DRAIN))
+    rest -= first * (1 + MAX_DRAIN)
+    return blocks, first + (rest // MAX_DRAIN if first == blocks else 0)
+
+
 def _l2_load(reg, seen):
     routes = {}
     for chain, name in [(ETHEREUM, 'ethereum')] + sorted(seen.items()):
@@ -280,17 +311,37 @@ def _l2_load(reg, seen):
         routes[name] = l2_route_load(window, spec['minDeposit'], spec['l2MinBurn'], spec['feeBps']['deposit'])
     out = {k: sum(r[k] for r in routes.values()) for k in ('mints', 'executions', 'burns', 'total')}
     limit = L2_TX_CAPACITY * L2_BRIDGE_SHARE_BPS // 10_000
-    gas_capacity = L2_BLOCKS_PER_DAY * L2_BLOCK_GAS
-    relayer_gas = out['mints'] * RELAYER_MINT_GAS + out['executions'] * RELAYER_DRAIN_GAS
+    # declared gas a day, with the relayer's own sending pattern (relayer_credit_txs), the worst case for gas and count
+    gas = {'mint_gas_limit': RELAYER_MINT_GAS, 'execute_gas_limit': RELAYER_EXECUTE_GAS, 'drain_gas_limit': RELAYER_DRAIN_GAS,
+           'burn_gas_assumed': USER_BURN_GAS, 'block_gas': L2_BLOCK_GAS, 'capacity': L2_GAS_CAPACITY,
+           'limit': L2_GAS_CAPACITY * L2_GAS_SHARE_BPS // 10_000, 'routes': {}}
+    for name, r in routes.items():
+        executes, drains = relayer_credit_txs(r['mints'])
+        gas['routes'][name] = {'mints': r['mints'], 'executes': executes, 'drains': drains, 'burns': r['burns'],
+                               'gas': r['mints'] * RELAYER_MINT_GAS + executes * RELAYER_EXECUTE_GAS + drains * RELAYER_DRAIN_GAS
+                               + r['burns'] * USER_BURN_GAS}
+    for k in ('mints', 'executes', 'drains', 'burns', 'gas'):
+        gas[k] = sum(r[k] for r in gas['routes'].values())
+    gas['total'] = gas.pop('gas')
+    gas['transactions'] = gas['mints'] + gas['executes'] + gas['drains'] + gas['burns']
+    gas['margin'] = gas['capacity'] - gas['total']
+    gas['ok'] = gas['total'] <= gas['limit']
+    # stated, not rules: the first day with full buckets (one more window of mints and their credits), and the burns a
+    # holder of every route's whole supply could send in one day (burns are not rate-limited on the L2)
+    first_day = {n: relayer_credit_txs(2 * r['mints']) for n, r in routes.items()}
+    gas['first_day_total'] = gas['total'] + out['mints'] * RELAYER_MINT_GAS + sum(
+        (first_day[n][0] - gas['routes'][n]['executes']) * RELAYER_EXECUTE_GAS + (first_day[n][1] - gas['routes'][n]['drains']) * RELAYER_DRAIN_GAS
+        for n in routes)
+    gas['one_block_fits'] = {'relayer_mints': L2_BLOCK_GAS // RELAYER_MINT_GAS, 'drains': L2_BLOCK_GAS // RELAYER_DRAIN_GAS}
     return {**out, 'routes': routes, 'capacity': L2_TX_CAPACITY, 'limit': limit, 'margin': L2_TX_CAPACITY - out['total'],
             'ok': out['total'] <= limit,
             # not covered by the rule, stated: a day that starts with full buckets admits one more window of mints
             'first_day_total': out['total'] + out['mints'] + out['executions'],
-            # not covered by the rule, stated (F421-2): the relayers' DECLARED gas a day against the block gas a day
-            'declared_gas': {'mint_gas_limit': RELAYER_MINT_GAS, 'drain_gas_limit': RELAYER_DRAIN_GAS, 'block_gas': L2_BLOCK_GAS,
-                             'capacity': gas_capacity, 'mints': out['mints'] * RELAYER_MINT_GAS,
-                             'executions': out['executions'] * RELAYER_DRAIN_GAS, 'relayer_total': relayer_gas,
-                             'fits': relayer_gas <= gas_capacity}}
+            # the transaction count with the relayer's own sending pattern (more credit transactions than one per nine
+            # mints): stated beside the rule's figure, and what it is of the launch configuration's 128 a block
+            'transactions_relayer_pattern': gas['transactions'],
+            'tx_capacity_launch_config': L2_BLOCKS_PER_DAY * L2_BLOCK_TXS_LAUNCH,
+            'declared_gas': gas}
 
 
 def _check_l2_load(reg, seen):
@@ -304,6 +355,18 @@ def _check_l2_load(reg, seen):
             f'minimums ({per}: smallest mints, their executions, smallest burns), above {load["limit"]} = '
             f'{L2_BRIDGE_SHARE_BPS / 100:g}% of the documented L2 capacity of {L2_TX_CAPACITY} a day; raise a minimum deposit or '
             'a minimum burn, or lower a window')
+
+
+def _check_l2_gas(reg, seen):
+    """The launchable routes' summed worst case of DECLARED gas a day (mints, executions, drains at the relayers' limits;
+    burns at the assumed user limit) is at most L2_GAS_SHARE_BPS of the L2's block gas a day. Raises LaunchError."""
+    gas = _l2_load(reg, seen)['declared_gas']
+    if not gas['ok']:
+        per = ', '.join(f'{n} {r["gas"]}' for n, r in gas['routes'].items())
+        raise LaunchError(
+            f'the launchable routes together can declare {gas["total"]} gas a day on the L2 at their windows and minimums ({per}), '
+            f'above {gas["limit"]} = {L2_GAS_SHARE_BPS / 100:g}% of the L2 block gas of {gas["capacity"]} a day '
+            f'({L2_BLOCKS_PER_DAY} blocks of {L2_BLOCK_GAS}); raise a minimum deposit or a minimum burn, or lower a window')
 
 
 def l2_load(path=None):

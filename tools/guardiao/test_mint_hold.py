@@ -65,8 +65,18 @@ def main():
         def view(url, to, sig, *a):
             return out(CAST, 'call', to, sig, *a, '--rpc-url', url).split()[0]
 
-        def send(url, key, to, *c):
-            return json.loads(out(CAST, 'send', to, *c, '--rpc-url', url, '--private-key', key, '--json'))
+        def send(url, key, to, *c, gas=None):
+            # Round 20 (agent 421): a send is held to its receipt. Before, a mined but REVERTED transaction passed here
+            # unseen, and one did, about once in 380 runs: `cast send` takes its gas limit from an estimate, and the
+            # token's mint costs 2,800 gas more when its block is in a later second than the block the estimate ran on
+            # (SignerMintedToken writes `bucketUpdatedAt` only when the second changed). The forged mint then ran out of
+            # gas, nothing was forged, and the checks below failed with no word of why. Mints get an explicit gas limit.
+            r = json.loads(out(CAST, 'send', to, *c, *(['--gas-limit', str(gas)] if gas else []), '--rpc-url', url, '--private-key', key,
+                               '--json'))
+            if int(r.get('status', '0x0'), 16) != 1:
+                raise SystemExit(f'FAILED: the transaction {c[:1]} to {to} was mined and reverted (gas used {int(r["gasUsed"], 16)}): '
+                                 'the rig is broken, not the product')
+            return r
 
         keys = sorted((out(CAST, 'wallet', 'address', '--private-key', k).lower(), k) for k in ('0x' + f'{i:02x}' * 32 for i in range(0x21, 0x28)))
         gkey = '0x' + '61' * 32
@@ -106,7 +116,7 @@ def main():
         def mint(dep, nonce, amount, to):
             dg = view(l2, token, 'mintDigest(bytes32,uint64,uint64,address)(bytes32)', dep, str(nonce), str(amount), to)
             sig = '0x' + ''.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', x, dg)[2:] for _, x in keys[:5])
-            send(l2, DEPLOYER, token, 'mint(bytes32,uint64,uint64,address,bytes)', dep, str(nonce), str(amount), to, sig)
+            send(l2, DEPLOYER, token, 'mint(bytes32,uint64,uint64,address,bytes)', dep, str(nonce), str(amount), to, sig, gas=400_000)
 
         # Slack: a real deposit no one has minted yet, so reserves are quiet. A second real deposit is minted honestly.
         send(eth, ukey, vault, 'deposit(uint64,bytes32)', str(5_000 * U), '0x' + '00' * 12 + user[2:])

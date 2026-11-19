@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.request
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -169,6 +170,55 @@ def rpc(method, *params):
     return vr.rpc(URL, method, list(params))
 
 
+def start_anvil(port, seconds=10):
+    """One loopback anvil on `port`, answering. Round 20 (agent 421): if the port is taken, anvil exits at once; the
+    class then waited ten seconds and failed in its first call with a bare ConnectionRefusedError (one table row was
+    lost to that: every agent port range of the shared host lies inside the kernel's ephemeral range 32768-60999, so
+    any other process can hold the port for a moment). Now the start says so in the words the table runner retries on
+    (`did not start`: tools/allnets/test_all.py waits 20 s and runs the suite again, three times at most)."""
+    proc = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(port), '--chain-id', '31337', '--hardfork', 'cancun',
+                             '--silent'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV)
+    url = f'http://127.0.0.1:{port}'
+    end = time.time() + seconds
+    while time.time() < end:
+        if proc.poll() is not None:
+            raise RuntimeError(f'anvil did not start on 127.0.0.1:{port} (it exited with {proc.returncode}: Address already in use?)')
+        try:
+            body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_chainId', 'params': []}).encode()
+            req = urllib.request.Request(url, body, {'content-type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=2) as r:
+                if int(json.loads(r.read())['result'], 16) == 31337:
+                    return proc
+        except Exception:  # noqa: BLE001 - not listening yet, or somebody else's socket
+            pass
+        time.sleep(0.1)
+    proc.kill()
+    proc.wait(10)
+    raise RuntimeError(f'anvil did not start on 127.0.0.1:{port} within {seconds} s')
+
+
+@unittest.skipUnless(Path(ANVIL).exists(), 'foundry not found (FOUNDRY_BIN)')
+class AnvilStart(unittest.TestCase):
+    """The rig's own start-up (round 20): a port somebody else holds is reported, not waited out."""
+
+    def test_a_port_that_is_held_is_reported_as_anvil_did_not_start(self):
+        import socket
+        with socket.socket() as held:
+            held.bind(('127.0.0.1', 0))
+            held.listen(1)
+            port = held.getsockname()[1]
+            t0 = time.time()
+            with self.assertRaises(RuntimeError) as e:
+                start_anvil(port, seconds=3)
+            self.assertIn('anvil did not start on 127.0.0.1', str(e.exception))
+            self.assertLess(time.time() - t0, 6)
+
+    def test_the_table_runner_retries_on_those_words(self):
+        runner = (REPO / 'tools/allnets/test_all.py').read_text()
+        self.assertIn("'Address already in use' in text or 'did not start' in text", runner)
+        self.assertIn("'A239_ANVIL_PORT': str(port_base + 30)", runner)   # the port comes from the caller's own range
+
+
 class Net:
     def __init__(self):
         self.key = '0x' + secrets.token_hex(32)
@@ -218,14 +268,7 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.work = Path(tempfile.mkdtemp(prefix='a239-'))
-        cls.anvil = subprocess.Popen([ANVIL, '--host', '127.0.0.1', '--port', str(PORT), '--chain-id', '31337',
-                                      '--hardfork', 'cancun', '--silent'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV)
-        for _ in range(100):
-            try:
-                rpc('eth_chainId')
-                break
-            except Exception:
-                time.sleep(0.1)
+        cls.anvil = start_anvil(PORT)
         n = cls.n = Net()
         cls.eth = keyset(7)
         cls.mint = keyset(7)
