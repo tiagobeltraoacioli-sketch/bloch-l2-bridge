@@ -251,6 +251,10 @@ def validate(cfg, rehearsal, token_cfg=None):
                f'vault.policy.l2MinBurn {pol["l2MinBurn"]} is below {floor}: the measured relayer cost of one release at the gas '
                'ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula); an exit that small '
                'would pay out less than relaying it costs')
+    windows = -(-v['cap'] // pol['windowLimit'])
+    refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
+           'switchDelay is too short for holders to exit: the cap needs '
+           f'{windows * pol["windowSeconds"]} s through the release window')
     if launch and not rehearsal:
         # Launch limits of 2026-11-19 (owner: windows and caps delegated to the coordinator; coordinator decision of the
         # same day): cap, windowLimit and windowSeconds are not free fields of a mainnet config. They are the values
@@ -270,10 +274,6 @@ def validate(cfg, rehearsal, token_cfg=None):
         refuse(v['cap'] == decided['windows_per_cap'] * pol['windowLimit'],
                f'vault.cap must be {decided["windows_per_cap"]} x windowLimit (the rate-limited path then needs '
                f'{decided["windows_per_cap"]} windows to empty a full vault)')
-    windows = -(-v['cap'] // pol['windowLimit'])
-    refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
-           'switchDelay is too short for holders to exit: the cap needs '
-           f'{windows * pol["windowSeconds"]} s through the release window')
 
     gd = v['guard']
     exact_keys(gd, ['guardians', 'pauseDuration', 'pauseCooldown'], 'vault.guard')

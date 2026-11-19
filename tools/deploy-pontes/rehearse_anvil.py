@@ -283,14 +283,14 @@ def source_vault(eth, work, provenance=False):
     signers = sorted(new_key()[1] for _ in range(3))
     guardians = sorted((new_key()[1] for _ in range(3)), key=lambda a: int(a, 16))  # BR-6: 3 vault guardians
     vault = create(VAULTS[provenance],
-                   k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(1_000_000 * 10**6), '0',
+                   k('ethereum-mainnet'), k('bloch-l2-700770'), k('USDC'), token, str(500_000 * 10**6), '0',
                    '[' + ','.join(signers) + ']', '2', f'({100_000 * 10**6},86400,2,604800,1,1)',
                    f'([{",".join(guardians)}],259200,259200)', *(['(1,0,0x' + '00' * 20 + ',(0x' + '00' * 20 + ',0,0))'] if provenance else []))
     sh(CAST, 'rpc', 'anvil_mine', '0x80', '--rpc-url', eth)
     return {'chainId': int(out(CAST, 'chain-id', '--rpc-url', eth)), 'vault': vault,
             'route': out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth).lower(),
             'vaultCodeHash': out(CAST, 'keccak', out(CAST, 'code', vault, '--rpc-url', eth)).lower(),
-            'vaultCap': 1_000_000 * 10**6,
+            'vaultCap': 500_000 * 10**6,  # the decided cap: since 2026-11-19 a mainnet token config needs vaultCap == supplyCap
             'vaultGuard': {'guardians': guardians, 'pauseDuration': 259200, 'pauseCooldown': 259200}}
 
 
