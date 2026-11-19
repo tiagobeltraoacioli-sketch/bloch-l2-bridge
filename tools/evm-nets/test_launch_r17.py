@@ -105,6 +105,10 @@ def filled_token(name):
     c = launch_fixture.filled()
     c['token']['name'], c['token']['symbol'] = spec['l2']['name'], spec['l2']['symbol']
     c['ethereum']['chainId'] = spec['chainId']
+    # the network's own launch limits (2026-11-19), as evm_nets.py derives them; the vault cap follows the supply cap
+    cap, window = spec['limits']['cap'], spec['limits']['windowLimit']
+    c['limits'].update(supplyCap=cap, bucketCapacity=window, refillPerSecond=window // 86400)
+    c['ethereum']['vaultCap'] = cap
     return c
 
 
@@ -333,8 +337,8 @@ class DeployGate(unittest.TestCase):
                          (5, 10, 101_000_000, 100_000_000, 100_000_000, 2))
         self.assertEqual((e['feeBps'], e['minDeposit'], e['l2MinBurn'], e['gasCeilingGwei']),
                          ({'deposit': 5, 'release': 10}, 101_000_000, 100_000_000, 2))
-        # windows and caps are NOT part of this schedule (an owner decision still open): unchanged
-        self.assertEqual((eth_v['cap'], eth_v['policy']['windowLimit']), (100_000_000_000, 10_000_000_000))
+        # windows and caps are NOT part of this schedule: they were decided on 2026-11-19 (class LaunchLimits below)
+        self.assertEqual((eth_v['cap'], eth_v['policy']['windowLimit']), (500_000_000_000, 50_000_000_000))
 
     def test_the_minimum_burn_floor_is_the_stated_formula(self):
         usd = REGISTRY['relayCost']['nativeUsd']

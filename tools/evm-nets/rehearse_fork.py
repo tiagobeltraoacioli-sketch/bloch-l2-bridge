@@ -19,7 +19,8 @@ NETWORK is a key of tools/evm-nets/networks.json. Two loopback anvils are starte
 (read-only public RPC as the fork source, nothing is ever sent to it) and a plain one standing in for the Bloch L2
 (chain 700771, as the other suites). Every key is a throwaway generated here. The contracts deployed on the fork are
 the unchanged artifacts: ProvenanceSourceVault (its creation-code keccak is compared with the Ethereum freeze) with
-the mainnet shape (5-of-7 release signers, 6-of-7 switch, 3 pause-only guardians, cap 100,000, window 10,000 a day,
+the mainnet shape (5-of-7 release signers, 6-of-7 switch, 3 pause-only guardians, the network's own launch limits of
+2026-11-19 from the registry (cap 250,000 and window 25,000 a day on the launchable networks; refill = floor(window / 86400)),
 the network's own minimums and fee rates from the registry, to the owner's fee address) and, on the L2 anvil, BridgedStablecoinV3 (creation keccak
 compared with the DEX pin) at T = 0 with the 12 h delay. For an 18-decimal asset the vault holds ScaledUnitToken.
 
@@ -57,11 +58,12 @@ TOKEN_CREATION = '0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c72
 L2_CHAIN = 700771
 USDC = 10**6
 DELAY = 43200
-CAP, WINDOW = 100_000 * USDC, 10_000 * USDC
+# The network's launch limits (2026-11-19), set by `schedule()` from the registry (launch.limits): never typed in here.
+CAP, WINDOW = None, None
 # Per network, set by `schedule()` from the registry (fee schedule of 2026-11-17): the vault's minimums and fee rates,
 # and the rig's unit U. Every amount of the flow is a multiple of U; the smallest burn of the flow is 40 U, so U is
 # the least whole number of dollars that puts 40 U at or above the network's minimum burn (1 dollar on Arbitrum One
-# and OP Mainnet, 15 on Linea), and the largest deposit, 600 U, stays inside the 10,000 a day window.
+# and OP Mainnet, 15 on Linea), and the largest deposit, 600 U, stays inside the network's window.
 U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS = USDC, 21 * USDC, 20 * USDC, 5, 5
 results, gas, PROCS = [], {}, []
 OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False}
@@ -84,14 +86,20 @@ def check(name, cond, detail=''):
 
 
 def schedule(spec):
-    global U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS
+    global U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS, CAP, WINDOW
     MIN_DEPOSIT, MIN_BURN = spec['minDeposit'], spec['l2MinBurn']
+    lim = launch.limits(spec['chainId'])  # the registry's record of this network, checked against launch.py LIMITS
+    CAP, WINDOW = lim['cap'], lim['window_limit']
+    if lim['window_seconds'] != 86400 or CAP != 10 * WINDOW:
+        raise SystemExit(f'the registry limits of this network are not the launch shape: {lim}')
     FEE_BPS, RELEASE_BPS = spec['feeBps']['deposit'], spec['feeBps']['release']
     U = USDC * -(-MIN_BURN // (40 * USDC))
     if 600 * U > WINDOW or 70 * U < MIN_DEPOSIT:
         raise SystemExit(f'the flow\'s amounts do not fit this network\'s limits (unit {U}, minimum burn {MIN_BURN})')
     print(f'INFO fee schedule: deposit {FEE_BPS} bps, release {RELEASE_BPS} bps, minimum deposit {MIN_DEPOSIT / USDC:g}, minimum burn '
           f'{MIN_BURN / USDC:g}; one flow unit is {U // USDC} dollar(s)', flush=True)
+    print(f'INFO launch limits: cap {CAP / USDC:g}, window {WINDOW / USDC:g} per 24 h, refill {WINDOW // 86400} units a second',
+          flush=True)
 
 
 def fee(amount):
@@ -674,7 +682,7 @@ def flow(rig):
 
     # 8. limits
     inv = selector('InvalidTransfer()')[2:]
-    check('8 limits: a deposit below the minimum (10) and one above the window (10,001) are refused',
+    check(f'8 limits: a deposit below the minimum ({MIN_DEPOSIT / USDC:g}) and one above the window ({WINDOW / USDC:g}) are refused',
           inv in rig.deposit_reverts(MIN_DEPOSIT - 1) and inv in rig.deposit_reverts(WINDOW + U))
     check('8 limits: a burn above the bucket and one below the minimum are refused by the token',
           rig.reverts(rig.l2, A['alice'], rig.token, 'burn(uint64,address)', str(WINDOW + U), A['bob']) != ''

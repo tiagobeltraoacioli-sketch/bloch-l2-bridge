@@ -6,8 +6,17 @@ real key or on a public network.** Every command block of sections 3 to 14 was e
 loopback anvil standing in for the Bloch L2 (chain 700770), with throwaway keys generated during the run and deleted
 after it (section 17 lists the result and every place where the rehearsal had to stand in for something).
 
-The contracts and tools are UNAUDITED. This kit does not replace the external audit; it is the sequence to run after
-it, from the audited revision.
+**The contracts and tools are UNAUDITED.** This kit does not replace the external audit. Until 2026-11-19 it was the
+sequence to run after the audit, from the audited revision. **Owner decision of 2026-11-19: the external audit is done
+AFTER launch**, and the owner goes ahead with the key ceremony and the
+real-key rehearsal. So this kit now runs BEFORE any external audit, from the reviewed launch revision of `main`
+(section 0, item 1); what is deployed with it is unaudited code holding real funds, and the cap decided the same day
+(500,000 USDC, section 0, item 3) is the most this route can lose.
+
+Round 20 (agent 410, 2026-11-19) changed in this document: the audit wording (this paragraph, sections 0, 2, 11, 16 and
+"Not done"), the decided windows and caps, the state of the L2 (section 0, item 2), the numbers of the rehearsal run
+with the new limits (sections 8 and 17), and one prerequisite found on the way (section 0, item 5). No command block
+changed.
 
 How to read the blocks:
 
@@ -25,18 +34,35 @@ decisions), `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` (daily operation), `docs/SIG-TR
 
 ## 0. Before anything: prerequisites (all must hold)
 
-1. **The external audit of the Ethereum route is complete** and its revision is named (`source.revision`).
+1. **The launch revision is named** (`source.revision`): the commit of `main` that carries the launch limits of
+   2026-11-19 and that the independent reviewer cleared. **It is NOT an audited revision.** Until 2026-11-19 this item
+   read "the external audit of the Ethereum route is complete"; the owner decided on 2026-11-19 that the external audit
+   is done after launch. The audit is still owed, and the audited revision is expected to need a new vault and a new
+   token (section 4.10 of `docs/BUSDC-MAINNET-V2.md`: a limit or a contract never changes in place).
 2. **The Bloch L2 is live and settling.** The L2 token is deployed on chain 700770 and a release can only be
-   certified once its burn is in an accepted, finalized settlement (`docs/BUSDC-MAINNET-V2.md` section 3). Today
-   (2026-11-17) the L2 has never settled (`getl2settlement`: `accepted` null, the L2 head is genesis `632e45ae…f468`).
-   Sections 3 to 8 (keys and the Ethereum vault, with deposits and releases OFF) can run before that; **section 9 (the
-   L2 token) and everything after it cannot.**
+   certified once its burn is in an accepted, finalized settlement (`docs/BUSDC-MAINNET-V2.md` section 3). Until
+   2026-11-17 the L2 had never settled. On 2026-11-19 the owner reported the first mainnet L2 settlement accepted on
+   L1 at 03:01 UTC; read at 03:47 UTC on two public L1 RPCs (80.240.16.185, 199.247.22.8), `getl2settlement` shows
+   chain 700770 with `accepted.commitment` `e8a5ffa7…5705` (before: `accepted` null). The L1 finality of that
+   settlement was still pending when this was written: **before section 9, read `getl2settlement` on your own L1 node
+   and go on only when the accepted settlement is in a finalized L1 block and the L2 keeps settling.** Sections 3 to 8
+   (keys and the Ethereum vault, with deposits and releases OFF) do not depend on it.
 3. Owner decisions recorded (section 7 of `docs/BRIDGE-V3-KEY-CEREMONY.md`, the "Owner inputs" of this kit's report):
-   the 7 signer operators, the 3 guardian operators, the relayer operators, the bridge windows and caps (an open
-   decision: the configs carry cap 100,000 USDC, window 10,000 USDC a day), the L2 gas price cap, the ceremony dates
-   (not in the hour around an L1 fork activation).
+   the 7 signer operators, the 3 guardian operators, the relayer operators, the L2 gas price cap, the ceremony dates
+   (not in the hour around an L1 fork activation). **The bridge windows and caps are decided** (2026-11-19: the owner
+   delegated them to the coordinator): cap and L2 supply cap **500,000 USDC**, window and L2 bucket **50,000 USDC per
+   24 h** each way (before: 100,000 and 10,000). They are constructor values and can never change; the tools refuse
+   any other value (`docs/BRIDGE-ALLNETS.md` section 7 has the reasons).
 4. Every holder has Foundry 1.7.1 (`cast --version` shows commit `4072e487`), Python 3.9 or newer and a checkout of
-   the audited revision of this repository at `/opt/bloch-bridge` (operators) or in the owner's working directory.
+   the launch revision of this repository (item 1) at `/opt/bloch-bridge` (operators) or in the owner's working
+   directory.
+5. **Before section 11 (not before the keys or the vault): the signers' L2 build pins must name the L2 release that
+   is live.** `tools/signatario-stable/l2_finality.py` `MAINNET_V2` (operator key `l2_pins: mainnet-v2`) pins the
+   release of 2026-11-03 (follower `cdf5da5c…`, producer `e3f1a290…`, settled RPC `53e88565…`); the L2 went live with
+   the release of 2026-11-17 (`bloch-l2-2026-11-17-launch-native-906336fd`: follower `d4d2b99a…`, producer `598873ae…`
+   by the L2 review record). A signer started with other binaries than the pinned ones refuses to sign anything for
+   chain 700770, so no mint and no release could be certified. The pins are changed only by a reviewed commit (as in
+   round 11); that commit does not exist yet (finding F410-2 of round 20, not part of this kit).
 
 ## 1. Who generates which key, where
 
@@ -73,7 +99,7 @@ cast --version
 
 It must show `1.7.1` and `4072e48705af9d93e3c0f6e29e93b5e9a40caed8`.
 
-Work from a clean checkout of the audited revision; the tools refuse anything else:
+Work from a clean checkout of the launch revision (section 0, item 1; unaudited); the tools refuse anything else:
 
 <!-- step owner git-clean -->
 ```
@@ -420,8 +446,10 @@ The decided fee schedule (2026-11-17), value by value: 5 bps on deposit and 10 b
 python3 tools/deploy-pontes/ceremony_kit.py schedule --token-config deployments/mainnet/busdc-mainnet.config.json --vault-config deployments/mainnet/busdc-vault-mainnet.config.json --relayer-template deployments/mainnet/busdc-ops/relayer.template.json
 ```
 
-`"decision": "schedule-ok"`. It also prints the windows and caps as `openOwnerDecision`: confirm them now, because
-they are constructor values and can never change.
+`"decision": "schedule-ok"`. The same command holds both configs to the launch limits decided on 2026-11-19 and prints
+them as `launchLimits`: vault cap and token supply cap `500000000000` (500,000 USDC), window and bucket `50000000000`
+(50,000 USDC per 24 h), `refillPerSecond` `578703`; a config with any other limit is refused. Read them now: they are
+constructor values and can never change, and with no audit before launch the cap is the most this route can lose.
 
 **Fee recipient: immutable.** `0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544` receives every bridge fee of this vault for
 its whole life. Confirm it on the second channel before section 8.
@@ -582,7 +610,7 @@ relay` (primary and backups), `guardiao.py watch` (3 guardians), `reservas.py wa
 secret; nothing secret ever travels the other way.
 
 The commit of the public records: the inventory, the filled configs, the plan, the deployment record and
-`ceremony-out/handover.json` go into a later commit on top of the audited revision (`docs/BUSDC-MAINNET-V2.md` 4.1:
+`ceremony-out/handover.json` go into a later commit on top of the launch revision (`docs/BUSDC-MAINNET-V2.md` 4.1:
 the tools pin `source.revision`, so they cannot be committed at it).
 
 ## 12. Enable deposits and releases (5 of 7 release signers)
@@ -843,9 +871,9 @@ source-side vault (BRIEF-ROUND16 architecture, point 5; every digest binds the c
 for one route is refused by every other). What each route adds is its deployer, its source-network fee payer or gas
 keys, and its own config. Each route's own document holds its exact commands; none is rehearsed by this kit.
 
-| Route | Status (2026-11-17) | New keys (all generated by their holder as in sections 3 to 6) | Route document |
+| Route | Status (2026-11-17; the first row as of 2026-11-19) | New keys (all generated by their holder as in sections 3 to 6) | Route document |
 |---|---|---|---|
-| Arbitrum One `bUSDC.arb`, OP Mainnet `bUSDC.op`, Linea `bUSDC.linea` | `launch.v1` true, unaudited | per network: a fresh vault deployer (hardware wallet, nonce 0), a fresh L2 token deployer, relayer gas keys on that network. No new committee key | `docs/BRIDGE-EVM-NETWORKS.md` (audit line `codex/bridge-evm-nets-r17-audit-20261117`, agents 337/372): same tools (`vault_pontes.py`, `deploy_pontes.py`) with `deployments/<network>/`; fees and minimums per network (Linea: exit 0.15%, minimums 601 / 600 USDC; Arbitrum One and OP Mainnet: 0.05% each way, 21 / 20); relayer ceilings 2 / 0.5 gwei; anchor policy `probe` |
+| Arbitrum One `bUSDC.arb`, OP Mainnet `bUSDC.op`, Linea `bUSDC.linea` | `launch.v1` true, unaudited (owner decision of 2026-11-19: audit after launch); limits decided 2026-11-19: cap 250,000 USDC, window 25,000 USDC per 24 h on each | per network: a fresh vault deployer (hardware wallet, nonce 0), a fresh L2 token deployer, relayer gas keys on that network. No new committee key | `docs/BRIDGE-EVM-NETWORKS.md` (audit line `codex/bridge-evm-nets-r17-audit-20261117`, agents 337/372): same tools (`vault_pontes.py`, `deploy_pontes.py`) with `deployments/<network>/`; fees and minimums per network (Linea: exit 0.15%, minimums 601 / 600 USDC; Arbitrum One and OP Mainnet: 0.05% each way, 21 / 20); relayer ceilings 2 / 0.5 gwei; anchor policy `probe` |
 | Base `bUSDC.base` | held (`launch.v1` false): every tool refuses chain 8453, no flag lifts it | none | same; do not run |
 | BNB Smart Chain | out of v1 | none | do not run |
 | Bitcoin `bBTC` | under review (agents 370, 378: R342-BTC-1..3) | **7 separate Bitcoin vault keys** (role `btc-vault-signer`, one more keystore per signer operator; a compromise of the Ethereum release keys does not open the Bitcoin vault), a fresh L2 token deployer; no Bitcoin guardian key (guardians pause bBTC on the L2), no relayer key that moves coins | `docs/BTC-BRIDGE-DEPLOYMENT.md` on `codex/bridge-btc-r17-20261117` (section 1: ceremony delta; fee output to `bc1qjpnq…etkyk`) |
@@ -854,8 +882,10 @@ keys, and its own config. Each route's own document holds its exact commands; no
 | Stellar `bUSDC.xlm` | under review (agents 373, 377) | a fresh Stellar deployer account (about 30 XLM; it holds nothing after the deployment) and a relayer account (about 20 XLM) | `docs/STELLAR-BRIDGE-DEPLOY.md` on `codex/bridge-stellar-r17-20261117`; burn destinations named by a router transaction on the L2 |
 
 For every route: the inventory of section 7 already holds the committee; the route's new keys are attested the same
-way and added to that route's inventory. No route launches before its own external audit, its reviewer's final
-verdict and its merge into `main` by the integrator (agent 375), and none before the L2 is live.
+way and added to that route's inventory. No held route (Base, Bitcoin, Tron, Solana, Stellar) launches before its own
+external audit, its reviewer's final verdict and its merge into `main` by the integrator, and BNB Smart Chain is out of
+v1. For Arbitrum One, OP Mainnet and Linea the owner decided on 2026-11-19 that the external audit is done after
+launch: they launch UNAUDITED, after their own ceremony, with the caps above. No route launches before the L2 is live.
 
 ## 17. Rehearsal record
 
@@ -894,9 +924,13 @@ The rehearsal had to stand in for these things, and only these:
 ## Not done / not proven
 
 - No real key, no hardware wallet, no public network: everything above is rehearsed on loopback stand-ins only.
-- The L2 is not live: section 9 onwards cannot run on mainnet until it settles.
+- The L2: its first settlement was accepted on L1 on 2026-11-19 (section 0, item 2); that it is in a finalized L1
+  block and that the L2 keeps settling was not established here. Section 9 onwards needs it.
+- The signers' L2 build pins name the release of 2026-11-03, not the release the L2 went live with (section 0, item 5):
+  section 11 onwards cannot work on mainnet until a reviewed commit re-pins them.
 - The signer daemons on the real L2 path (`l2_pins: mainnet-v2`, the rebuild, the feeds) are not part of this
   rehearsal; their own suites and agent 381's bundles cover them.
 - Safe creation, Safe owner checks and the deployer balance sweep are not rehearsed.
 - The other routes (section 16) are pointers to their own documents and lines, not rehearsed here.
-- The external audit has not happened; the bridge windows and caps are an open owner decision.
+- The external audit has not happened, and by the owner's decision of 2026-11-19 it will not happen before launch:
+  everything this kit deploys is unaudited. The bridge windows and caps are decided (2026-11-19; section 0, item 3).

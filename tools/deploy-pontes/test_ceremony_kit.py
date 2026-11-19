@@ -166,8 +166,36 @@ def main():
         mutate(tt, vv, rr)
         check(f'schedule: {name} is refused', refused(lambda: ck.schedule(tt, vv, rr), where))
 
+    # launch limits decided on 2026-11-19 (round 20): the kit's own record, the registry's and launch.py's are one
+    sys.path.insert(0, str(HERE.parent / 'evm-nets'))
+    import launch
+    reg = launch.limits(1)
+    check('limits: the kit, tools/evm-nets/networks.json and launch.py LIMITS hold the same Ethereum limits (500,000 / 50,000 / 578703)',
+          ck.LIMITS == {'vaultCap': 500_000 * 10**6, 'windowLimit': 50_000 * 10**6, 'windowSeconds': 86400,
+                        'tokenSupplyCap': 500_000 * 10**6, 'tokenBucketCapacity': 50_000 * 10**6, 'tokenRefillPerSecond': 578703}
+          and (reg['cap'], reg['window_limit'], reg['window_seconds'], reg['supply_cap'], reg['bucket_capacity'], reg['refill_per_second'])
+          == tuple(ck.LIMITS[k] for k in ('vaultCap', 'windowLimit', 'windowSeconds', 'tokenSupplyCap', 'tokenBucketCapacity',
+                                          'tokenRefillPerSecond'))
+          and launch.LIMITS[1] == (ck.LIMITS['vaultCap'], ck.LIMITS['windowLimit']), (ck.LIMITS, reg))
+    check('limits: schedule prints the decided limits, no longer an open decision',
+          s['launchLimits'] == {**ck.LIMITS, 'decided': '2026-11-19', 'note': s['launchLimits']['note']}
+          and 'openOwnerDecision' not in s and 'before the external audit' in s['launchLimits']['note'], s)
+    for name, mutate, where in (
+            ('the cap before the decision (100,000)', lambda tt, vv, rr: vv['vault'].update(cap=100_000 * 10**6), 'vaultCap'),
+            ('a cap ten times the decided one', lambda tt, vv, rr: vv['vault'].update(cap=5_000_000 * 10**6), 'vaultCap'),
+            ('the window before the decision (10,000)', lambda tt, vv, rr: vv['vault']['policy'].update(windowLimit=10_000 * 10**6), 'windowLimit'),
+            ('a 12 hour window', lambda tt, vv, rr: vv['vault']['policy'].update(windowSeconds=43200), 'windowSeconds'),
+            ('the supply cap before the decision', lambda tt, vv, rr: tt['limits'].update(supplyCap=100_000 * 10**6), 'tokenSupplyCap'),
+            ('the bucket before the decision', lambda tt, vv, rr: tt['limits'].update(bucketCapacity=10_000 * 10**6), 'tokenBucketCapacity'),
+            ('the refill before the decision (115740)', lambda tt, vv, rr: tt['limits'].update(refillPerSecond=115740), 'tokenRefillPerSecond'),
+            ('a refill one unit faster', lambda tt, vv, rr: tt['limits'].update(refillPerSecond=578704), 'tokenRefillPerSecond'),
+            ('a cap as a float', lambda tt, vv, rr: vv['vault'].update(cap=500000000000.0), 'vaultCap')):
+        tt, vv, rr = copy.deepcopy(t), copy.deepcopy(v), copy.deepcopy(relayer)
+        mutate(tt, vv, rr)
+        check(f'limits: {name} is refused', refused(lambda: ck.schedule(tt, vv, rr), where))
+
     # ethereum
-    be = {'chainId': 1, 'vault': key()[1], 'route': '0x' + '11' * 32, 'vaultCodeHash': '0x' + '22' * 32, 'vaultCap': 100_000 * 10**6,
+    be = {'chainId': 1, 'vault': key()[1], 'route': '0x' + '11' * 32, 'vaultCodeHash': '0x' + '22' * 32, 'vaultCap': 500_000 * 10**6,
           'vaultGuard': copy.deepcopy(t['ethereum']['vaultGuard'])}
     te = ck.ethereum(t, {'decision': 'verified', 'busdcEthereum': be})
     check('ethereum: the verified vault values enter the token config', te['ethereum']['vault'] == be['vault'])
@@ -175,6 +203,10 @@ def main():
     bg['vaultGuard']['guardians'] = bg['vaultGuard']['guardians'][::-1]
     check('ethereum: a vault whose guard differs from the token config is refused',
           refused(lambda: ck.ethereum(t, {'decision': 'verified', 'busdcEthereum': bg}), 'vault guard'))
+    for cap, why in ((500_000 * 10**6 + 1, 'must both be the'), (5_000_000 * 10**6, 'must both be the'),
+                     (100_000 * 10**6, 'vault cap below the token supplyCap')):
+        check(f'ethereum: a verified vault whose cap is {cap} (not the decided 500,000 USDC) is refused',
+              refused(lambda: ck.ethereum(t, {'decision': 'verified', 'busdcEthereum': {**be, 'vaultCap': cap}}), why))
     check('ethereum: an unverified vault is refused', refused(lambda: ck.ethereum(t, {'decision': 'refused'}), 'verified'))
     check('ethereum: a second vault over a filled token config is refused',
           refused(lambda: ck.ethereum(te, {'decision': 'verified', 'busdcEthereum': {**be, 'vault': key()[1]}}), 'already holds'))

@@ -251,6 +251,25 @@ def validate(cfg, rehearsal, token_cfg=None):
                f'vault.policy.l2MinBurn {pol["l2MinBurn"]} is below {floor}: the measured relayer cost of one release at the gas '
                'ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula); an exit that small '
                'would pay out less than relaying it costs')
+    if launch and not rehearsal:
+        # Launch limits of 2026-11-19 (owner: windows and caps delegated to the coordinator; coordinator decision of the
+        # same day): cap, windowLimit and windowSeconds are not free fields of a mainnet config. They are the values
+        # recorded for this chain in tools/evm-nets/networks.json `limits` and, a second time, in tools/evm-nets/launch.py
+        # LIMITS; chain 1 included. The limits are constructor arguments (immutable), and the launch runs before the
+        # external audit, so a typed-in cap would be a typed-in maximum loss.
+        try:
+            decided = launch.limits(eth['chainId'])
+        except launch.LaunchError as e:
+            refuse(False, f'the launch limits cannot be read, so cap and windowLimit cannot be checked: {e}')
+        refuse(decided is not None, f'no launch limits are recorded for chain {eth["chainId"]}')
+        refuse((v['cap'], pol['windowLimit'], pol['windowSeconds'])
+               == (decided['cap'], decided['window_limit'], decided['window_seconds']),
+               f'launch limits of chain {eth["chainId"]} (decided 2026-11-19, tools/evm-nets/networks.json `limits`): cap '
+               f'{decided["cap"]}, windowLimit {decided["window_limit"]}, windowSeconds {decided["window_seconds"]}; the config has '
+               f'{v["cap"]}, {pol["windowLimit"]}, {pol["windowSeconds"]}')
+        refuse(v['cap'] == decided['windows_per_cap'] * pol['windowLimit'],
+               f'vault.cap must be {decided["windows_per_cap"]} x windowLimit (the rate-limited path then needs '
+               f'{decided["windows_per_cap"]} windows to empty a full vault)')
     windows = -(-v['cap'] // pol['windowLimit'])
     refuse(windows * pol['windowSeconds'] <= pol['switchDelay'],
            'switchDelay is too short for holders to exit: the cap needs '
@@ -306,6 +325,12 @@ def validate(cfg, rehearsal, token_cfg=None):
                'vault cap differs from the L2 supplyCap (above it a deposit may never mint; below it mints stop early)')
         refuse(lim.get('bucketCapacity') == pol['windowLimit'],
                'vault windowLimit differs from the L2 bucketCapacity (a deposit or burn outside them can never complete)')
+        if not rehearsal:
+            # The L2 bucket refills in exactly the vault's window (floor, the rounding of the earlier 115740): a faster
+            # refill would let more through per day on the L2 side than the vault's window pays, a slower one less.
+            refuse(is_uint(lim.get('refillPerSecond')) and lim['refillPerSecond'] == pol['windowLimit'] // pol['windowSeconds'],
+                   f'the L2 refillPerSecond must be floor(windowLimit / windowSeconds) = {pol["windowLimit"] // pol["windowSeconds"]} '
+                   f'(the bucket refills in the vault\'s window); the token config has {lim.get("refillPerSecond")}')
         refuse(lim.get('minBurn') == pol['l2MinBurn'],
                'vault l2MinBurn differs from the L2 minBurn (the constructor can only compare minDeposit with this declared value)')
         vg = te.get('vaultGuard') or {}

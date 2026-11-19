@@ -66,12 +66,12 @@ def main():
         usdc, _ = create(eth, 'solidity-tests/BridgedStablecoin.t.sol:MockStable')
         vault, gas['create ProvenanceSourceVault'] = create(
             eth, 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault', k('ethereum-mainnet'), k('bloch-l2-700770'),
-            k('USDC'), usdc, str(100_000 * U), '0', addrs(ethk), '5', f'({10_000 * U},86400,6,1209600,{10 * U},{10 * U})',
+            k('USDC'), usdc, str(500_000 * U), '0', addrs(ethk), '5', f'({50_000 * U},86400,6,1209600,{10 * U},{10 * U})',
             f'({addrs(vg)},259200,259200)', '(1,0,0x' + '00' * 20 + ',(0x' + '00' * 20 + ',0,0))')
         route = out(CAST, 'call', vault, 'routeId()(bytes32)', '--rpc-url', eth)
         token, gas['create BridgedStablecoinV3'] = create(
             l2, 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', 'Bloch Bridged USDC', 'bUSDC', '1', vault, route,
-            addrs(l2k), '5', f'({100_000 * U},{10_000 * U},115740,0,43200,{10 * U})', f'({addrs(tg)},259200,259200)', '(6,1209600)')
+            addrs(l2k), '5', f'({500_000 * U},{50_000 * U},578703,0,43200,{10 * U})', f'({addrs(tg)},259200,259200)', '(6,1209600)')
         vu = str(2**40)
         d = out(CAST, 'call', vault, 'controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu, '--rpc-url', eth)
         certs = lambda dg: '[' + ','.join(out(CAST, 'wallet', 'sign', '--no-hash', '--private-key', x, dg) for _, x in ethk[:5]) + ']'  # noqa: E731

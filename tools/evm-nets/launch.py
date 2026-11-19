@@ -16,6 +16,11 @@ registry that is missing or unreadable, a network added to one place only) EVERY
 There is no flag, environment variable or operator file that lifts a refusal: lifting one is a change to this file
 and to networks.json in a reviewed commit, after which `evm_nets.py write` generates that network's deployment files.
 
+The launch limits (cap and window of every route, decided 2026-11-19) are recorded twice in the same way: networks.json
+`limits` and `LIMITS` below. `limits(chain_id)` gives them to the deploy tools, which refuse a vault or token config
+that carries any other value; a registry whose limits differ from `LIMITS` is untrusted like one whose launch status
+differs, so every network is refused. Changing a limit is a reviewed commit that changes both records.
+
 Ethereum (chain 1) is not a network of this registry and is never looked up here: the Ethereum bridge is unchanged.
 A chain id that is neither 1 nor in the registry is a local rehearsal chain (anvil); nothing signed for it is valid
 on a real network, because every digest binds the chain id. The fork rehearsal of a network that is not launchable
@@ -50,6 +55,26 @@ DECIDED = {
     56: ('bnb', False),
 }
 STATES = {True: ('launchable',), False: ('held', 'out')}
+# chain id -> (cap, windowLimit) in six-decimal units of the dollar asset: the launch limits, the second record of the
+# decision of 2026-11-19 (networks.json `limits` is the first, with its reasons). Owner, 2026-11-19: windows and caps
+# delegated to the coordinator; coordinator, same day: Ethereum 500,000 / 50,000 per 24 h each way; Arbitrum One, OP
+# Mainnet and Linea 250,000 / 25,000. The launch runs before the external audit (owner decision of the same day), so a
+# route's cap is its maximum loss and is sized for the unaudited period. Base (held) and BNB Smart Chain (out) were not
+# part of the decision: they keep the earlier 100,000 / 10,000 and stay refused by every tool. Unlike the launch status,
+# chain 1 IS in this record: the Ethereum route's limits are checked by the same rule.
+UNIT = 10**6
+LIMITS = {
+    ETHEREUM: (500_000 * UNIT, 50_000 * UNIT),
+    42161: (250_000 * UNIT, 25_000 * UNIT),
+    10: (250_000 * UNIT, 25_000 * UNIT),
+    59144: (250_000 * UNIT, 25_000 * UNIT),
+    8453: (100_000 * UNIT, 10_000 * UNIT),
+    56: (100_000 * UNIT, 10_000 * UNIT),
+}
+# The cap is this many windows: the rate-limited release path needs WINDOWS_PER_CAP x WINDOW_SECONDS (ten days) to
+# empty a full vault, against a guardian pause of three days.
+WINDOWS_PER_CAP = 10
+WINDOW_SECONDS = 86400
 # Keys of the signer's source half (eth_half.py) and of the daemon (vigia.py) that every signer of one network must
 # share. `anchor_depth` exists only with the probe policy.
 ANCHOR_KEYS = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin')
@@ -85,6 +110,7 @@ def _load(path=None):
         missing = sorted(set(DECIDED) - set(seen))
         if missing:
             raise LaunchError(f'networks.json lacks the decided chain ids {missing}')
+        _check_limits(reg, seen)
         return reg
     except LaunchError:
         raise
@@ -92,8 +118,50 @@ def _load(path=None):
         raise LaunchError(f'{path} is missing or unreadable: {type(e).__name__}: {e}') from e
 
 
+def _is_amount(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def _check_limits(reg, seen):
+    """The launch limits of networks.json are exactly the ones recorded in LIMITS, for chain 1 and for every network,
+    and every record keeps the rule cap = WINDOWS_PER_CAP x windowLimit. Anything else (a value edited by hand, a
+    missing record, a key added) raises LaunchError, so every network is refused and chain 1's limits cannot be read."""
+    top = reg.get('limits')
+    if not isinstance(top, dict) or set(top) != {'decided', 'decision', 'rule', 'windowsPerCap', 'windowSeconds', 'ethereum'}:
+        raise LaunchError('networks.json `limits` must hold exactly decided, decision, rule, windowsPerCap, windowSeconds, ethereum')
+    if type(top['windowsPerCap']) is not int or type(top['windowSeconds']) is not int \
+            or (top['windowsPerCap'], top['windowSeconds']) != (WINDOWS_PER_CAP, WINDOW_SECONDS):
+        raise LaunchError(f'networks.json `limits`: windowsPerCap / windowSeconds are {top["windowsPerCap"]!r} / '
+                          f'{top["windowSeconds"]!r}, the decision recorded in tools/evm-nets/launch.py is '
+                          f'{WINDOWS_PER_CAP} / {WINDOW_SECONDS}')
+    for text in ('decided', 'decision', 'rule'):
+        if not isinstance(top[text], str) or len(top[text]) < 10:
+            raise LaunchError(f'networks.json `limits.{text}` must be text')
+    eth = top['ethereum']
+    if not isinstance(eth, dict) or set(eth) != {'chainId', 'cap', 'windowLimit'} or type(eth['chainId']) is not int \
+            or eth['chainId'] != ETHEREUM:
+        raise LaunchError('networks.json `limits.ethereum` must be {"chainId": 1, "cap", "windowLimit"}')
+    records = {ETHEREUM: ('ethereum', eth)}
+    for chain, name in seen.items():
+        lim = reg['networks'][name].get('limits')
+        if not isinstance(lim, dict) or set(lim) != {'cap', 'windowLimit'}:
+            raise LaunchError(f'{name}: `limits` must be {{"cap", "windowLimit"}}')
+        records[chain] = (name, lim)
+    if set(records) != set(LIMITS):
+        raise LaunchError(f'the chain ids with limits {sorted(records)} are not the decided ones {sorted(LIMITS)}')
+    for chain, (name, lim) in records.items():
+        cap, window = lim['cap'], lim['windowLimit']
+        if not _is_amount(cap) or not _is_amount(window):
+            raise LaunchError(f'{name}: limits cap / windowLimit must be positive integers')
+        if (cap, window) != LIMITS[chain]:
+            raise LaunchError(f'{name} (chain {chain}): networks.json says cap {cap}, windowLimit {window}; the decision recorded '
+                              f'in tools/evm-nets/launch.py is cap {LIMITS[chain][0]}, windowLimit {LIMITS[chain][1]}')
+        if cap != WINDOWS_PER_CAP * window:
+            raise LaunchError(f'{name} (chain {chain}): cap {cap} is not {WINDOWS_PER_CAP} x windowLimit {window}')
+
+
 def registry(path=None):
-    """networks.json, only if it agrees with DECIDED. Raises LaunchError otherwise."""
+    """networks.json, only if it agrees with DECIDED and LIMITS. Raises LaunchError otherwise."""
     return _load(path)
 
 
@@ -230,6 +298,29 @@ def fee_schedule(chain_id, path=None):
     return {'deposit_bps': spec['feeBps']['deposit'], 'release_bps': spec['feeBps']['release'], 'min_deposit': spec['minDeposit'],
             'l2_min_burn': spec['l2MinBurn'], 'release_gas': relay['releaseGas'], 'gas_ceiling_gwei': relay['gasCeilingGwei'],
             'native_usd': reg['relayCost']['nativeUsd']}
+
+
+def limits(chain_id, path=None):
+    """The decided launch limits of a route (2026-11-19), or None for a rehearsal chain: {cap, window_limit,
+    window_seconds, windows_per_cap, supply_cap, bucket_capacity, refill_per_second}, six-decimal units. The vault takes
+    cap, window_limit and window_seconds; the L2 token takes supply_cap = cap, bucket_capacity = window_limit and
+    refill_per_second = floor(window_limit / window_seconds). Chain 1 is the `limits.ethereum` entry. Raises LaunchError
+    when the registry cannot be trusted (the caller refuses): no limit is ever taken from an untrusted registry, and
+    none from LIMITS alone."""
+    if isinstance(chain_id, bool) or not isinstance(chain_id, int):
+        raise LaunchError(f'chain id {chain_id!r} is not an integer')
+    reg = _load(path)
+    if chain_id == ETHEREUM:
+        rec = reg['limits']['ethereum']
+    else:
+        net = network_of(chain_id, path)
+        if net is None:
+            return None
+        rec = net[1]['limits']
+    cap, window = rec['cap'], rec['windowLimit']
+    seconds = reg['limits']['windowSeconds']
+    return {'cap': cap, 'window_limit': window, 'window_seconds': seconds, 'windows_per_cap': reg['limits']['windowsPerCap'],
+            'supply_cap': cap, 'bucket_capacity': window, 'refill_per_second': window // seconds}
 
 
 def min_burn_floor(chain_id, release_bps, path=None):

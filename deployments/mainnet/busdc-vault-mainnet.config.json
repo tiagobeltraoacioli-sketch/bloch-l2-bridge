@@ -4,13 +4,13 @@
     "tool": "tools/deploy-pontes/vault_pontes.py (validate / args / verify); the owner deploys with forge, never an agent",
     "sequence": "docs/BUSDC-MAINNET-V2.md section 4",
     "units": "1 USDC = 1e6 units (6 decimals)",
-    "cap": "proposed 100,000 USDC, must equal the L2 supplyCap (busdc-mainnet.config.json, validated); the vault refuses deposits above it",
-    "windowLimit": "proposed 10,000 USDC per 24 h = the L2 token bucket: the release token bucket (capacity; full refill in windowSeconds): a colluding release quorum takes at most this plus the refill; it is also the largest single deposit (the vault refuses more) and must equal the L2 bucketCapacity, which is the largest single burn (validated)",
+    "cap": "500,000 USDC = 10 windows; must equal the L2 supplyCap (busdc-mainnet.config.json, validated); the vault refuses deposits above it. Decided 2026-11-19 (owner: windows and caps delegated to the coordinator; coordinator decision of the same day; before: proposed 100,000). Immutable once deployed. By the owner's decision of the same day the launch runs before the external audit, so this cap is the maximum loss of the route and is sized for the unaudited period; the reasons and the rule are in tools/evm-nets/networks.json `limits`, and the deploy tools refuse any other value (tools/evm-nets/launch.py LIMITS)",
+    "windowLimit": "50,000 USDC per 24 h = the L2 token bucket: the release token bucket (capacity; full refill in windowSeconds): a colluding release quorum takes at most this plus the refill; it is also the largest single deposit (the vault refuses more) and must equal the L2 bucketCapacity, which is the largest single burn (validated). Decided 2026-11-19 (before: proposed 10,000): agents/347-fee-economics-r17.md measured an Ethereum-only break-even of about 60,000 USD crossing a day, which 10,000 a day each way could never reach; 50,000 each way allows 100,000. The cap is ten windows: the rate-limited path needs ten days to empty a full vault, against a guardian pause of three days",
     "switchThreshold": "6 of 7 (owner decision 2026-11-02, validated on mainnet): one more than the release threshold to end a pause early and to propose or cancel the one-way light-client switch",
     "switchDelay": "proposed 14 days (contract minimum 7 days): time for users and guardians to react to a proposed verifier (owner decision)",
     "guard": "three independent pause-only guardians (BR-6, owner decision 2026-11-02): one Ethereum vault guardian key per guardian operator, the same 3 operators who hold the L2 token guardian keys; each runs guardiao.py (fast path, vault_pause_on_mint true) and sombra.py (proof path) runs beside it once ported; 72 h pause, 72 h cooldown, as the L2 token. validate refuses another count on mainnet. The guardian set is immutable",
     "minDeposit": "101 USDC (fee schedule of 2026-11-17, coordinator, agents/347-fee-economics-r17.md; before: 11): the smallest deposit, immutable. With the 5 bps deposit fee it nets 100.9495 USDC, above l2MinBurn 100 (before: 10; a release costs the relayer about 207,000 gas, and 5 bps of 10 USDC never covered it) (the constructor and validate refuse a minDeposit whose net is below l2MinBurn). The constructor requires l2MinBurn <= minDeposit <= windowLimit; validate --token-config requires l2MinBurn == the L2 minBurn",
-    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0, never a 2026-10-14 address); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, distinct from their L2 mint keys); 3 guardian operators + Ethereum addresses (independent of every signer operator); confirm cap, windowLimit, switchDelay. Filled: vault.provenance.fees.recipient (owner input 2026-11-16)",
+    "TBD-owner": "source.revision; deployer.address (fresh key, nonce 0, never a 2026-10-14 address); deployer.fundedBy.safe (Bloch Inc Safe); 7 release signer operators + Ethereum addresses (one key per operator, distinct from their L2 mint keys); 3 guardian operators + Ethereum addresses (independent of every signer operator); confirm switchDelay (cap and windowLimit were decided on 2026-11-19). Filled: vault.provenance.fees.recipient (owner input 2026-11-16)",
     "provenance": "mode 1: the vault keeps a hash chain over its deposits and pays a burn only if the burn states the same chain (BridgedStablecoinV3). Deposit ids carry the vault nonce in their top 8 bytes. releaseDelay 0 and no mintVerifier: options 2 and 3 are not the launch design",
     "fees": "protocol fee fixed at deployment (agent 197, owner rule 'the bridge must generate revenue', middle ground): 5 bps of each deposit and 10 bps of each release (release fee raised from 5 by the fee schedule of 2026-11-17, coordinator, agents/347-fee-economics-r17.md), ceiling 30 bps in the contract. The deposit chain, the deposit id, the Deposited log and totalLocked carry the NET amount the L2 token mints; a release unlocks the burned amount and pays it less 10 bps. Fees accrue outside totalLocked; anyone calls sweepFees() to pay them to the immutable recipient. recipient: 0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544, the protocol treasury on Ethereum, given by the owner on 2026-11-16 (a single externally owned address by the owner's choice, not a multisig). It is a constructor argument: immutable once the vault is deployed"
   },
@@ -34,7 +34,7 @@
     "nativeDomainLabel": "bloch-l2-700770",
     "assetLabel": "USDC",
     "token": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    "cap": 100000000000,
+    "cap": 500000000000,
     "transferMode": 0,
     "signers": {
       "threshold": 5,
@@ -70,7 +70,7 @@
       ]
     },
     "policy": {
-      "windowLimit": 10000000000,
+      "windowLimit": 50000000000,
       "windowSeconds": 86400,
       "switchThreshold": 6,
       "switchDelay": 1209600,

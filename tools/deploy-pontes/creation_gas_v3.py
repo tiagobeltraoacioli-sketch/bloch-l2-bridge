@@ -29,7 +29,7 @@ try:
         g = '[' + ','.join(sorted(addr(0x4000 + i) for i in range(ng))) + ']'
         t = out(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', url, '--private-key', DEP, '--json', '--gas-limit', '30000000',
                 'contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', '--constructor-args', name, 'bUSDC', '1', vault, route, s, '5',
-                f'({100_000 * U},{10_000 * U},115740,0,43200,{10 * U})', f'({g},259200,259200)', '(6,1209600)')
+                f'({500_000 * U},{50_000 * U},578703,0,43200,{10 * U})', f'({g},259200,259200)', '(6,1209600)')
         r = json.loads(t[t.rindex('\n{') + 1:] if '\n{' in t else t)
         gas = int(json.loads(out(CAST, 'receipt', r['transactionHash'], '--rpc-url', url, '--json'))['gasUsed'], 16)
         print(json.dumps({'shape': label, 'gasUsed': gas, 'under_5M_by': 5_000_000 - gas}), flush=True)

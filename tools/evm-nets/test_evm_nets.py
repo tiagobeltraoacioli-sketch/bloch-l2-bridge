@@ -184,11 +184,13 @@ class Generated(unittest.TestCase):
         for name in LIVE:
             v = json.loads((ROOT / 'deployments' / name / 'busdc-vault.config.json').read_text())['vault']
             spec = NETS[name]
-            for key in ('cap', 'transferMode'):
-                self.assertEqual(v[key], eth[key], (name, key))
-            # limits (window, switch) are the Ethereum ones; the minimums and the fee rates are the network's own
-            # (fee schedule of 2026-11-17, tools/evm-nets/networks.json)
-            for key in ('windowLimit', 'windowSeconds', 'switchThreshold', 'switchDelay'):
+            self.assertEqual(v['transferMode'], eth['transferMode'], name)
+            # the window length and the switch are the Ethereum ones; cap and window are the network's own launch limits
+            # (decided 2026-11-19), the minimums and the fee rates the network's own fee schedule (2026-11-17): all from
+            # tools/evm-nets/networks.json. The Ethereum route's own limits are pinned in test_launch_r17.LaunchLimits.
+            self.assertEqual((v['cap'], v['policy']['windowLimit']), (spec['limits']['cap'], spec['limits']['windowLimit']), name)
+            self.assertEqual(v['cap'], 10 * v['policy']['windowLimit'], name)
+            for key in ('windowSeconds', 'switchThreshold', 'switchDelay'):
                 self.assertEqual(v['policy'][key], eth['policy'][key], (name, key))
             self.assertEqual((v['policy']['minDeposit'], v['policy']['l2MinBurn']), (spec['minDeposit'], spec['l2MinBurn']), name)
             self.assertEqual({k: v['provenance'][k] for k in ('mode', 'releaseDelay', 'mintVerifier')},

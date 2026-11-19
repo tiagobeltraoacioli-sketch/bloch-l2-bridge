@@ -2,7 +2,11 @@
 
 Status: UNAUDITED integration of the route lines; nothing is deployed; every address is `TBD-deploy`. The Ethereum
 bUSDC bridge is the audit candidate (freeze `cc2511a`); every other route needs its own external audit and the owner's
-ceremony before any real funds. Integrator: agent 355 (round 17), agent 375 (round 18).
+ceremony before any real funds. Integrator: agent 355 (round 17), agent 375 (round 18), agent 403 (round 19), agent 410
+(round 20).
+
+**Owner decisions of 2026-11-19 (section 7):** the launch limits of the four launchable routes are decided, and their
+external audit is done AFTER launch. They are UNAUDITED; the cap of each route is the most it can lose.
 
 ## 1. What is in this tree and how it got here
 
@@ -92,5 +96,97 @@ the same thing:
 - No route is audited except as an audit candidate (Ethereum); none is deployed.
 - The tron and stellar rehearsals need a private java-tron and a local Stellar network that the caller runs; the
   integrator's runs record whether they were run.
-- Launch status is a design statement; the owner's ceremony, the external audits and the bridge windows and caps
-  (an open owner decision) come first.
+- Launch status is a design statement. The owner's ceremony comes first for every route. For the held routes the
+  external audit also comes first; for the four launchable routes the owner decided on 2026-11-19 that it is done after
+  launch (section 7). The bridge windows and caps of those four routes are decided (section 7); the held routes' limits
+  were not part of that decision.
+
+## 7. Owner decisions of 2026-11-19: launch limits, and the audit after launch (round 20, agent 410)
+
+State on that day: the owner reported the first mainnet L2 settlement accepted on L1 at 03:01 UTC (L1 finality pending);
+nothing of the bridge is deployed.
+
+### 7.1 The decisions
+
+1. **Windows and caps.** The owner delegated them to the coordinator ("best technique for market parameters"). The
+   coordinator decided, the same day:
+
+   | Route | Cap = L2 `supplyCap` | Window = L2 `bucketCapacity`, per 24 h each way | `refillPerSecond` | Before |
+   |---|---|---|---|---|
+   | Ethereum (bUSDC) | 500,000 USDC (`500000000000`) | 50,000 USDC (`50000000000`) | `578703` | 100,000 / 10,000 / `115740` |
+   | Arbitrum One, OP Mainnet, Linea | 250,000 USDC (`250000000000`) | 25,000 USDC (`25000000000`) | `289351` | 100,000 / 10,000 / `115740` |
+   | Base (held), BNB Smart Chain (out), Bitcoin, TRON, Solana, Stellar (held) | unchanged | unchanged | unchanged | not part of the decision |
+
+   `refillPerSecond` is `floor(window / 86400)`, the rounding of the earlier value (10,000e6 / 86400 was stored as
+   115740). Unchanged: `windowSeconds` (24 h), thresholds (5 of 7, 6 of 7), 3 + 3 guardians, fees, minimum deposit and
+   burn, pause times (72 h), T = 0, the 12 h mint delay. The largest single deposit and the largest single burn are the
+   window (the contracts' own rule), so they rise with it.
+
+   Why these numbers:
+   - the limits are constructor arguments, immutable once deployed;
+   - the launch runs before the external audit (decision 2), so a route's cap is its maximum loss and is sized for the
+     unaudited period; the four routes share one committee, so the aggregate exposure is **1,250,000 USDC**;
+   - `agents/347-fee-economics-r17.md` measured an Ethereum-only break-even of about 60,000 USD crossing a day, which
+     the earlier window of 10,000 a day each way (20,000 both ways) could never reach; 50,000 each way allows 100,000;
+   - the cap is ten windows, so the rate-limited release path needs ten days to empty a full vault, against a guardian
+     pause of three days (and inside the 14 day switch delay, which `vault_pontes.py` already required);
+   - the audited revision is expected to need a new vault anyway, where the limits are decided again.
+
+2. **External audit after launch.** The owner decided that the external audit of the launchable routes is done AFTER
+   launch. **These four routes launch UNAUDITED.** Every document that named
+   the audit as a precondition of their launch now states this decision with its date; no statement that the code is
+   unaudited was removed. The held routes are not part of the decision: each still needs its own audit, its reviewer's
+   final pass and its ceremony first.
+
+3. **The key ceremony and the real-key rehearsal go ahead** (`docs/BRIDGE-OWNER-CEREMONY.md`).
+
+### 7.2 Where the limits live, and what enforces them
+
+- First record: `tools/evm-nets/networks.json`, `limits` (the rule, the reasons, the Ethereum route) and
+  `networks.<name>.limits`. Second record, in code: `tools/evm-nets/launch.py` `LIMITS`. A registry whose limits differ
+  from `LIMITS` (or whose record is missing, has another key, or breaks cap = 10 windows) is untrusted: every network is
+  refused and no limit is read from it, as for a launch status edited by hand. No flag or environment variable lifts it.
+- `tools/evm-nets/evm_nets.py write` derives each network's `busdc-vault.config.json`, `busdc-token.config.json` and
+  `bridge.network.json` from that record; the Ethereum templates `deployments/mainnet/busdc-*.config.json` carry the
+  Ethereum values. `deployments/bridges.json` and the README table are generated by `tools/allnets/registry.py`, whose
+  check C9 holds every EVM route's cap and window to the record.
+- `tools/deploy-pontes/vault_pontes.py validate` (mainnet): cap, `windowLimit` and `windowSeconds` must be the recorded
+  ones for the chain (chain 1 included) and cap = 10 windows; with `--token-config`: vault cap = L2 `supplyCap`,
+  `windowLimit` = L2 `bucketCapacity` (both since round 10) and now `refillPerSecond` = floor(window / windowSeconds).
+- `tools/deploy-pontes/deploy_pontes.py validate` (mainnet): `supplyCap`, `bucketCapacity` and `refillPerSecond` must be
+  the recorded ones for the source chain, and `ethereum.vaultCap` must equal `supplyCap` (before: at least it).
+- `tools/deploy-pontes/ceremony_kit.py`: `schedule` holds both Ethereum configs to the same six numbers (a third
+  record, checked against the two others by its test), `ethereum` refuses a verified vault whose cap is not the decided
+  one, and `onchain` reads cap, window, window length, supply cap, bucket and refill back from both chains.
+- Tests: `tools/evm-nets/test_limits_r20.py` (records, files, both tools, every other value refused),
+  `tools/allnets/test_registry.py` (C9), `tools/deploy-pontes/test_ceremony_kit.py`.
+- The line-owned files this changes (`tools/evm-nets`, the three networks' deployment files, the ceremony kit and its
+  document) are recorded blob by blob in `deployments/allnets/integration-changes.json`; `test_all.py --identity` holds
+  each to its recorded blob and every other owned byte to its line tip, as before.
+
+### 7.3 Consequences of the larger limits, checked
+
+| What | Before | Now | Result |
+|---|---|---|---|
+| Release quorum (5 of 7 Ethereum keys) compromised: what leaves before a pause | bucket 10,000, then 10,000 a day | Ethereum: 50,000, then 50,000 a day (1,562 USDC per 45 min of guardian grace); the three networks: 25,000, then 25,000 a day | bound by the bucket as before; five times (2.5 times) larger. This is the stated price of the decision |
+| The same over one 72 h cooldown gap (guardian chain ended) | 10,000 + 30,000 | Ethereum 50,000 + 150,000; networks 25,000 + 75,000 | 40% of the cap, as before (the ratio is unchanged) |
+| Time for the rate-limited path to empty a full vault | 10 days | 10 days | unchanged (cap = 10 windows); `switchDelay` 14 d still covers it (`vault_pontes.py`) |
+| `MAX_PENDING` 2,048: honest queue at the bucket rate / with one more 12 h delay of lag | 1,500 / 2,000 (10 USDC mints, contract comment); with the 2026-11-17 minimums: Ethereum 148 / 198, Arbitrum One and OP Mainnet 714 / 952, Linea 24 / 33 | Ethereum **742 / 990**; Arbitrum One and OP Mainnet **1,786 / 2,382**; Linea 62 / 83 | Ethereum and Linea fit. **F410-1 (Low, liveness): on Arbitrum One and OP Mainnet the queue fits at the bucket rate but not with one more delay of lag**: a full-rate stream of 21 USDC deposits fills it once executions lag about 5.3 h; `vigia.py` then sends no mint until executions free room (alert `mint-queue-full`; deposits wait, nothing is lost, nothing forged credits). Filling the queue costs the same capital as emptying the bucket (37,500 USDC in 21 USDC deposits), which already delays honest mints. Closed only by a higher minimum deposit on those two networks (25 USDC gives 2,000 with lag) or a smaller window: a fee-schedule decision, not taken here |
+| Guardian cancel rate needed against a forger holding the mint quorum | 2.84 a minute (`MAX_PENDING` / 12 h); measured about 25 | the same | independent of the limits. Each forged candidate can now carry up to the bucket (50,000 / 25,000) |
+| Large-mint delay, T = 0 | every mint waits 12 h | the same | unchanged; a single mint is at most the window |
+| Releases a day at the smallest burn (window / `l2MinBurn`) | Ethereum 100; Arbitrum One, OP Mainnet 500; Linea 16 | Ethereum 500; Arbitrum One, OP Mainnet 1,250; Linea 41 | the signers' budget `max_release_signs_per_hour` is per burn, not per day: unaffected |
+| Relayer gas for those releases at the gas ceiling, worst case a day | Ethereum 0.041 ETH; Arbitrum One, OP Mainnet 0.052 ETH; Linea 0.007 ETH | Ethereum **0.207 ETH** (500 x 207,000 gas x 2 gwei; 0.024 ETH at the price measured on 2026-11-17); Arbitrum One, OP Mainnet **0.129 ETH** each (execution gas only); Linea **0.017 ETH** | the relayer's gas reserve per day of autonomy is five times (2.5 times) the earlier figure. The fee of those smallest exits (50 USD a day on Ethereum) is below their gas at the ceiling (376 USD): unchanged per exit, the minimum burn is a floor, not the break-even (`networks.json` `relayCost.formula`) |
+| L2 gas for mints, worst case a day (window / smallest mint, `mint_gas_limit` 600,000 at 50 gwei) | Ethereum 99 mints | Ethereum 495 mints: 14.9 BLCH at the ceiling | the L2 gas key needs five times the reserve |
+| L2 block space (48 blocks of 64 transactions a day in `agents/347-fee-economics-r17.md`: 3,072) | 1,116 smallest burns a day over the four routes | 3,041 smallest burns a day, plus about 2,900 mints | under saturation by smallest items the L2 block space binds before the windows do. Liveness only |
+| Monitoring thresholds, alert rules | - | - | none holds an amount: the guardian, reserves and package templates carry times only; `reservas` `tolerance` is 0. Nothing to change |
+| Operator templates (`busdc-ops`, per network `ops/`) | - | - | no limit in them; regenerated files are byte-identical except the three networks' configs |
+| DEX on the Bloch L2 (repo postern-dex, `main` `ba1455b`) | pins the bridge token | **the L2 DEX gate refuses the new bUSDC**: `deployments/mainnet/bridge-token.pin.json` `mainnetPolicy.maxSupplyCap` is `100000000000`; `dex-mainnet.config.json` `bridgeBucketCapacity` and `opening-form.json` `busdcBucketCapacity` are `10000000000`; its copies of `bridge.network.json` are imported from the route line branches and show the earlier limits | **cross-area, not changed here**: postern-dex must take 500,000 / 50,000 (and re-import the route files from `main`) before bUSDC can be listed on the L2 DEX. The DEX rule "cap x 10 <= bucket" still holds for its 1,000 bUSDC cap |
+| Vault and token creation gas | 4,598,052 / 4,822,592 | see `docs/BRIDGE-OWNER-CEREMONY.md` section 17 (rehearsed again with the new arguments) | same argument sizes |
+
+### 7.4 Not done / not proven
+
+- No external audit. No real key, nothing deployed, nothing sent to a public network.
+- F410-1 is open (a decision on the minimum deposit of Arbitrum One and OP Mainnet).
+- The DEX repository still pins the earlier limits (row above).
+- The held routes' limits were not reviewed against the new aggregate exposure; they are unchanged.
+

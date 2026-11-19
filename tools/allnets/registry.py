@@ -20,7 +20,10 @@ Launch status in the registry (`launch.state`):
   undeclared                    the route's file carries no `launch` block and no finding is open: NOT launchable
   held | out                    as the source says (Base held, BNB Smart Chain out of v1)
 `launch.v1` is true only for `launchable`. Every route also keeps its own `status` (today `unaudited-not-deployed`
-for all): launchable is a design statement, not a deployment; external audit and the owner's ceremony come first.
+for all): launchable is a design statement, not a deployment. Owner decision of 2026-11-19 for the four launchable
+routes (Ethereum, Arbitrum One, OP Mainnet, Linea): the external audit is done AFTER launch; they stay UNAUDITED and
+their caps (decided the same day, C9) are sized as the maximum loss of the unaudited period. For every held route the
+external audit and the owner's ceremony still come first.
 
 Cross-route checks (any failure refuses `write` and fails `check`), each one a property the isolation of
 BRIEF-ROUND16.md architecture point 2 rests on:
@@ -35,6 +38,9 @@ BRIEF-ROUND16.md architecture point 2 rests on:
      severity with a known first word (Critical, High, Medium in `findings`; Low, Info, residual in `listed`); the
      findings file itself is read fail-closed (findings_doc: a missing file, a missing or misspelled `findings` or
      `listed` key, a wrong type or an unknown top-level key stops the generator: nothing is written or printed)
+  C9 the cap and window of every EVM route are the launch limits recorded for its chain in tools/evm-nets (networks.json
+     `limits` and launch.py LIMITS, decided 2026-11-19; Base and BNB Smart Chain keep the earlier values), the window is
+     24 h and the cap is ten windows
 Standard library only. Reads files; writes only deployments/bridges.json and the launch table between the markers of README.md.
 """
 import json
@@ -232,9 +238,12 @@ def build():
                    'and nothing is deployed (addresses TBD-deploy).',
            'l2ChainId': L2_CHAIN, 'tokenCreationCodeKeccak': CREATION_KECCAK,
            'checks': ['C1 network ids', 'C2 L2 symbols and names', 'C3 source chain ids', 'C4 source-domain labels',
-                      'C5 frozen token on 700770', 'C6 owner fee recipients', 'C7 one committee', 'C8 findings name routes'],
+                      'C5 frozen token on 700770', 'C6 owner fee recipients', 'C7 one committee', 'C8 findings name routes',
+                      'C9 launch limits'],
            'routes': [{'id': n, **out[n]} for n in order],
            'listedFindings': listed, 'coverageNotes': fdoc.get('coverageNotes', [])}
+    if not errors:
+        reg['launchLimits'] = launch_limits({r['id']: r for r in reg['routes']})
     return reg, errors
 
 
@@ -274,7 +283,37 @@ def cross_checks(out, findings):
         for r in f['routes']:
             if r not in out:
                 errs.append(f'C8 finding {f["id"]} names unknown route {r}')
+    launch = routes._launch()
+    for n, e in out.items():
+        if e['network']['kind'] != 'evm':
+            continue
+        try:
+            want = launch.limits(int(e['network']['chainId']))
+        except (launch.LaunchError, ValueError) as err:
+            errs.append(f'C9 {n}: the launch limits cannot be read: {err}')
+            continue
+        if want is None:
+            errs.append(f'C9 {n}: no launch limits are recorded for chain {e["network"]["chainId"]}')
+            continue
+        got = (e['limits'].get('cap'), e['limits'].get('window'), e['limits'].get('windowSeconds'))
+        if got != (str(want['cap']), str(want['window_limit']), want['window_seconds']) or type(got[2]) is not int:
+            errs.append(f'C9 {n}: cap, window, windowSeconds {got} are not the decided launch limits '
+                        f'{(str(want["cap"]), str(want["window_limit"]), want["window_seconds"])}')
+        elif int(got[0]) != want['windows_per_cap'] * int(got[1]):
+            errs.append(f'C9 {n}: cap {got[0]} is not {want["windows_per_cap"]} windows of {got[1]}')
     return errs
+
+
+def launch_limits(out):
+    """The decision of 2026-11-19 as the registry states it: the text of networks.json `limits`, and per launchable EVM
+    route its cap and window, with the sum of the caps (the exposure under the one committee)."""
+    top = routes._launch().registry()['limits']
+    rows = [{'id': n, 'cap': e['limits']['cap'], 'window': e['limits']['window'], 'windowSeconds': e['limits']['windowSeconds']}
+            for n, e in out.items() if e['network']['kind'] == 'evm' and e['launch']['sourceState'] == 'launchable']
+    return {'decided': top['decided'], 'decision': top['decision'], 'rule': top['rule'], 'windowsPerCap': top['windowsPerCap'],
+            'routes': rows, 'aggregateCap': str(sum(int(r['cap']) for r in rows)),
+            'audit': 'Owner decision of 2026-11-19: the external audit of the launchable routes is done AFTER launch. They are '
+                     'UNAUDITED; the cap of each route is the most it can lose. Held routes are not part of this decision.'}
 
 
 README = ROOT / 'README.md'
@@ -299,6 +338,14 @@ def readme_table(reg):
     if notes:
         rows += ['', 'What this table does not cover, and findings closed without their own reviewer pass:', '']
         rows += [f'- {n}' for n in notes]
+    ll = reg.get('launchLimits')
+    if ll:
+        usd = lambda units: f'{int(units) // 10**6:,}'  # noqa: E731
+        rows += ['', f'Launch limits of the launchable routes, decided {ll["decided"]} (immutable once deployed; '
+                     f'cap = {ll["windowsPerCap"]} windows; in USDC):', '',
+                 '| Route | Cap (also the L2 supply cap) | Window per 24 h, each way (also the largest deposit and burn) |', '|---|---|---|']
+        rows += [f"| limits: {r['id']} | {usd(r['cap'])} | {usd(r['window'])} |" for r in ll['routes']]
+        rows += [f"| limits: all {len(ll['routes'])} under the one committee | {usd(ll['aggregateCap'])} | |", '', ll['audit']]
     return '\n'.join(rows)
 
 
@@ -331,7 +378,7 @@ def main(argv):
     if mode == 'write':
         OUT.write_text(text)
         README.write_text(readme_with(reg))
-        print(f'wrote README.md launch table; wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C8 passed')
+        print(f'wrote README.md launch table; wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C9 passed')
         return 0
     if mode == 'check':
         if not OUT.exists() or OUT.read_text() != text:
@@ -340,7 +387,7 @@ def main(argv):
         if README.read_text() != readme_with(reg):
             print('README.md launch table differs from the registry: run `registry.py write`')
             return 1
-        print(f'{OUT.relative_to(ROOT)} current: {len(reg["routes"])} routes, checks C1-C8 passed')
+        print(f'{OUT.relative_to(ROOT)} current: {len(reg["routes"])} routes, checks C1-C9 passed')
         return 0
     raise SystemExit(f'unknown mode {mode}')
 

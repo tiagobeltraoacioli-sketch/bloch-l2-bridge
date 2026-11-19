@@ -193,7 +193,7 @@ Cross-system:
 - **Guardian pause chains.** One key still pauses at once, but each guardian may start one pause per chain of
   consecutive pauses. With g guardians a chain lasts at most g × `pauseDuration`, then `pauseCooldown` stays open
   (`testC5`). The cost: in a real, lasting compromise the vault reopens after the chain, and the attacker gets the
-  bucket plus its refill over the cooldown (mainnet: 10,000 + 30,000 USDC per 72 h gap). Until the LC port only
+  bucket plus its refill over the cooldown (mainnet: 50,000 + 150,000 USDC per 72 h gap at the launch limits of 2026-11-19; 10,000 + 30,000 when this was written). Until the LC port only
   `guardiao.py` pauses automatically, so the second guardian's operator must be ready to renew by hand.
 - **No signer rotation.** Three lost release keys of seven stop releases for good; two stop `unpause` and the switch
   at the proposed 6-of-7. There is no rescue path, by design.

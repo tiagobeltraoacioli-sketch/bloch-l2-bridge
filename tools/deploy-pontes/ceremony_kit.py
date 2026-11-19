@@ -20,7 +20,8 @@ Every command writes JSON to stdout; exit 0 = done, 2 = refused (with the reason
               overwritten. Then `key_inventory.py check` with both configs must pass, or nothing is written.
   schedule    --token-config T --vault-config V [--relayer-template R]
               The decided fee schedule of the Ethereum route (fees, minimums, relayer gas ceiling, owner fee address)
-              against the configs, value by value; windows and caps are printed as the open owner decision.
+              against the configs, value by value, and the launch limits decided on 2026-11-19 (cap, window, supply
+              cap, bucket, refill) the same way: a config that carries any other limit is refused.
   ethereum    --token-config T --vault-verify FILE
               Copies `busdcEthereum` of `vault_pontes.py verify` into the token config's `ethereum` block; refused if
               the vault guard or cap there differs from what is already decided in the token config.
@@ -79,6 +80,18 @@ SCHEDULE = {
     'tokenMinBurn': 100_000_000,
     'largeMintThreshold': 0,
     'relayerEthCeilingGwei': 2,
+}
+# The launch limits of the Ethereum route, decided 2026-11-19 (owner: windows and caps delegated to the coordinator;
+# coordinator decision of the same day): cap 500,000 USDC = 10 windows, window 50,000 USDC per 24 h each way, the L2
+# bucket refilled in the same 24 h (floor). A third record on purpose, beside tools/evm-nets/networks.json `limits` and
+# tools/evm-nets/launch.py LIMITS (test_ceremony_kit.py holds the three equal): the owner's kit states what it checks.
+LIMITS = {
+    'vaultCap': 500_000_000_000,
+    'windowLimit': 50_000_000_000,
+    'windowSeconds': 86400,
+    'tokenSupplyCap': 500_000_000_000,
+    'tokenBucketCapacity': 50_000_000_000,
+    'tokenRefillPerSecond': 578703,
 }
 PLACEHOLDER = re.compile(r'^TBD')
 
@@ -219,15 +232,28 @@ def schedule(token_cfg, vault_cfg, relayer=None):
     refuse(not diff, f'the configs differ from the decided fee schedule: {json.dumps(diff)}')
     net = SCHEDULE['minDeposit'] - SCHEDULE['minDeposit'] * SCHEDULE['depositBps'] // 10_000
     refuse(net >= SCHEDULE['l2MinBurn'], 'the smallest deposit nets below the minimum burn')
+    limits = {
+        'vaultCap': v.get('cap'), 'windowLimit': v['policy'].get('windowLimit'), 'windowSeconds': v['policy'].get('windowSeconds'),
+        'tokenSupplyCap': token_cfg['limits'].get('supplyCap'), 'tokenBucketCapacity': token_cfg['limits'].get('bucketCapacity'),
+        'tokenRefillPerSecond': token_cfg['limits'].get('refillPerSecond'),
+    }
+    diff = {k: {'config': limits[k], 'decided': LIMITS[k]} for k in LIMITS
+            if limits[k] != LIMITS[k] or type(limits[k]) is not int}
+    refuse(not diff, f'the configs differ from the launch limits decided on 2026-11-19: {json.dumps(diff)}')
+    refuse(LIMITS['vaultCap'] == LIMITS['tokenSupplyCap'] == 10 * LIMITS['windowLimit']
+           and LIMITS['windowLimit'] == LIMITS['tokenBucketCapacity']
+           and LIMITS['tokenRefillPerSecond'] == LIMITS['windowLimit'] // LIMITS['windowSeconds'],
+           'the decided limits break their own rule (cap = supply cap = 10 windows; window = bucket; refill = floor)')
     return {
         'decision': 'schedule-ok',
         'checked': got,
         'smallestDepositNet': net,
         'smallestExitPaid': SCHEDULE['l2MinBurn'] - math.ceil(SCHEDULE['l2MinBurn'] * SCHEDULE['releaseBps'] / 10_000),
-        'openOwnerDecision': {
-            'vaultCap': v['cap'], 'windowLimit': v['policy']['windowLimit'], 'windowSeconds': v['policy']['windowSeconds'],
-            'tokenSupplyCap': token_cfg['limits']['supplyCap'], 'tokenBucketCapacity': token_cfg['limits']['bucketCapacity'],
-            'note': 'bridge windows and caps are unchanged and still an open owner decision (BRIEF-ROUND18.md)'},
+        'launchLimits': {
+            **limits, 'decided': '2026-11-19',
+            'note': 'decided 2026-11-19 (owner: windows and caps delegated to the coordinator): cap 500,000 USDC = 10 windows, '
+                    'window 50,000 USDC per 24 h each way; immutable once deployed. The launch runs before the external audit '
+                    '(owner decision of the same day): the cap is the most this route can lose'},
     }
 
 
@@ -243,6 +269,9 @@ def ethereum(token_cfg, verify_out):
     refuse(old['vaultGuard']['pauseDuration'] == be['vaultGuard']['pauseDuration']
            and old['vaultGuard']['pauseCooldown'] == be['vaultGuard']['pauseCooldown'], 'vault pause timing differs')
     refuse(be['vaultCap'] >= t['limits']['supplyCap'], 'vault cap below the token supplyCap')
+    refuse(be['vaultCap'] == t['limits']['supplyCap'] == LIMITS['vaultCap'],
+           f'the vault cap on chain ({be["vaultCap"]}) and the token supplyCap ({t["limits"]["supplyCap"]}) must both be the '
+           f'decided {LIMITS["vaultCap"]} (launch limits of 2026-11-19)')
     for k in ('vault', 'route', 'vaultCodeHash', 'vaultCap'):
         refuse(old.get(k) in (None, be[k]) or PLACEHOLDER.match(str(old.get(k))), f'token ethereum.{k} already holds {old.get(k)}')
     refuse(old.get('chainId') == be['chainId'], 'token ethereum.chainId differs')
@@ -318,7 +347,10 @@ def onchain(token_cfg, vault_cfg, eth_urls, l2_urls, vault, token):
         ('vault minDeposit()', e('minDeposit()'), SCHEDULE['minDeposit']),
         ('vault l2MinBurn()', e('l2MinBurn()'), SCHEDULE['l2MinBurn']),
         ('vault cap()', e('cap()'), v['cap']),
+        ('vault cap() is the decided cap', e('cap()'), LIMITS['vaultCap']),
         ('vault windowLimit()', e('windowLimit()'), v['policy']['windowLimit']),
+        ('vault windowLimit() is the decided window', e('windowLimit()'), LIMITS['windowLimit']),
+        ('vault windowSeconds()', e('windowSeconds()'), LIMITS['windowSeconds']),
         ('vault threshold()', e('threshold()'), v['signers']['threshold']),
         ('vault switchThreshold()', e('switchThreshold()'), v['policy']['switchThreshold']),
         ('vault signerCount()', e('signerCount()'), len(v['signers']['set'])),
@@ -326,10 +358,13 @@ def onchain(token_cfg, vault_cfg, eth_urls, l2_urls, vault, token):
         ('vault token() is USDC', e('token()'), int(v['token'], 16)),
         ('token minBurn()', t('minBurn()'), SCHEDULE['tokenMinBurn']),
         ('token supplyCap()', t('supplyCap()'), lim['supplyCap']),
+        ('token supplyCap() is the decided cap', t('supplyCap()'), LIMITS['tokenSupplyCap']),
+        ('token refillPerSecond()', t('refillPerSecond()'), LIMITS['tokenRefillPerSecond']),
         ('token largeMintThreshold()', t('largeMintThreshold()'), SCHEDULE['largeMintThreshold']),
         ('token largeMintDelay()', t('largeMintDelay()'), lim['largeMintDelay']),
         ('token threshold()', t('threshold()'), token_cfg['signers']['threshold']),
         ('token bucketCapacity()', t('bucketCapacity()'), lim['bucketCapacity']),
+        ('token bucketCapacity() is the decided window', t('bucketCapacity()'), LIMITS['tokenBucketCapacity']),
         ('token sourceVault() is the vault', t('sourceVault()'), int(vault, 16)),
         ('token sourceChainId()', t('sourceChainId()'), vault_cfg['ethereum']['chainId']),
     ]

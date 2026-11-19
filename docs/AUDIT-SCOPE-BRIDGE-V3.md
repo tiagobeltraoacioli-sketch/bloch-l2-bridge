@@ -1,5 +1,16 @@
 # Audit scope: bUSDC bridge V3 launch design (Ethereum USDC <-> Bloch L2)
 
+**Dated note, 2026-11-19 (round 20; `docs/BRIDGE-ALLNETS.md` section 7).** Two decisions were taken after this document was
+written, and neither changes a contract. (1) The owner decided that the external audit is done AFTER launch: the route
+launches UNAUDITED. (2) The launch limits were decided (owner: delegated to the coordinator): cap and supply cap
+**500,000 USDC**, window and bucket **50,000 USDC per 24 h**, `refillPerSecond` 578703. Every figure below that states the
+configuration of the freeze (cap 100,000, bucket 10,000 a day, and the bounds derived from them) is the record of the
+freeze commit; in the tree after 2026-11-19 each scales by five: a release quorum takes the bucket (50,000) plus 50,000 a
+day, 200,000 over a 72 h cooldown gap, and the whole cap in about nine days; fee revenue at the caps is at most about
+$50 a day from releases. The honest queue at the bucket rate is 742 mints (990 with one delay of lag) with the 101 USDC
+minimum deposit, under `MAX_PENDING`. The contracts, the 5-of-7 / 6-of-7 / 3+3 shape, T = 0, the 12 h delay and the fees
+are unchanged.
+
 The target is branch `codex/bridge-v3-lc-merge-r8-20261102` of `bloch-l2-bridge`: the V3 launch tip `9f91a56` (`codex/bridge-v3-r7-20261102`) plus `RecoverableReleaseVerifier` with its handoff (agent 103, `2a116fa`, merged unchanged in `4422d13`), its tests on the V3 vault and the anvil release driver (agent 138). The contracts of `9f91a56` are unchanged on it. This document was first written by agent 131 on `codex/bridge-audit-scope-v3-r8-20261102` (`323eddd`, docs only) and extended for the verifier by agent 138.
 
 **Round 10 release candidate (agent 200):** branch `codex/bridge-rc-r10-20261102`, from agent 194's `8d988ce` (T = 0 in

@@ -410,11 +410,34 @@ def validate(cfg, rehearsal):
                 refuse(floor is None or lim['minBurn'] >= floor,
                        f'limits.minBurn {lim["minBurn"]} is below {floor}: the measured relayer cost of one release at the gas ceiling '
                        'divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula)')
+        decided = None
+        if not rehearsal:
+            # Launch limits of 2026-11-19 (owner: windows and caps delegated to the coordinator): supplyCap, bucketCapacity
+            # and refillPerSecond of a token whose source is chain 1 or a network of the EVM registry are the decided
+            # ones (tools/evm-nets/networks.json `limits`, recorded a second time in tools/evm-nets/launch.py LIMITS), and
+            # the vault cap written into this config equals the supply cap. A route outside the registry (opened by
+            # data) keeps its own tool's rules.
+            launch = evm_launch()
+            if launch is not None:
+                try:
+                    decided = launch.limits(eth['chainId'])
+                except launch.LaunchError as e:
+                    refuse(False, f'the launch limits cannot be read, so supplyCap and bucketCapacity cannot be checked: {e}')
+                if decided is not None:
+                    refuse((lim['supplyCap'], lim['bucketCapacity'], lim['refillPerSecond'])
+                           == (decided['supply_cap'], decided['bucket_capacity'], decided['refill_per_second']),
+                           f'launch limits of source chain {eth["chainId"]} (decided 2026-11-19, tools/evm-nets/networks.json '
+                           f'`limits`): supplyCap {decided["supply_cap"]}, bucketCapacity {decided["bucket_capacity"]}, refillPerSecond '
+                           f'{decided["refill_per_second"]}; the config has {lim["supplyCap"]}, {lim["bucketCapacity"]}, '
+                           f'{lim["refillPerSecond"]}')
         refuse(is_addr(eth['vault']), 'ethereum.vault is undecided or invalid')
         refuse(is_hash(eth['route']) and int(eth['route'], 16), 'ethereum.route is undecided (vault.routeId())')
         refuse(is_hash(eth['vaultCodeHash']), 'ethereum.vaultCodeHash is undecided')
         refuse(is_uint(eth['vaultCap'], UINT64_MAX, 1), 'ethereum.vaultCap is undecided (vault.cap())')
         refuse(lim['supplyCap'] <= eth['vaultCap'], 'supplyCap exceeds the vault cap')
+        refuse(decided is None or eth['vaultCap'] == lim['supplyCap'],
+               f'ethereum.vaultCap {eth["vaultCap"]} differs from supplyCap {lim["supplyCap"]}: the vault cap and the L2 supply '
+               'cap are one decided number (launch limits of 2026-11-19)')
         refuse(eth['vault'].lower() not in signers + guardians, 'the vault address is listed as a role')
         # the vault's own guardians (ContextBoundSourceVault Guard constructor argument), checked on-chain by verify
         vg = eth['vaultGuard']

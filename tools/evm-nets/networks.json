@@ -1,6 +1,6 @@
 {
   "domain": "bloch.bridge.evm-networks.v1",
-  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` is the owner's fee address; each network's `feeBps`, `minDeposit` and `l2MinBurn` are the fee schedule decided by the coordinator on 2026-11-17 (agents/347-fee-economics-r17.md), which the deploy tools require of every vault config of these networks (R329-EVM-2); `relay` and `relayCost` hold the measured relayer cost of a release and the gas ceiling, from which the tools derive the least minimum burn they accept (`relayCost.formula`). `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
+  "notes": "Source networks of the EVM bridges (rounds 16 and 17). `launch` is the launch status of each network; it is recorded a second time in tools/evm-nets/launch.py and every tool refuses a network whose `launch.v1` is false, or every network when the two records disagree (review R329-EVM-1). `feeRecipient` is the owner's fee address; each network's `feeBps`, `minDeposit` and `l2MinBurn` are the fee schedule decided by the coordinator on 2026-11-17 (agents/347-fee-economics-r17.md), which the deploy tools require of every vault config of these networks (R329-EVM-2); `relay` and `relayCost` hold the measured relayer cost of a release and the gas ceiling, from which the tools derive the least minimum burn they accept (`relayCost.formula`). `limits` (top level: the rule and the Ethereum route; per network: `cap` and `windowLimit`) are the launch limits decided on 2026-11-19 (owner: windows and caps delegated to the coordinator), recorded a second time in tools/evm-nets/launch.py (`LIMITS`); the deploy tools require them of every vault and token config of these networks and of chain 1, and when the two records disagree every network is refused. `signer` is what all signers of one network share: eth_half.py and vigia.py take it by chain id and refuse an operator file that contradicts it (R329-EVM-3); `interval_s`, `max_release_signs_per_hour` and `refused_retry` are the daemon pacing for that network's window (R329-EVM-6). `timing` is what a release round is held to (R329-EVM-4): the join window is anchor_max_age x anchorBlockSeconds; a signature whose work or anchor age reaches alertFraction of it is alerted, and a signer whose recent work per signature exceeds holdFraction of it starts no round. Asset addresses were read on-chain and against the issuer's own page on 2026-11-16 (agents/320-bridge-evm-nets-r16.md section 2). `rpc` is a public read-only endpoint used only as the fork source of local rehearsals; operators use their own nodes. Block times and finality lags are measurements of 2026-11-16, not guarantees. Every network takes ProvenanceSourceVault byte-identical to the Ethereum bridge.",
   "feeRecipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
   "relayCost": {
     "formula": "l2MinBurn >= ceil(releaseGas x gasCeilingGwei x 1e-9 x nativeUsd x 1e6 / (1 - releaseBps / 10000)) units: the smallest exit still pays out at least what its release costs the relayer at the gas ceiling. The deploy tools refuse a config below it (tools/deploy-pontes/vault_pontes.py, deploy_pontes.py). It is a floor, not the fee break-even: the fee of the smallest exit covers the relayer at a gas price of l2MinBurn x releaseBps / 10000 / (releaseGas x 1e-9 x nativeUsd) gwei.",
@@ -20,6 +20,18 @@
       "measured": "release gas: the Ethereum bridge rehearsals (206,932 to 207,000). eth_gasPrice 0.1148 gwei on 2026-11-17 02:25 UTC: the relayer pays 0.23 gwei, 0.086 USD a release; 0.752 USD at the ceiling. Fee of the smallest exit (100 USDC at 10 bps): 0.10 USD."
     }
   },
+  "limits": {
+    "decided": "2026-11-19",
+    "decision": "Owner decision of 2026-11-19: the bridge windows and caps were delegated to the coordinator (\"best technique for market parameters\"). Coordinator decision of the same day: Ethereum cap 500,000 USDC and window 50,000 USDC per 24 h each way; Arbitrum One, OP Mainnet and Linea cap 250,000 USDC and window 25,000 USDC per 24 h each way. Why: the limits are constructor arguments, immutable once deployed; by the owner's decision of the same day the launch runs BEFORE the external audit, so the cap is the maximum loss of a route and is sized for the unaudited period; agents/347-fee-economics-r17.md measured an Ethereum-only break-even of about 60,000 USD crossing a day, which the earlier window of 10,000 a day each way (20,000 both ways) could never reach, and a window of 50,000 each way allows 100,000; the cap is ten windows, so the rate-limited release path needs ten days to empty a full vault against a guardian pause of three days; the audited revision is expected to need a new vault anyway, where the limits are decided again. Aggregate exposure of the four launchable routes under the one committee: 1,250,000 USDC. Base (held) and BNB Smart Chain (out of v1) were not part of the decision and keep the earlier values (cap 100,000, window 10,000).",
+    "rule": "cap = windowsPerCap x windowLimit; the L2 token's supplyCap = cap, bucketCapacity = windowLimit and refillPerSecond = floor(windowLimit / windowSeconds) (the rounding of the earlier value: 10,000e6 / 86400 was stored as 115740); the largest single deposit and the largest single burn are windowLimit. vault_pontes.py and deploy_pontes.py refuse any other value on chain 1 and on the networks of this registry.",
+    "windowsPerCap": 10,
+    "windowSeconds": 86400,
+    "ethereum": {
+      "chainId": 1,
+      "cap": 500000000000,
+      "windowLimit": 50000000000
+    }
+  },
   "networks": {
     "arbitrum-one": {
       "name": "Arbitrum One",
@@ -35,6 +47,10 @@
       },
       "minDeposit": 21000000,
       "l2MinBurn": 20000000,
+      "limits": {
+        "cap": 250000000000,
+        "windowLimit": 25000000000
+      },
       "relay": {
         "releaseGas": 206932,
         "gasCeilingGwei": 0.5,
@@ -107,6 +123,10 @@
       },
       "minDeposit": 21000000,
       "l2MinBurn": 20000000,
+      "limits": {
+        "cap": 100000000000,
+        "windowLimit": 10000000000
+      },
       "relay": {
         "releaseGas": 206950,
         "gasCeilingGwei": 0.5,
@@ -179,6 +199,10 @@
       },
       "minDeposit": 21000000,
       "l2MinBurn": 20000000,
+      "limits": {
+        "cap": 250000000000,
+        "windowLimit": 25000000000
+      },
       "relay": {
         "releaseGas": 206968,
         "gasCeilingGwei": 0.5,
@@ -251,6 +275,10 @@
       },
       "minDeposit": 601000000,
       "l2MinBurn": 600000000,
+      "limits": {
+        "cap": 250000000000,
+        "windowLimit": 25000000000
+      },
       "relay": {
         "releaseGas": 210269,
         "gasCeilingGwei": 2,
@@ -323,6 +351,10 @@
       },
       "minDeposit": 11000000,
       "l2MinBurn": 10000000,
+      "limits": {
+        "cap": 100000000000,
+        "windowLimit": 10000000000
+      },
       "relay": {
         "releaseGas": null,
         "gasCeilingGwei": null,

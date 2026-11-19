@@ -11,7 +11,8 @@
     "C5 frozen token on 700770",
     "C6 owner fee recipients",
     "C7 one committee",
-    "C8 findings name routes"
+    "C8 findings name routes",
+    "C9 launch limits"
   ],
   "routes": [
     {
@@ -47,8 +48,8 @@
       "limits": {
         "minDeposit": "101000000",
         "l2MinBurn": "100000000",
-        "cap": "100000000000",
-        "window": "10000000000",
+        "cap": "500000000000",
+        "window": "50000000000",
         "windowSeconds": 86400
       },
       "committee": {
@@ -111,8 +112,8 @@
       "limits": {
         "minDeposit": "21000000",
         "l2MinBurn": "20000000",
-        "cap": "100000000000",
-        "window": "10000000000",
+        "cap": "250000000000",
+        "window": "25000000000",
         "windowSeconds": 86400
       },
       "committee": {
@@ -397,8 +398,8 @@
       "limits": {
         "minDeposit": "601000000",
         "l2MinBurn": "600000000",
-        "cap": "100000000000",
-        "window": "10000000000",
+        "cap": "250000000000",
+        "window": "25000000000",
         "windowSeconds": 86400
       },
       "committee": {
@@ -463,8 +464,8 @@
       "limits": {
         "minDeposit": "21000000",
         "l2MinBurn": "20000000",
-        "cap": "100000000000",
-        "window": "10000000000",
+        "cap": "250000000000",
+        "window": "25000000000",
         "windowSeconds": 86400
       },
       "committee": {
@@ -895,5 +896,39 @@
     "The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.",
     "F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.",
     "Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal."
-  ]
+  ],
+  "launchLimits": {
+    "decided": "2026-11-19",
+    "decision": "Owner decision of 2026-11-19: the bridge windows and caps were delegated to the coordinator (\"best technique for market parameters\"). Coordinator decision of the same day: Ethereum cap 500,000 USDC and window 50,000 USDC per 24 h each way; Arbitrum One, OP Mainnet and Linea cap 250,000 USDC and window 25,000 USDC per 24 h each way. Why: the limits are constructor arguments, immutable once deployed; by the owner's decision of the same day the launch runs BEFORE the external audit, so the cap is the maximum loss of a route and is sized for the unaudited period; agents/347-fee-economics-r17.md measured an Ethereum-only break-even of about 60,000 USD crossing a day, which the earlier window of 10,000 a day each way (20,000 both ways) could never reach, and a window of 50,000 each way allows 100,000; the cap is ten windows, so the rate-limited release path needs ten days to empty a full vault against a guardian pause of three days; the audited revision is expected to need a new vault anyway, where the limits are decided again. Aggregate exposure of the four launchable routes under the one committee: 1,250,000 USDC. Base (held) and BNB Smart Chain (out of v1) were not part of the decision and keep the earlier values (cap 100,000, window 10,000).",
+    "rule": "cap = windowsPerCap x windowLimit; the L2 token's supplyCap = cap, bucketCapacity = windowLimit and refillPerSecond = floor(windowLimit / windowSeconds) (the rounding of the earlier value: 10,000e6 / 86400 was stored as 115740); the largest single deposit and the largest single burn are windowLimit. vault_pontes.py and deploy_pontes.py refuse any other value on chain 1 and on the networks of this registry.",
+    "windowsPerCap": 10,
+    "routes": [
+      {
+        "id": "ethereum",
+        "cap": "500000000000",
+        "window": "50000000000",
+        "windowSeconds": 86400
+      },
+      {
+        "id": "arbitrum-one",
+        "cap": "250000000000",
+        "window": "25000000000",
+        "windowSeconds": 86400
+      },
+      {
+        "id": "linea",
+        "cap": "250000000000",
+        "window": "25000000000",
+        "windowSeconds": 86400
+      },
+      {
+        "id": "op-mainnet",
+        "cap": "250000000000",
+        "window": "25000000000",
+        "windowSeconds": 86400
+      }
+    ],
+    "aggregateCap": "1250000000000",
+    "audit": "Owner decision of 2026-11-19: the external audit of the launchable routes is done AFTER launch. They are UNAUDITED; the cap of each route is the most it can lose. Held routes are not part of this decision."
+  }
 }

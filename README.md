@@ -25,7 +25,9 @@ cover: the operator-packages and ceremony-kit lines had no reviewer pass of thei
 fail-closed: a missing file, a missing or misspelled `findings` or `listed` key, a wrong type or an unknown key
 stops it and nothing is written. `held` and `out` come from the route's own source
 and are not lifted by closing findings: every held route also waits for its external audit and the owner's key
-ceremony.
+ceremony. For the four launchable routes the owner decided on 2026-11-19 that the external audit is done AFTER launch:
+they are **UNAUDITED**, and the launch limits decided the same day (under the table) are sized as the most each route
+can lose ([docs/BRIDGE-ALLNETS.md](docs/BRIDGE-ALLNETS.md) section 7).
 
 <!-- allnets-launch-table:begin -->
 | Route | L2 token | Launch status | Open findings (Medium or above) | Open findings below Medium |
@@ -73,10 +75,25 @@ What this table does not cover, and findings closed without their own reviewer p
 - The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.
 - F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.
 - Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal.
+
+Launch limits of the launchable routes, decided 2026-11-19 (immutable once deployed; cap = 10 windows; in USDC):
+
+| Route | Cap (also the L2 supply cap) | Window per 24 h, each way (also the largest deposit and burn) |
+|---|---|---|
+| limits: ethereum | 500,000 | 50,000 |
+| limits: arbitrum-one | 250,000 | 25,000 |
+| limits: linea | 250,000 | 25,000 |
+| limits: op-mainnet | 250,000 | 25,000 |
+| limits: all 4 under the one committee | 1,250,000 | |
+
+Owner decision of 2026-11-19: the external audit of the launchable routes is done AFTER launch. They are UNAUDITED; the cap of each route is the most it can lose. Held routes are not part of this decision.
 <!-- allnets-launch-table:end -->
 
-Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before
-any real funds; the bridge windows and caps are an open owner decision.
+Every route needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony. Owner
+decisions of 2026-11-19: (1) for the four launchable routes (Ethereum, Arbitrum One, OP Mainnet, Linea) the external
+audit is done AFTER launch, so they launch **UNAUDITED** once the key ceremony is done; a held route still needs its
+audit before any real funds; (2) the bridge windows and caps were delegated to the coordinator and are decided: the
+table above, enforced by the deploy tools (`tools/evm-nets/networks.json` `limits`). Nothing is deployed yet.
 
 **Reference components, unaudited, no live bridge deployment.** The historical
 v1 BLCH vault design is custodial. The new

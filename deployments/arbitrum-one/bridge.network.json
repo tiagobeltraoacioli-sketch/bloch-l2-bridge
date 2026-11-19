@@ -67,13 +67,13 @@
     "codeHash": "TBD-deploy"
   },
   "limits": {
-    "cap": "100000000000",
-    "window": "10000000000",
+    "cap": "250000000000",
+    "window": "25000000000",
     "windowSeconds": 86400,
     "minDeposit": "21000000",
-    "maxDeposit": "10000000000",
+    "maxDeposit": "25000000000",
     "l2MinBurn": "20000000",
-    "l2MaxBurn": "10000000000",
+    "l2MaxBurn": "25000000000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
   },
@@ -133,6 +133,6 @@
     }
   },
   "notes": [
-    "UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge's launch values, proposed for this network; the owner confirms them before deployment."
+    "UNAUDITED. Nothing is deployed. Limits decided 2026-11-19: cap 250,000 USDC, window 25,000 per 24 h each way, immutable once deployed. Owner decision of 2026-11-19: the external audit is done AFTER launch; until then the cap is the most this route can lose."
   ]
 }

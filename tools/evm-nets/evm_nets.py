@@ -22,6 +22,7 @@ file: `write` removes them, `check` fails while one exists, and `verify-unit` re
 import copy
 import json
 from pathlib import Path
+import re
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -50,13 +51,19 @@ def vault_config(name, spec, registry, template):
     v['provenance']['fees'].update(recipient=registry['feeRecipient'], depositBps=spec['feeBps']['deposit'],
                                    releaseBps=spec['feeBps']['release'])
     v['policy']['minDeposit'], v['policy']['l2MinBurn'] = spec['minDeposit'], spec['l2MinBurn']
+    # Launch limits of 2026-11-19: each network's own cap and window from the registry (launch.limits), no longer the
+    # Ethereum template's. The rule (cap = 10 windows, 24 h) is checked by launch.py when the registry is loaded.
+    lim = launch.limits(spec['chainId'])
+    v['cap'], v['policy']['windowLimit'], v['policy']['windowSeconds'] = lim['cap'], lim['window_limit'], lim['window_seconds']
     n = c['notes']
+    n['cap'], n['windowLimit'] = limit_notes(spec, lim, registry)
     n['minDeposit'] = (f'{spec["minDeposit"] / 1e6:g} units, l2MinBurn {spec["l2MinBurn"] / 1e6:g} (fee schedule of 2026-11-17, coordinator, '
                        'agents/347-fee-economics-r17.md): immutable. The deploy tool refuses an l2MinBurn below the relayer cost of a '
                        'release at the gas ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula).')
     n['network'] = (f'{spec["name"]} (chain {spec["chainId"]}). In this file the key `ethereum` names the SOURCE network, to keep '
-                    'one config format and one tool for every EVM source. Same committee keys, same limits and same fee as '
-                    'the Ethereum bridge; a separate vault, a separate L2 token and separate books (round 16, isolation).')
+                    'one config format and one tool for every EVM source. Same committee keys as the Ethereum bridge; this '
+                    'network\'s own limits (2026-11-19) and fee schedule (2026-11-17), both from tools/evm-nets/networks.json; '
+                    'a separate vault, a separate L2 token and separate books (round 16, isolation).')
     n['units'] = ('1 unit = 1e6 vault units (6 decimals)' + (
         f'; the vault holds ScaledUnitToken units, 1 unit = {10 ** (asset["decimals"] - 6)} of the {asset["decimals"]}-decimal asset '
         f'{asset["address"]}. vault.token is null until the unit token is deployed (docs/BRIDGE-EVM-NETWORKS.md section 6)' if unit else
@@ -69,17 +76,87 @@ def vault_config(name, spec, registry, template):
                  'address for every EVM network, given 2026-11-16; a single externally owned address by the owner\'s choice). '
                  'A constructor argument: immutable once deployed.')
     n['TBD-owner'] = ('source.revision; deployer.address; deployer.fundedBy.safe; the 7 release signers and 3 guardians (the SAME '
-                      'addresses as in deployments/mainnet/busdc-vault-mainnet.config.json); confirm cap, windowLimit, switchDelay'
+                      'addresses as in deployments/mainnet/busdc-vault-mainnet.config.json); confirm switchDelay (cap and '
+                      'windowLimit were decided on 2026-11-19)'
                       + ('; vault.token (the deployed unit token)' if unit else ''))
     return c
 
 
-def token_config(name, spec, template):
+def usdc(units):
+    return f'{units // 10**6:,}' if units % 10**6 == 0 else f'{units / 1e6:,.6f}'.rstrip('0')
+
+
+def limit_notes(spec, lim, registry):
+    """The `cap` and `windowLimit` notes of a network's vault config, from the registry's decision text."""
+    decided = registry['limits']['decided']
+    if not spec['launch']['v1']:  # never written to a file (no vault config for such a network); kept exact for the record
+        return (f'{usdc(lim["cap"])} units: not part of the decision of {decided}; this network is not launchable',
+                f'{usdc(lim["window_limit"])} units per 24 h: not part of the decision of {decided}')
+    cap = (f'{usdc(lim["cap"])} USDC = {lim["windows_per_cap"]} windows; must equal the L2 supplyCap (busdc-token.config.json, validated); '
+           f'the vault refuses deposits above it. Decided {decided} (owner: windows and caps delegated to the coordinator; coordinator '
+           'decision of the same day; before: proposed 100,000). Immutable once deployed. By the owner\'s decision of the same day the '
+           'launch runs before the external audit, so this cap is the maximum loss of the route and is sized for the unaudited period; '
+           'the reasons and the rule are in tools/evm-nets/networks.json `limits`, and the deploy tools refuse any other value '
+           '(tools/evm-nets/launch.py LIMITS)')
+    window = (f'{usdc(lim["window_limit"])} USDC per 24 h = the L2 token bucket: the release token bucket (capacity; full refill in '
+              'windowSeconds): a colluding release quorum takes at most this plus the refill; it is also the largest single deposit (the '
+              'vault refuses more) and must equal the L2 bucketCapacity, which is the largest single burn (validated). Decided '
+              f'{decided} (before: proposed 10,000). The cap is {lim["windows_per_cap"]} windows: the rate-limited path needs '
+              f'{lim["windows_per_cap"]} days to empty a full vault, against a guardian pause of three days')
+    return cap, window
+
+
+MAX_PENDING = 2048  # BridgedStablecoinV3.MAX_PENDING (the frozen token)
+
+
+def queue_figures(lim, min_deposit, deposit_bps, delay):
+    """(smallest mint, mints queued at most by honest flow at the bucket rate, the same with one more delay of lag): the
+    bucket admits its capacity plus the refill of one mint delay, and every mint waits that delay (T = 0)."""
+    smallest = min_deposit - min_deposit * deposit_bps // 10_000
+    per_delay = lim['refill_per_second'] * delay
+    return smallest, (lim['bucket_capacity'] + per_delay) // smallest, (lim['bucket_capacity'] + 2 * per_delay) // smallest
+
+
+def queue_note(lim, min_deposit, deposit_bps, delay):
+    smallest, peak, lagged = queue_figures(lim, min_deposit, deposit_bps, delay)
+    text = (f'Honest flow at the bucket rate (limits of 2026-11-19: bucket {usdc(lim["bucket_capacity"])} USDC, '
+            f'{usdc(lim["bucket_capacity"] // 2) if delay * 2 == lim["window_seconds"] else usdc(lim["refill_per_second"] * delay)} '
+            f'refilled per {delay // 3600} h delay; smallest mint {usdc(smallest)} USDC) queues at most {peak:,} mints, and '
+            f'{lagged:,} with one more delay of lag')
+    if lagged <= MAX_PENDING:
+        text += ', under MAX_PENDING'
+    else:
+        room = (MAX_PENDING - peak) * smallest / lim['refill_per_second'] / 3600
+        text += (f': ABOVE MAX_PENDING ({MAX_PENDING:,}). A full-rate stream of smallest deposits fills the queue once executions '
+                 f'lag by about {room:.1f} h; the relayer then sends no mint until executions free room (alert mint-queue-full; '
+                 'deposits wait, nothing is lost)')
+    return text + (' (the contract comment states the earlier figures: 10 USDC mints, bucket 10,000; the token code is frozen and '
+                   'unchanged)')
+
+
+QUEUE_SENTENCE = re.compile(r'Honest flow at the bucket rate .*? \(the contract comment states the earlier figures: 10 USDC mints, '
+                            r'bucket 10,000; the token code is frozen and unchanged\)')
+
+
+def token_config(name, spec, template, registry):
     c = copy.deepcopy(template)
     c['token']['name'], c['token']['symbol'] = spec['l2']['name'], spec['l2']['symbol']
     c['ethereum']['chainId'] = spec['chainId']
     c['limits']['minBurn'] = spec['l2MinBurn']
+    lim = launch.limits(spec['chainId'])
+    c['limits'].update(supplyCap=lim['supply_cap'], bucketCapacity=lim['bucket_capacity'], refillPerSecond=lim['refill_per_second'])
     if isinstance(c.get('notes'), dict):
+        c['notes']['pilot'] = (f'launch limits decided {registry["limits"]["decided"]} (owner: windows and caps delegated to the coordinator): '
+                               f'{usdc(lim["bucket_capacity"])} USDC bucket refilled in 24 h (refillPerSecond = floor({usdc(lim["bucket_capacity"])}e6 '
+                               f'/ {lim["window_seconds"]}) = {lim["refill_per_second"]}), supply <= {usdc(lim["supply_cap"])} USDC = the vault cap = '
+                               f'{lim["windows_per_cap"]} buckets; the launch runs before the external audit (owner decision '
+                               f'{registry["limits"]["decided"]}), so the cap is the maximum loss and is sized for the unaudited period '
+                               '(tools/evm-nets/networks.json `limits`; the deploy tools refuse any other value)')
+        design, found = QUEUE_SENTENCE.subn(lambda m: queue_note(lim, spec['minDeposit'], spec['feeBps']['deposit'],
+                                                                 c['limits']['largeMintDelay']), c['notes']['launchDesign'])
+        if found != 1:
+            raise launch.LaunchError('the Ethereum token template\'s launchDesign note no longer holds the queue sentence')
+        c['notes']['launchDesign'] = design
         c['notes']['network'] = (f'L2 token of the {spec["name"]} bridge: {spec["l2"]["symbol"]}. `ethereum` names the source network '
                                  f'(chain {spec["chainId"]}). BridgedStablecoinV3 byte-identical (creation keccak {TOKEN_CREATION}); '
                                  'only the constructor arguments differ. Same mint signers and guardians as bUSDC.')
@@ -234,7 +311,11 @@ def network_json(name, spec, registry, vcfg):
                                 if spec['relay']['gasCeilingGwei'] else [])},
         'explorers': {'source': {'tx': exp + '/tx/{tx}', 'address': exp + '/address/{address}', 'block': exp + '/block/{block}'},
                       'l2': {'tx': 'TBD-owner', 'address': 'TBD-owner'}},
-        'notes': ['UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge\'s launch values, proposed for this network; '
+        'notes': [(f'UNAUDITED. Nothing is deployed. Limits decided {registry["limits"]["decided"]}: cap '
+                   f'{usdc(vcfg["vault"]["cap"])} {asset["symbol"]}, window {usdc(pol["windowLimit"])} per 24 h each way, immutable once '
+                   f'deployed. Owner decision of {registry["limits"]["decided"]}: the external audit is done AFTER launch; until then '
+                   'the cap is the most this route can lose.') if spec['launch']['v1'] else
+                  'UNAUDITED. Nothing is deployed. Limits are the Ethereum bridge\'s launch values, proposed for this network; '
                   'the owner confirms them before deployment.']
     }
     doc['deposit']['refusals'] = ['an amount below minDeposit or above maxDeposit, or one that would pass the cap',
@@ -334,7 +415,7 @@ def derive():
             absent += [DEP / name / f for f in DEPLOY_FILES]
             continue
         files[DEP / name / 'busdc-vault.config.json'] = dump(vcfg)
-        files[DEP / name / 'busdc-token.config.json'] = dump(token_config(name, spec, tt))
+        files[DEP / name / 'busdc-token.config.json'] = dump(token_config(name, spec, tt, registry))
         files[DEP / name / 'ops/eth-half.template.json'] = dump(eth_half(name, spec, ops['eth-half']))
         files[DEP / name / 'ops/signer.template.json'] = dump(signer_template(name, spec, ops['signer']))
         files[DEP / name / 'ops/relayer.template.json'] = dump(relayer_template(name, spec, ops['relayer']))

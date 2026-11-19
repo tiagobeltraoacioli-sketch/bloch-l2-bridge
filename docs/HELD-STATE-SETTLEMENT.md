@@ -46,7 +46,7 @@ the shortfall is shared pro rata. The alternative, first come first served, lets
 leaves the last holders with nothing (agent 172).
 
 The vault's own rules still apply to every settled item: one payment per burn nonce and burn id, the release window
-(10,000 a day at launch values), `totalLocked`, and the release fee. The release fee (5 bps) is taken from every
+(50,000 a day at the launch values of 2026-11-19; 10,000 when this was written), `totalLocked`, and the release fee. The release fee (5 bps) is taken from every
 settled payment and goes to the treasury through `sweepFees`, as for any release.
 
 ## 3. The snapshot

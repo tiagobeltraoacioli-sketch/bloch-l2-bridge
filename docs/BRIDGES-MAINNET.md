@@ -4,6 +4,15 @@ Status 2026-10-14, branch `feat/pontes-mainnet-deploy` (from `feat/pontes-v11` `
 deploys anything. Contracts `WrappedGnBV2` and `BridgedStablecoinV3` over `ProvenanceSourceVault` (shared core `SignerMintedToken`; `BridgedStablecoinV2` remains for the RC pair)
 are **UNAUDITED**; audits come before any cap is raised (and preferably before launch).
 
+**Dated exception, 2026-11-19 (owner and coordinator decisions; `docs/BRIDGE-ALLNETS.md` section 7).** The owner decided that the
+external audit is done AFTER launch, and delegated the bridge windows and caps to the coordinator, who set the bUSDC
+launch limits before any deployment: Ethereum cap 500,000 USDC and window 50,000 USDC per 24 h; Arbitrum One, OP Mainnet
+and Linea cap 250,000 and window 25,000. So the sentence above no longer holds for these four routes: they launch
+**UNAUDITED**, with caps larger than the pilot values of section 2, and the cap of each route is the most it can lose.
+The bUSDC column of section 2 keeps the 2026-10-14 values as the record of that date; the values in force are in
+`deployments/mainnet/*.config.json` and `tools/evm-nets/networks.json` (`limits`), and the deploy tools refuse any other.
+wGSMH is unchanged.
+
 Ground rules: no owner, setter, upgrade or recurring signature; every limit is a constructor immutable;
 a change of any parameter is a new contract plus an assisted migration. A new token always gets a new vault: a used vault
 is never reused (`docs/BUSDC-MAINNET-V2.md`, section 4.5). Mainnet L2 chain id **700770**

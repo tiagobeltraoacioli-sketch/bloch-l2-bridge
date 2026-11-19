@@ -5,7 +5,10 @@ section 6 and `agents/329-bridge-evm-review-r17.md`. **Launchable in bridge v1: 
 held and BNB Smart Chain is out of v1: every tool refuses them (section 0).**
 
 **UNAUDITED. Nothing is deployed, nothing was sent to any public network, no real key was used.** Each of these
-bridges needs its own external audit before real funds. The Ethereum bridge documents stay the reference:
+bridges needs its own external audit. Owner decision of 2026-11-19: for Arbitrum One, OP Mainnet and Linea (and the
+Ethereum route) that audit is done AFTER launch, so they launch unaudited and the cap of each route (250,000 USDC here,
+decided the same day) is the most it can lose (`docs/BRIDGE-ALLNETS.md` section 7). Base and BNB Smart Chain are not
+part of that decision: an audit comes before any real funds there. The Ethereum bridge documents stay the reference:
 `docs/AUDIT-SCOPE-BRIDGE-V3.md` (design, trust model, known limits), `docs/BRIDGE-V3-KEY-CEREMONY.md`,
 `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md`, `docs/BUSDC-MAINNET-V2.md` (deployment sequence). This document states only
 what differs per network.
@@ -364,7 +367,7 @@ growth applies to it with a 1,920 s window; adding it is a decision for that lin
 | Anchor window (time for five signatures and the relay) | 51 min | 51 min (Arbitrum), 512 s (OP), 4 to 40 min (Linea), **51 s (Base), 115 s (BNB)** | block times; section 4 |
 | Daemon interval | 60 s | 60 s (Arbitrum), 20 s (OP, Linea), **5 s (Base, BNB)** | section 4 |
 | Fee recipient | `0x775a…0544` | the same address, on each network | owner, 2026-11-16 |
-| Limits | cap 100,000, window 10,000 / day (an owner decision still open); since the fee schedule of 2026-11-17: deposit 5 bps, release 10 bps, minimums 101 / 100 | cap and window the same; fees and minimums per network (section 9.1) | each network's relayer cost differs |
+| Limits | cap 500,000, window 50,000 / day (decided 2026-11-19; before: 100,000 and 10,000); since the fee schedule of 2026-11-17: deposit 5 bps, release 10 bps, minimums 101 / 100 | cap 250,000, window 25,000 / day on the three launchable networks (decided 2026-11-19; Base and BNB Smart Chain keep 100,000 and 10,000 and stay refused); fees and minimums per network (section 9.1) | each network's relayer cost differs; half the Ethereum exposure per network (`tools/evm-nets/networks.json` `limits`) |
 | Gas payer | ETH | ETH on four, BNB on BNB Smart Chain; rollups add an L1 data fee | section 9 |
 | Sequencer | none | Arbitrum, OP, Base and Linea have a single sequencer: it can delay or order deposits and releases, not forge them | - |
 

@@ -88,6 +88,64 @@ class Registry(unittest.TestCase):
         errs = self.mutated(lambda o: o['solana']['committee'].__setitem__('threshold', 4))
         self.assertTrue(any(e.startswith('C7 solana') for e in errs), errs)
 
+    # ── C9 (round 20): the launch limits decided on 2026-11-19 ──
+    def test_c9_the_launch_limits_are_the_decided_ones(self):
+        want = {'ethereum': (500_000, 50_000), 'arbitrum-one': (250_000, 25_000), 'op-mainnet': (250_000, 25_000),
+                'linea': (250_000, 25_000), 'base': (100_000, 10_000), 'bnb': (100_000, 10_000)}
+        for net, (cap, window) in want.items():
+            lim = self.routes[net]['limits']
+            self.assertEqual((lim['cap'], lim['window'], lim['windowSeconds']), (str(cap * 10**6), str(window * 10**6), 86400), net)
+            self.assertEqual(int(lim['cap']), 10 * int(lim['window']), net)
+        ll = self.reg['launchLimits']
+        self.assertEqual([r['id'] for r in ll['routes']], ['ethereum', 'arbitrum-one', 'linea', 'op-mainnet'])
+        self.assertEqual((ll['decided'], ll['windowsPerCap'], ll['aggregateCap']), ('2026-11-19', 10, str(1_250_000 * 10**6)))
+        self.assertIn('AFTER launch', ll['audit'])
+        self.assertIn('UNAUDITED', ll['audit'])
+        self.assertIn('C9 launch limits', self.reg['checks'])
+
+    def test_c9_another_cap_or_window_is_refused(self):
+        def old(o):
+            o['ethereum']['limits'].update(cap='100000000000', window='10000000000')
+        cases = {
+            'the values before the decision on Ethereum': old,
+            'a larger cap on Ethereum': lambda o: o['ethereum']['limits'].__setitem__('cap', '5000000000000'),
+            'the Ethereum limits on Linea': lambda o: o['linea']['limits'].update(cap='500000000000', window='50000000000'),
+            'a larger window on OP Mainnet': lambda o: o['op-mainnet']['limits'].__setitem__('window', '250000000000'),
+            'a 12 hour window on Arbitrum One': lambda o: o['arbitrum-one']['limits'].__setitem__('windowSeconds', 43200),
+            'a raised cap on Base': lambda o: o['base']['limits'].update(cap='250000000000', window='25000000000'),
+            'a cap as a number on Linea': lambda o: o['linea']['limits'].__setitem__('cap', 250000000000),
+            'no cap on Linea': lambda o: o['linea']['limits'].pop('cap'),
+        }
+        for what, change in cases.items():
+            errs = self.mutated(change)
+            self.assertTrue(any(e.startswith('C9 ') for e in errs), (what, errs))
+        self.assertEqual(self.mutated(lambda o: None), [])
+
+    def test_c9_other_kinds_of_route_are_not_held_to_the_evm_limits(self):
+        # Bitcoin, TRON, Solana and Stellar keep their own limits (not part of the decision): C9 does not read them
+        errs = self.mutated(lambda o: [o[n]['limits'].update(cap='1') for n in ('bitcoin', 'tron', 'solana', 'stellar')])
+        self.assertFalse(any(e.startswith('C9 ') for e in errs), errs)
+
+    def test_c9_an_untrusted_limits_record_fails_the_check(self):
+        launch = registry.routes._launch()
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = json.loads(launch.REGISTRY.read_text())
+            reg['limits']['ethereum']['cap'] = 5_000_000 * 10**6
+            (Path(tmp) / 'networks.json').write_text(json.dumps(reg))
+            with mock.patch.object(launch, 'REGISTRY', Path(tmp) / 'networks.json'):
+                errs = self.mutated(lambda o: None)
+        self.assertTrue(any(e.startswith('C9 ethereum: the launch limits cannot be read') for e in errs), errs)
+
+    def test_the_readme_states_the_limits_and_that_the_routes_are_unaudited(self):
+        table = registry.readme_table(self.reg)
+        for text in ('decided 2026-11-19', '| limits: ethereum | 500,000 | 50,000 |', '| limits: arbitrum-one | 250,000 | 25,000 |',
+                     '| limits: op-mainnet | 250,000 | 25,000 |', '| limits: linea | 250,000 | 25,000 |', '| limits: all 4 under the one committee | 1,250,000 | |',
+                     'external audit of the launchable routes is done AFTER launch', 'UNAUDITED'):
+            self.assertIn(text, table, text)
+        tail = table[table.index('Launch limits of the launchable routes'):]
+        for held in ('base |', 'bnb |', 'bitcoin |', 'tron |', 'solana |', 'stellar |'):
+            self.assertNotIn(held, tail)
+
     def test_c8_finding_of_unknown_route_refused(self):
         bad = self.findings + [{'id': 'X', 'routes': ['polygon'], 'severity': 'Medium', 'state': 'open', 'owner': 0}]
         self.assertTrue(any(e.startswith('C8') for e in registry.cross_checks(copy.deepcopy(self.routes), bad)))
