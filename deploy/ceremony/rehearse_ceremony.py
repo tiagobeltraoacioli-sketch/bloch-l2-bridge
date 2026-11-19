@@ -384,6 +384,11 @@ def flow(rig):
     out = json.loads(owner.run('schedule'))
     check('[7] the decided fee schedule: 5 / 10 bps to 0x775a…0544, minimums 101 / 100 USDC, ceiling 2 gwei',
           out['decision'] == 'schedule-ok' and out['smallestDepositNet'] == 100_949_500 and out['smallestExitPaid'] == 99_900_000, out)
+    # Review R420-8: the document says this block prints `launchLimits` with the decided numbers; held here as printed.
+    ll = out.get('launchLimits') or {}
+    check('[7] the schedule block prints launchLimits: cap and supply cap 500,000 USDC, window and bucket 50,000 per 86400 s, refill 578703',
+          (ll.get('vaultCap'), ll.get('tokenSupplyCap'), ll.get('windowLimit'), ll.get('tokenBucketCapacity'), ll.get('windowSeconds'),
+           ll.get('tokenRefillPerSecond'), ll.get('decided')) == (500_000 * U, 500_000 * U, 50_000 * U, 50_000 * U, 86400, 578703, '2026-11-19'), ll)
 
     # ── 8. the vault ──
     vdep = owner.var('VAULT_DEPLOYER').lower()
@@ -442,6 +447,11 @@ def flow(rig):
     # ── 10. post-deployment ──
     out = json.loads(owner.run('onchain'))
     check('[10] both chains at finalized equal the configs and the fee schedule', out['decision'] == 'onchain-ok', out)
+    # Review R420-9: the read-back names what it compared; the rows of the decided limits must be among them.
+    check('[10] the read-back compared the decided cap, window, window length, supply cap, bucket and refill',
+          all(n in out.get('checked', []) for n in ('vault cap() is the decided cap', 'vault windowLimit() is the decided window',
+                                                    'vault windowSeconds()', 'token supplyCap() is the decided cap',
+                                                    'token bucketCapacity() is the decided window', 'token refillPerSecond()')), out.get('checked'))
     check('[10] the inventory still matches the final configs', json.loads(owner.run('inventory-final'))['decision'] == 'ok')
     check('[10] each deployer sent exactly its one creation',
           owner.run('vault-deployer-done') == '1' and owner.run('token-deployer-done') == '1')

@@ -145,6 +145,13 @@ def validate(cfg, rehearsal, token_cfg=None):
     # Review R329-EVM-3P-1: the chain id is a JSON integer before anything compares it. 8453.0 equals 8453 in Python
     # and `true` equals 1, so a float or a boolean would match a row while skipping the launch check.
     refuse(is_uint(eth['chainId'], lo=1), 'ethereum.chainId must be a positive JSON integer')
+    # Review R420-2 (round 20): the launch status, the minimum-burn floor, the launch limits and the mint queue bound all
+    # come from tools/evm-nets/launch.py. Without that module this tool used to skip them (the fallback of a tree from
+    # before round 16), so a mainnet vault with any cap validated. A mainnet config is refused when it is missing or
+    # cannot be imported: nothing is checked by half.
+    refuse(rehearsal or launch is not None,
+           'tools/evm-nets/launch.py is missing or cannot be imported: the launch status, the minimum-burn floor, the launch '
+           'limits and the mint queue bound of a mainnet vault cannot be checked, so nothing is validated')
     nets = source_networks()
     if launch and not rehearsal and eth['chainId'] != ETH_MAINNET:
         why = launch.refusal(eth['chainId'])

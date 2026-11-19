@@ -215,6 +215,26 @@ def fill(inv, token_cfg, vault_cfg, revision, max_gas_price_wei):
 
 
 # ── schedule ──────────────────────────────────────────────────────────────────
+def decided_limits(token_cfg, vault_cfg):
+    """The six limits of the two configs, only if each is the decided one (this kit's own record, LIMITS). Used by
+    `schedule` and, since review R420-2, by `vault-run` itself: the creation of the vault does not rely on `schedule`
+    having been run, nor on the registry of tools/evm-nets being present."""
+    v = vault_cfg['vault']
+    limits = {
+        'vaultCap': v.get('cap'), 'windowLimit': v['policy'].get('windowLimit'), 'windowSeconds': v['policy'].get('windowSeconds'),
+        'tokenSupplyCap': token_cfg['limits'].get('supplyCap'), 'tokenBucketCapacity': token_cfg['limits'].get('bucketCapacity'),
+        'tokenRefillPerSecond': token_cfg['limits'].get('refillPerSecond'),
+    }
+    diff = {k: {'config': limits[k], 'decided': LIMITS[k]} for k in LIMITS
+            if limits[k] != LIMITS[k] or type(limits[k]) is not int}
+    refuse(not diff, f'the configs differ from the launch limits decided on 2026-11-19: {json.dumps(diff)}')
+    refuse(LIMITS['vaultCap'] == LIMITS['tokenSupplyCap'] == 10 * LIMITS['windowLimit']
+           and LIMITS['windowLimit'] == LIMITS['tokenBucketCapacity']
+           and LIMITS['tokenRefillPerSecond'] == LIMITS['windowLimit'] // LIMITS['windowSeconds'],
+           'the decided limits break their own rule (cap = supply cap = 10 windows; window = bucket; refill = floor)')
+    return limits
+
+
 def schedule(token_cfg, vault_cfg, relayer=None):
     v, fees = vault_cfg['vault'], (vault_cfg['vault'].get('provenance') or {}).get('fees') or {}
     got = {
@@ -232,18 +252,7 @@ def schedule(token_cfg, vault_cfg, relayer=None):
     refuse(not diff, f'the configs differ from the decided fee schedule: {json.dumps(diff)}')
     net = SCHEDULE['minDeposit'] - SCHEDULE['minDeposit'] * SCHEDULE['depositBps'] // 10_000
     refuse(net >= SCHEDULE['l2MinBurn'], 'the smallest deposit nets below the minimum burn')
-    limits = {
-        'vaultCap': v.get('cap'), 'windowLimit': v['policy'].get('windowLimit'), 'windowSeconds': v['policy'].get('windowSeconds'),
-        'tokenSupplyCap': token_cfg['limits'].get('supplyCap'), 'tokenBucketCapacity': token_cfg['limits'].get('bucketCapacity'),
-        'tokenRefillPerSecond': token_cfg['limits'].get('refillPerSecond'),
-    }
-    diff = {k: {'config': limits[k], 'decided': LIMITS[k]} for k in LIMITS
-            if limits[k] != LIMITS[k] or type(limits[k]) is not int}
-    refuse(not diff, f'the configs differ from the launch limits decided on 2026-11-19: {json.dumps(diff)}')
-    refuse(LIMITS['vaultCap'] == LIMITS['tokenSupplyCap'] == 10 * LIMITS['windowLimit']
-           and LIMITS['windowLimit'] == LIMITS['tokenBucketCapacity']
-           and LIMITS['tokenRefillPerSecond'] == LIMITS['windowLimit'] // LIMITS['windowSeconds'],
-           'the decided limits break their own rule (cap = supply cap = 10 windows; window = bucket; refill = floor)')
+    limits = decided_limits(token_cfg, vault_cfg)
     return {
         'decision': 'schedule-ok',
         'checked': got,
@@ -383,6 +392,7 @@ def _abi_type(inp):
 
 
 def vault_run(vault_cfg, token_cfg, url, max_gwei, broadcast, confirm, write, wallet, timeout=3600):
+    decided_limits(token_cfg, vault_cfg)  # the kit's own record, before anything else (review R420-2)
     try:
         norm = vault_pontes.validate(vault_cfg, False, token_cfg)
     except vault_pontes.Refused as e:

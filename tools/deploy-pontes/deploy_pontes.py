@@ -108,13 +108,26 @@ def current_l2_pins():
 
 
 def evm_launch():
-    """tools/evm-nets/launch.py (the launch status and names of the other EVM source networks), or None in a tree without
-    it. Loaded only for a source chain id other than 1: an Ethereum config never reaches it."""
-    if not (ROOT / 'tools/evm-nets/launch.py').exists():
+    """tools/evm-nets/launch.py (the launch status and names of the other EVM source networks, the fee schedule, the
+    launch limits), or None when it is missing or cannot be imported. A caller in mainnet mode refuses on None
+    (`require_launch`, review R420-2): the rules that live there are never skipped."""
+    tools = HERE.parent / 'evm-nets'   # beside this file, whatever ROOT a caller points the templates at
+    if not (tools / 'launch.py').exists():
         return None
-    if str(ROOT / 'tools/evm-nets') not in sys.path:
-        sys.path.insert(0, str(ROOT / 'tools/evm-nets'))
-    import launch
+    if str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    try:
+        import launch
+    except ImportError:
+        return None
+    return launch
+
+
+def require_launch(what):
+    """The launch module, or a refusal (mainnet mode): `what` names the rule that cannot be checked without it."""
+    launch = evm_launch()
+    refuse(launch is not None, f'tools/evm-nets/launch.py is missing or cannot be imported: {what} cannot be checked, so '
+                               'nothing is validated')
     return launch
 
 
@@ -374,7 +387,7 @@ def validate(cfg, rehearsal):
         # --rehearsal (no flag lifts it), and only under the token name and symbol the registry gives that network.
         named = {}
         if eth['chainId'] != ETH_MAINNET:
-            launch = evm_launch()
+            launch = require_launch('the launch status of the source network')  # refuses when the module is missing (review R420-2)
             if launch is not None:
                 why = launch.refusal(eth['chainId'])
                 refuse(why is None, why)
@@ -410,7 +423,7 @@ def validate(cfg, rehearsal):
         if not rehearsal:
             # Fee schedule of 2026-11-17: the token's minBurn is the vault's l2MinBurn, held to the same floor (the vault
             # tool states the formula). The release fee rate is the vault's; the route's decided rate is used here.
-            launch = evm_launch()
+            launch = require_launch('the minimum-burn floor of the fee schedule')  # refuses when the module is missing (review R420-2)
             if launch is not None:
                 try:
                     sched = launch.fee_schedule(eth['chainId'])
@@ -427,7 +440,7 @@ def validate(cfg, rehearsal):
             # ones (tools/evm-nets/networks.json `limits`, recorded a second time in tools/evm-nets/launch.py LIMITS), and
             # the vault cap written into this config equals the supply cap. A route outside the registry (opened by
             # data) keeps its own tool's rules.
-            launch = evm_launch()
+            launch = require_launch('the launch limits (supplyCap, bucketCapacity, refillPerSecond)')  # refuses when the module is missing (review R420-2)
             if launch is not None:
                 try:
                     decided = launch.limits(eth['chainId'])

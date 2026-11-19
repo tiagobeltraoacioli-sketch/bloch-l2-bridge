@@ -80,11 +80,32 @@ WINDOW_SECONDS = 86400
 # config). Its own comment gives the design point: mints at the bucket rate queue (bucket + refill x delay) / smallest
 # mint, and (bucket + 2 x refill x delay) / smallest mint once executions lag by one more delay; that second figure
 # must fit MAX_PENDING. The limits of 2026-11-19 broke it on Arbitrum One and OP Mainnet (2,382 with the 21 USDC
-# minimum); the coordinator's decision of the same day is a minimum deposit of 25 USDC there (2,000). The bound is a
+# minimum); the coordinator's decision of the same day is the Ethereum minimum, 101 USDC, there (495). The bound is a
 # rule of the registry: a launchable route that breaks it makes the registry untrusted, as an edited limit does.
 MAX_PENDING = 2048       # BridgedStablecoinV3.MAX_PENDING
 MINT_DELAY = 43200       # largeMintDelay of the launch token configs, seconds
 QUEUE_LAG_DELAYS = 1     # delays of execution lag the queue must absorb: the design point of the frozen token
+# The bridge's load on the L2 (round 20, review 420 R420-4; coordinator decision of 2026-11-19). Every mint, every
+# execution of queued mints and every burn is an L2 transaction, and the L2 makes a bounded number of them a day. The
+# worst case the windows allow, every launchable route at once and every item of the smallest size: mints = window /
+# smallest mint, executions = one per (1 + MAX_DRAIN) mints, burns = window / minimum burn. With the minimums of
+# 2026-11-17 (21 / 20 USDC on Arbitrum One and OP Mainnet) and the windows of 2026-11-19 that sum was about 6,285 a
+# day, twice the documented capacity: a cheap way to fill the L2. The coordinator's decision: those two networks take
+# the Ethereum minimums (101 / 100), 2,187 a day. The rule: the sum over the launchable routes is at most
+# L2_BRIDGE_SHARE_BPS of the documented capacity; a registry that breaks it is untrusted, as with the queue bound.
+# Capacity as documented (agents/347-fee-economics-r17.md: one block per 1,800 s, 64 transactions a block). It is the
+# L2 operator's pacing, not a protocol constant: if the L2 line changes it, this record changes in a reviewed commit.
+MAX_DRAIN = 8                  # BridgedStablecoinV3.MAX_DRAIN: queued mints credited behind one execution, at most
+L2_BLOCKS_PER_DAY = 48
+L2_TXS_PER_BLOCK = 64
+L2_TX_CAPACITY = L2_BLOCKS_PER_DAY * L2_TXS_PER_BLOCK   # 3,072 transactions a day
+L2_BRIDGE_SHARE_BPS = 7500     # the bridge's worst case may ask for at most three quarters of it
+# Declared gas (finding F421-2, stated by l2_load, not a rule yet): the relayer declares this much gas per mint and per
+# drain (vigia.py defaults; `mint_gas_limit` of the relayer template), and the L2 producer of the launch configuration
+# (bloch-l2-evm b17b3ae, install-settler-mainnet.py: max_block_gas) selects transactions by declared gas.
+RELAYER_MINT_GAS = 600_000
+RELAYER_DRAIN_GAS = 2_000_000
+L2_BLOCK_GAS = 15_000_000
 # Keys of the signer's source half (eth_half.py) and of the daemon (vigia.py) that every signer of one network must
 # share. `anchor_depth` exists only with the probe policy.
 ANCHOR_KEYS = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin')
@@ -122,6 +143,7 @@ def _load(path=None):
             raise LaunchError(f'networks.json lacks the decided chain ids {missing}')
         _check_limits(reg, seen)
         _check_queue(reg, seen)
+        _check_l2_load(reg, seen)
         return reg
     except LaunchError:
         raise
@@ -230,6 +252,64 @@ def _check_queue(reg, seen):
                 f'bucket of {q["bucket_capacity"]}, honest mints at the bucket rate queue {q["queued_lagged"]} with one more mint '
                 f'delay ({MINT_DELAY} s) of execution lag, above MAX_PENDING ({MAX_PENDING}) of the frozen L2 token; the least '
                 f'minimum deposit that fits is {q["min_deposit_floor"]}')
+
+
+def l2_route_load(window, min_deposit, min_burn, deposit_bps):
+    """L2 transactions a day one route can ask for at its window, every item of the smallest size: {mints, executions,
+    burns, total}. Integers only (LaunchError otherwise)."""
+    if not (_is_count(window, 1) and _is_count(min_deposit, 1) and _is_count(min_burn, 1) and _is_count(deposit_bps)) \
+            or deposit_bps >= 10_000:
+        raise LaunchError(f'the L2 load cannot be computed from window {window!r}, minimum deposit {min_deposit!r}, minimum burn '
+                          f'{min_burn!r}, deposit fee {deposit_bps!r} bps')
+    smallest = min_deposit - min_deposit * deposit_bps // 10_000
+    if smallest < 1:
+        raise LaunchError(f'the smallest mint of a minimum deposit of {min_deposit} at {deposit_bps} bps is zero')
+    mints = window // smallest
+    executions = -(-mints // (1 + MAX_DRAIN))
+    burns = window // min_burn
+    return {'mints': mints, 'executions': executions, 'burns': burns, 'total': mints + executions + burns}
+
+
+def _l2_load(reg, seen):
+    routes = {}
+    for chain, name in [(ETHEREUM, 'ethereum')] + sorted(seen.items()):
+        if chain != ETHEREUM and not reg['networks'][name]['launch']['v1']:
+            continue
+        spec = reg['relayCost']['ethereum'] if chain == ETHEREUM else reg['networks'][name]
+        window = (reg['limits']['ethereum'] if chain == ETHEREUM else spec['limits'])['windowLimit']
+        routes[name] = l2_route_load(window, spec['minDeposit'], spec['l2MinBurn'], spec['feeBps']['deposit'])
+    out = {k: sum(r[k] for r in routes.values()) for k in ('mints', 'executions', 'burns', 'total')}
+    limit = L2_TX_CAPACITY * L2_BRIDGE_SHARE_BPS // 10_000
+    gas_capacity = L2_BLOCKS_PER_DAY * L2_BLOCK_GAS
+    relayer_gas = out['mints'] * RELAYER_MINT_GAS + out['executions'] * RELAYER_DRAIN_GAS
+    return {**out, 'routes': routes, 'capacity': L2_TX_CAPACITY, 'limit': limit, 'margin': L2_TX_CAPACITY - out['total'],
+            'ok': out['total'] <= limit,
+            # not covered by the rule, stated: a day that starts with full buckets admits one more window of mints
+            'first_day_total': out['total'] + out['mints'] + out['executions'],
+            # not covered by the rule, stated (F421-2): the relayers' DECLARED gas a day against the block gas a day
+            'declared_gas': {'mint_gas_limit': RELAYER_MINT_GAS, 'drain_gas_limit': RELAYER_DRAIN_GAS, 'block_gas': L2_BLOCK_GAS,
+                             'capacity': gas_capacity, 'mints': out['mints'] * RELAYER_MINT_GAS,
+                             'executions': out['executions'] * RELAYER_DRAIN_GAS, 'relayer_total': relayer_gas,
+                             'fits': relayer_gas <= gas_capacity}}
+
+
+def _check_l2_load(reg, seen):
+    """The summed worst case of bridge transactions a day on the L2 (see the constants) is at most L2_BRIDGE_SHARE_BPS
+    of the documented L2 capacity. Raises LaunchError: every network is refused and no limit or fee is read."""
+    load = _l2_load(reg, seen)
+    if not load['ok']:
+        per = ', '.join(f'{n} {r["total"]}' for n, r in load['routes'].items())
+        raise LaunchError(
+            f'the launchable routes together can ask the L2 for {load["total"]} transactions a day at their windows and '
+            f'minimums ({per}: smallest mints, their executions, smallest burns), above {load["limit"]} = '
+            f'{L2_BRIDGE_SHARE_BPS / 100:g}% of the documented L2 capacity of {L2_TX_CAPACITY} a day; raise a minimum deposit or '
+            'a minimum burn, or lower a window')
+
+
+def l2_load(path=None):
+    """The bridge's worst-case load on the L2 as `_l2_load` computes it from a trusted registry."""
+    reg = _load(path)
+    return _l2_load(reg, {spec['chainId']: name for name, spec in reg['networks'].items()})
 
 
 def queue_bound(chain_id, path=None):

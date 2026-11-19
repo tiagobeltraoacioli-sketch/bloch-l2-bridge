@@ -158,7 +158,14 @@ def stage_integration(r):
 
 
 CHANGES = 'deployments/allnets/integration-changes.json'
-CHANGE_KEYS = {'line', 'path', 'lineTip', 'blob', 'decision'}
+CHANGE_KEYS = {'line', 'path', 'lineTip', 'blob', 'mode', 'decision'}
+# Review R420-1 (round 20): the record above is written by `--identity-record` from the tree it is meant to hold, so
+# by itself it held nothing: change a line's file, run the tool, and the check passed. The record is therefore held a
+# second time, BY HAND, in a file the tool never writes: one text line per recorded file, "MODE BLOB LINE PATH". The
+# check fails unless the two agree exactly, entry for entry, and unless each file's mode at HEAD is the recorded one.
+# A change to a line-owned file now needs three things in reviewed commits: the change, the tool's record, and the
+# hand-written pin.
+PINS = 'tools/allnets/identity-pins.txt'
 
 
 def _git(root, *argv):
@@ -178,6 +185,30 @@ def owned_differences(root, line, tip, paths):
                 blob = _git(root, 'rev-parse', '--verify', '--quiet', f'HEAD:{f}')
                 out[f] = blob.stdout.strip() if blob.returncode == 0 else None
     return out
+
+
+def file_mode(root, path):
+    """The git mode of `path` at HEAD ('100644', '100755', '120000'), or None."""
+    done = _git(root, 'ls-tree', 'HEAD', '--', path)
+    row = done.stdout.split('\n')[0].split()
+    return row[0] if done.returncode == 0 and len(row) >= 3 else None
+
+
+def load_pins(root):
+    """The hand-written second record: a set of "MODE BLOB LINE PATH" lines. A missing file is no pin at all (then no
+    recorded change can pass); a malformed or repeated line stops the check."""
+    path = Path(root) / PINS
+    if not path.exists():
+        return set()
+    pins = set()
+    for n, line in enumerate(path.read_text().split('\n'), 1):
+        if not line.strip() or line.startswith('#'):
+            continue
+        parts = line.split(' ')
+        if len(parts) != 4 or not re.fullmatch(r'1[02][0-7]{4}', parts[0]) or not re.fullmatch(r'[0-9a-f]{40}', parts[1]) or line in pins:
+            raise SystemExit(f'{PINS}:{n}: not one "MODE BLOB LINE PATH" entry, or a repeated one')
+        pins.add(line)
+    return pins
 
 
 def load_changes(root):
@@ -227,6 +258,16 @@ def identity(root=ROOT, owned=None):
         if c['line'] not in owned or not any(c['path'] == p or c['path'].startswith(p + '/') for p in owned.get(c['line'], [])):
             print(f'{c["line"]:9} {c["path"]}: recorded, but not a path that line owns')
             bad += 1
+    # the second record (review R420-1): exactly the recorded entries, written by hand
+    pins = load_pins(root)
+    recorded = {f'{c["mode"]} {c["blob"]} {c["line"]} {c["path"]}' for c in doc['changes']}
+    for entry in sorted(recorded - pins):
+        print(f'{entry.split(" ", 3)[2]:9} {entry.split(" ", 3)[3]}: recorded, but {PINS} does not hold "{entry}" (the record is '
+              'held a second time by hand; a re-run of --identity-record alone changes nothing)')
+        bad += 1
+    for entry in sorted(pins - recorded):
+        print(f'{PINS}: "{entry}" is pinned, but no such record is in {CHANGES}')
+        bad += 1
     seen = set()
     for line, paths in owned.items():
         tip = lock[line]['commit']
@@ -248,6 +289,9 @@ def identity(root=ROOT, owned=None):
                 bad += 1
             elif rec['blob'] != blob:
                 print(f'{line:9}   {f}: DIFFERS from the recorded blob {rec["blob"][:12]} (it is {blob[:12]})')
+                bad += 1
+            elif rec['mode'] != file_mode(root, f):
+                print(f'{line:9}   {f}: its mode is {file_mode(root, f)}, the recorded mode is {rec["mode"]}')
                 bad += 1
             else:
                 print(f'{line:9}   {f}: integration change, blob {blob[:12]} as recorded ({rec["decision"]})')
@@ -278,10 +322,13 @@ def identity_record(decision):
         for f, blob in sorted(owned_differences(ROOT, line, tip, paths).items()):
             if blob is None:
                 raise SystemExit(f'{f} was removed from the tree: a removal cannot be recorded')
-            changes.append({'line': line, 'path': f, 'lineTip': tip, 'blob': blob, 'decision': old.get((line, f), decision)})
+            changes.append({'line': line, 'path': f, 'lineTip': tip, 'blob': blob, 'mode': file_mode(ROOT, f),
+                            'decision': old.get((line, f), decision)})
     doc['changes'] = changes
     (ROOT / CHANGES).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + '\n')
     print(f'recorded {len(changes)} integration change(s) in {CHANGES}')
+    print(f'NOT pinned: {PINS} is written by hand, one "MODE BLOB LINE PATH" line per record, in a reviewed commit; until then '
+          '--identity fails for every entry that changed (review R420-1)')
     return 0
 
 

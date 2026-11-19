@@ -70,9 +70,9 @@
     "cap": "250000000000",
     "window": "25000000000",
     "windowSeconds": 86400,
-    "minDeposit": "25000000",
+    "minDeposit": "101000000",
     "maxDeposit": "25000000000",
-    "l2MinBurn": "20000000",
+    "l2MinBurn": "100000000",
     "l2MaxBurn": "25000000000",
     "mintDelaySeconds": 43200,
     "largeItemThreshold": "0"
@@ -118,7 +118,7 @@
     "notes": [
       "a recipient blacklisted by the issuer cannot be paid until the issuer lifts it; the burn names the recipient and cannot be redirected",
       "the relayer pays at most 0.5 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
-      "the smallest exit is l2MinBurn (20); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
+      "the smallest exit is l2MinBurn (100); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
     ]
   },
   "explorers": {

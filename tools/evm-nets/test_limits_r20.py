@@ -316,7 +316,8 @@ class FailClosed(unittest.TestCase):
 
     def test_a_missing_file_and_an_import_error_both_give_no_module(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(dp, 'ROOT', Path(tmp)):
+            (Path(tmp) / 'deploy-pontes').mkdir()
+            with mock.patch.object(dp, 'HERE', Path(tmp) / 'deploy-pontes'):   # a tree without tools/evm-nets beside the tool
                 self.assertIsNone(dp.evm_launch())
         real_import = __import__
 

@@ -17,7 +17,9 @@ Round 20 (agent 410, 2026-11-19) changed in this document: the audit wording (th
 "Not done"), the decided windows and caps, the state of the L2 (section 0, item 2), the numbers of the rehearsal run
 with the new limits (sections 8 and 17), and one prerequisite found on the way (section 0, item 5). No command block
 changed. Round 20 (agent 421, 2026-11-19) changed: section 0 item 5 and the matching "Not done" lines (the signers' L2
-pins now name the live release). No command block changed.
+pins now name the live release), and section 17 (the rehearsal's two added checks). No command block changed. The
+minimums of the Ethereum route are unchanged (101 / 100 USDC); Arbitrum One and OP Mainnet now carry the same
+(`docs/BRIDGE-ALLNETS.md` section 7.3).
 
 How to read the blocks:
 
@@ -920,7 +922,10 @@ created with supply cap 500,000, bucket 50,000 and `refillPerSecond` 578703 (4,8
 values back from both chains, with `windowSeconds` 86400; the 101 USDC round trip and the pause drills as on 2026-11-17.
 Not rehearsed with the new limits: a deposit or a burn near the window, and the cap being reached (the fork rehearsals
 of `tools/evm-nets/rehearse_fork.py` refuse one above the window on the three networks; the forge suites cover the
-contract rule).
+contract rule). Since round 20 (agent 421, review 420): `solidity-tests/R20LaunchLimits.t.sol` runs the frozen vault and
+token at exactly these values (the window, bucket and cap edges, the refill over 24 h, a full vault leaving in ten
+days), and the rehearsal script has 52 checks: it also asserts the `launchLimits` output of the `schedule` block and
+the names of the six decided values in the `onchain` read-back. No block of this document changed.
 
 The rehearsal had to stand in for these things, and only these:
 
