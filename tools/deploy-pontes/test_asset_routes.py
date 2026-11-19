@@ -198,6 +198,33 @@ class Held(unittest.TestCase):
                 self.assertNotEqual(done.returncode, 0)
                 self.assertIn(f'route {rid} is not launchable in v1 (held)', done.stdout + done.stderr)
 
+    def test_the_rehearsal_flag_does_not_lift_a_held_route_in_the_token_tool(self):
+        """As for a network that is not launchable (R329-EVM-5): `--rehearsal` (a local L2, chain 31337) does not make
+        the token tool validate a config that names a held route's source chain and its L2 name or symbol."""
+        for rid in ROUTES:
+            _, tok = hand_made(rid)
+            spec = AR.registry()['routes'][rid]
+            why = token_verdict(fx.rehearsal(tok), rehearsal=True)
+            with self.subTest(route=rid):
+                self.assertIn(f'route {rid}', why or '')
+                self.assertIn(HELD, why or '')
+            for field in ('name', 'symbol'):
+                cfg = fx.rehearsal(fx.filled())
+                cfg['ethereum']['chainId'] = spec['chainId']
+                cfg['token'][field] = spec['l2'][field]
+                with self.subTest(route=rid, field=field):
+                    self.assertIn(f'route {rid}', token_verdict(cfg, rehearsal=True) or '')
+        # a rehearsal of the first route over the same source chain is what it was
+        self.assertIsNone(token_verdict(fx.rehearsal(fx.filled()), rehearsal=True))
+        # and a lifted route may be rehearsed with other limits
+        with lifted('ethereum-usdt'):
+            _, tok = generated('ethereum-usdt')
+            loose = fx.rehearsal(tok)
+            loose['limits']['supplyCap'] = loose['ethereum']['vaultCap'] = 10**9
+            loose['limits']['bucketCapacity'] = 10**8
+            loose['limits']['refillPerSecond'] = 10**8 // 86400
+            self.assertIsNone(token_verdict(loose, rehearsal=True))
+
     def test_no_environment_variable_or_rehearsal_flag_lifts_a_route_on_its_own_chain(self):
         vault, tok = hand_made('ethereum-usdt')
         with mock.patch.dict('os.environ', {'BLOCH_BRIDGE_ALLOW_HELD': '1', 'ASSET_ROUTES_LIFT': 'ethereum-usdt'}):

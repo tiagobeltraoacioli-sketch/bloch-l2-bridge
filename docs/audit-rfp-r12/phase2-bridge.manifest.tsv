@@ -8,7 +8,7 @@ A2	1398	1129	1049	fbd1cb58649d0ca515d2e019b61ed3ebde9e16ea13ceebc7d290d510979bb5
 A2	2008	1577	1482	032d04b12bc8011f3c0fce48708fbbf7ffccdcae90ca069f39b9db375eaf45b7	tools/signatario-stable/vigia.py
 A2	994	789	705	877c6fa9bba7cf030635116a92ef516f89bc6a3b02dace622959b65802ac55ef	tools/signatario-stable/signatario.py
 A2	494	408	366	c7e9804663a3c1ab582d3c4829f65989da64489062dde3f8ad91328708ce245c	tools/signatario-stable/release_submission.py
-A2	1010	809	692	9f4cf0b278eafef0489d6d9586fd755e31bcf3822b7d6fa70905a5d0681173d1	tools/deploy-pontes/deploy_pontes.py
+A2	1013	811	694	0599890acae9a3c78c018fbde5acfcea991ee6f28b4438f32fe5593448a47a44	tools/deploy-pontes/deploy_pontes.py
 A2	517	421	412	6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5	tools/signatario-stable/sigfeed.py
 A2	445	360	325	a0a76c46c0400a1161b273eb15339346481b1cff3360cbac98ae66fd4f1dd3b4	tools/signatario-stable/bridge_feed.py
 A2	651	491	437	7b16bdd6202f009dbda7dfe6cece8d3b9fe37777cfebefd7ed49eb33c2c531c3	tools/signatario-stable/eth_half.py
@@ -32,6 +32,6 @@ A-cfg	19	-	-	4ef22fb2d9894091811dd74be8214ff0b2e2901806a2b5249f56991f922dd421	de
 A-cfg	17	-	-	c67b74d0f470513b7aa0c4a1cdd75edbe3aaeee4d9ce2d5665d864841aa6ce22	deployments/mainnet/busdc-ops/reservas.template.json
 A-cfg	34	-	-	f4aaef5e83a8d4d8b17bdcbb9d586ec992570e1ec6cda20c205f8cc8f956d85c	deployments/mainnet/lc-verifier.review.json
 # total A1	2289	1715	1500
-# total A2	9245	7237	6538
+# total A2	9248	7239	6540
 # total A2opt	1608	1229	1024
 # total A-cfg	808	0	0

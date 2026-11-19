@@ -141,7 +141,7 @@ are sets, written only by a release that paid. So:
 | `tools/evm-nets/asset_routes.py refusal(chain id, token)` | the reason; "cannot be trusted" for every decided pair when the file and the code disagree, or the file or the launch registry is missing |
 | `tools/evm-nets/asset_routes.py write` / `check` | writes `bridge.network.json` and nothing else; `check` fails while any other file exists under `deployments/<route>/` |
 | `tools/deploy-pontes/vault_pontes.py validate / args / verify` | refused with the route's reason for any config whose `vault.token` is the route's asset on its chain, whatever the rest says |
-| `tools/deploy-pontes/deploy_pontes.py validate / plan / run / record / verify`, `route <id> …` | refused for a token config naming the route's L2 name or symbol on its chain; `route` prints the reason |
+| `tools/deploy-pontes/deploy_pontes.py validate / plan / run / record / verify`, `route <id> …` | refused for a token config naming the route's L2 name or symbol on its chain, with or without `--rehearsal` (as a network that is not launchable is; a fork rehearsal of a held route runs under a rehearsal chain id); `route` prints the reason |
 | `tools/signatario-stable/eth_half.py deposit / release` (the source half of every signer) | reads the vault's `token()`; refused before anything is attested or signed. No config key lifts it |
 | `tools/deploy-pontes/ceremony_kit.py` | validates through the two deploy tools above, so it refuses; it also accepts only the frozen vault contract (not extended to the Tether-aware vault, section 10) |
 | `ops/bundle.py` | knows no such route (as it knows no Base): no operator package can be built |

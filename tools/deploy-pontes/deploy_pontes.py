@@ -416,12 +416,13 @@ def validate(cfg, rehearsal):
         # --rehearsal (no flag lifts it), and only under the token name and symbol the registry gives that network.
         named = {}
         # Round 20: a FURTHER asset route of a network (tools/evm-nets/asset_routes.py), found by the token's name or
-        # symbol on this source chain. It is refused while its route is not launchable, with or without --rehearsal on
-        # its own chain id; when launchable it is held to the route's exact name, symbol and limits, and the "one token
-        # per network" rules below then speak of the network's FIRST route and do not apply to it.
+        # symbol on this source chain. It is refused while its route is not launchable, WITH OR WITHOUT --rehearsal (as
+        # a network that is not launchable is: no flag lifts it; a fork rehearsal of such a route runs under a rehearsal
+        # chain id). When launchable it is held to the route's exact name, symbol and limits, and the "one token per
+        # network" rules below then speak of the network's FIRST route and do not apply to it.
         route = None
         ar = asset_routes()
-        if ar is not None and not rehearsal:
+        if ar is not None:
             try:
                 hit = ar.by_l2(eth['chainId'], name, symbol)
             except ar.RouteError as e:
@@ -429,15 +430,17 @@ def validate(cfg, rehearsal):
                 refuse(not ar.routes_named(eth['chainId'], name, symbol),
                        f'the asset-route registry cannot be trusted, so no route of it is launchable ({e})')
             if hit is not None:
-                rid, route = hit
-                refuse(route['launch']['v1'], f'route {rid} ({route["l2"]["symbol"]} over {route["asset"]["symbol"]} on chain '
-                       f'{route["chainId"]}) is not launchable in bridge v1 ({route["launch"]["state"]}): {route["launch"]["reason"]} '
-                       'No flag, environment variable or operator file lifts this.')
-                refuse((name, symbol) == (route['l2']['name'], route['l2']['symbol']),
-                       f'the L2 token of route {rid} is {route["l2"]["symbol"]} ("{route["l2"]["name"]}"); the config names {symbol} ("{name}")')
-                refuse((lim['supplyCap'], lim['bucketCapacity'], lim['minBurn']) == (route['limits']['cap'], route['limits']['window'], route['l2MinBurn']),
-                       f'limits of route {rid}: supplyCap {route["limits"]["cap"]}, bucketCapacity {route["limits"]["window"]}, minBurn '
-                       f'{route["l2MinBurn"]} (tools/evm-nets/asset-routes.json); the config has {lim["supplyCap"]}, {lim["bucketCapacity"]}, {lim["minBurn"]}')
+                rid, found = hit
+                refuse(found['launch']['v1'], f'route {rid} ({found["l2"]["symbol"]} over {found["asset"]["symbol"]} on chain '
+                       f'{found["chainId"]}) is not launchable in bridge v1 ({found["launch"]["state"]}): {found["launch"]["reason"]} '
+                       'No flag (--rehearsal included), environment variable or operator file lifts this.')
+                if not rehearsal:
+                    route = found
+                    refuse((name, symbol) == (route['l2']['name'], route['l2']['symbol']),
+                           f'the L2 token of route {rid} is {route["l2"]["symbol"]} ("{route["l2"]["name"]}"); the config names {symbol} ("{name}")')
+                    refuse((lim['supplyCap'], lim['bucketCapacity'], lim['minBurn']) == (route['limits']['cap'], route['limits']['window'], route['l2MinBurn']),
+                           f'limits of route {rid}: supplyCap {route["limits"]["cap"]}, bucketCapacity {route["limits"]["window"]}, minBurn '
+                           f'{route["l2MinBurn"]} (tools/evm-nets/asset-routes.json); the config has {lim["supplyCap"]}, {lim["bucketCapacity"]}, {lim["minBurn"]}')
         if eth['chainId'] != ETH_MAINNET:
             launch = evm_launch()
             if launch is not None:
