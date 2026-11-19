@@ -5,7 +5,8 @@
 
 Implements the subset of JSON Schema 2020-12 the schema uses (type, required, additionalProperties, properties, enum,
 const, pattern, anyOf, $ref to #/$defs, items, minItems, minLength, minimum, uniqueItems) and, beyond the schema:
-the file must sit in a directory named as its `network.id`, and no amount may be a JSON number. Exit 1 on any error.
+the file must sit in a directory named as its `network.id` (or, for a file with a `route` block, as its `route.id`,
+which must be `<network.id>-<route.asset>`), and no amount may be a JSON number. Exit 1 on any error.
 """
 import json
 from pathlib import Path
@@ -63,8 +64,18 @@ def check(path):
     doc = json.loads(Path(path).read_text())
     found = list(errors(doc, schema, schema))
     net = doc.get('network', {}).get('id') if isinstance(doc, dict) else None
-    if Path(path).resolve().parent.name != net:
-        found.append(f'the file must be deployments/{net}/bridge.network.json (directory = network.id)')
+    route = doc.get('route') if isinstance(doc, dict) else None
+    if route is None:
+        if Path(path).resolve().parent.name != net:
+            found.append(f'the file must be deployments/{net}/bridge.network.json (directory = network.id)')
+        return found
+    # Round 20: a further asset route of a network. Its directory is its route id, and the route id is the network's
+    # id and the asset key, so two files cannot claim one (network, asset) pair under different names.
+    rid, key = (route.get('id'), route.get('asset')) if isinstance(route, dict) else (None, None)
+    if rid != f'{net}-{key}':
+        found.append(f'route.id {rid!r} must be network.id and route.asset joined by a hyphen ({net}-{key})')
+    if Path(path).resolve().parent.name != rid:
+        found.append(f'the file must be deployments/{rid}/bridge.network.json (directory = route.id)')
     return found
 
 

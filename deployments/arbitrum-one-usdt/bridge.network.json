@@ -1,0 +1,161 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "route": {
+    "id": "arbitrum-one-usdt",
+    "asset": "usdt"
+  },
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+  },
+  "network": {
+    "id": "arbitrum-one",
+    "name": "Arbitrum One",
+    "kind": "evm",
+    "chainId": "42161",
+    "nativeCurrency": {
+      "symbol": "ETH",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "USD\u20ae0",
+    "name": "USD\u20ae0",
+    "decimals": 6,
+    "id": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+    "issuer": "USDT0 (omnichain USDT; LayerZero OFT arrangement; not named on Tether's supported-protocols page)",
+    "issuerNative": false,
+    "issuerPowers": [
+      "blocklist",
+      "destroy-blocked-funds",
+      "upgrade",
+      "mint",
+      "burn"
+    ],
+    "contractIs": "An EIP-1967 transparent proxy at this address; implementation 0x3263CD783823d04a6B9819517E0E6840d37cA3F4 (code keccak 0x1d4c20a1...2279). symbol() is \"USD\u20ae0\", not \"USDT\". Supply on Arbitrum One is minted and burned by the OFT contract oftContract() = 0x14E4A1B13bf7F943c8ff7C51fb60FA964A298D92 as USDT moves between chains; redemption 1:1 against USDT locked on Ethereum is the publisher's statement, not verified here.",
+    "admin": "Proxy admin contract 0x553ec478A66BE27Ba25A6bc5dB20AEc2eD6A1B4A, owned by the Safe 0x4DFF9b5b0143E642a3F63a5bcf2d1C328e600bf8 (threshold 3 of 5 owners, read on the fork). The same Safe is the token's owner(). It can replace the implementation with any code (so: change balances, add a fee, stop transfers), block an address and destroy a blocked address's funds. Who holds the five Safe keys was not examined.",
+    "behaviour": {
+      "returnsNoValue": false,
+      "approveZeroFirst": false,
+      "transferFee": "none in the current implementation; an upgrade could add one",
+      "blocklist": "`transfer` and `transferFrom` revert when the CALLER is blocked, `transferFrom` also when `from` is blocked: a blocked vault can neither pull a deposit nor pay; a blocked address still RECEIVES; its balance can then be destroyed",
+      "pause": "none in the current implementation",
+      "upgrade": "the proxy admin's owner can replace the implementation",
+      "recipientRefusals": [
+        "the token contract itself (a transfer to it reverts)"
+      ]
+    },
+    "verified": [
+      {
+        "source": "https://docs.usdt0.to/technical-documentation/deployments (the USDT0 publisher's list; fetched by agent 409 on 2026-11-18, sha256 baa823860bbd3648...)",
+        "date": "2026-11-18"
+      },
+      {
+        "source": "loopback fork of Arbitrum One at block 525506294 (public fork source arb1.arbitrum.io, read-only): proxy slots, implementation code keccak, owner and proxy admin owner (one Safe, 3 of 5), blocklist behaviour with the vault in each role",
+        "date": "2026-11-19"
+      }
+    ]
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDT (Arbitrum)",
+    "symbol": "bUSDT.arb",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "250000000000",
+    "window": "25000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "21000000",
+    "maxDeposit": "25000000000",
+    "l2MinBurn": "20000000",
+    "l2MaxBurn": "25000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 0.5 gwei: while the network's gas price is above that the release waits"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own Arbitrum One node reports as finalized (its batch is in a finalized Ethereum block).",
+    "tag": "finalized",
+    "confirmations": 0,
+    "typicalSeconds": 1200,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient)",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "approve the vault for the amount on the USD\u20ae0 contract",
+      "call deposit(amount, l2Recipient) on the vault",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token",
+      "a deposit while the asset contract is not in the pinned state (issuer fee, pause, replaced or upgraded token, vault blocked): the vault or the token refuses it, and the signers attest nothing for the route until the state is back"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "0.5",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "USD\u20ae0, the burned amount less 0.05%",
+    "notes": [
+      "a recipient the issuer has blocked is still PAID by this token (only the sender side is checked); the issuer can then destroy that balance. The burn names the recipient and cannot be redirected",
+      "never name the token contract itself (a transfer to it reverts) as the recipient: the release of such a burn can never be paid and the burned amount stays locked",
+      "the relayer pays at most 0.5 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (20); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://arbiscan.io/tx/{tx}",
+      "address": "https://arbiscan.io/address/{address}",
+      "block": "https://arbiscan.io/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "NOT LAUNCHABLE IN V1 (held): Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying. A page, a pool builder or the DEX gate must not offer this route; every bridge tool refuses it (tools/evm-nets/asset_routes.py). The network's USDC route is another route with its own launch block.",
+    "UNAUDITED. Nothing is deployed. A further route of Arbitrum One: the network's first route is USDC (deployments/arbitrum-one/). Cap and window follow the rule decided for USDC on 2026-11-19; fees and minimums are the USDC route's.",
+    "The asset: An EIP-1967 transparent proxy at this address; implementation 0x3263CD783823d04a6B9819517E0E6840d37cA3F4 (code keccak 0x1d4c20a1...2279). symbol() is \"USD\u20ae0\", not \"USDT\". Supply on Arbitrum One is minted and burned by the OFT contract oftContract() = 0x14E4A1B13bf7F943c8ff7C51fb60FA964A298D92 as USDT moves between chains; redemption 1:1 against USDT locked on Ethereum is the publisher's statement, not verified here."
+  ]
+}

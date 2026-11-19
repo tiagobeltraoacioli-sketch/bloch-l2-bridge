@@ -1,0 +1,222 @@
+{
+  "domain": "bloch.bridge.asset-routes.v1",
+  "notes": "Further asset routes on EVM source networks that already carry a first route (round 20, owner request of 2026-11-19: several assets per network). A route id is <network>-<asset> in lower case; its files live in deployments/<route-id>/. The network's first route (USDC) is NOT in this file and nothing here changes it: Ethereum's is the frozen bUSDC line, the others are tools/evm-nets/networks.json. Every decision here is recorded a second time in tools/evm-nets/asset_routes.py (DECIDED); when the two disagree every route of this file is refused. `launch` has the meaning of networks.json: a route whose `launch.v1` is false gets a bridge.network.json and nothing else, and every tool refuses its (chain id, asset) pair with no flag to lift it. Fee rates and minimums are those of the network's USDC route and are compared with it on every load (chain 1: relayCost.ethereum of networks.json). Caps and windows follow the rule decided for USDC on 2026-11-19. `guard` is what every signer reads at its own finalized block before attesting a deposit: any difference stops minting for the route (tools/signatario-stable/token_guard.py). Asset facts were read on loopback forks of the three networks on 2026-11-19 (agents/411-bridge-usdt-r20.md) and from agent 409's probes of 2026-11-18. UNAUDITED. Nothing is deployed.",
+  "held": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying.",
+  "ethereum": {
+    "_about": "What the Ethereum bridge's own files state for chain 1, gathered here because chain 1 is not a network of networks.json. Used only to describe and rehearse a further route on Ethereum; the bUSDC line reads none of it.",
+    "name": "Ethereum",
+    "chainId": 1,
+    "nativeSymbol": "ETH",
+    "rpc": "https://ethereum-rpc.publicnode.com",
+    "explorer": "https://etherscan.io",
+    "sourceDomainLabel": "ethereum-mainnet",
+    "signer": {
+      "anchor_policy": "finalized",
+      "anchor_max_age": 160,
+      "finalized_margin": 0,
+      "interval_s": 60,
+      "why": "the Ethereum rule: the anchor is the signer's own finalized block, inside the 256-block window"
+    },
+    "measured": {
+      "blockTimeSeconds": 12.0,
+      "blockhashWindowSeconds": 3072
+    },
+    "fork": {
+      "slotsInAnEpoch": 32
+    },
+    "finality": {
+      "meaning": "two epochs of Ethereum's own consensus",
+      "typicalSeconds": 960,
+      "worstCaseSeconds": 86400
+    }
+  },
+  "routes": {
+    "ethereum-usdt": {
+      "network": "ethereum",
+      "chainId": 1,
+      "assetKey": "usdt",
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+      },
+      "assetLabel": "USDT",
+      "asset": {
+        "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "symbol": "USDT",
+        "name": "Tether USD",
+        "decimals": 6,
+        "issuer": "Tether",
+        "issuerNative": true,
+        "kind": "tether-legacy",
+        "issuerPowers": ["blacklist", "destroy-blacklisted-funds", "pause", "transfer-fee", "deprecate"],
+        "contractIs": "Tether's own TetherToken (Solidity 0.4.17), not a proxy: the address holds the token code itself. `deprecate(address)` makes it forward every call to another contract.",
+        "admin": "owner() = 0xC6CDE7C39eB2f0F0095F41570af89eFC2C1Ea828 (a contract; its signers were not examined): blacklist and destroy funds of a blacklisted address, pause, set a transfer fee below 20 bps and below 50 USDT per transfer, issue, redeem, deprecate.",
+        "behaviour": {
+          "returnsNoValue": true,
+          "approveZeroFirst": true,
+          "transferFee": "switch `basisPointsRate` / `maximumFee`, both zero today; the sender loses the amount, the recipient receives it less the fee",
+          "blocklist": "`transfer` checks the sender, `transferFrom` checks `from` only: a blacklisted address still RECEIVES; its balance can then be destroyed by the issuer",
+          "pause": "`transfer` and `transferFrom` revert while paused",
+          "upgrade": "`deprecate(address)`: calls are forwarded to the new contract; balances are read from it",
+          "recipientRefusals": []
+        },
+        "verified": [
+          {"source": "https://tether.to/en/supported-protocols/ (Tether's own page names this contract; fetched by agent 409 on 2026-11-18, sha256 c88c040a99d2b04e...)", "date": "2026-11-18"},
+          {"source": "loopback fork of Ethereum at block 26446459 (public fork source ethereum-rpc.publicnode.com, read-only): code keccak, decimals, owner, transfer / transferFrom / blacklist / pause / fee behaviour with the vault in each role", "date": "2026-11-19"}
+        ]
+      },
+      "vault": {
+        "contract": "contracts/tron/TronSourceVault.sol:TronSourceVault",
+        "creationKeccak": "0x52144d19e5cc5d180d8d687f8e97746300241070fa25d4e68b491b780d282b0c",
+        "transferMode": 1,
+        "releaseFlat": 0,
+        "why": "The same TetherToken code runs on TRON and on Ethereum, and the vault written for it (frozen ProvenanceSourceVault plus the seven marked changes of docs/TRON-VAULT-DIFF.md) is what this token needs: it refuses a deposit while the issuer has blacklisted the vault or deprecated the token (the token alone accepts a transferFrom INTO a blacklisted address), and it keeps exits open while the issuer's transfer fee is on (the recipient bears it; the vault's own balance must fall by exactly what it sent). The stock solc 0.8.24 build of this tree is used on Ethereum (the TRON pin is TRON's own compiler). The frozen USDC vault is not touched."
+      },
+      "l2": {"name": "Bloch Bridged USDT", "symbol": "bUSDT"},
+      "feeBps": {"deposit": 5, "release": 10},
+      "minDeposit": 101000000,
+      "l2MinBurn": 100000000,
+      "limits": {"cap": 500000000000, "window": 50000000000, "windowSeconds": 86400},
+      "guard": {
+        "codes": [
+          {"address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "keccak": "0xb44fb4e949d0f78f87f79ee46428f23a2a5713ce6fc6e0beb3dda78c2ac1ea55", "what": "TetherToken runtime code"}
+        ],
+        "slots": [],
+        "calls": [
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "basisPointsRate()", "selector": "0xdd644f72", "arg": null, "word": "0x0", "what": "issuer transfer fee rate (must be zero)"},
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "maximumFee()", "selector": "0x35390714", "arg": null, "word": "0x0", "what": "issuer transfer fee ceiling (must be zero)"},
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "paused()", "selector": "0x5c975abb", "arg": null, "word": "0x0", "what": "issuer pause"},
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "deprecated()", "selector": "0x0e136b19", "arg": null, "word": "0x0", "what": "the token was replaced (deprecate)"},
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "isBlackListed(address)", "selector": "0xe47d6060", "arg": "vault", "word": "0x0", "what": "the vault is blacklisted"},
+          {"to": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "sig": "owner()", "selector": "0x8da5cb5b", "arg": null, "word": "0xc6cde7c39eb2f0f0095f41570af89efc2c1ea828", "what": "the token owner changed"}
+        ]
+      }
+    },
+    "arbitrum-one-usdt": {
+      "network": "arbitrum-one",
+      "chainId": 42161,
+      "assetKey": "usdt",
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+      },
+      "assetLabel": "USDT0",
+      "asset": {
+        "address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+        "symbol": "USD₮0",
+        "name": "USD₮0",
+        "decimals": 6,
+        "issuer": "USDT0 (omnichain USDT; LayerZero OFT arrangement; not named on Tether's supported-protocols page)",
+        "issuerNative": false,
+        "kind": "usdt0",
+        "issuerPowers": ["blocklist", "destroy-blocked-funds", "upgrade", "mint", "burn"],
+        "contractIs": "An EIP-1967 transparent proxy at this address; implementation 0x3263CD783823d04a6B9819517E0E6840d37cA3F4 (code keccak 0x1d4c20a1...2279). symbol() is \"USD₮0\", not \"USDT\". Supply on Arbitrum One is minted and burned by the OFT contract oftContract() = 0x14E4A1B13bf7F943c8ff7C51fb60FA964A298D92 as USDT moves between chains; redemption 1:1 against USDT locked on Ethereum is the publisher's statement, not verified here.",
+        "admin": "Proxy admin contract 0x553ec478A66BE27Ba25A6bc5dB20AEc2eD6A1B4A, owned by the Safe 0x4DFF9b5b0143E642a3F63a5bcf2d1C328e600bf8 (threshold 3 of 5 owners, read on the fork). The same Safe is the token's owner(). It can replace the implementation with any code (so: change balances, add a fee, stop transfers), block an address and destroy a blocked address's funds. Who holds the five Safe keys was not examined.",
+        "behaviour": {
+          "returnsNoValue": false,
+          "approveZeroFirst": false,
+          "transferFee": "none in the current implementation; an upgrade could add one",
+          "blocklist": "`transfer` and `transferFrom` revert when the CALLER is blocked, `transferFrom` also when `from` is blocked: a blocked vault can neither pull a deposit nor pay; a blocked address still RECEIVES; its balance can then be destroyed",
+          "pause": "none in the current implementation",
+          "upgrade": "the proxy admin's owner can replace the implementation",
+          "recipientRefusals": ["the token contract itself (a transfer to it reverts)"]
+        },
+        "verified": [
+          {"source": "https://docs.usdt0.to/technical-documentation/deployments (the USDT0 publisher's list; fetched by agent 409 on 2026-11-18, sha256 baa823860bbd3648...)", "date": "2026-11-18"},
+          {"source": "loopback fork of Arbitrum One at block 525506294 (public fork source arb1.arbitrum.io, read-only): proxy slots, implementation code keccak, owner and proxy admin owner (one Safe, 3 of 5), blocklist behaviour with the vault in each role", "date": "2026-11-19"}
+        ]
+      },
+      "vault": {
+        "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+        "creationKeccak": "0x901d52d04b519c826bfb1e82a298d96ab1f33a1aec5721db55a7f9dfe2ce3a74",
+        "transferMode": 0,
+        "releaseFlat": null,
+        "why": "The frozen vault, byte-identical to the Ethereum bridge. This token returns true, has no fee and refuses a transferFrom whose caller is blocked, so a blocked vault cannot take a deposit; exact balance deltas on both sides refuse any transfer that moves another amount (an implementation that starts to charge)."
+      },
+      "l2": {"name": "Bloch Bridged USDT (Arbitrum)", "symbol": "bUSDT.arb"},
+      "feeBps": {"deposit": 5, "release": 5},
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "limits": {"cap": 250000000000, "window": 25000000000, "windowSeconds": 86400},
+      "guard": {
+        "codes": [
+          {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "keccak": "0xfc1ea81db44e2de921b958dc92da921a18968ff3f3465bd475fb86dd1af03986", "what": "the proxy's own code"},
+          {"address": "0x3263CD783823d04a6B9819517E0E6840d37cA3F4", "keccak": "0x1d4c20a1a19a0e182c0d2bffbe433a96bd70a1dbb383b7a2d293976df4042279", "what": "the implementation's code"}
+        ],
+        "slots": [
+          {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "slot": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", "value": "0x0000000000000000000000003263cd783823d04a6b9819517e0e6840d37ca3f4", "what": "EIP-1967 implementation (an upgrade changes it)"},
+          {"address": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "slot": "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103", "value": "0x000000000000000000000000553ec478a66be27ba25a6bc5db20aec2ed6a1b4a", "what": "EIP-1967 proxy admin"}
+        ],
+        "calls": [
+          {"to": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "sig": "isBlocked(address)", "selector": "0xfbac3951", "arg": "vault", "word": "0x0", "what": "the vault is blocked"},
+          {"to": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "sig": "owner()", "selector": "0x8da5cb5b", "arg": null, "word": "0x4dff9b5b0143e642a3f63a5bcf2d1c328e600bf8", "what": "the token owner changed"},
+          {"to": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", "sig": "oftContract()", "selector": "0x232849c3", "arg": null, "word": "0x14e4a1b13bf7f943c8ff7c51fb60fa964a298d92", "what": "the contract allowed to mint and burn changed"},
+          {"to": "0x553ec478A66BE27Ba25A6bc5dB20AEc2eD6A1B4A", "sig": "owner()", "selector": "0x8da5cb5b", "arg": null, "word": "0x4dff9b5b0143e642a3f63a5bcf2d1c328e600bf8", "what": "the proxy admin's owner changed"}
+        ]
+      }
+    },
+    "op-mainnet-usdt": {
+      "network": "op-mainnet",
+      "chainId": 10,
+      "assetKey": "usdt",
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+      },
+      "assetLabel": "USDT",
+      "asset": {
+        "address": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+        "symbol": "USDT",
+        "name": "Tether USD",
+        "decimals": 6,
+        "issuer": "OP Mainnet standard bridge (a bridged representation of Tether's Ethereum USDT; NOT issued by Tether here; not USD₮0)",
+        "issuerNative": false,
+        "kind": "op-bridged",
+        "issuerPowers": ["mint", "burn-any-balance", "bridge-upgrade"],
+        "contractIs": "A plain bridged token (L2StandardERC20, not a proxy): l1Token() = Tether's Ethereum contract 0xdAC17F958D2ee523a2206206994597C13D831ec7, l2Bridge() = the predeploy 0x4200000000000000000000000000000000000010. It has no owner, blocklist, pause or fee.",
+        "admin": "The token has no admin. Its l2Bridge may mint to any address and burn(address,uint256) from ANY holder without an allowance (shown on the fork: the bridge burned a balance of the vault's stand-in). The bridge is a proxy (implementation 0xAE9ed42F43a3ee45c3a9deF8ae6B48cBb58eD1a1) whose admin is the predeploy 0x4200000000000000000000000000000000000018, controlled by the OP Stack's upgrade authority (stated from the OP Stack's design, not read on chain). Every unit is backed by USDT locked in the Ethereum side of the bridge, where Tether's powers over that balance apply.",
+        "behaviour": {
+          "returnsNoValue": false,
+          "approveZeroFirst": false,
+          "transferFee": "none; the code is not upgradeable",
+          "blocklist": "none on this network (Tether can blacklist the bridge's balance on Ethereum, which would affect every holder at once)",
+          "pause": "none",
+          "upgrade": "the token code cannot change; the bridge that may mint and burn it can be upgraded",
+          "recipientRefusals": []
+        },
+        "verified": [
+          {"source": "https://static.optimism.io/optimism.tokenlist.json (Superchain Token List 10.0.1772; fetched by agent 409 on 2026-11-18, sha256 c01f91ac4bb76d47...)", "date": "2026-11-18"},
+          {"source": "loopback fork of OP Mainnet at block 159730198 (public fork source mainnet.optimism.io, read-only): code keccak, l1Token, l2Bridge, the bridge's proxy slots, mint and burn by the bridge", "date": "2026-11-19"}
+        ]
+      },
+      "vault": {
+        "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+        "creationKeccak": "0x901d52d04b519c826bfb1e82a298d96ab1f33a1aec5721db55a7f9dfe2ce3a74",
+        "transferMode": 0,
+        "releaseFlat": null,
+        "why": "The frozen vault, byte-identical to the Ethereum bridge: this is a plain token that returns true. If the bridge ever burned the vault's balance, every path of the vault stops on its backing check (InsufficientBacking) instead of paying one user with another's funds."
+      },
+      "l2": {"name": "Bloch Bridged USDT (OP Mainnet)", "symbol": "bUSDT.op"},
+      "feeBps": {"deposit": 5, "release": 5},
+      "minDeposit": 21000000,
+      "l2MinBurn": 20000000,
+      "limits": {"cap": 250000000000, "window": 25000000000, "windowSeconds": 86400},
+      "guard": {
+        "codes": [
+          {"address": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58", "keccak": "0xb49036bd4151aceb1aeaf736cd44d43f820306b280c5e8a58e430083cc444151", "what": "the token's runtime code"}
+        ],
+        "slots": [
+          {"address": "0x4200000000000000000000000000000000000010", "slot": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", "value": "0x000000000000000000000000ae9ed42f43a3ee45c3a9def8ae6b48cbb58ed1a1", "what": "the standard bridge's implementation (an upgrade of the contract that may mint and burn the token)"},
+          {"address": "0x4200000000000000000000000000000000000010", "slot": "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103", "value": "0x0000000000000000000000004200000000000000000000000000000000000018", "what": "the standard bridge's proxy admin"}
+        ],
+        "calls": [
+          {"to": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58", "sig": "l1Token()", "selector": "0xc01e1bd6", "arg": null, "word": "0xdac17f958d2ee523a2206206994597c13d831ec7", "what": "the Ethereum token this one represents"},
+          {"to": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58", "sig": "l2Bridge()", "selector": "0xae1f6aaf", "arg": null, "word": "0x4200000000000000000000000000000000000010", "what": "the contract that may mint and burn"}
+        ]
+      }
+    }
+  }
+}

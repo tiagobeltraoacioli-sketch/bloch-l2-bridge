@@ -4,14 +4,16 @@
   "l2ChainId": 700770,
   "tokenCreationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
   "checks": [
-    "C1 network ids",
+    "C1 route ids",
     "C2 L2 symbols and names",
-    "C3 source chain ids",
-    "C4 source-domain labels",
+    "C3 one source chain id per network",
+    "C4 one source-domain label per network",
     "C5 frozen token on 700770",
     "C6 owner fee recipients",
     "C7 one committee",
-    "C8 findings name routes"
+    "C8 findings name routes",
+    "C9 custody and L2 token addresses",
+    "C10 one route per network and asset"
   ],
   "routes": [
     {
@@ -135,6 +137,76 @@
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): the join window is 200 Ethereum block numbers (2,400 s); five serial cold signatures use about 5% of it.",
+        "openFindings": []
+      },
+      "sourceDomain": "arbitrum-one",
+      "sourceChainId": "42161"
+    },
+    {
+      "id": "arbitrum-one-usdt",
+      "route": {
+        "id": "arbitrum-one-usdt",
+        "asset": "usdt"
+      },
+      "network": {
+        "id": "arbitrum-one",
+        "name": "Arbitrum One",
+        "kind": "evm",
+        "chainId": "42161"
+      },
+      "asset": {
+        "symbol": "USD₮0",
+        "name": "USD₮0",
+        "decimals": 6,
+        "id": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+        "issuer": "USDT0 (omnichain USDT; LayerZero OFT arrangement; not named on Tether's supported-protocols page)"
+      },
+      "custody": {
+        "type": "evm-vault",
+        "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+        "address": "TBD-deploy"
+      },
+      "l2": {
+        "chainId": 700770,
+        "name": "Bloch Bridged USDT (Arbitrum)",
+        "symbol": "bUSDT.arb",
+        "decimals": 6,
+        "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+        "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+        "token": "TBD-deploy"
+      },
+      "fee": {
+        "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+        "depositBps": 5,
+        "releaseBps": 5
+      },
+      "limits": {
+        "minDeposit": "21000000",
+        "l2MinBurn": "20000000",
+        "cap": "250000000000",
+        "window": "25000000000",
+        "windowSeconds": 86400
+      },
+      "committee": {
+        "scheme": "secp256k1",
+        "threshold": 5,
+        "switchThreshold": 6,
+        "guardianPower": "pause-only",
+        "pauseSeconds": 259200
+      },
+      "release": {
+        "gasCeilingGwei": "0.5"
+      },
+      "status": "unaudited-not-deployed",
+      "sources": [
+        "deployments/arbitrum-one-usdt/bridge.network.json"
+      ],
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "sourceState": "held",
+        "source": "asset-route-registry",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying.",
         "openFindings": []
       },
       "sourceDomain": "arbitrum-one",
@@ -361,6 +433,76 @@
       "sourceChainId": "56"
     },
     {
+      "id": "ethereum-usdt",
+      "route": {
+        "id": "ethereum-usdt",
+        "asset": "usdt"
+      },
+      "network": {
+        "id": "ethereum",
+        "name": "Ethereum",
+        "kind": "evm",
+        "chainId": "1"
+      },
+      "asset": {
+        "symbol": "USDT",
+        "name": "Tether USD",
+        "decimals": 6,
+        "id": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "issuer": "Tether"
+      },
+      "custody": {
+        "type": "evm-vault",
+        "contract": "contracts/tron/TronSourceVault.sol:TronSourceVault",
+        "address": "TBD-deploy"
+      },
+      "l2": {
+        "chainId": 700770,
+        "name": "Bloch Bridged USDT",
+        "symbol": "bUSDT",
+        "decimals": 6,
+        "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+        "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+        "token": "TBD-deploy"
+      },
+      "fee": {
+        "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+        "depositBps": 5,
+        "releaseBps": 10
+      },
+      "limits": {
+        "minDeposit": "101000000",
+        "l2MinBurn": "100000000",
+        "cap": "500000000000",
+        "window": "50000000000",
+        "windowSeconds": 86400
+      },
+      "committee": {
+        "scheme": "secp256k1",
+        "threshold": 5,
+        "switchThreshold": 6,
+        "guardianPower": "pause-only",
+        "pauseSeconds": 259200
+      },
+      "release": {
+        "gasCeilingGwei": "2"
+      },
+      "status": "unaudited-not-deployed",
+      "sources": [
+        "deployments/ethereum-usdt/bridge.network.json"
+      ],
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "sourceState": "held",
+        "source": "asset-route-registry",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying.",
+        "openFindings": []
+      },
+      "sourceDomain": "ethereum-mainnet",
+      "sourceChainId": "1"
+    },
+    {
       "id": "linea",
       "network": {
         "id": "linea",
@@ -487,6 +629,76 @@
         "sourceState": "launchable",
         "source": "evm-launch-registry",
         "reason": "Fit for v1 (reviews 325 and 329): a release was paid at 140 s of the 494 s join window with 26 s of work per signature, signers one after another; the rebuild time is measured and alerted (timing).",
+        "openFindings": []
+      },
+      "sourceDomain": "op-mainnet",
+      "sourceChainId": "10"
+    },
+    {
+      "id": "op-mainnet-usdt",
+      "route": {
+        "id": "op-mainnet-usdt",
+        "asset": "usdt"
+      },
+      "network": {
+        "id": "op-mainnet",
+        "name": "OP Mainnet",
+        "kind": "evm",
+        "chainId": "10"
+      },
+      "asset": {
+        "symbol": "USDT",
+        "name": "Tether USD",
+        "decimals": 6,
+        "id": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+        "issuer": "OP Mainnet standard bridge (a bridged representation of Tether's Ethereum USDT; NOT issued by Tether here; not USD₮0)"
+      },
+      "custody": {
+        "type": "evm-vault",
+        "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+        "address": "TBD-deploy"
+      },
+      "l2": {
+        "chainId": 700770,
+        "name": "Bloch Bridged USDT (OP Mainnet)",
+        "symbol": "bUSDT.op",
+        "decimals": 6,
+        "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+        "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+        "token": "TBD-deploy"
+      },
+      "fee": {
+        "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+        "depositBps": 5,
+        "releaseBps": 5
+      },
+      "limits": {
+        "minDeposit": "21000000",
+        "l2MinBurn": "20000000",
+        "cap": "250000000000",
+        "window": "25000000000",
+        "windowSeconds": 86400
+      },
+      "committee": {
+        "scheme": "secp256k1",
+        "threshold": 5,
+        "switchThreshold": 6,
+        "guardianPower": "pause-only",
+        "pauseSeconds": 259200
+      },
+      "release": {
+        "gasCeilingGwei": "0.5"
+      },
+      "status": "unaudited-not-deployed",
+      "sources": [
+        "deployments/op-mainnet-usdt/bridge.network.json"
+      ],
+      "launch": {
+        "v1": false,
+        "state": "held",
+        "sourceState": "held",
+        "source": "asset-route-registry",
+        "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying.",
         "openFindings": []
       },
       "sourceDomain": "op-mainnet",

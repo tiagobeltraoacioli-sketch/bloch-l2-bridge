@@ -10,6 +10,10 @@ One tool deploys the L2 token of every route; the L2 token is always the frozen 
   arbitrum-one, op-mainnet, linea deploy_pontes.py; the source chain id is accepted from the EVM launch registry
                                   (tools/evm-nets/launch.py + networks.json), under that network's token name only
   base, bnb                       refused: not launchable in v1 (the registry's reason is printed); no flag lifts it
+  ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt
+                                  further asset routes (round 20, tools/evm-nets/asset_routes.py): deploy_pontes.py, the
+                                  (chain id, token name) pair accepted only from that registry; all three are HELD
+                                  and refused by every command until a reviewed commit lifts them
   tron                            deploy_pontes.py; the config's `ethereum` section describes the TRON vault and the
                                   source chain id is accepted from DATA (`source_refusal` below); `--source-rpc` is the
                                   operator's tools/signatario-tron/tron_rpc_shim.py
@@ -62,6 +66,14 @@ ROUTES = {
                'vaultConfig': 'deployments/solana/busdc-sol-vault.config.json',
                'commands': ('translate', 'source') + COMMANDS, 'sourceRpc': 'own Solana RPC',
                'doc': 'docs/SOLANA-BRIDGE-DEPLOY-CEREMONY.md'},
+    # Round 20: further asset routes of a network (tools/evm-nets/asset_routes.py). deploy_pontes.py deploys their L2
+    # token as any EVM route's, from a config that `asset_routes.py write` generates only once the route is launchable.
+    'ethereum-usdt': {'path': 'native', 'config': 'deployments/ethereum-usdt/busdt-token.config.json',
+                      'sourceRpc': 'own Ethereum node', 'doc': 'docs/BRIDGE-USDT-ROUTES.md'},
+    'arbitrum-one-usdt': {'path': 'native', 'config': 'deployments/arbitrum-one-usdt/busdt-token.config.json',
+                          'sourceRpc': 'own Arbitrum One node', 'doc': 'docs/BRIDGE-USDT-ROUTES.md'},
+    'op-mainnet-usdt': {'path': 'native', 'config': 'deployments/op-mainnet-usdt/busdt-token.config.json',
+                        'sourceRpc': 'own OP Mainnet node', 'doc': 'docs/BRIDGE-USDT-ROUTES.md'},
     'bitcoin': {'path': 'adapter', 'tool': 'tools/signatario-btc/btc_deploy.py',
                 'config': 'deployments/bitcoin/bbtc-token-mainnet.config.json',
                 'vaultConfig': 'deployments/bitcoin/bbtc-vault-mainnet.config.json',
@@ -85,6 +97,13 @@ def _launch():
         sys.path.insert(0, str(EVM_NETS))
     import launch
     return launch
+
+
+def _asset_routes():
+    if str(EVM_NETS) not in sys.path:
+        sys.path.insert(0, str(EVM_NETS))
+    import asset_routes
+    return asset_routes
 
 
 def network_files():
@@ -136,6 +155,16 @@ def status(net):
         return 'launchable', 'the Ethereum bridge (bUSDC V3), freeze cc2511a'
     files = network_files()
     doc = files[net][1] if net in files else None
+    if doc and isinstance(doc.get('route'), dict):
+        # A further asset route of a network (round 20): its own registry decides, whatever its network's status is.
+        ar = _asset_routes()
+        try:
+            spec = ar.registry()['routes'].get(net)
+        except ar.RouteError as e:
+            return 'held', f'the asset-route registry cannot be trusted: {e}'
+        if spec is None:
+            return 'out', 'a further route that the asset-route registry does not name'
+        return spec['launch']['state'], spec['launch']['reason']
     if doc and doc['network'].get('kind') == 'evm':
         launch = _launch()
         try:
@@ -156,6 +185,9 @@ def table():
     for net, how in ROUTES.items():
         doc = files[net][1] if net in files else None
         state, reason = status(net)
+        if doc and isinstance(doc.get('route'), dict) and state != 'launchable':
+            # A further asset route that is not launchable has no config and no command (as Base and BNB Smart Chain).
+            how = {'path': 'refused', 'doc': how['doc']}
         if net == 'ethereum':
             symbol = json.loads((ROOT / how['config']).read_text())['token']['symbol']
         else:

@@ -1,0 +1,160 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "route": {
+    "id": "ethereum-usdt",
+    "asset": "usdt"
+  },
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+  },
+  "network": {
+    "id": "ethereum",
+    "name": "Ethereum",
+    "kind": "evm",
+    "chainId": "1",
+    "nativeCurrency": {
+      "symbol": "ETH",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "USDT",
+    "name": "Tether USD",
+    "decimals": 6,
+    "id": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    "issuer": "Tether",
+    "issuerNative": true,
+    "issuerPowers": [
+      "blacklist",
+      "destroy-blacklisted-funds",
+      "pause",
+      "transfer-fee",
+      "deprecate"
+    ],
+    "contractIs": "Tether's own TetherToken (Solidity 0.4.17), not a proxy: the address holds the token code itself. `deprecate(address)` makes it forward every call to another contract.",
+    "admin": "owner() = 0xC6CDE7C39eB2f0F0095F41570af89eFC2C1Ea828 (a contract; its signers were not examined): blacklist and destroy funds of a blacklisted address, pause, set a transfer fee below 20 bps and below 50 USDT per transfer, issue, redeem, deprecate.",
+    "behaviour": {
+      "returnsNoValue": true,
+      "approveZeroFirst": true,
+      "transferFee": "switch `basisPointsRate` / `maximumFee`, both zero today; the sender loses the amount, the recipient receives it less the fee",
+      "blocklist": "`transfer` checks the sender, `transferFrom` checks `from` only: a blacklisted address still RECEIVES; its balance can then be destroyed by the issuer",
+      "pause": "`transfer` and `transferFrom` revert while paused",
+      "upgrade": "`deprecate(address)`: calls are forwarded to the new contract; balances are read from it",
+      "recipientRefusals": []
+    },
+    "verified": [
+      {
+        "source": "https://tether.to/en/supported-protocols/ (Tether's own page names this contract; fetched by agent 409 on 2026-11-18, sha256 c88c040a99d2b04e...)",
+        "date": "2026-11-18"
+      },
+      {
+        "source": "loopback fork of Ethereum at block 26446459 (public fork source ethereum-rpc.publicnode.com, read-only): code keccak, decimals, owner, transfer / transferFrom / blacklist / pause / fee behaviour with the vault in each role",
+        "date": "2026-11-19"
+      }
+    ]
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/tron/TronSourceVault.sol:TronSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDT",
+    "symbol": "bUSDT",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "500000000000",
+    "window": "50000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "101000000",
+    "maxDeposit": "50000000000",
+    "l2MinBurn": "100000000",
+    "l2MaxBurn": "50000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 10,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 2 gwei: while the network's gas price is above that the release waits"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own Ethereum node reports as finalized (two epochs of Ethereum's own consensus).",
+    "tag": "finalized",
+    "confirmations": 0,
+    "typicalSeconds": 960,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient)",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "read allowance(owner, vault) on the USDT contract; if it is neither zero nor already enough, send approve(vault, 0) first: this token reverts an approve from a non-zero allowance to a non-zero value; then approve the vault for the amount",
+      "approve and transfer on this token return no data: do not decode a boolean from them",
+      "call deposit(amount, l2Recipient) on the vault",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token",
+      "a deposit while the asset contract is not in the pinned state (issuer fee, pause, replaced or upgraded token, vault blocked): the vault or the token refuses it, and the signers attest nothing for the route until the state is back"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "2",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDT, the burned amount less 0.1%",
+    "notes": [
+      "a recipient the issuer has blocked is still PAID by this token (only the sender side is checked); the issuer can then destroy that balance. The burn names the recipient and cannot be redirected",
+      "the relayer pays at most 2 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (100); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)",
+      "if the issuer turns its transfer fee on, a release still pays: the vault sends the amount less the bridge fee and the recipient receives it less the issuer's fee (below 20 bps, below 50 USDT)"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://etherscan.io/tx/{tx}",
+      "address": "https://etherscan.io/address/{address}",
+      "block": "https://etherscan.io/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "NOT LAUNCHABLE IN V1 (held): Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying. A page, a pool builder or the DEX gate must not offer this route; every bridge tool refuses it (tools/evm-nets/asset_routes.py). The network's USDC route is another route with its own launch block.",
+    "UNAUDITED. Nothing is deployed. A further route of Ethereum: the network's first route is USDC (deployments/mainnet/). Cap and window follow the rule decided for USDC on 2026-11-19; fees and minimums are the USDC route's.",
+    "The asset: Tether's own TetherToken (Solidity 0.4.17), not a proxy: the address holds the token code itself. `deprecate(address)` makes it forward every call to another contract."
+  ]
+}

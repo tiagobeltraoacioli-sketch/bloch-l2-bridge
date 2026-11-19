@@ -32,11 +32,14 @@ ceremony.
 |---|---|---|---|---|
 | ethereum | bUSDC | launchable | - | R329-SHARED-1 (Info), F374-1 (Info (test flake)) |
 | arbitrum-one | bUSDC.arb | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-11 (residual) (Info), R325-EVM-6 (Info (stands)) |
+| arbitrum-one-usdt | bUSDT.arb | held | - | - |
 | base | bUSDC.base | held | R325-EVM-1 (High, open), R329-EVM-3P-2 (Medium, open) | R325-EVM-6 (Info (stands)) |
 | bitcoin | bBTC | held | - | R342-BTC-4 (Info), R342-BTC-5 (Info), R342-BTC-2P-5 (Info), R342-BTC-2P-7 (Info (latent)), R342-BTC-6 (Info), R342-BTC-7 (Info), R342-BTC-2P-3 (residual) (Info (residual of a fixed Low)) |
 | bnb | bUSDC.bnb | out | R325-EVM-1 (High, open), R325-EVM-2 (Medium, partly-fixed) | R325-EVM-10 (Info (stands)) |
+| ethereum-usdt | bUSDT | held | - | - |
 | linea | bUSDC.linea | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
 | op-mainnet | bUSDC.op | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
+| op-mainnet-usdt | bUSDT.op | held | - | - |
 | solana | bUSDC.sol | held | - | R374-1 (Info (question, answered by a test)), R330-SOL-1 (residual) (residual, per reviewer 376), R330-SOL-4P-5 (Info), R330-SOL-4P-8 (Info (rig hygiene)) |
 | stellar | bUSDC.xlm | held | - | R331-XLM-4P (Info, no id) (Info), R331-XLM-4P-7 (Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed)) |
 | tron | bUSDT.trx | held | - | R342-TRX-5 (Info), R342-TRX-6 (Info), R342-TRX-4 (limit) (Info (stated limit of a fixed Low)) |

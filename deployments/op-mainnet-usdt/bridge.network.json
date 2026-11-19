@@ -1,0 +1,156 @@
+{
+  "schema": "bloch.bridge.network.v1",
+  "status": "unaudited-not-deployed",
+  "route": {
+    "id": "op-mainnet-usdt",
+    "asset": "usdt"
+  },
+  "launch": {
+    "v1": false,
+    "state": "held",
+    "reason": "Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying."
+  },
+  "network": {
+    "id": "op-mainnet",
+    "name": "OP Mainnet",
+    "kind": "evm",
+    "chainId": "10",
+    "nativeCurrency": {
+      "symbol": "ETH",
+      "decimals": 18
+    }
+  },
+  "asset": {
+    "symbol": "USDT",
+    "name": "Tether USD",
+    "decimals": 6,
+    "id": "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+    "issuer": "OP Mainnet standard bridge (a bridged representation of Tether's Ethereum USDT; NOT issued by Tether here; not USD\u20ae0)",
+    "issuerNative": false,
+    "issuerPowers": [
+      "mint",
+      "burn-any-balance",
+      "bridge-upgrade"
+    ],
+    "contractIs": "A plain bridged token (L2StandardERC20, not a proxy): l1Token() = Tether's Ethereum contract 0xdAC17F958D2ee523a2206206994597C13D831ec7, l2Bridge() = the predeploy 0x4200000000000000000000000000000000000010. It has no owner, blocklist, pause or fee.",
+    "admin": "The token has no admin. Its l2Bridge may mint to any address and burn(address,uint256) from ANY holder without an allowance (shown on the fork: the bridge burned a balance of the vault's stand-in). The bridge is a proxy (implementation 0xAE9ed42F43a3ee45c3a9deF8ae6B48cBb58eD1a1) whose admin is the predeploy 0x4200000000000000000000000000000000000018, controlled by the OP Stack's upgrade authority (stated from the OP Stack's design, not read on chain). Every unit is backed by USDT locked in the Ethereum side of the bridge, where Tether's powers over that balance apply.",
+    "behaviour": {
+      "returnsNoValue": false,
+      "approveZeroFirst": false,
+      "transferFee": "none; the code is not upgradeable",
+      "blocklist": "none on this network (Tether can blacklist the bridge's balance on Ethereum, which would affect every holder at once)",
+      "pause": "none",
+      "upgrade": "the token code cannot change; the bridge that may mint and burn it can be upgraded",
+      "recipientRefusals": []
+    },
+    "verified": [
+      {
+        "source": "https://static.optimism.io/optimism.tokenlist.json (Superchain Token List 10.0.1772; fetched by agent 409 on 2026-11-18, sha256 c01f91ac4bb76d47...)",
+        "date": "2026-11-18"
+      },
+      {
+        "source": "loopback fork of OP Mainnet at block 159730198 (public fork source mainnet.optimism.io, read-only): code keccak, l1Token, l2Bridge, the bridge's proxy slots, mint and burn by the bridge",
+        "date": "2026-11-19"
+      }
+    ]
+  },
+  "custody": {
+    "type": "evm-vault",
+    "address": "TBD-deploy",
+    "contract": "contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault",
+    "codeHash": "TBD-deploy",
+    "route": "TBD-deploy",
+    "fromBlock": "TBD-deploy"
+  },
+  "committee": {
+    "scheme": "secp256k1",
+    "signers": "TBD-owner",
+    "threshold": 5,
+    "switchThreshold": 6,
+    "guardians": "TBD-owner",
+    "guardianPower": "pause-only",
+    "pauseSeconds": 259200
+  },
+  "l2": {
+    "chainId": 700770,
+    "token": "TBD-deploy",
+    "name": "Bloch Bridged USDT (OP Mainnet)",
+    "symbol": "bUSDT.op",
+    "decimals": 6,
+    "contract": "contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3",
+    "creationCodeKeccak": "0xe560441f37e247e387cebd23bb3dd798a29d34174a9fb19a4bb3877c6c721de7",
+    "codeHash": "TBD-deploy"
+  },
+  "limits": {
+    "cap": "250000000000",
+    "window": "25000000000",
+    "windowSeconds": 86400,
+    "minDeposit": "21000000",
+    "maxDeposit": "25000000000",
+    "l2MinBurn": "20000000",
+    "l2MaxBurn": "25000000000",
+    "mintDelaySeconds": 43200,
+    "largeItemThreshold": "0"
+  },
+  "fee": {
+    "depositBps": 5,
+    "releaseBps": 5,
+    "recipient": "0x775a993F09Bd80aeCF8F8c2ADe0C84158E3a0544",
+    "paidOn": "source",
+    "collection": "accrued in the vault outside the backing; anyone calls sweepFees() and the vault pays the recipient",
+    "networkFee": "the depositor pays the deposit transaction; the relayer pays the release transaction, up to 0.5 gwei: while the network's gas price is above that the release waits"
+  },
+  "finality": {
+    "rule": "A deposit is attested when its block is at or below the block the signer's own OP Mainnet node reports as finalized (its batch is in a finalized Ethereum block).",
+    "tag": "finalized",
+    "confirmations": 0,
+    "typicalSeconds": 1300,
+    "worstCaseSeconds": 86400,
+    "reorg": "Signers read only finalized blocks; a deposit that leaves the canonical chain before finality is never attested. Every mint waits 12 hours on the L2; the relayer does not execute a mint whose deposit is not in the vault's finalized deposit chain and the guardians cancel it. A credited mint with no deposit holds later releases instead of paying them."
+  },
+  "deposit": {
+    "method": "contract-call",
+    "recipientEncoding": "bytes32: the 20-byte L2 address left-padded with zeros",
+    "function": "deposit(uint64 amount, bytes32 l2Recipient)",
+    "approvalTarget": "TBD-deploy",
+    "steps": [
+      "approve the vault for the amount on the USDT contract",
+      "call deposit(amount, l2Recipient) on the vault",
+      "after source finality and the 12 hour mint delay the L2 token credits amount less 0.05% to l2Recipient"
+    ],
+    "refusals": [
+      "an amount below minDeposit or above maxDeposit, or one that would pass the cap",
+      "an l2Recipient that is zero or longer than 20 bytes",
+      "do not name a contract as l2Recipient unless it can move the token",
+      "a deposit while the asset contract is not in the pinned state (issuer fee, pause, replaced or upgraded token, vault blocked): the vault or the token refuses it, and the signers attest nothing for the route until the state is back"
+    ]
+  },
+  "release": {
+    "l2Function": "burn(uint64 amount, address sourceRecipient)",
+    "gasCeilingGwei": "0.5",
+    "recipientEncoding": "20-byte address on the source network",
+    "typicalSeconds": 3600,
+    "paysAsset": "USDT, the burned amount less 0.05%",
+    "notes": [
+      "this token has no blocklist on this network: no recipient is refused by it. The burn names the recipient and cannot be redirected",
+      "the relayer pays at most 0.5 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
+      "the smallest exit is l2MinBurn (20); the fee of an exit covers the relayer's gas only up to a gas price that grows with the amount (docs/BRIDGE-EVM-NETWORKS.md section 9.1)"
+    ]
+  },
+  "explorers": {
+    "source": {
+      "tx": "https://optimistic.etherscan.io/tx/{tx}",
+      "address": "https://optimistic.etherscan.io/address/{address}",
+      "block": "https://optimistic.etherscan.io/block/{block}"
+    },
+    "l2": {
+      "tx": "TBD-owner",
+      "address": "TBD-owner"
+    }
+  },
+  "notes": [
+    "NOT LAUNCHABLE IN V1 (held): Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying. A page, a pool builder or the DEX gate must not offer this route; every bridge tool refuses it (tools/evm-nets/asset_routes.py). The network's USDC route is another route with its own launch block.",
+    "UNAUDITED. Nothing is deployed. A further route of OP Mainnet: the network's first route is USDC (deployments/op-mainnet/). Cap and window follow the rule decided for USDC on 2026-11-19; fees and minimums are the USDC route's.",
+    "The asset: A plain bridged token (L2StandardERC20, not a proxy): l1Token() = Tether's Ethereum contract 0xdAC17F958D2ee523a2206206994597C13D831ec7, l2Bridge() = the predeploy 0x4200000000000000000000000000000000000010. It has no owner, blocklist, pause or fee."
+  ]
+}

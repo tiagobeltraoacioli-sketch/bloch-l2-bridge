@@ -64,6 +64,24 @@
         "retired"
       ]
     },
+    "route": {
+      "description": "Optional (round 20, several assets per network). Present only on a FURTHER route of a network that already carries one: the file then lives in deployments/<route.id>/ and `network.id` stays the network's own id (the same network.id and chainId as the network's first route, another asset). Absent: the route id is `network.id` and the file lives in deployments/<network.id>/ (every route before round 20, unchanged). A consumer keys a route on its directory name (the route id), never on network.id alone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "asset"],
+      "properties": {
+        "id": {
+          "description": "<network.id>-<asset>, lower case: ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt. Also the directory name.",
+          "type": "string",
+          "pattern": "^[a-z0-9-]{2,40}$"
+        },
+        "asset": {
+          "description": "The asset key of the route id, lower case (usdt). One route per (network.id, asset key).",
+          "type": "string",
+          "pattern": "^[a-z0-9]{2,12}$"
+        }
+      }
+    },
     "launch": {
       "description": "Optional (round 17, EVM networks). Whether this route may be offered in bridge v1. Absent: the file makes no statement (the other bridges). A page, a pool builder or the DEX gate must treat `v1: false` as: do not offer this network, whatever `status` says.",
       "type": "object",
@@ -102,7 +120,7 @@
       ],
       "properties": {
         "id": {
-          "description": "Stable lowercase key, also the directory name: ethereum, arbitrum-one, base, op-mainnet, linea, bnb, bitcoin, solana, tron, stellar.",
+          "description": "Stable lowercase key of the NETWORK: ethereum, arbitrum-one, base, op-mainnet, linea, bnb, bitcoin, solana, tron, stellar. Also the directory name, unless the file carries `route` (a further asset on this network: the directory is then route.id).",
           "type": "string",
           "pattern": "^[a-z0-9-]{2,24}$"
         },
@@ -183,6 +201,29 @@
             "type": "string"
           },
           "uniqueItems": true
+        },
+        "contractIs": {
+          "description": "Optional (round 20). Exactly which contract the asset id is: the issuer's own code, a proxy (with its implementation), or a bridged representation, and what its symbol() says.",
+          "type": "string"
+        },
+        "admin": {
+          "description": "Optional (round 20). Who can change the asset contract or act on a holder, and how that was read.",
+          "type": "string"
+        },
+        "behaviour": {
+          "description": "Optional (round 20). How the asset contract deviates from a plain ERC-20, as measured on a fork of the network. A page uses it to build the deposit (an approval that must go through zero) and to refuse a recipient the token itself refuses.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["returnsNoValue", "approveZeroFirst", "transferFee", "blocklist", "pause", "upgrade", "recipientRefusals"],
+          "properties": {
+            "returnsNoValue": {"description": "transfer, transferFrom and approve return no data (the caller must not decode a boolean).", "type": "boolean"},
+            "approveZeroFirst": {"description": "approve reverts when both the current allowance and the new value are non-zero: set zero first.", "type": "boolean"},
+            "transferFee": {"type": "string"},
+            "blocklist": {"type": "string"},
+            "pause": {"type": "string"},
+            "upgrade": {"type": "string"},
+            "recipientRefusals": {"description": "Recipients a transfer of this token always refuses; a burn naming one can never be paid.", "type": "array", "items": {"type": "string"}}
+          }
         },
         "verified": {
           "description": "How the asset id was verified: at least one issuer document and one on-chain reading.",

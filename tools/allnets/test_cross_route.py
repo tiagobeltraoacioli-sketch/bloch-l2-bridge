@@ -21,6 +21,12 @@ for Stellar, its own tags. Families and their digest code:
             flag) commit to the outpoints of that route's own P2WSH thread; a 65-byte certificate of any other route is
             not a script signature at all (Argument; the regtest rehearsal shows the script path), and a Bitcoin
             signature is not a 65-byte EIP-191 certificate (Test: test_bitcoin_signature_is_not_a_certificate).
+Several routes on ONE network (round 20: ethereum and ethereum-usdt, arbitrum-one and arbitrum-one-usdt, op-mainnet
+and op-mainnet-usdt) share the chain id word by definition. What separates their certificates is the vault word (two
+contracts on one chain never have one address; the registry's check C9 refuses a shared custody address in the files)
+and the route word (routeId() hashes the vault's own address and its token). So in this matrix the first route of
+every network keeps the one shared address, the worst case across chains, and each further route of a network has an
+address of its own; the control test at the end shows what the vault word carries.
 Mint side: every L2 token is the frozen BridgedStablecoinV3; its EIP-712 mint digest binds the token address, chain
 700770 and, in the struct, sourceChainId, sourceVault, sourceRoute (bridge_feed.mint_digest).
 """
@@ -66,12 +72,25 @@ def chain_word(net):
     return int(ROUTES[net]['sourceChainId']).to_bytes(32, 'big')
 
 
-def release_digest(net):
+FURTHER = [n for n, r in ROUTES.items() if 'route' in r]
+
+
+def vault_of(net, shared=False):
+    """The 20-byte vault of a route in the matrix: the one shared address for the first route of every network (a
+    deployer with one nonce on two chains), and an own address for each further route of a network (one chain, two
+    contracts, two addresses). `shared=True` is the impossible case used by the control test."""
+    if shared or net not in FURTHER:
+        return VAULT20
+    import hashlib
+    return hashlib.sha256(b'further-route-vault:' + net.encode()).digest()[:20]
+
+
+def release_digest(net, shared_vault=False, route=ROUTE32):
     """The 32-byte digest route `net`'s committee signs for ITEM, by that route's own code."""
     i = ITEM
     if net in EVM_V2:
-        return BF.release_digest(chain_word(net), w(VAULT20), ROUTE32, w(i['nonce']), w(RECIPIENT20), w(i['amount']), BURN32,
-                                 w(i['valid']), w(i['anchor_n']), ANCHOR_H, w(i['native_n']), NATIVE_H,
+        return BF.release_digest(chain_word(net), w(vault_of(net, shared_vault)), route, w(i['nonce']), w(RECIPIENT20),
+                                 w(i['amount']), BURN32, w(i['valid']), w(i['anchor_n']), ANCHOR_H, w(i['native_n']), NATIVE_H,
                                  chain=[w(i['mint_count']), w(i['minted_total']), MINT_HEAD])
     if net == 'solana':
         rel = {'route': ROUTE32, 'nonce': i['nonce'], 'recipient': RECIPIENT20, 'amount': i['amount'], 'nativeBurn': BURN32,
@@ -125,7 +144,7 @@ class Matrix(unittest.TestCase):
     def test_mint_certificate_of_one_route_is_refused_by_every_other_even_at_one_token_address(self):
         token = w(bytes.fromhex('70' * 20))
         def mint(n):
-            return BF.mint_digest('3', w(700770), token, chain_word(n), w(VAULT20), ROUTE32, BURN32, w(1), w(10**9), w(RECIPIENT20))
+            return BF.mint_digest('3', w(700770), token, chain_word(n), w(vault_of(n)), ROUTE32, BURN32, w(1), w(10**9), w(RECIPIENT20))
         nets = list(ROUTES)
         digests = {n: mint(n) for n in nets}
         self.assertEqual(len(set(digests.values())), len(nets))
@@ -152,6 +171,44 @@ class Matrix(unittest.TestCase):
         finally:
             ROUTES['linea']['sourceChainId'] = real
 
+    def test_there_are_further_routes_and_each_shares_its_network_s_chain_word(self):
+        self.assertEqual(sorted(FURTHER), ['arbitrum-one-usdt', 'ethereum-usdt', 'op-mainnet-usdt'])
+        for n in FURTHER:
+            self.assertEqual(chain_word(n), chain_word(ROUTES[n]['network']['id']))
+            self.assertNotEqual(vault_of(n), vault_of(ROUTES[n]['network']['id']))
+        self.assertEqual(len({vault_of(n) for n in FURTHER}), len(FURTHER))
+
+    def test_two_routes_of_one_network_at_one_vault_address_would_accept_each_other_s_certificates(self):
+        """Control: for routes of ONE network the separation rests on the vault word (and the route word below). One
+        address cannot hold two contracts on a chain, and registry check C9 refuses the files that would say so."""
+        for n in FURTHER:
+            first = ROUTES[n]['network']['id']
+            with self.subTest(route=n):
+                same = release_digest(n, shared_vault=True)
+                self.assertEqual(same, release_digest(first))
+                self.assertTrue(accepted(release_digest(first), certificate(same)))
+                self.assertNotEqual(release_digest(n), release_digest(first))
+                self.assertFalse(accepted(release_digest(first), certificate(release_digest(n))))
+
+    def test_the_route_word_alone_also_separates_two_routes_of_one_network(self):
+        """routeId() hashes the vault's token and its own address, so two vaults never share it; a certificate for one
+        route id is refused under another even at one (impossible) vault address."""
+        other = bytes.fromhex('7f' * 32)
+        for n in FURTHER:
+            a, b = release_digest(n, shared_vault=True), release_digest(n, shared_vault=True, route=other)
+            self.assertNotEqual(a, b)
+            self.assertFalse(accepted(b, certificate(a)))
+
+    def test_a_mint_certificate_of_one_route_is_refused_by_the_other_route_of_its_network(self):
+        token = w(bytes.fromhex('70' * 20))
+        for n in FURTHER:
+            first = ROUTES[n]['network']['id']
+            d = {x: BF.mint_digest('3', w(700770), token, chain_word(x), w(vault_of(x)), ROUTE32, BURN32, w(1), w(10**9), w(RECIPIENT20))
+                 for x in (n, first)}
+            self.assertNotEqual(d[n], d[first])
+            self.assertFalse(accepted(d[first], certificate(d[n])))
+            self.assertFalse(accepted(d[n], certificate(d[first])))
+
     def test_one_signature_too_few_is_refused_on_its_own_route(self):
         d = release_digest('solana')
         self.assertFalse(accepted(d, certificate(d)[:THRESHOLD - 1]))
@@ -167,8 +224,10 @@ class Matrix(unittest.TestCase):
     def test_route_digest_families_use_distinct_domain_tags_or_chain_words(self):
         tags = {b'BLOCH-USDT-RELEASE-AUTH-v2', b'BLOCH-XLM-RELEASE-AUTH-v1'}
         self.assertEqual(len(tags), 2)
-        words = [chain_word(n) for n in EVM_V2 + ['solana']]
-        self.assertEqual(len(set(words)), len(words))
+        # one chain word per NETWORK (registry check C3); the further routes of a network share its word
+        words = {ROUTES[n]['network']['id']: chain_word(n) for n in EVM_V2 + ['solana']}
+        self.assertEqual(len(set(words.values())), len(words))
+        self.assertEqual(len(words), len(EVM_V2 + ['solana']) - len(FURTHER))
 
 
 if __name__ == '__main__':

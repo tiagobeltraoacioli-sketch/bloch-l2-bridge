@@ -24,13 +24,21 @@ for all): launchable is a design statement, not a deployment; external audit and
 
 Cross-route checks (any failure refuses `write` and fails `check`), each one a property the isolation of
 BRIEF-ROUND16.md architecture point 2 rests on:
-  C1 network ids unique, and each file's directory is its `network.id`
+  C1 route ids unique, and each file's directory is its route id: its `network.id`, or, for a FURTHER route of a
+     network (round 20: several assets per network; the file carries a `route` block), `<network.id>-<asset key>`; a
+     further route needs the first route of its network in the tree and has that network's kind
   C2 L2 symbols unique, L2 names unique (the EIP-712 domain name of the frozen token is fixed; the name shown is not)
-  C3 source chain ids unique as 256-bit integers (the token's `sourceChainId` is in every mint digest)
-  C4 source-domain labels unique (the vault's routeId and the release digests are keyed on them)
+  C3 one source chain id per NETWORK, as 256-bit integers (the token's `sourceChainId` is in every mint digest): two
+     networks never share a chain id and one network never has two. Routes of ONE network share it by definition;
+     what separates their certificates is the vault address and the route id, both in every digest (C9, and the
+     control test of tools/allnets/test_cross_route.py)
+  C4 one source-domain label per network, never shared by two networks (the vault's routeId is keyed on it)
   C5 every L2 token is the frozen BridgedStablecoinV3, creation keccak 0xe560441f...1de7, on chain 700770
   C6 the fee recipient of each route is the owner's address for that network kind (BRIEF-ROUND18.md owner facts)
   C7 the committee is one committee: same scheme, threshold, switch threshold, guardian power and pause on every route
+  C9 no two routes share a decided custody address, and no two a decided L2 token address (compared without case;
+     `TBD-deploy` is not an address). Registry-wide, so it also forbids one deployer nonce on two chains
+  C10 one route per (network, asset key) and per (network, asset address), compared without case
   C8 every finding (Medium or above, and the listed ones below Medium) names known routes only and states its
      severity with a known first word (Critical, High, Medium in `findings`; Low, Info, residual in `listed`); the
      findings file itself is read fail-closed (findings_doc: a missing file, a missing or misspelled `findings` or
@@ -125,6 +133,7 @@ def ethereum_route():
 def route_entry(net, path, doc):
     keep = lambda d, ks: {k: d[k] for k in ks if k in d}
     return {
+        **({'route': keep(doc['route'], ('id', 'asset'))} if isinstance(doc.get('route'), dict) else {}),
         'network': keep(doc['network'], ('id', 'name', 'kind', 'chainId')),
         'asset': keep(doc['asset'], ('symbol', 'name', 'decimals', 'id', 'issuer')),
         'custody': keep(doc['custody'], ('type', 'contract', 'address')),
@@ -188,14 +197,18 @@ def build():
         if found or doc is None:
             errors.append(f'C0 {path.relative_to(ROOT)} fails the schema check: {found[:1]}')
             continue
-        if doc['network']['id'] != net:
-            errors.append(f'C1 {path.relative_to(ROOT)}: network.id {doc["network"]["id"]!r} is not its directory {net!r}')
+        rid = doc['route']['id'] if isinstance(doc.get('route'), dict) else doc['network']['id']
+        if rid != net:
+            errors.append(f'C1 {path.relative_to(ROOT)}: route id {rid!r} (route.id, or network.id without a route block) '
+                          f'is not its directory {net!r}')
         out[net] = route_entry(net, path, doc)
     for net, entry in out.items():
         state, reason = routes.status(net)
         open_ = [f for f in findings if net in f['routes']]
         src = 'evm-launch-registry' if entry['network']['kind'] == 'evm' and net != 'ethereum' else (
             'route-file' if state != 'undeclared' else 'none')
+        if 'route' in entry:
+            src = 'asset-route-registry'  # tools/evm-nets/asset_routes.py: a further route of an EVM network
         if net == 'ethereum':
             src = 'routes.py (the frozen Ethereum bridge)'
         if state == 'launchable' and open_:
@@ -208,10 +221,12 @@ def build():
                            'reason': reason,
                            'openFindings': [{'id': f['id'], 'severity': f['severity'], 'state': f['state'],
                                              'owner': f['owner']} for f in open_]}
-        lab = LABELS.get(net)
+        # A further route (round 20) has the source domain of its NETWORK: the label of the network's first route.
+        lab = LABELS.get(entry['network']['id'] if 'route' in entry else net)
         entry['sourceDomain'] = (dig(load(lab[0]), lab[1]) if lab else
                                  f'genesis:{entry["network"]["chainId"]}' if entry['network']['kind'] == 'utxo' else None)
-        reg_label = dig(load('tools/evm-nets/networks.json'), ('networks', net, 'sourceDomainLabel'))
+        reg_label = dig(load('tools/evm-nets/networks.json'), ('networks', entry['network']['id'] if 'route' in entry else net,
+                                                               'sourceDomainLabel'))
         if reg_label is not None:  # an EVM registry network: the registry's label is what vault_pontes.py deploys
             if entry['sourceDomain'] is not None and entry['sourceDomain'] != reg_label:
                 errors.append(f'C4 {net}: vault config label {entry["sourceDomain"]!r} differs from networks.json {reg_label!r}')
@@ -231,8 +246,10 @@ def build():
                    'design statement for bridge v1, not a deployment: every route is unaudited or an audit candidate '
                    'and nothing is deployed (addresses TBD-deploy).',
            'l2ChainId': L2_CHAIN, 'tokenCreationCodeKeccak': CREATION_KECCAK,
-           'checks': ['C1 network ids', 'C2 L2 symbols and names', 'C3 source chain ids', 'C4 source-domain labels',
-                      'C5 frozen token on 700770', 'C6 owner fee recipients', 'C7 one committee', 'C8 findings name routes'],
+           'checks': ['C1 route ids', 'C2 L2 symbols and names', 'C3 one source chain id per network',
+                      'C4 one source-domain label per network', 'C5 frozen token on 700770', 'C6 owner fee recipients',
+                      'C7 one committee', 'C8 findings name routes', 'C9 custody and L2 token addresses',
+                      'C10 one route per network and asset'],
            'routes': [{'id': n, **out[n]} for n in order],
            'listedFindings': listed, 'coverageNotes': fdoc.get('coverageNotes', [])}
     return reg, errors
@@ -252,9 +269,58 @@ def cross_checks(out, findings):
             seen[key] = net
     unique('L2 symbol', 'C2', [(n, e['l2'].get('symbol')) for n, e in out.items()])
     unique('L2 name', 'C2', [(n, e['l2'].get('name')) for n, e in out.items()])
-    unique('source chain id', 'C3', [(n, int(e['sourceChainId']) if str(e['sourceChainId']).isdigit() else e['sourceChainId'])
-                                     for n, e in out.items()])
-    unique('source-domain label', 'C4', [(n, e.get('sourceDomain')) for n, e in out.items()])
+    # Round 20: several routes on one network. C3 and C4 were "unique per route" while a network had one route; they are
+    # now "one per network, never shared by two networks", which is the same statement for every tree of before.
+    chain_of = lambda e: int(e['sourceChainId']) if str(e['sourceChainId']).isdigit() else e['sourceChainId']  # noqa: E731
+    for what, code, value in (('source chain id', 'C3', chain_of), ('source-domain label', 'C4', lambda e: e.get('sourceDomain'))):
+        owner, of_net = {}, {}
+        for n, e in out.items():
+            v, net = value(e), e['network']['id']
+            if v is None:
+                continue
+            key = v.lower() if isinstance(v, str) else v
+            if key in owner and owner[key][0] != net:
+                errs.append(f'{code} {what} {v!r} shared by {owner[key][1]} and {n} (networks {owner[key][0]} and {net})')
+            owner.setdefault(key, (net, n))
+            if net in of_net and of_net[net][0] != key:
+                errs.append(f'{code} network {net} has two {what}s: {of_net[net][1]} and {n}')
+            of_net.setdefault(net, (key, n))
+    # C1: a further route is `<network>-<asset key>`, beside the first route of its network and of its kind.
+    for n, e in out.items():
+        net = e['network']['id']
+        if 'route' not in e:
+            if n != net:
+                errs.append(f'C1 route {n}: its network.id is {net!r} and it has no route block (a first route is named as its network)')
+            continue
+        key = str(e['route'].get('asset', ''))
+        if n != f'{net}-{key}' or e['route'].get('id') != n or key != key.lower() or not key:
+            errs.append(f'C1 route {n}: a further route is named <network.id>-<asset key> in lower case ({net}-{key.lower()})')
+        if net not in out or 'route' in out[net]:
+            errs.append(f'C1 route {n}: its network {net!r} has no first route in the tree')
+        elif out[net]['network'].get('kind') != e['network'].get('kind'):
+            errs.append(f'C1 route {n}: kind {e["network"].get("kind")!r} is not its network\'s {out[net]["network"].get("kind")!r}')
+    # C10: one route per (network, asset key) and per (network, asset address).
+    pairs, assets = {}, {}
+    for n, e in out.items():
+        net = e['network']['id']
+        key = str(e['route']['asset'] if 'route' in e else e['asset'].get('symbol', '')).lower()
+        if (net, key) in pairs:
+            errs.append(f'C10 network {net} and asset {key!r} are the pair of two routes: {pairs[(net, key)]} and {n}')
+        pairs.setdefault((net, key), n)
+        aid = str(e['asset'].get('id', '')).lower()
+        if aid and (net, aid) in assets:
+            errs.append(f'C10 asset address {e["asset"].get("id")} on network {net} is listed under two routes: {assets[(net, aid)]} and {n}')
+        assets.setdefault((net, aid), n)
+    # C9: decided addresses are never shared.
+    for what, pick in (('custody address', lambda e: e['custody'].get('address')), ('L2 token address', lambda e: e['l2'].get('token'))):
+        seen = {}
+        for n, e in out.items():
+            v = pick(e)
+            if not isinstance(v, str) or v.upper().startswith('TBD') or not v:
+                continue
+            if v.lower() in seen:
+                errs.append(f'C9 {what} {v} shared by {seen[v.lower()]} and {n}')
+            seen.setdefault(v.lower(), n)
     for n, e in out.items():
         if e['l2'].get('chainId') != L2_CHAIN:
             errs.append(f'C5 {n}: L2 chain id {e["l2"].get("chainId")} is not {L2_CHAIN}')
@@ -331,7 +397,7 @@ def main(argv):
     if mode == 'write':
         OUT.write_text(text)
         README.write_text(readme_with(reg))
-        print(f'wrote README.md launch table; wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C8 passed')
+        print(f'wrote README.md launch table; wrote {OUT.relative_to(ROOT)}: {len(reg["routes"])} routes, checks C1-C10 passed')
         return 0
     if mode == 'check':
         if not OUT.exists() or OUT.read_text() != text:
@@ -340,7 +406,7 @@ def main(argv):
         if README.read_text() != readme_with(reg):
             print('README.md launch table differs from the registry: run `registry.py write`')
             return 1
-        print(f'{OUT.relative_to(ROOT)} current: {len(reg["routes"])} routes, checks C1-C8 passed')
+        print(f'{OUT.relative_to(ROOT)} current: {len(reg["routes"])} routes, checks C1-C10 passed')
         return 0
     raise SystemExit(f'unknown mode {mode}')
 
