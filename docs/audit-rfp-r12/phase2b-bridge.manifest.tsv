@@ -1,7 +1,7 @@
 B1	595	395	304	d2a0894e45ad7111bd19b0117481b04282ecc5225cd03b9fc33693a67c9a863c	contracts/stable/EthereumMintVerifier.sol
 B1	356	240	209	91c738340a0fec328963d00de808e6e24363b09747c96412fcfbf088f6d12cf6	contracts/usdt/HeldStateSettlementVerifier.sol
 B-doc	359	-	-	f1cb9fab9f0e38e6479c51e0026a261e2269116d36013854d10c5a6ff7be4276	docs/LC-MINT-VERIFIER.md
-B-doc	229	-	-	50d041c5a4dda49c07156cdfc88ec7aed268dbeaeb80f0fdb10688fa3785ad2d	docs/HELD-STATE-SETTLEMENT.md
+B-doc	229	-	-	4f661d8ca01d85a2f3bf73bbba1baab4d90f691232bbb957f1768b67bbb29399	docs/HELD-STATE-SETTLEMENT.md
 B-test	1362	1152	1100	c1bd76f1dd215d1d63d2e00aefc6b340ba9a296477afa6b563b9dccf00ca7f32	solidity-tests/A276MintVerifier.t.sol
 B-test	785	668	643	a0e3e3868effc1ef2d7e25b1353fb466a7d863c539806d8006b6519b8761c780	solidity-tests/R306HeldStateSettlement.t.sol
 B-test	370	294	250	d565e8687f4edb89755b5ec1cb6287d82879e4919053ebb5e6fbb7618206963e	solidity-tests/R306VerifierReview.t.sol
