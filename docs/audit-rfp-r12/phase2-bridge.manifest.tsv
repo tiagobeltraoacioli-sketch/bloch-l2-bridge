@@ -13,7 +13,7 @@ A2	517	421	412	6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5	
 A2	445	360	325	a0a76c46c0400a1161b273eb15339346481b1cff3360cbac98ae66fd4f1dd3b4	tools/signatario-stable/bridge_feed.py
 A2	572	439	389	01ece2618c02773db41491a86f24ac84ed663cbafcb3ceb54b71fed6e6acc6f4	tools/signatario-stable/eth_half.py
 A2	411	312	289	67c34ffe77a6529175de002ccbce2bdcd6398d7dc2d9336c54c1f6553e2a3340	tools/guardiao/sombra.py
-A2	472	367	283	597a56ae8e50dbb959628bf52286a7ad0151a05bb372c1e02ff74643f004684f	tools/deploy-pontes/vault_pontes.py
+A2	472	367	283	34733228487e2fdba87225dc59a1afa0872582599309ad03dbf4e08b4d6a0d40	tools/deploy-pontes/vault_pontes.py
 A2	88	58	35	4a644faa54cb82e1cc9c0357c6dc4dc38ef7da352f38c27fa02b486d1ab0375e	tools/deploy-pontes/legacy_digests.py
 A2	303	220	208	7ad6b009cc9422f7a073b0c58b75db9d7eb8ac84057ef0c5726a6ed031769091	tools/reservas/reservas.py
 A2	306	214	175	afcb3a4de0eead4e8ee9f0cfa8651c48de3883e0cacc5e60acd061f4abbe2553	tools/signatario-stable/l2_finality.py
