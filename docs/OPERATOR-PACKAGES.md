@@ -35,8 +35,19 @@ with the wrong ceiling. `ops/routes.json` `facts` now lists only the current pin
 signer or relayer bundle from a revision whose templates carry another, and
 `tools/signatario-stable/test_l2_pins_r20.py` holds every packaged route's `source_rev` to this tree: the pin-bearing
 daemons and every operator template must be byte for byte the same. When one of them changes, `source_rev` moves in a
-reviewed commit (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a). The container rehearsal of section 8 ran with the
-bundles of `cc2511a` and was NOT repeated with the new revision (its F381-1 control is restated in the script, not rerun).
+reviewed commit (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a).
+
+**The container rehearsal of section 8 was run again with the new source revision (agent 421, 2026-11-19, host
+45.77.142.123, the same image and driver): 72 of 72 checks PASS in 965 s, `REHEARSAL OK`.** The first run with it
+failed, and that is finding F421-5: the signer and relayer units exited at start with "tools/evm-nets/launch.py is
+missing". Their payload was `tools/signatario-stable` alone, and the daemons refuse a source chain other than 1 without
+the registry module beside them, so no bundle of Arbitrum One, OP Mainnet or Linea could ever start (at `9187656` as
+well), and the Ethereum bundle only on chain 1 itself. The payload of both roles now adds
+`tools/evm-nets/launch.py`, `networks.json` and `signer_timing.py` (held by `ops/test_bundle.py`), and the driver's
+committed-unit drill stages them with the head tools. In the passing run the F381-1 control is the restated one: the
+code in the bundle (after `b4ff916`) accepts the 0440 credential, and the committed relay unit relays a mint with the
+gas limits measured on 2026-11-19 (`mint_gas_limit` 250,000). The three networks' bundles are still built and checked
+offline only; none was run in containers.
 
 The EVM networks inherit the Ethereum roles (`inherit` in `ops/routes.json`) with their own committed templates
 (`deployments/<network>/ops/*.template.json`), their own feed port, no sombra (the light client is Ethereum's), and the
