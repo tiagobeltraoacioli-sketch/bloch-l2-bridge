@@ -2,12 +2,15 @@
 """The single test entry point of the all-networks bridge tree (agent 375, round 18).
 
   python3 tools/allnets/test_all.py OUTDIR [STAGE ...] [--tools TOOLS.json] [--port-base N] [--umask OCTAL]
+  python3 tools/allnets/test_all.py --identity                   the route-file identity check alone
+  python3 tools/allnets/test_all.py --identity-record DECISION   record the owned files the integration changed (round 20)
 
 Stages (default: every stage; a stage whose toolchain is not named in TOOLS.json is recorded NOT RUN with the reason,
 never silently skipped and never counted as a pass):
   integration   registry check, test_registry, the cross-route matrix, mergecheck over every merge, regress.py
                 (per-file test and assertion counts never below the freeze or any merged line tip), the never-merge and forbidden-path rules,
-                route-file identity (every path a line owns is byte-identical to that line's merged tip), test_routes
+                route-file identity (every path a line owns is byte-identical to that line's merged tip, except
+                the files recorded blob by blob in deployments/allnets/integration-changes.json), test_routes
   forge         `forge test --offline` (whole tree), A239Metamorphic isolated on shanghai and cancun
   artifacts     creation and runtime keccak of every contract: the frozen tree cc2511a and every line tip are built
                 from `git archive` of that commit and compared with this tree's build (tools/allnets/artifacts.py)
@@ -151,25 +154,135 @@ def stage_integration(r):
         r.suite('integration', f'manifest-{lst}', ['sh', '-c', f'{sys.executable} -I scripts/audit-rfp/manifest.py . HEAD '
                 f'docs/audit-rfp-r12/{lst}.list | cmp - docs/audit-rfp-r12/{lst}.manifest.tsv'])
     r.suite('integration', 'route-file-identity', py(str(HERE / 'test_all.py'), '--identity'))
+    r.suite('integration', 'test_identity_r20', py('-m', 'unittest', 'test_identity_r20'), cwd=HERE)
 
 
-def identity():
-    """Every path a line owns equals that line's merged tip, byte for byte (git diff --quiet)."""
-    lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
-    bad = 0
-    for line, paths in OWNED.items():
+CHANGES = 'deployments/allnets/integration-changes.json'
+CHANGE_KEYS = {'line', 'path', 'lineTip', 'blob', 'decision'}
+
+
+def _git(root, *argv):
+    return subprocess.run(['git', *argv], cwd=root, capture_output=True, text=True)
+
+
+def owned_differences(root, line, tip, paths):
+    """{file: blob at HEAD, or None when HEAD has no such file} of every file under a line's owned paths that differs
+    from the line's merged tip."""
+    out = {}
+    for p in paths:
+        done = _git(root, 'diff', '--name-only', '--no-renames', tip, 'HEAD', '--', p)
+        if done.returncode != 0:
+            raise SystemExit(f'git diff {tip[:7]} HEAD -- {p} failed: {done.stderr.strip()[-300:]}')
+        for f in done.stdout.split('\n'):
+            if f:
+                blob = _git(root, 'rev-parse', '--verify', '--quiet', f'HEAD:{f}')
+                out[f] = blob.stdout.strip() if blob.returncode == 0 else None
+    return out
+
+
+def load_changes(root):
+    """The integration's recorded changes to line-owned files, read fail-closed: a missing file means no change is
+    recorded; an unreadable one, an unknown key or a malformed entry stops the check."""
+    path = Path(root) / CHANGES
+    if not path.exists():
+        return {'decisions': {}, 'changes': []}
+    try:
+        doc = json.loads(path.read_text())
+    except ValueError as e:
+        raise SystemExit(f'{CHANGES} cannot be read as JSON ({e})')
+    if not isinstance(doc, dict) or set(doc) != {'domain', 'note', 'decisions', 'changes'} \
+            or not isinstance(doc['decisions'], dict) or not isinstance(doc['changes'], list):
+        raise SystemExit(f'{CHANGES} must hold exactly domain, note, decisions (object), changes (list)')
+    for d, text in doc['decisions'].items():
+        if not isinstance(text, str) or len(text) < 40:
+            raise SystemExit(f'{CHANGES}: decision {d!r} must state what was decided, by whom and when')
+    for n, c in enumerate(doc['changes']):
+        if not isinstance(c, dict) or set(c) != CHANGE_KEYS or not all(isinstance(c[k], str) and c[k] for k in CHANGE_KEYS):
+            raise SystemExit(f'{CHANGES}: changes[{n}] must hold exactly {sorted(CHANGE_KEYS)}, each a non-empty text')
+    return doc
+
+
+def identity(root=ROOT, owned=None):
+    """Every path a line owns equals that line's merged tip, byte for byte, EXCEPT the files the integration changed
+    after the merge and recorded in deployments/allnets/integration-changes.json (round 20): each such file is held to
+    the git blob recorded there, under a decision the file states, against the line tip it was changed from. A
+    difference that is not recorded, a recorded file whose content is not the recorded blob, a record for a file that
+    does not differ (stale), for a path no line owns, against another tip than the merged one, under an unknown decision,
+    twice, or for a file that HEAD no longer has: each is a failure. So the check is as strict as before for every
+    other byte, and a recorded file cannot drift after its record."""
+    root = Path(root)
+    owned = OWNED if owned is None else owned
+    lock = json.loads((root / 'deployments/allnets/merge-lock.json').read_text())['lines']
+    doc = load_changes(root)
+    records, bad = {}, 0
+    for c in doc['changes']:
+        key = (c['line'], c['path'])
+        if key in records:
+            print(f'{c["line"]:9} {c["path"]}: recorded twice')
+            bad += 1
+        records[key] = c
+        if c['decision'] not in doc['decisions']:
+            print(f'{c["line"]:9} {c["path"]}: decision {c["decision"]!r} is not stated in `decisions`')
+            bad += 1
+        if c['line'] not in owned or not any(c['path'] == p or c['path'].startswith(p + '/') for p in owned.get(c['line'], [])):
+            print(f'{c["line"]:9} {c["path"]}: recorded, but not a path that line owns')
+            bad += 1
+    seen = set()
+    for line, paths in owned.items():
         tip = lock[line]['commit']
+        differing = owned_differences(root, line, tip, paths)
         for p in paths:
-            done = subprocess.run(['git', 'diff', '--quiet', tip, 'HEAD', '--', p], cwd=ROOT)
-            print(f'{line:9} {p:45} {"identical to " + tip[:7] if done.returncode == 0 else "DIFFERS from " + tip[:7]}')
-            bad += done.returncode != 0
+            mine = sorted(f for f in differing if f == p or f.startswith(p + '/'))
+            print(f'{line:9} {p:45} {"identical to " + tip[:7] if not mine else str(len(mine)) + " file(s) differ from " + tip[:7]}')
+        for f, blob in sorted(differing.items()):
+            rec = records.get((line, f))
+            seen.add((line, f))
+            if rec is None:
+                print(f'{line:9}   {f}: DIFFERS from {tip[:7]} and no integration change is recorded')
+                bad += 1
+            elif blob is None:
+                print(f'{line:9}   {f}: removed from the tree (a removal cannot be recorded)')
+                bad += 1
+            elif rec['lineTip'] != tip:
+                print(f'{line:9}   {f}: recorded against {rec["lineTip"][:7]}, the merged tip is {tip[:7]} (record again after a re-merge)')
+                bad += 1
+            elif rec['blob'] != blob:
+                print(f'{line:9}   {f}: DIFFERS from the recorded blob {rec["blob"][:12]} (it is {blob[:12]})')
+                bad += 1
+            else:
+                print(f'{line:9}   {f}: integration change, blob {blob[:12]} as recorded ({rec["decision"]})')
+    for key in sorted(set(records) - seen):
+        print(f'{key[0]:9} {key[1]}: recorded as changed, but it does not differ from the line tip (stale record)')
+        bad += 1
     never = json.loads((HERE / 'lines.json').read_text())
     for path in never.get('forbiddenPaths', []):
-        hit = subprocess.run(['git', 'rev-list', '-n', '1', 'HEAD', '--', path], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        hit = subprocess.run(['git', 'rev-list', '-n', '1', 'HEAD', '--', path], cwd=root, capture_output=True, text=True).stdout.strip()
         print(f'forbidden path {path}: {"in history at " + hit[:7] if hit else "never in the history"}')
         bad += bool(hit)
     print(f'{bad} identity failure(s)')
     return 1 if bad else 0
+
+
+def identity_record(decision):
+    """Rewrite the `changes` list of integration-changes.json from the tree: one record per owned file that differs
+    from its line's merged tip at HEAD, with its blob at HEAD. The decision must already be stated in the file (its
+    text is written by hand, in a reviewed commit); files recorded before keep their decision."""
+    doc = load_changes(ROOT)
+    if decision not in doc['decisions']:
+        raise SystemExit(f'state decision {decision!r} in {CHANGES} `decisions` first')
+    lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
+    old = {(c['line'], c['path']): c['decision'] for c in doc['changes']}
+    changes = []
+    for line, paths in OWNED.items():
+        tip = lock[line]['commit']
+        for f, blob in sorted(owned_differences(ROOT, line, tip, paths).items()):
+            if blob is None:
+                raise SystemExit(f'{f} was removed from the tree: a removal cannot be recorded')
+            changes.append({'line': line, 'path': f, 'lineTip': tip, 'blob': blob, 'decision': old.get((line, f), decision)})
+    doc['changes'] = changes
+    (ROOT / CHANGES).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + '\n')
+    print(f'recorded {len(changes)} integration change(s) in {CHANGES}')
+    return 0
 
 
 def stage_forge(r):
@@ -315,6 +428,8 @@ def stage_scripts(r):
 def main(argv):
     if argv[:1] == ['--identity']:
         return identity()
+    if argv[:1] == ['--identity-record'] and len(argv) == 2:
+        return identity_record(argv[1])
     tools, base, args = {}, 47500, []
     it = iter(argv)
     for a in it:
