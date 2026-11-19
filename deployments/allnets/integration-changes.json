@@ -2,14 +2,43 @@
   "domain": "bloch.bridge.allnets.integration-changes.v1",
   "note": "Files under a path that a route line owns (tools/allnets/test_all.py OWNED) which the integration changed AFTER merging the line, each with the git blob it must have and the tip of the line it was changed from. `test_all.py --identity` holds every such file to its blob and every other owned byte to its line's merged tip. The `changes` list is written by `test_all.py --identity-record DECISION` from the committed tree, never by hand; the text of a decision is written by hand in a reviewed commit. A line that is merged again at a new tip needs its records made again (a record against another tip fails the check).",
   "decisions": {
-    "launch-limits-2026-11-19": "Owner, 2026-11-19: the bridge windows and caps are delegated to the coordinator, the external audit is done after launch, and the key ceremony goes ahead. Coordinator, 2026-11-19: Ethereum cap 500,000 USDC and window 50,000 USDC per 24 h; Arbitrum One, OP Mainnet and Linea cap 250,000 and window 25,000; every other route unchanged. Agent 410 (round 20) applied it in the integration tree because the limits became a field of the EVM launch registry and of the owner's ceremony kit: tools/evm-nets (registry record, generator, tests, fork rehearsal), the three networks' generated deployment files, and the ceremony kit, its test and its document (limits held value by value; audit wording; the state of the L2). Base and BNB Smart Chain files are not changed. docs/BRIDGE-ALLNETS.md section 7."
+    "launch-limits-2026-11-19": "Owner, 2026-11-19: the bridge windows and caps are delegated to the coordinator, the external audit is done after launch, and the key ceremony goes ahead. Coordinator, 2026-11-19: Ethereum cap 500,000 USDC and window 50,000 USDC per 24 h; Arbitrum One, OP Mainnet and Linea cap 250,000 and window 25,000; every other route unchanged. Agent 410 (round 20) applied it in the integration tree because the limits became a field of the EVM launch registry and of the owner's ceremony kit: tools/evm-nets (registry record, generator, tests, fork rehearsal), the three networks' generated deployment files, and the ceremony kit, its test and its document (limits held value by value; audit wording; the state of the L2). Base and BNB Smart Chain files are not changed. docs/BRIDGE-ALLNETS.md section 7.",
+    "l2-repin-and-queue-bound-2026-11-19": "Coordinator, 2026-11-19 (round 20, agent 421), two launch blockers of the Ethereum bUSDC bridge found by agent 410. F410-2: the signers' L2 pin set named the L2 release of 2026-11-03 while the L2 went live with the release the owner signed on 2026-11-17; the new pin set mainnet-v3 (tools/signatario-stable/l2_finality.py) replaces the name mainnet-v2 in every operator template, so the generated operator templates of the three networks, ops/routes.json (the pin name in the list of public facts a rendered config may hold, and every route's source_rev with its status text: an operator bundle ships the daemons and templates of source_rev, which was the audit candidate cc2511a / 9187656 with the pins of 2026-11-03 and the relayer gas ceiling from before the fee schedule, so the re-pin reaches an operator only through a new source_rev), what stated the old revision (ops/test_bundle.py, the F381-1 control of ops/rehearse_containers.py, the table of docs/OPERATOR-PACKAGES.md) and tools/evm-nets/test_launch_r17.py changed; no file of a held route's line is changed (the Bitcoin mint-signer template keeps the superseded name and is refused until its own line takes the current one); notes.l2Build of the generated token configs names the live release; the ceremony document states the prerequisite as closed. F410-1: minimum deposit 25 USDC on Arbitrum One and OP Mainnet (21 before; the minimum burn stays 20) because with the 25,000 USDC bucket of the launch limits the honest mint queue with one more delay of execution lag exceeded MAX_PENDING of the frozen L2 token; the bound became a rule of tools/evm-nets/launch.py (registry) and tools/deploy-pontes/vault_pontes.py, so tools/evm-nets (registry, launch.py, generator, tests) and the two networks' generated files changed. Base and BNB Smart Chain files are not changed. docs/BRIDGE-ALLNETS.md section 7.3; docs/BRIDGE-V3-OPERATOR-RUNBOOK.md section 3a. A file that was already recorded under launch-limits-2026-11-19 keeps that label (the record tool keeps the first decision of a file) and its blob now carries both changes."
   },
   "changes": [
+    {
+      "line": "operator-pkg",
+      "path": "docs/OPERATOR-PACKAGES.md",
+      "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
+      "blob": "2cbe87bde1e6bbc9f60cb5fcc9a1bb0515385893",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "operator-pkg",
+      "path": "ops/rehearse_containers.py",
+      "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
+      "blob": "0b9bf3c3eda549036b2cd71a1a3a19bf71a4755f",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "operator-pkg",
+      "path": "ops/routes.json",
+      "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
+      "blob": "764980573a5bf18d8fef1eb18a4e5a5744e80275",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "operator-pkg",
+      "path": "ops/test_bundle.py",
+      "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
+      "blob": "c52bc0107170567ee833a64a90578f174949e61e",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
     {
       "line": "ceremony",
       "path": "docs/BRIDGE-OWNER-CEREMONY.md",
       "lineTip": "8d7c51c076e3e2d3fbea49e8b6cde8d184c69416",
-      "blob": "e0ca355f194c9e4a7711708e7efd2193f45895a4",
+      "blob": "48270941f180ca12fbea11cfd8bce45dd2b8589b",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -30,22 +59,36 @@
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/bridge.network.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "fbd2bdfdbefe24cd02ad1473d24d8a3efa631da5",
+      "blob": "94a6be4ab333f5e29aad9f996e94fe1c77c1a080",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "54692e1b95955306583c460ca294664faa94c753",
+      "blob": "1f8bc56f967c5e058e2cb174e1901a9de39b5e15",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/arbitrum-one/busdc-vault.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "307453e5f2ddb51f5bfcce723a78fae5fe512299",
+      "blob": "bf21dac452b6d6b2a4bb2b64a868b6232c5eef02",
       "decision": "launch-limits-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "deployments/arbitrum-one/ops/relayer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "6bee375d74049ec442c2e13a97a761eae0e4fd9c",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "deployments/arbitrum-one/ops/signer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "dc97ca294435c2c20b525e55dd0d55b962ca6515",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "evm-nets",
@@ -58,7 +101,7 @@
       "line": "evm-nets",
       "path": "deployments/linea/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "f36e3bcbb528deeac0dd70cd922a840b473545f4",
+      "blob": "222057a5154390739b3e1b2fa2acddcf36d24000",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -70,44 +113,72 @@
     },
     {
       "line": "evm-nets",
+      "path": "deployments/linea/ops/relayer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "c908e881190fbb9fa9c0aa24b56b920c8a52328a",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "deployments/linea/ops/signer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "6c4ddaa801ae9dc1863bb59b6dd1814e69732e6c",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
       "path": "deployments/op-mainnet/bridge.network.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "7317cf2d0a55f4ec44ffc1535c1d3f0c1c74b591",
+      "blob": "5e5f6ffd1028867d2e6f41325b40cdb69711913c",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/op-mainnet/busdc-token.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "5dffda40004789a3f4c7b2bc59a5dca3b642ba15",
+      "blob": "d4b743bb9230ea30003d610c05d556c2b0a4a6ca",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "deployments/op-mainnet/busdc-vault.config.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "16f3e12aa62968d05fec50287071edd6d8c1522e",
+      "blob": "b1d7e63f4717e8163b6330628b4a2b2b5e538127",
       "decision": "launch-limits-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "deployments/op-mainnet/ops/relayer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "ccb9edeb9b324fd4fa26ea4afa9f3eb94eaacf80",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "deployments/op-mainnet/ops/signer.template.json",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "ad58d1d1cf6edf00137c2f6531208ec69e12f1be",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/evm_nets.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "1c1dd96ee115be13e5bafc65a6ef636d4c6b0271",
+      "blob": "adfb645daa07f90b46a80144ef5ce8e6c716ba30",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/launch.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "04683283f27c2f215051cd4cece4f7a7e6e1367d",
+      "blob": "bda9b54537e267c4928cea363e607ac790671365",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/networks.json",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "bd5ddbf3efec131e1d796e95ae416abfb1a3e128",
+      "blob": "7f66154350dcb4e9d728e73a0dbb03d36ad21630",
       "decision": "launch-limits-2026-11-19"
     },
     {
@@ -128,15 +199,22 @@
       "line": "evm-nets",
       "path": "tools/evm-nets/test_launch_r17.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "29b0c474f43cc3f9a3275494e41a2445bea8873a",
+      "blob": "3f6368856e9929d2901f715d56c05e39795eb4e6",
       "decision": "launch-limits-2026-11-19"
     },
     {
       "line": "evm-nets",
       "path": "tools/evm-nets/test_limits_r20.py",
       "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
-      "blob": "8b5536c42764890f88676770d4fafc5519c61996",
+      "blob": "2e7e18f473a42a6b0f44ad3cedd300a8628632e8",
       "decision": "launch-limits-2026-11-19"
+    },
+    {
+      "line": "evm-nets",
+      "path": "tools/evm-nets/test_queue_bound_r20.py",
+      "lineTip": "d6ad227e7d431e870ddb74c312a64afb9aed2802",
+      "blob": "bf800cd18df94dda5f73e5ed675f7db1def5cb37",
+      "decision": "l2-repin-and-queue-bound-2026-11-19"
     }
   ]
 }
