@@ -456,7 +456,7 @@ its whole life. Confirm it on the second channel before section 8.
 
 ## 8. The Ethereum vault (deposits and releases start OFF)
 
-The Safe sends the vault deployer the gas only: the creation used 4,598,052 to 4,598,088 gas in the rehearsals (section 17); the
+The Safe sends the vault deployer the gas only: the creation used 4,598,052 to 4,598,088 gas in the rehearsals (section 17; 4,598,076 with the limits of 2026-11-19); the
 kit's gas limit is 5,000,000 and it signs at up to twice the node's gas price quote, capped at `ETH_MAX_GWEI`, and
 refuses to sign unless the balance covers `5,000,000 x that price`. At 30 gwei that is 0.15 ETH; at today's 0.11 gwei
 quote (0.23 gwei paid) about 0.0012 ETH. Send `5,000,000 x 2 x the current quote` plus a margin.
@@ -527,7 +527,7 @@ python3 tools/deploy-pontes/deploy_pontes.py plan --config deployments/mainnet/b
 ```
 
 The second reviewer regenerates the plan and compares it byte for byte. The Safe sends the token deployer the gas only
-(the creation uses about 4.82 M gas; at the L2 gas price cap that is `4.82e6 x L2_MAX_GAS_PRICE_WEI` wei). The dry run
+(the creation uses about 4.82 M gas, 4,822,580 with the limits of 2026-11-19; at the L2 gas price cap that is `4.82e6 x L2_MAX_GAS_PRICE_WEI` wei). The dry run
 (chain id, genesis hash `632e45ae…f468`, nonce 0, empty address, balance, gas price, the vault unused, a simulated
 creation that returns the planned runtime code):
 
@@ -902,6 +902,17 @@ the fee schedule; 5-of-7 controls (4 signatures and a non-member's refused); 101
 12 h delay, 100 bUSDC out, 99.90 USDC paid, 0.1505 USDC of fees swept to `0x775a…0544`, reserves `ok`; vault and token
 paused by one guardian each and unpaused by 6 of 7 (5 refused). Adversarial checks with the document's own commands:
 a forged record, a wrong `--confirm`, too few and foreign signatures.
+
+Result on 2026-11-19 at `0f025a3` (agent 410, round 20: the first commit with the launch limits of 2026-11-19; the
+rehearsal script unchanged), from a clean clone with no build cache: 128 of 128 marked blocks run, 50 of 50 checks
+pass, `CEREMONY REHEARSAL OK`. Every tool's mainnet-policy check passed with the decided limits and no rehearsal flag
+(`vault_pontes.py validate` with the token config, `ceremony_kit.py schedule`, `deploy_pontes.py validate`); the vault
+created with cap 500,000 USDC and window 50,000 USDC per 24 h (4,598,076 gas) and verified at finality; the token
+created with supply cap 500,000, bucket 50,000 and `refillPerSecond` 578703 (4,822,580 gas); `onchain` read those six
+values back from both chains, with `windowSeconds` 86400; the 101 USDC round trip and the pause drills as on 2026-11-17.
+Not rehearsed with the new limits: a deposit or a burn near the window, and the cap being reached (the fork rehearsals
+of `tools/evm-nets/rehearse_fork.py` refuse one above the window on the three networks; the forge suites cover the
+contract rule).
 
 The rehearsal had to stand in for these things, and only these:
 
