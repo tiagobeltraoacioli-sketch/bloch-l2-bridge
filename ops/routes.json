@@ -70,7 +70,10 @@
         "signer": {
           "summary": "One of the 7 automatic signers: vigia.py sign (signatario.py + eth_half.py) and its read-only signature feed.",
           "payload": [
-            "tools/signatario-stable"
+            "tools/signatario-stable",
+            "tools/evm-nets/launch.py",
+            "tools/evm-nets/networks.json",
+            "tools/evm-nets/signer_timing.py"
           ],
           "exclude": [
             "test_*",
@@ -272,7 +275,10 @@
         "relayer": {
           "summary": "vigia.py relay: submits what k signers already signed. Gas keys only, no bridge authority. One primary, six staggered backups.",
           "payload": [
-            "tools/signatario-stable"
+            "tools/signatario-stable",
+            "tools/evm-nets/launch.py",
+            "tools/evm-nets/networks.json",
+            "tools/evm-nets/signer_timing.py"
           ],
           "exclude": [
             "test_*",

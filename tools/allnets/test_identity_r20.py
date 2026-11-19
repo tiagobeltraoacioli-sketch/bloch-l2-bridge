@@ -357,18 +357,24 @@ class ThisTree(unittest.TestCase):
             diff = subprocess.run(['git', '-C', str(ROOT), 'diff', '--no-color', '-U0', tip, 'HEAD', '--', path],
                                   capture_output=True, text=True, check=True).stdout
             return [l for l in diff.splitlines() if l[:1] in '+-' and not l.startswith(('+++', '---'))]
-        # ops/routes.json: nothing but the pin name, the four source revisions with their status text, and the note
+        # ops/routes.json: nothing but the pin name, the four source revisions with their status text, the note, and
+        # three registry files added to the signer and relayer payloads (F421-5: the daemons refuse to start without them)
         lines = changed('ops/routes.json')
-        self.assertEqual(len([l for l in lines if l.startswith('-')]), 10, lines)
-        self.assertEqual(len([l for l in lines if l.startswith('+')]), 10, lines)
+        self.assertEqual(len([l for l in lines if l.startswith('-')]), 12, lines)
+        self.assertEqual(len([l for l in lines if l.startswith('+')]), 18, lines)
         for l in lines:
-            self.assertTrue(any(k in l for k in ('"mainnet-v2"', '"mainnet-v3"', '"source_rev"', '"launch_status"', '"_about"')), l)
+            self.assertTrue(any(k in l for k in ('"mainnet-v2"', '"mainnet-v3"', '"source_rev"', '"launch_status"', '"_about"',
+                                                 '"tools/signatario-stable"', '"tools/evm-nets/')), l)
         manifest = json.loads((ROOT / 'ops/routes.json').read_text())
         was = json.loads(subprocess.run(['git', '-C', str(ROOT), 'show', f'{tip}:ops/routes.json'], capture_output=True, text=True, check=True).stdout)
         for route in manifest['routes']:
             for doc_ in (manifest, was):
                 doc_['routes'][route].pop('source_rev'), doc_['routes'][route].pop('launch_status')
         manifest.pop('_about'), was.pop('_about')
+        for role in ('signer', 'relayer'):
+            self.assertEqual(manifest['routes']['ethereum']['roles'][role].pop('payload'),
+                             was['routes']['ethereum']['roles'][role].pop('payload') + ['tools/evm-nets/launch.py', 'tools/evm-nets/networks.json',
+                                                                                        'tools/evm-nets/signer_timing.py'])
         was['facts']['values'] = {('mainnet-v3' if k == 'mainnet-v2' else k): (manifest['facts']['values']['mainnet-v3'] if k == 'mainnet-v2' else v)
                                   for k, v in was['facts']['values'].items()}
         self.assertEqual(manifest, was)   # every unit, credential, port, hardening line and role is what the line shipped

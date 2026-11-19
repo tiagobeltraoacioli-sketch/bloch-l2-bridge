@@ -57,6 +57,19 @@ class Bundles(unittest.TestCase):
             for p, b in regs.items():
                 self.assertEqual(listed[p]['sha256'], hashlib.sha256(b).hexdigest(), p)
 
+    def test_signer_and_relayer_bundles_ship_the_launch_registry_the_daemons_need(self):
+        """Round 20 (agent 421, finding F421-5, found by the container rehearsal with the new source revision): vigia.py,
+        signatario.py and eth_half.py refuse to start for a source chain other than 1 when tools/evm-nets/launch.py is
+        not beside them, and the payload was tools/signatario-stable alone: no bundle of Arbitrum One, OP Mainnet or
+        Linea could start, and the Ethereum bundle only on chain 1."""
+        need = {'tools/evm-nets/launch.py', 'tools/evm-nets/networks.json', 'tools/evm-nets/signer_timing.py'}
+        for (route, role), (files, man) in self.built.items():
+            got = {p for p in files if p.startswith('tools/evm-nets/')}
+            self.assertEqual(got, need if role in ('signer', 'relayer') else set(), f'{route}-{role}')
+        files = self.built[('arbitrum-one', 'signer')][0]
+        self.assertIn(b"import launch", files['tools/signatario-stable/vigia.py'][0])
+        self.assertIn(b'"arbitrum-one"', files['tools/evm-nets/networks.json'][0])
+
     def test_payload_has_no_tests_fakes_or_rehearsals(self):
         for (route, role), (files, man) in self.built.items():
             spec = MAN['routes'][route]['roles'][role]
