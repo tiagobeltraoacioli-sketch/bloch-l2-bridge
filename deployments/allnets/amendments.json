@@ -1,0 +1,18 @@
+{
+  "domain": "bloch.bridge.allnets-amendments.v1",
+  "note": "Files a route line owns (tools/allnets/test_all.py OWNED) that a later round changed on a branch of `main`, after the line was merged and closed. The route-file identity check accepts exactly these files as differing from their line's merged tip (deployments/allnets/merge-lock.json) and nothing else; a record of a file that does not differ fails the check too. One entry per change, with who made it and why. Never record a file to make a failing check pass: record it in the commit that changes it, for its reviewer.",
+  "amendments": [
+    {
+      "line": "evm-nets",
+      "by": "agent 411, round 20 (2026-11-19), branch codex/bridge-usdt-r20-20261119",
+      "reason": "Several assets per network (owner request of 2026-11-19): the asset-route registry (new files asset-routes.json, asset_routes.py), the fork rehearsal of a further route (new file rehearse_route.py; rehearse_fork.py takes a route's vault contract, transfer mode, limits and token guard and an issuer-step table, and is unchanged for a network of networks.json), and the schema checker's directory rule for a file with a `route` block (network_json.py). networks.json, launch.py, evm_nets.py and every deployments/<network>/ file of the line are untouched.",
+      "files": [
+        "tools/evm-nets/asset-routes.json",
+        "tools/evm-nets/asset_routes.py",
+        "tools/evm-nets/network_json.py",
+        "tools/evm-nets/rehearse_fork.py",
+        "tools/evm-nets/rehearse_route.py"
+      ]
+    }
+  ]
+}

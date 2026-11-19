@@ -10,6 +10,11 @@ bridges needs its own external audit before real funds. The Ethereum bridge docu
 `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md`, `docs/BUSDC-MAINNET-V2.md` (deployment sequence). This document states only
 what differs per network.
 
+Round 20 note: a network of this document may carry FURTHER asset routes beside its USDC route (USDT on Arbitrum One
+and OP Mainnet, and on Ethereum; all held). They are decided in `tools/evm-nets/asset-routes.json` and
+`asset_routes.py`, not in `networks.json`, and nothing in this document changes for the USDC routes:
+`docs/BRIDGE-USDT-ROUTES.md`.
+
 ## 0. Launch status, and what enforces it (round 17, review R329-EVM-1)
 
 | Network | Status | Why |

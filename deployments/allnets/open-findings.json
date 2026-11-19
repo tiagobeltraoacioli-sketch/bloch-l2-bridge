@@ -1,7 +1,7 @@
 {
   "domain": "bloch.bridge.allnets.open-findings.v1",
   "note": "The integrator's table of review findings of severity Medium or above that are not closed by a reviewer's re-verification, per route (agent 375, round 18). A finding a developer has fixed stays here, with state fixed-unverified, until its reviewer re-verifies the fix in a dated report section; only then it is removed, with the commit and the report section named in the commit message. registry.py reads this file: a route with any entry is 'not launchable until fixed' whatever its own file says. Severity Low and Info are not listed here (they stay in the review reports). Source of every entry: the review report named, read 2026-11-17. Round 19 (agent 403): `findings` also carries the Medium-or-above findings of routes that are held or out by their own source (Base, BNB Smart Chain), so the table is complete per route; they cannot change such a route's state (the registry only lowers `launchable` or `undeclared`). `listed` now carries EVERY finding below Medium that a reviewer's last pass (329/379, 330/376, 331/377, 342/378) leaves open, standing or unverified, per route.",
-  "asOf": "2026-11-18T07:00:00Z",
+  "asOf": "2026-11-19T06:00:00Z",
   "findings": [
     {
       "id": "R325-EVM-1",
@@ -39,6 +39,18 @@
       "reviewer": 379,
       "what": "BNB Smart Chain unit token: the address is pinned but the deploy tool never compares the code at it; acceptable only while BNB is out of v1",
       "source": "agents/329-bridge-evm-review-r17.md section 1"
+    },
+    {
+      "id": "F411-1",
+      "routes": [
+        "ethereum-usdt"
+      ],
+      "severity": "Medium",
+      "state": "open",
+      "owner": 411,
+      "reviewer": null,
+      "what": "the vault of this route is `TronSourceVault` in the stock solc 0.8.24 build (creation keccak 0x52144d19...2b0c). The TRON reviews examined that source for the TVM and TRON's compiler; no reviewer has examined it as an Ethereum deployment (the issuer-fee bounds against Ethereum's TetherToken, the deposit gate's getters, the 256-block window). The route is held by its own source in any case",
+      "source": "agents/411-bridge-usdt-r20.md; docs/BRIDGE-USDT-ROUTES.md section 8 item 1"
     }
   ],
   "removed": [
@@ -331,6 +343,46 @@
       "severity": "Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed)",
       "what": "a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement)",
       "source": "agents/331-bridge-stellar-review-r17.md"
+    },
+    {
+      "id": "F411-2",
+      "routes": [
+        "ethereum-usdt"
+      ],
+      "severity": "Low",
+      "what": "the owner's ceremony kit (`tools/deploy-pontes/ceremony_kit.py`) accepts only the frozen vault contract: this route's ceremony needs a kit change first (the kit refuses the route today because it is held)",
+      "source": "agents/411-bridge-usdt-r20.md"
+    },
+    {
+      "id": "F411-3",
+      "routes": [
+        "ethereum-usdt",
+        "arbitrum-one-usdt",
+        "op-mainnet-usdt"
+      ],
+      "severity": "Info",
+      "what": "the token guard reads the asset contract's state at the signer's finalized block: a change made and undone between two reads is not seen by it (the vault's own balance checks cover that interval), and an upgrade is seen when executed, not when scheduled",
+      "source": "docs/BRIDGE-USDT-ROUTES.md sections 2 and 10"
+    },
+    {
+      "id": "F411-4",
+      "routes": [
+        "arbitrum-one-usdt"
+      ],
+      "severity": "Info",
+      "what": "a burn that names the USD₮0 contract itself as recipient can never be paid (the token refuses a transfer to itself) and the burned amount stays locked; the frozen L2 token cannot refuse such a recipient, so the page must (`asset.behaviour.recipientRefusals`)",
+      "source": "docs/BRIDGE-USDT-ROUTES.md section 4"
+    },
+    {
+      "id": "F411-5",
+      "routes": [
+        "ethereum-usdt",
+        "arbitrum-one-usdt",
+        "op-mainnet-usdt"
+      ],
+      "severity": "Info",
+      "what": "not examined: the signers of Tether's owner contract, the holders of the five keys of the USD₮0 Safe (3 of 5; it owns the token and its proxy admin), whether USD₮0 is redeemable for USDT, and the OP Stack upgrade authority over the standard bridge, which may burn any holder's balance",
+      "source": "docs/BRIDGE-USDT-ROUTES.md section 2"
     }
   ],
   "noteListed": "listed: every finding below Medium that a reviewer's last pass leaves open, standing or unverified; they do not hold a route.",
@@ -351,6 +403,7 @@
   "coverageNotes": [
     "The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.",
     "F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.",
-    "Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal."
+    "Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal.",
+    "The three USDT routes of round 20 (ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt; agent 411, `docs/BRIDGE-USDT-ROUTES.md`) had NO reviewer pass: the asset-route registry, the token guard in the signer's source half, the route-aware deploy tools and the restated registry checks C1, C3, C4, C9 and C10 are the developer's own work and tests. All three are held; none may launch before an independent review, an external audit and the owner's key ceremony."
   ]
 }

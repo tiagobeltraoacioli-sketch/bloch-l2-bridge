@@ -14,7 +14,8 @@ never silently skipped and never counted as a pass):
   offline       every `tools/*/test_*.py` unittest module from its own directory, and the offline script tests
   ethereum      the Ethereum bridge's anvil suites and daemon drills (agent 306's stages anvil1, anvil2, anvil3, extra)
   evmnets       tools/evm-nets tests, the reviewer's deploy-gate cases, the registry checks, network files
-  forks         one fork rehearsal per launchable EVM network (public endpoints as fork sources only, read-only)
+  forks         one fork rehearsal per launchable EVM network (public endpoints as fork sources only, read-only), and
+                one per further asset route of a network (round 20: USDT, the real token on the fork)
   bitcoin       the regtest rehearsal (needs `bitcoinBin`)
   solana        the validator rehearsal (needs `solanaBin`, `solanaVaultSo`, `solanaHelperSo`)
   tron          the private-TVM rehearsal (needs `tronUrl` and `tronUsdtGetcontract`: a private java-tron the caller runs)
@@ -141,6 +142,7 @@ def py(*args):
 def stage_integration(r):
     r.suite('integration', 'registry-check', py('tools/allnets/registry.py', 'check'))
     r.suite('integration', 'test_registry', py('-m', 'unittest', 'test_registry'), cwd=HERE)
+    r.suite('integration', 'test_registry_multi', py('-m', 'unittest', 'test_registry_multi'), cwd=HERE)
     r.suite('integration', 'test_cross_route', py('-m', 'unittest', 'test_cross_route'), cwd=HERE)
     r.suite('integration', 'mergecheck', py('tools/allnets/mergecheck.py'))
     r.suite('integration', 'regress-counts', py('tools/allnets/regress.py'))
@@ -154,15 +156,44 @@ def stage_integration(r):
 
 
 def identity():
-    """Every path a line owns equals that line's merged tip, byte for byte (git diff --quiet)."""
+    """Every path a line owns equals that line's merged tip, byte for byte, EXCEPT the files a later round changed on
+    `main` itself and recorded, one by one with the reason, in deployments/allnets/amendments.json (round 20: the route
+    lines of rounds 16 to 18 are closed and work continues on branches of `main`). The check stays exact both ways:
+    a file that differs from its line's tip without being recorded fails, and so does a recorded file that does not
+    differ (a stale record), a record of a file no line owns, and a record without a reason."""
     lock = json.loads((ROOT / 'deployments/allnets/merge-lock.json').read_text())['lines']
-    bad = 0
+    amend_path = ROOT / 'deployments/allnets/amendments.json'
+    amended, bad = {}, 0
+    if amend_path.exists():
+        for a in json.loads(amend_path.read_text())['amendments']:
+            ok = (isinstance(a.get('reason'), str) and len(a['reason']) >= 20 and isinstance(a.get('by'), str)
+                  and a.get('line') in OWNED and isinstance(a.get('files'), list) and a['files'])
+            if not ok:
+                print(f'amendment {str(a)[:120]}: needs line (one of {sorted(OWNED)}), files, by, reason')
+                bad += 1
+                continue
+            for f in a['files']:
+                if not any(f == p or f.startswith(p.rstrip('/') + '/') for p in OWNED[a['line']]):
+                    print(f'amendment names {f}, which line {a["line"]} does not own')
+                    bad += 1
+                amended.setdefault(a['line'], set()).add(f)
     for line, paths in OWNED.items():
         tip = lock[line]['commit']
+        differing = set()
         for p in paths:
-            done = subprocess.run(['git', 'diff', '--quiet', tip, 'HEAD', '--', p], cwd=ROOT)
-            print(f'{line:9} {p:45} {"identical to " + tip[:7] if done.returncode == 0 else "DIFFERS from " + tip[:7]}')
-            bad += done.returncode != 0
+            done = subprocess.run(['git', 'diff', '--name-only', tip, 'HEAD', '--', p], cwd=ROOT, capture_output=True, text=True)
+            files = set(done.stdout.split()) if done.returncode == 0 else {f'{p} (git diff failed)'}
+            differing |= files
+            unrecorded = sorted(files - amended.get(line, set()))
+            state = ('identical to ' + tip[:7] if not files else
+                     f'DIFFERS from {tip[:7]}: {unrecorded}' if unrecorded else
+                     f'identical to {tip[:7]} but for {len(files)} recorded amendment(s)')
+            print(f'{line:9} {p:45} {state}')
+            bad += bool(unrecorded)
+        stale = sorted(amended.get(line, set()) - differing)
+        if stale:
+            print(f'{line:9} recorded amendment(s) of files that do not differ from {tip[:7]}: {stale}')
+            bad += 1
     never = json.loads((HERE / 'lines.json').read_text())
     for path in never.get('forbiddenPaths', []):
         hit = subprocess.run(['git', 'rev-list', '-n', '1', 'HEAD', '--', path], cwd=ROOT, capture_output=True, text=True).stdout.strip()
@@ -256,6 +287,7 @@ def stage_evmnets(r):
     r.suite('evmnets', 'r329_demo_deploy_gate', py('tools/evm-nets/r329_demo_deploy_gate.py'))
     r.suite('evmnets', 'evm_nets-check', py('tools/evm-nets/evm_nets.py', 'check'))
     r.suite('evmnets', 'launch-check', py('tools/evm-nets/launch.py', 'check'))
+    r.suite('evmnets', 'asset_routes-check', py('tools/evm-nets/asset_routes.py', 'check'))
     files = sorted(str(p.relative_to(ROOT)) for p in ROOT.glob('deployments/*/bridge.network.json'))
     r.suite('evmnets', f'network_json-check-x{len(files)}', py('tools/evm-nets/network_json.py', 'check', *files),
             expect=lambda t, c: t.count('"valid"') == len(files))
@@ -267,6 +299,11 @@ def stage_forks(r):
            and x['launch']['sourceState'] == 'launchable']
     for i, n in enumerate(evm):
         r.suite('forks', f'fork-{n}', py('tools/evm-nets/rehearse_fork.py', n, '--port', str(r.base + 50 + 4 * i)))
+    # Round 20: the further asset routes of a network (USDT), each with its real token on a fork of its network. A route
+    # that is not launchable runs under a rehearsal chain id; the tools refuse its asset on the network's own id.
+    further = [x['id'] for x in reg['routes'] if 'route' in x and x['network']['kind'] == 'evm']
+    for i, n in enumerate(further):
+        r.suite('forks', f'route-{n}', py('tools/evm-nets/rehearse_route.py', n, '--port', str(r.base + 62 + 2 * i)))
 
 
 def stage_bitcoin(r):

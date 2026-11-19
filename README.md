@@ -27,19 +27,24 @@ stops it and nothing is written. `held` and `out` come from the route's own sour
 and are not lifted by closing findings: every held route also waits for its external audit and the owner's key
 ceremony.
 
+Since round 20 a network may carry several routes (one per asset). The first route of a network is named as the
+network; a further one is `<network>-<asset>` and lives in `deployments/<route-id>/`. The first further routes are
+USDT on Ethereum, Arbitrum One and OP Mainnet (`ethereum-usdt`, `arbitrum-one-usdt`, `op-mainnet-usdt`): all three
+are **held** and refused by every tool. Design, token behaviour and audit scope: `docs/BRIDGE-USDT-ROUTES.md`.
+
 <!-- allnets-launch-table:begin -->
 | Route | L2 token | Launch status | Open findings (Medium or above) | Open findings below Medium |
 |---|---|---|---|---|
 | ethereum | bUSDC | launchable | - | R329-SHARED-1 (Info), F374-1 (Info (test flake)) |
 | arbitrum-one | bUSDC.arb | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-11 (residual) (Info), R325-EVM-6 (Info (stands)) |
-| arbitrum-one-usdt | bUSDT.arb | held | - | - |
+| arbitrum-one-usdt | bUSDT.arb | held | - | F411-3 (Info), F411-4 (Info), F411-5 (Info) |
 | base | bUSDC.base | held | R325-EVM-1 (High, open), R329-EVM-3P-2 (Medium, open) | R325-EVM-6 (Info (stands)) |
 | bitcoin | bBTC | held | - | R342-BTC-4 (Info), R342-BTC-5 (Info), R342-BTC-2P-5 (Info), R342-BTC-2P-7 (Info (latent)), R342-BTC-6 (Info), R342-BTC-7 (Info), R342-BTC-2P-3 (residual) (Info (residual of a fixed Low)) |
 | bnb | bUSDC.bnb | out | R325-EVM-1 (High, open), R325-EVM-2 (Medium, partly-fixed) | R325-EVM-10 (Info (stands)) |
-| ethereum-usdt | bUSDT | held | - | - |
+| ethereum-usdt | bUSDT | held | F411-1 (Medium, open) | F411-2 (Low), F411-3 (Info), F411-5 (Info) |
 | linea | bUSDC.linea | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
 | op-mainnet | bUSDC.op | launchable | - | R329-EVM-3P-3 (Info), R325-EVM-6 (Info (stands)) |
-| op-mainnet-usdt | bUSDT.op | held | - | - |
+| op-mainnet-usdt | bUSDT.op | held | - | F411-3 (Info), F411-5 (Info) |
 | solana | bUSDC.sol | held | - | R374-1 (Info (question, answered by a test)), R330-SOL-1 (residual) (residual, per reviewer 376), R330-SOL-4P-5 (Info), R330-SOL-4P-8 (Info (rig hygiene)) |
 | stellar | bUSDC.xlm | held | - | R331-XLM-4P (Info, no id) (Info), R331-XLM-4P-7 (Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed)) |
 | tron | bUSDT.trx | held | - | R342-TRX-5 (Info), R342-TRX-6 (Info), R342-TRX-4 (limit) (Info (stated limit of a fixed Low)) |
@@ -70,12 +75,17 @@ What each finding below Medium says (they do not hold the route):
 | R330-SOL-4P-8 | solana | Info (rig hygiene) | the rehearsal's solana-test-validator does not keep to --bind-address 127.0.0.1 on the host |
 | R331-XLM-4P (Info, no id) | stellar | Info | rehearsal driver: other alert kinds no longer fail the direct-burn alert check (one narrowed assertion, `b43cc08`; 377: not a weakened product check) |
 | R331-XLM-4P-7 | stellar | Low (fixed in baa5391 by 373; that commit is unreviewed and unrehearsed) | a paid-not-latest-naming guardian alert stands for ever (recomputed on every check, no acknowledgement) |
+| F411-2 | ethereum-usdt | Low | the owner's ceremony kit (`tools/deploy-pontes/ceremony_kit.py`) accepts only the frozen vault contract: this route's ceremony needs a kit change first (the kit refuses the route today because it is held) |
+| F411-3 | ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt | Info | the token guard reads the asset contract's state at the signer's finalized block: a change made and undone between two reads is not seen by it (the vault's own balance checks cover that interval), and an upgrade is seen when executed, not when scheduled |
+| F411-4 | arbitrum-one-usdt | Info | a burn that names the USD₮0 contract itself as recipient can never be paid (the token refuses a transfer to itself) and the burned amount stays locked; the frozen L2 token cannot refuse such a recipient, so the page must (`asset.behaviour.recipientRefusals`) |
+| F411-5 | ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt | Info | not examined: the signers of Tether's owner contract, the holders of the five keys of the USD₮0 Safe (3 of 5; it owns the token and its proxy admin), whether USD₮0 is redeemable for USDT, and the OP Stack upgrade authority over the standard bridge, which may burn any holder's balance |
 
 What this table does not cover, and findings closed without their own reviewer pass:
 
 - The table is built from the last passes of the route reviewers (EVM networks and shared tools 329 / 379 / 408; Solana 330 / 376; Stellar 331 / 377; Bitcoin and TRON 342 / 378). The operator-packages line (`ops/`, agent 381, merged at `c4b35cf`) and the ceremony-kit line (`deploy/ceremony`, agent 380, merged at `8d7c51c`) had NO reviewer pass of their own: reviewer 379 saw only the F381-1 credential rule, reviewer 408 only the F381-2 mechanism. Both serve Ethereum, Arbitrum One, OP Mainnet and Linea.
 - F381-2 (Medium, operator packages; Ethereum, Arbitrum One, OP Mainnet, Linea): a signer unit with `UMask=0077` published its partial signatures into 0700 subdirectories, so the feed answered 404 and no quorum could form (liveness). Status: fixed in the packaging by agent 381 (default ACL on the publish directory; install sets it, `check` verifies it); re-verified at the mechanism by reviewer 408 in round 19; the container rehearsal under real systemd was not rerun by a reviewer. It does not hold the routes.
 - Stellar: the fix of R331-XLM-4P-7 (`baa5391`, `guardiao_stellar.py ack`) is in this tree UNREVIEWED and UNREHEARSED (reviewer 377 cleared `b43cc08`, the commit before it). Reviewer 408 read it and noted that the command is chosen by word membership (`--note check` runs `check`). The route is held; nothing of Stellar may launch before a reviewer confirms that commit with a rehearsal.
+- The three USDT routes of round 20 (ethereum-usdt, arbitrum-one-usdt, op-mainnet-usdt; agent 411, `docs/BRIDGE-USDT-ROUTES.md`) had NO reviewer pass: the asset-route registry, the token guard in the signer's source half, the route-aware deploy tools and the restated registry checks C1, C3, C4, C9 and C10 are the developer's own work and tests. All three are held; none may launch before an independent review, an external audit and the owner's key ceremony.
 <!-- allnets-launch-table:end -->
 
 Every route also needs its own external audit (Ethereum is the audit candidate) and the owner's key ceremony before
