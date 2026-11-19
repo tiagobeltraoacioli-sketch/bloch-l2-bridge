@@ -246,6 +246,15 @@ def by_l2(chain_id, name, symbol, path=None):
     return None
 
 
+def routes_named(chain_id, name, symbol):
+    """From the CODE and nothing else: could (name, symbol) on `chain_id` be a further route's L2 token? True when a
+    decided route lives on that chain and the name or symbol is not the plain bUSDC family's. Used only to fail closed
+    when the file cannot be read: a config that may be a held route's is then refused rather than passed on."""
+    if not any(c == chain_id for c, _ in DECIDED):
+        return False
+    return 'usdc' not in str(symbol).lower() or 'usdc' not in str(name).lower()
+
+
 def launchable(path=None):
     return {rid: s for rid, s in _load(path)['routes'].items() if s['launch']['v1']}
 

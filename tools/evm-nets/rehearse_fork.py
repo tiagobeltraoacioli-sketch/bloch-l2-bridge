@@ -64,6 +64,11 @@ CAP, WINDOW = 100_000 * USDC, 10_000 * USDC
 # and OP Mainnet, 15 on Linea), and the largest deposit, 600 U, stays inside the 10,000 a day window.
 U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS = USDC, 21 * USDC, 20 * USDC, 5, 5
 results, gas, PROCS = [], {}, []
+# Round 20: tools/evm-nets/rehearse_route.py rehearses a FURTHER asset route of a network (asset_routes.py) with this rig.
+# It passes the route as a network spec that also carries `route`, `vault`, `limits` and `guard`, and registers the
+# issuer steps of its asset kinds here. A network of networks.json carries none of those keys and runs as before.
+ISSUER_STEPS = {}
+EIP1967_IMPLEMENTATION = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
 OPTS = {'block_time': None, 'from_fork_block': False, 'join_delay': 0, 'overrides': False, 'production_budgets': False}
 
 
@@ -84,8 +89,10 @@ def check(name, cond, detail=''):
 
 
 def schedule(spec):
-    global U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS
+    global U, MIN_DEPOSIT, MIN_BURN, FEE_BPS, RELEASE_BPS, CAP, WINDOW
     MIN_DEPOSIT, MIN_BURN = spec['minDeposit'], spec['l2MinBurn']
+    if spec.get('limits'):  # a further route states its own cap and window (asset-routes.json)
+        CAP, WINDOW = spec['limits']['cap'], spec['limits']['window']
     FEE_BPS, RELEASE_BPS = spec['feeBps']['deposit'], spec['feeBps']['release']
     U = USDC * -(-MIN_BURN // (40 * USDC))
     if 600 * U > WINDOW or 70 * U < MIN_DEPOSIT:
@@ -122,7 +129,10 @@ class Rig:
     def __init__(self, name, spec, registry, work, rpc, port):
         self.name, self.spec, self.work = name, spec, work
         # The chain id the fork runs under: the network's own only when the tools would act for it with these settings.
-        self.registry_chain = not launch.refusal(spec['chainId']) and not OPTS['overrides']
+        # A further asset route (round 20) is rehearsed under a rehearsal chain id while it is not launchable: the tools
+        # refuse its (chain id, asset) pair on the network's own id, whatever the network's own status is.
+        self.registry_chain = not launch.refusal(spec['chainId']) and not OPTS['overrides'] and not (
+            spec.get('route') and not spec['launch']['v1'])
         self.chain = spec['chainId'] if self.registry_chain else launch.rehearsal_chain_id(spec['chainId'])
         self.salt = os.urandom(16).hex()
         fork = spec['fork']
@@ -145,6 +155,7 @@ class Rig:
         if not self.registry_chain:
             print(f'INFO {name} runs under the rehearsal chain id {self.chain}: '
                   + ('its anchor settings were changed on the command line' if OPTS['overrides'] else
+                     'this route is not launchable and every tool refuses its asset on the network\'s own id' if spec.get('route') else
                      'it is not launchable and every tool refuses its own id') + '; nothing signed here is valid on the network',
                   flush=True)
         self.fork_block = int(out(CAST, 'block-number', '--rpc-url', self.eth))
@@ -298,14 +309,13 @@ class Rig:
         except SystemExit as e:
             return str(e)
 
-    def pin_implementation(self):
+    def pin_implementation(self, slot='0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3'):
         """anvil 1.7.1 cannot answer a call at a PAST block of a fork when the call DELEGATECALLs into a contract whose
         code it only ever loaded from the fork source: `missing bytecode for code hash` (the hash is the FiatToken
         implementation's, checked against the real networks). The guardian reads the vault's asset balance at past
         blocks, so on the first runs it could only report `unverifiable`. Writing the implementation's own code back
         with anvil_setCode makes it part of the fork's local state. The contract and its code are unchanged."""
-        impl = '0x' + out(CAST, 'storage', self.asset, '0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3',
-                          '--rpc-url', self.eth)[-40:]
+        impl = '0x' + out(CAST, 'storage', self.asset, slot, '--rpc-url', self.eth)[-40:]
         code = out(CAST, 'code', impl, '--rpc-url', self.eth)
         self.mine(self.eth, 5)
         before = self.historical_balance()
@@ -321,7 +331,9 @@ class Rig:
     def deploy(self):
         spec = self.spec
         k = lambda t: out(CAST, 'keccak', t)  # noqa: E731
-        for target, want, what in (('contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault', VAULT_CREATION, 'vault'),
+        custody = spec.get('vault') or {'contract': 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault',
+                                        'creationKeccak': VAULT_CREATION, 'transferMode': 0, 'releaseFlat': None}
+        for target, want, what in ((custody['contract'], custody['creationKeccak'], 'vault'),
                                    ('contracts/stable/BridgedStablecoinV3.sol:BridgedStablecoinV3', TOKEN_CREATION, 'token')):
             code = out(FORGE, 'inspect', '--root', ROOT, target, 'bytecode')
             check(f'[build] the {what} creation code is the frozen one ({want[:10]}…)', k(code).lower() == want, k(code))
@@ -330,6 +342,8 @@ class Rig:
               dec == spec['asset']['decimals'], dec)
         if spec['asset'].get('kind') == 'fiattoken':
             self.pin_implementation()
+        elif spec['asset'].get('kind') == 'usdt0':
+            self.pin_implementation(EIP1967_IMPLEMENTATION)
         self.unit = None
         if dec != 6:
             unit = spec['asset']['unit']
@@ -342,10 +356,12 @@ class Rig:
         addrs = '[' + ','.join(a for a, _, _ in self.signers) + ']'
         vgs = '[' + ','.join(sorted(self.addr[f'vg{i}'] for i in range(3))) + ']'
         tgs = '[' + ','.join(sorted(self.addr[f'tg{i}'] for i in range(3))) + ']'
-        ctor = [k(spec['sourceDomainLabel']), k('bloch-l2-700770'), k(spec['assetLabel']), self.held, str(CAP), '0', addrs, '5',
+        flat = '' if custody['releaseFlat'] is None else f',{custody["releaseFlat"]}'  # the Tether-aware vault's fourth fee field
+        ctor = [k(spec['sourceDomainLabel']), k('bloch-l2-700770'), k(spec['assetLabel']), self.held, str(CAP),
+                str(custody['transferMode']), addrs, '5',
                 f'({WINDOW},86400,6,1209600,{MIN_DEPOSIT},{MIN_BURN})', f'({vgs},259200,259200)',
-                f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{RELEASE_BPS}))']
-        target = 'contracts/usdt/ProvenanceSourceVault.sol:ProvenanceSourceVault'
+                f'(1,0,0x{"00" * 20},({self.fee_to},{FEE_BPS},{RELEASE_BPS}{flat}))']
+        target = custody['contract']
         if dec != 6:
             bad = sh(FORGE, 'create', '--root', ROOT, '--broadcast', '--rpc-url', self.eth, '--private-key', self.key['deployer'],
                      target, '--constructor-args', *ctor[:3], self.asset, *ctor[4:], ok=False)
@@ -411,7 +427,9 @@ class Rig:
             ecfg.write_text(json.dumps({'eth_rpc': self.eth, 'eth_chain_id': self.chain, 'vault': self.vault,
                                         'vault_code_keccak': vault_code, 'vault_from_block': self.from_block, 'keystore': ks,
                                         'password_file': str(work / 'pw'), 'cast': CAST, 'provenance': True,
-                                        'db': str(work / f'ethdb{i}.json'), **policy}))
+                                        'db': str(work / f'ethdb{i}.json'), **policy,
+                                        # a further route under a rehearsal chain id carries its token guard itself
+                                        **({'token_guard': spec['guard']} if spec.get('guard') and not self.registry_chain else {})}))
             half = plain_half = [sys.executable, str(STABLE / 'eth_half.py'), '--config', str(ecfg)]
             if OPTS['join_delay']:
                 # Stands in for the work a production signer does before its source half runs for a RELEASE (the L2
@@ -431,7 +449,7 @@ class Rig:
                 'shared_dir': str(work / 'shared'), 'eth_rpc': self.eth, 'eth_chain_id': self.chain,
                 'vault_from_block': self.from_block,
                 **{k: policy[k] for k in ('anchor_policy', 'anchor_max_age') if k in policy}, **budgets,
-                **({} if self.registry_chain else {'rehearsal_network': self.name}),
+                **({} if self.registry_chain else {'rehearsal_network': (spec.get('route') or {}).get('network', self.name)}),
                 'l2_relayer_key': str(work / 'relayer.key'), 'eth_relayer_key': str(work / 'relayer.key')}))
             self.cfgs.append(path)
             self.eth_cfgs.append(ecfg)
@@ -757,7 +775,9 @@ def flow(rig):
           int(rig.tview('totalSupply()(uint256)')) + 0 <= int(rig.vview('totalLocked()(uint64)')), lines[-2:])
 
     # 11. the issuer's powers over the real asset
-    if rig.spec['asset'].get('kind') == 'fiattoken':
+    if rig.spec['asset'].get('kind') in ISSUER_STEPS:
+        ISSUER_STEPS[rig.spec['asset']['kind']](rig)
+    elif rig.spec['asset'].get('kind') == 'fiattoken':
         blacklister = rig.view(rig.eth, rig.asset, 'blacklister()(address)')
         pauser = rig.view(rig.eth, rig.asset, 'pauser()(address)')
         rig.impersonated(blacklister, rig.asset, 'blacklist(address)', A['carol'])
@@ -889,15 +909,15 @@ def measure(rig, seconds, interval, stagger=False):
     print('MEASURE ' + json.dumps(summary), flush=True)
 
 
-def main():
+def main(route_spec=None):
     args = sys.argv[1:]
     registry = launch.registry()
-    if not args or args[0] not in registry['networks']:
+    if route_spec is None and (not args or args[0] not in registry['networks']):
         raise SystemExit(__doc__ + f'\nnetworks: {", ".join(registry["networks"])}')
     name = args[0]
-    spec = registry['networks'][name]
+    spec = route_spec or registry['networks'][name]
     opt = lambda n, d=None: args[args.index(n) + 1] if n in args else d  # noqa: E731
-    port = int(opt('--port', 42010 + 2 * list(registry['networks']).index(name)))
+    port = int(opt('--port', 42010 + 2 * (list(registry['networks']).index(name) if route_spec is None else 9)))
     OPTS['block_time'] = opt('--block-time')
     OPTS['from_fork_block'] = os.environ.get('EVMNETS_FROM_FORK_BLOCK') == '1'
     OPTS['join_delay'] = float(opt('--join-delay', 0))

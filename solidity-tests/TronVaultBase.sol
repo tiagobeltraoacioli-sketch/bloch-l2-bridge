@@ -283,8 +283,11 @@ abstract contract TronVaultBase {
     function prepare(address who, uint256 gross) internal {
         usdt.mint(who, gross);
         if (usdt.allowance(who, address(vault)) != type(uint256).max) {
+            // A raw call: Tether's contract on Ethereum returns no data from approve (round 20), so a typed call would
+            // revert on decoding in the test, not in the token.
             vm.prank(who);
-            usdt.approve(address(vault), type(uint256).max);
+            (bool ok,) = address(usdt).call(abi.encodeWithSignature("approve(address,uint256)", address(vault), type(uint256).max));
+            require(ok, "approve");
         }
     }
 

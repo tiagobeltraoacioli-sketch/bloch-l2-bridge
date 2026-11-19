@@ -64,6 +64,35 @@ try:
     import launch  # noqa: E402
 except ImportError:  # a tree without tools/evm-nets: Ethereum only, as before round 16
     launch = None
+# Round 20 (several assets per network): tools/evm-nets/asset_routes.py holds the FURTHER routes of a network, keyed on
+# (chain id, asset address). A vault config whose token is such an asset is that route's: refused while the route is
+# not launchable (no flag lifts it), and otherwise held to the route's vault contract, transfer mode, labels, limits
+# and fees. A token that is no such asset takes exactly the path of before; the USDC routes never read that registry.
+try:
+    import asset_routes  # noqa: E402
+except ImportError:  # a tree without the asset-route registry
+    asset_routes = None
+# The Tether-aware vault (the TRON line's contract, unchanged): frozen vault + the changes of docs/TRON-VAULT-DIFF.md.
+# Its constructor takes a four-field fee tuple (`releaseFlat`) and requires transferMode 1. Only a route of the
+# asset-route registry that names it may use it (ethereum-usdt), or a rehearsal on chain 31337.
+TETHER_VAULT = 'contracts/tron/TronSourceVault.sol:TronSourceVault'
+
+
+def provenance_shaped(contract):
+    return contract in PROVENANCE_CONTRACTS or contract == TETHER_VAULT
+
+
+def asset_route(chain_id, token):
+    """(route id, spec) when `token` on `chain_id` is the asset of a launchable further route, None when it is no such
+    asset; refuses when its route is not launchable or the registry cannot be trusted."""
+    if asset_routes is None:
+        return None
+    why = asset_routes.refusal(chain_id, token)
+    refuse(why is None, why)
+    try:
+        return asset_routes.route_of(chain_id, token)
+    except asset_routes.RouteError as e:  # unreachable after `refusal`; kept as the closed default
+        refuse(False, f'the asset-route registry cannot be trusted: {e}')
 
 
 def source_networks():
@@ -154,15 +183,26 @@ def validate(cfg, rehearsal, token_cfg=None):
            f'chainId must be {ETH_MAINNET}' + (f', or a source network of tools/evm-nets/networks.json: {sorted(set(nets) - {ETH_MAINNET})}'
                                                if len(nets) > 1 else ''))
     net = None if rehearsal else nets[eth['chainId']]
+    route = None
+    if not rehearsal and isinstance(cfg.get('vault'), dict):
+        hit = asset_route(eth['chainId'], cfg['vault'].get('token'))
+        if hit is not None:
+            # A further route of this network: the row its registry gives replaces the first route's (label, asset label,
+            # token, vault contract, asset, no unit token, fee recipient and rates).
+            rid, route = hit
+            fees = (launch.registry()['feeRecipient'].lower(), route['feeBps']['deposit'], route['feeBps']['release'])
+            net = (net[0], route['assetLabel'], route['asset']['address'].lower(), (route['vault']['contract'],),
+                   route['asset']['address'].lower(), None, fees)
     exact_keys(cfg['source'], ['revision'], 'source')
     refuse(isinstance(cfg['source']['revision'], str) and re.fullmatch(r'[0-9a-f]{40}', cfg['source']['revision']),
            'source.revision is undecided (full git commit hash)')
 
     v = cfg['vault']
-    provenance = v.get('contract') in PROVENANCE_CONTRACTS
+    tether = v.get('contract') == TETHER_VAULT and (rehearsal or route is not None)
+    provenance = v.get('contract') in PROVENANCE_CONTRACTS or tether
     exact_keys(v, ['contract', 'sourceDomainLabel', 'nativeDomainLabel', 'assetLabel', 'token', 'cap',
                    'transferMode', 'signers', 'policy', 'guard'] + (['provenance'] if provenance else []), 'vault')
-    refuse(v['contract'] in (CONTRACT,) + PROVENANCE_CONTRACTS, f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
+    refuse(v['contract'] in (CONTRACT,) + PROVENANCE_CONTRACTS or tether, f'vault.contract must be {PROVENANCE_CONTRACT} or {CONTRACT}')
     if net is not None:
         refuse(v['contract'] in net[3], f'vault.contract on chain {eth["chainId"]} must be {" or ".join(net[3])}')
     if provenance:
@@ -171,7 +211,12 @@ def validate(cfg, rehearsal, token_cfg=None):
         refuse(pv['mode'] == 1 and pv['releaseDelay'] == 0 and pv['mintVerifier'] is None,
                'vault.provenance must be mode 1 (mint chain), releaseDelay 0, no mintVerifier (options 2 and 3 are not the launch design)')
         fe = pv['fees']
-        exact_keys(fe, ['recipient', 'depositBps', 'releaseBps'], 'vault.provenance.fees')
+        exact_keys(fe, ['recipient', 'depositBps', 'releaseBps'] + (['releaseFlat'] if tether else []), 'vault.provenance.fees')
+        if tether:
+            # TRON-7 of the Tether-aware vault: a flat release fee. No EVM route charges one; the field exists because the
+            # constructor's fee tuple has four fields.
+            refuse(fe['releaseFlat'] == 0 and not isinstance(fe['releaseFlat'], bool),
+                   'vault.provenance.fees.releaseFlat must be 0 (no route on an EVM network charges a flat release fee)')
         refuse(is_uint(fe['depositBps'], MAX_FEE_BPS) and is_uint(fe['releaseBps'], MAX_FEE_BPS),
                f'vault.provenance.fees: depositBps and releaseBps are undecided or above {MAX_FEE_BPS} (0.30%)')
         no_fee = fe['depositBps'] == 0 and fe['releaseBps'] == 0
@@ -204,7 +249,24 @@ def validate(cfg, rehearsal, token_cfg=None):
             refuse(str(v['token']).lower() == net[5], f'vault.token must be the pinned unit token {net[5]}')
     refuse(is_addr(v['token']), 'vault.token is undecided or invalid')
     refuse(is_uint(v['cap'], lo=1), 'vault.cap is undecided')
-    refuse(v['transferMode'] == 0, 'vault.transferMode must be 0 (Ethereum USDC)')
+    if tether:
+        refuse(v['transferMode'] == 1 and not isinstance(v['transferMode'], bool),
+               'vault.transferMode must be 1 for the Tether-aware vault (exact balance deltas are authoritative; its constructor '
+               'refuses any other mode)')
+    else:
+        refuse(v['transferMode'] == 0, 'vault.transferMode must be 0 (Ethereum USDC)')
+    if route is not None:
+        lim = route['limits']
+        refuse(v['transferMode'] == route['vault']['transferMode'], f'vault.transferMode of route {rid} is {route["vault"]["transferMode"]}')
+        refuse(v['cap'] == lim['cap'], f'vault.cap of route {rid} is {lim["cap"]} (the rule decided on 2026-11-19; '
+               f'tools/evm-nets/asset-routes.json); the config has {v["cap"]}')
+        pol_ = v.get('policy') if isinstance(v.get('policy'), dict) else {}
+        refuse((pol_.get('windowLimit'), pol_.get('windowSeconds')) == (lim['window'], lim['windowSeconds']),
+               f'vault.policy window of route {rid} is {lim["window"]} per {lim["windowSeconds"]} s; the config has '
+               f'{pol_.get("windowLimit")} per {pol_.get("windowSeconds")} s')
+        refuse((pol_.get('minDeposit'), pol_.get('l2MinBurn')) == (route['minDeposit'], route['l2MinBurn']),
+               f'vault.policy minimums of route {rid} are minDeposit {route["minDeposit"]} and l2MinBurn {route["l2MinBurn"]} '
+               '(the fee schedule of the network\'s USDC route)')
 
     sg = v['signers']
     exact_keys(sg, ['threshold', 'set'], 'vault.signers')
@@ -327,13 +389,14 @@ def constructor_args(cfg, norm):
             str(v['signers']['threshold']),
             f'({p["windowLimit"]},{p["windowSeconds"]},{p["switchThreshold"]},{p["switchDelay"]},{p["minDeposit"]},{p["l2MinBurn"]})',
             f'([{",".join(norm["guardians"])}],{g["pauseDuration"]},{g["pauseCooldown"]})'] + (
-                [provenance_arg(v['provenance'])] if v['contract'] in PROVENANCE_CONTRACTS else [])
+                [provenance_arg(v['provenance'])] if provenance_shaped(v['contract']) else [])
 
 
 def provenance_arg(pv):
     fe = pv['fees']
     recipient = (fe['recipient'] or ZERO).lower()
-    return f'({pv["mode"]},{pv["releaseDelay"]},{ZERO},({recipient},{fe["depositBps"]},{fe["releaseBps"]}))'
+    flat = f',{fe["releaseFlat"]}' if 'releaseFlat' in fe else ''  # the Tether-aware vault's fourth fee field
+    return f'({pv["mode"]},{pv["releaseDelay"]},{ZERO},({recipient},{fe["depositBps"]},{fe["releaseBps"]}{flat}))'
 
 
 def rpc(url, method, params):
@@ -372,8 +435,10 @@ def verify(cfg, norm, url, address, block, unused=False):
         'verifier()(address)': '0x' + '00' * 20, 'proposedVerifier()(address)': '0x' + '00' * 20,
         'pausedUntil()(uint64)': '0', 'totalLocked()(uint64)': None, 'depositCount()(uint64)': None, 'depositsEnabled()(bool)': None,
         'releasesEnabled()(bool)': None}
-    if v['contract'] in PROVENANCE_CONTRACTS:
+    if provenance_shaped(v['contract']):
         fe = v['provenance']['fees']
+        if v['contract'] == TETHER_VAULT:
+            expect['releaseFlatFee()(uint64)'] = str(fe['releaseFlat'])
         expect.update({'provenanceMode()(uint8)': str(v['provenance']['mode']), 'releaseDelay()(uint64)': '0',
                        'mintVerifier()(address)': ZERO, 'forgeryProvenAt()(uint64)': '0',
                        'feeRecipient()(address)': (fe['recipient'] or ZERO).lower(),
@@ -397,7 +462,14 @@ def verify(cfg, norm, url, address, block, unused=False):
         refuse(state['depositCount'] == '0' and state['totalLocked'] == '0', f'a used vault (depositCount {state["depositCount"]}, totalLocked '
                f'{state["totalLocked"]}): a new token needs a new vault')
     code_hash = cast('keccak', *plain(code)).lower()
-    genesis = get('mintChainGenesis()(bytes32)').lower() if v['contract'] in PROVENANCE_CONTRACTS else None
+    genesis = get('mintChainGenesis()(bytes32)').lower() if provenance_shaped(v['contract']) else None
+    if v['contract'] == TETHER_VAULT:
+        # The vault's own reading of its token: both getters answer, the issuer has not blacklisted the vault and has not
+        # replaced the token. Anything else and `deposit` refuses (TokenUnsafe).
+        flags = cast('call', address, 'tokenState()(bool,bool,bool)', '--rpc-url', url, '--block', str(int(at, 16))).split()
+        refuse(flags == ['true', 'false', 'false'], f'tokenState() is {flags}: the token does not answer its getters, or the issuer '
+               'has blacklisted this vault or deprecated the token')
+        state['tokenState'] = 'known, not blacklisted, not replaced'
     return {'decision': 'verified', 'block': int(at, 16), 'checked': checked, 'state': state,
             'signers': norm['signers'], 'guardians': norm['guardians'],
             'busdcEthereum': {'chainId': cfg['ethereum']['chainId'], 'vault': address.lower(), 'route': route,

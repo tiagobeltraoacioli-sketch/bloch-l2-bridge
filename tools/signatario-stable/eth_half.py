@@ -48,6 +48,16 @@ network of tools/evm-nets/networks.json the four keys `anchor_policy`, `anchor_d
 `finalized_margin` are the registry's, by chain id: a config that omits one the registry sets, or contradicts one, is
 refused at start (round 18; round 17 filled an omitted key). A chain id that is neither 1 nor in the registry is a local rehearsal chain and
 keeps the keys of its config. Chain 1 never loads that module and reads exactly the keys it read before.
+
+Round 20 (several assets per network). The vault's own `token()` names its asset, and (chain id, asset) names its
+route (tools/evm-nets/asset_routes.py): a FURTHER route of a network (USDT) that is not launchable is refused for
+deposits and releases alike, and a launchable one has a token guard that `deposit` applies at the finalized block:
+the asset contract's pinned code, storage slots and getters (transfer fee zero, not paused, not replaced or upgraded,
+the vault not blocked). Any difference, or a getter that does not answer, and nothing is attested: minting stops for
+that route (token_guard.py). Releases are not guarded. A vault over a network's first asset (USDC) has no guard and
+is decided from that module's code table alone. Optional config key `token_guard`: "registry" (the generated
+templates of a further route say so; refused when the vault's asset is no such route) or, on a local rehearsal chain
+only, the guard object itself.
 """
 import fcntl
 import hashlib
@@ -192,6 +202,72 @@ class Eth:
         c.setdefault('deposit_cursor', settings.get('deposit_cursor', False))
         return c
 
+    # ── the route's asset (round 20: several assets, several vaults per network) ──────────────────────────────────
+    def raw_rpc(self, method, params):
+        """As `rpc`, but an error is raised to the caller instead of ending the run (the token guard counts a getter
+        that reverts or a node that does not answer as a difference)."""
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode()
+        req = urllib.request.Request(self.url, body, {'content-type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            out = json.loads(r.read())
+        if 'error' in out:
+            raise RuntimeError(f'{method}: {out["error"]}')
+        return out['result']
+
+    def asset_route(self):
+        """The token guard of this vault's route, or None when the route has none (the first route of a network: USDC).
+
+        The vault's own `token()` names the asset, and (chain id, asset) names the route (tools/evm-nets/asset_routes.py).
+        A further route that is not launchable is refused here, for deposits and releases alike: no key, flag or
+        environment variable lifts it. For a launchable one the guard is the registry's; a config that carries another
+        is refused. An asset that is no further route (USDC on any network) is answered from that module's code table
+        alone, reads no registry file and returns None: exactly the path of before. A local rehearsal chain (an id
+        the registry does not decide about) may carry its own `token_guard` object in the config."""
+        out = self.rpc('eth_call', [{'to': self.vault, 'data': '0xfc0c546a'}, 'latest'])  # token()
+        if not isinstance(out, str) or len(out) != 66 or int(out, 16) >> 160:
+            refuse('the vault does not answer token() with one address', got=str(out)[:80])
+        token = '0x' + out[-40:].lower()
+        cfg_guard = self.cfg.get('token_guard')
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'evm-nets'))
+            import asset_routes
+        except ImportError:
+            asset_routes = None  # a tree without the asset-route registry (before round 20)
+        rid = asset_routes.decided(self.chain_id, token) if asset_routes else None
+        if rid is None:
+            if cfg_guard == 'registry':
+                refuse('config: token_guard is "registry", but this vault\'s asset is not a further route of the asset-route '
+                       'registry on this chain', chain_id=self.chain_id, asset=token)
+            if cfg_guard is not None and not isinstance(cfg_guard, dict):
+                refuse('config: token_guard must be "registry" or a guard object (codes, slots, calls)')
+            return cfg_guard
+        why = asset_routes.refusal(self.chain_id, token)
+        if why:
+            refuse('this route is not launchable: nothing is attested or signed for it', chain_id=self.chain_id, route=rid,
+                   asset=token, why=why)
+        guard = asset_routes.route_of(self.chain_id, token)[1]['guard']
+        if cfg_guard not in (None, 'registry') and cfg_guard != guard:
+            refuse('config contradicts the asset-route registry (tools/evm-nets/asset-routes.json): remove token_guard or set '
+                   '"registry"; every signer of a route must apply the same token guard', route=rid)
+        return guard
+
+    def guard_deposit(self, block):
+        """Stops minting for a route whose asset contract is no longer in the reviewed state (token_guard.py): at
+        `block` (this signer's finalized block) the pinned code, storage slots and getters must all match. Refuses with
+        the differences; returns the route's guard (None for a route without one)."""
+        guard = self.asset_route()
+        if guard is None:
+            return None
+        import token_guard
+        try:
+            found = token_guard.check(self.raw_rpc, self.keccak, guard, self.vault, block)
+        except (KeyError, TypeError, ValueError) as e:
+            refuse('the token guard of this route is malformed: nothing is attested', error=f'{type(e).__name__}: {e}')
+        if found:
+            refuse('the asset contract is not in the state this route pins: no deposit is attested (minting stops for the '
+                   'route until the token is back in that state or the route is reviewed again)', block=block, differences=found)
+        return guard
+
     # ── tools ────────────────────────────────────────────────────────────────
     def run(self, argv, what):
         done = subprocess.run([str(a) for a in argv], capture_output=True, text=True)
@@ -321,6 +397,7 @@ def cmd_deposit(eth, args):
     fin = eth.block('finalized')
     finalized = int(fin['number'], 16)
     eth.check_code(finalized)
+    eth.guard_deposit(finalized)  # round 20: a held route is refused; a route's token guard stops minting
     topic0 = eth.run([eth.cast, 'keccak', DEPOSITED], 'cast keccak').lower()
     start, chunk, logs = int(eth.cfg.get('vault_from_block', 0)), int(eth.cfg.get('log_chunk', 10000)), []
     if eth.deposit_cursor:
@@ -429,6 +506,7 @@ def cmd_release(eth, args):
     if address(intent.get('vault', ''), 'intent vault') != eth.vault \
             or uint(intent.get('source_chain_id', 0), 256, 'source_chain_id') != eth.chain_id:
         refuse('intent for another chain or vault')
+    eth.asset_route()  # round 20: a further route that is not launchable signs nothing (releases are not token-guarded)
     r, n = intent['release'], intent['native']
     rel = {'route': hex32(r['route'], 'route'), 'nonce': uint(r['nonce'], 64, 'nonce'),
            'recipient': address(r['recipient'], 'recipient'), 'amount': uint(r['amount'], 64, 'amount'),
@@ -569,4 +647,5 @@ def main():
     (cmd_deposit if 'deposit' in args else cmd_release)(eth, args)
 
 
-main()
+if __name__ == '__main__':
+    main()

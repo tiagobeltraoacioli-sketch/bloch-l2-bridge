@@ -10,8 +10,23 @@ import {TronVaultIssuerBase} from "./TronVaultBase.sol";
 /// totalLocked, feesAccrued, depositCount and the deposit chain against the test's own ledger (`checkBooks`), the
 /// vault's token balance, and that a refused call consumed no nonce and no burn.
 contract TronVaultIssuerTest is TronVaultIssuerBase {
-    function setUp() public {
+    /// Virtual since round 20: R411UsdtRoutes.t.sol runs every case of this contract a second time over the stand-in
+    /// of Tether's contract on ETHEREUM (no return data, approve through zero).
+    function setUp() public virtual {
         baseSetUp(new TronUSDTLike());
+    }
+
+    /// The issuer (this contract) sends tokens with a raw call: Tether's contract on Ethereum answers nothing, TRON's
+    /// answers `false` from a successful `transfer`; either way the transfer must not revert.
+    function send(address to, uint256 value) internal {
+        (bool ok,) = address(usdt).call(abi.encodeWithSignature("transfer(address,uint256)", to, value));
+        require(ok, "transfer");
+    }
+
+    /// A token call that succeeded and did not answer `false` (TRON's `transferFrom` and `approve` answer true,
+    /// Ethereum's answer nothing).
+    function accepted(bool ok, bytes memory ret) internal pure returns (bool) {
+        return ok && (ret.length == 0 || (ret.length == 32 && abi.decode(ret, (uint256)) == 1));
     }
 
     // ---------------------------------------------------------------- a. vault blacklisted
@@ -54,7 +69,9 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
         usdt.addBlackList(address(vault));
         uint256 before = usdt.balanceOf(address(vault));
         vm.prank(address(vault)); // the vault is the spender in a deposit
-        require(usdt.transferFrom(CAROL, address(vault), 100 * U), "the token moves Carol's funds into the frozen vault");
+        (bool moved, bytes memory answer) =
+            address(usdt).call(abi.encodeWithSignature("transferFrom(address,address,uint256)", CAROL, address(vault), 100 * U));
+        require(accepted(moved, answer), "the token moves Carol's funds into the frozen vault");
         require(usdt.balanceOf(address(vault)) == before + 100 * U, "received");
         vm.prank(address(vault));
         (bool ok,) = address(usdt).call(abi.encodeWithSignature("transfer(address,uint256)", CAROL, 100 * U));
@@ -92,7 +109,7 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
         // Somebody donates all but one unit of the missing tokens: still short, still closed.
         usdt.mint(MALLORY, held);
         vm.prank(MALLORY);
-        usdt.transfer(address(vault), held - 1);
+        send(address(vault), held - 1);
         expectDeposit(CAROL, uint64(100 * U), CAROL, TronSourceVault.InsufficientBacking.selector);
         expectRelease(r, c, s, TronSourceVault.InsufficientBacking.selector);
         expectSweep(TronSourceVault.InsufficientBacking.selector);
@@ -100,7 +117,7 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
 
         // The last unit arrives. A donation is never a deposit: no id, no count, no credit.
         vm.prank(MALLORY);
-        usdt.transfer(address(vault), 1);
+        send(address(vault), 1);
         require(unchanged(b), "exactly the state before the destruction: the donation created no credit");
         checkBooks();
         checkBacked();
@@ -242,7 +259,9 @@ contract TronVaultIssuerTest is TronVaultIssuerBase {
         up.mint(CAROL, usdt.balanceOf(CAROL));
         usdt.deprecate(address(up));
         vm.prank(CAROL);
-        usdt.approve(address(vault), type(uint256).max); // forwarded: Carol is fully able to pay
+        (bool approved, bytes memory said) =
+            address(usdt).call(abi.encodeWithSignature("approve(address,uint256)", address(vault), type(uint256).max));
+        require(accepted(approved, said), "forwarded: Carol is fully able to pay");
         require(usdt.allowance(CAROL, address(vault)) == type(uint256).max && usdt.balanceOf(CAROL) == 300 * U, "Carol is ready");
         require(flags() == KNOWN | REPLACED, "TRON-5 reports the replacement");
         Snap memory b = snap();

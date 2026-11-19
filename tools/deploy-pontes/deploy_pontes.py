@@ -108,9 +108,61 @@ def evm_launch():
     return launch
 
 
+def asset_routes():
+    """tools/evm-nets/asset_routes.py (the further asset routes of a network, round 20), or None in a tree without it."""
+    if not (ROOT / 'tools/evm-nets/asset_routes.py').exists():
+        return None
+    if str(ROOT / 'tools/evm-nets') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'tools/evm-nets'))
+    import asset_routes as module
+    return module
+
+
 def refuse(cond, message):
     if not cond:
         raise Refused(message)
+
+
+USDC_ETHEREUM = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+
+
+def expected_source_asset(chain_id, name, symbol):
+    """The asset the source vault of this L2 token must hold, in lower case, or None when no file states it (a rehearsal
+    chain, a source that is not EVM, a network whose vault holds a unit token). Round 20: with several vaults on one
+    chain, a token deployed over ANOTHER route's vault would be minted from that route's deposits a second time, so
+    `plan` (with --source-rpc) and `verify` read the vault's `token()` and compare."""
+    if chain_id == ETH_MAINNET and (name, symbol) == ETHEREUM_L2_TOKEN:
+        return USDC_ETHEREUM
+    ar = asset_routes()
+    if ar is not None:
+        try:
+            hit = ar.by_l2(chain_id, name, symbol)
+        except ar.RouteError as e:
+            refuse(False, f'the asset-route registry cannot be trusted: {e}')
+        if hit is not None and (hit[1]['l2']['name'], hit[1]['l2']['symbol']) == (name, symbol):
+            return hit[1]['asset']['address'].lower()
+    launch = evm_launch()
+    if launch is not None and chain_id != ETH_MAINNET:
+        try:
+            for n in launch.launchable().values():
+                if int(n['chainId']) == chain_id and (n['l2']['name'], n['l2']['symbol']) == (name, symbol) and n['asset']['decimals'] == 6:
+                    return n['asset']['address'].lower()
+        except launch.LaunchError:
+            return None
+    return None
+
+
+def check_source_asset(plan, eth):
+    """Refuses when the source vault holds another asset than this token's route names (see expected_source_asset)."""
+    if plan['chain'].get('rehearsal'):
+        return None
+    want = expected_source_asset(plan['sourceVault']['chainId'], plan['expected']['name'], plan['expected']['symbol'])
+    if want is None:
+        return None
+    got = str(json.loads(eth.call(plan['sourceVault']['address'], 'token()', block='latest', returns='(address)'))[0]).lower()
+    refuse(got == want, f'the vault {plan["sourceVault"]["address"]} holds the asset {got}; the L2 token {plan["expected"]["symbol"]} '
+           f'belongs over a vault of {want}. A token over another route\'s vault would mint that route\'s deposits a second time')
+    return got
 
 
 # ── small helpers ───────────────────────────────────────────────────────────
@@ -363,6 +415,29 @@ def validate(cfg, rehearsal):
         # Round 17 (reviews R329-EVM-1, R329-EVM-5): only a network whose launch status is launchable, with or without
         # --rehearsal (no flag lifts it), and only under the token name and symbol the registry gives that network.
         named = {}
+        # Round 20: a FURTHER asset route of a network (tools/evm-nets/asset_routes.py), found by the token's name or
+        # symbol on this source chain. It is refused while its route is not launchable, with or without --rehearsal on
+        # its own chain id; when launchable it is held to the route's exact name, symbol and limits, and the "one token
+        # per network" rules below then speak of the network's FIRST route and do not apply to it.
+        route = None
+        ar = asset_routes()
+        if ar is not None and not rehearsal:
+            try:
+                hit = ar.by_l2(eth['chainId'], name, symbol)
+            except ar.RouteError as e:
+                hit = None
+                refuse(not ar.routes_named(eth['chainId'], name, symbol),
+                       f'the asset-route registry cannot be trusted, so no route of it is launchable ({e})')
+            if hit is not None:
+                rid, route = hit
+                refuse(route['launch']['v1'], f'route {rid} ({route["l2"]["symbol"]} over {route["asset"]["symbol"]} on chain '
+                       f'{route["chainId"]}) is not launchable in bridge v1 ({route["launch"]["state"]}): {route["launch"]["reason"]} '
+                       'No flag, environment variable or operator file lifts this.')
+                refuse((name, symbol) == (route['l2']['name'], route['l2']['symbol']),
+                       f'the L2 token of route {rid} is {route["l2"]["symbol"]} ("{route["l2"]["name"]}"); the config names {symbol} ("{name}")')
+                refuse((lim['supplyCap'], lim['bucketCapacity'], lim['minBurn']) == (route['limits']['cap'], route['limits']['window'], route['l2MinBurn']),
+                       f'limits of route {rid}: supplyCap {route["limits"]["cap"]}, bucketCapacity {route["limits"]["window"]}, minBurn '
+                       f'{route["l2MinBurn"]} (tools/evm-nets/asset-routes.json); the config has {lim["supplyCap"]}, {lim["bucketCapacity"]}, {lim["minBurn"]}')
         if eth['chainId'] != ETH_MAINNET:
             launch = evm_launch()
             if launch is not None:
@@ -384,12 +459,12 @@ def validate(cfg, rehearsal):
             by_data = True
         refuse(rehearsal or eth['chainId'] == ETH_MAINNET or eth['chainId'] in named or by_data,
                'mainnet policy: ethereum.chainId must be 1' + (f' or one of {sorted(named)}' if named else ''))
-        if not rehearsal and eth['chainId'] in named:
+        if not rehearsal and eth['chainId'] in named and route is None:
             want = named[eth['chainId']]
             refuse((name, symbol) == (want['name'], want['symbol']),
                    f'the L2 token of source chain {eth["chainId"]} is {want["symbol"]} ("{want["name"]}"), one token per network '
                    f'(tools/evm-nets/networks.json); the config names {symbol} ("{name}")')
-        if not rehearsal and eth['chainId'] == ETH_MAINNET:
+        if not rehearsal and eth['chainId'] == ETH_MAINNET and route is None:
             # One token per source chain (integration of the bridge lines, agent 375, round 18): chain id 1 is the source
             # of the Ethereum bridge's bUSDC only. Before this, any name and symbol passed with chain id 1, so another
             # route's token config re-pointed at Ethereum validated (tools/deploy-pontes/test_routes.py). Strictly an
@@ -651,7 +726,8 @@ def unused_vault(plan, source_rpc):
                                                  returns='(uint64)'))[0]).split()[0])
     refuse(not any(used.values()), f'the vault {sv["address"]} has been used ({used}); a token over a used vault would '
            'mint its old deposits again. Deploy a new vault and a new token (docs/BUSDC-MAINNET-V2.md 4.5)')
-    return {'vaultUnused': used}
+    held = check_source_asset(plan, eth)
+    return {'vaultUnused': used, **({'vaultAsset': held} if held else {})}
 
 
 def dry_run(plan, init_code, rpc):
@@ -824,6 +900,7 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
         refuse(route == sv['route'], f'vault routeId is {route}, the config says {sv["route"]}')
         cap = int(str(json.loads(eth.call(sv['address'], 'cap()', block='finalized', returns='(uint64)'))[0]).split()[0])
         refuse(cap == sv['cap'] and cap >= exp['supplyCap'], f'vault cap is {cap}, the config says {sv["cap"]}')
+        held = check_source_asset(plan, eth)
         uint = lambda sig, *a: int(str(json.loads(eth.call(sv['address'], sig, *a, block='finalized',
                                                             returns='(uint256)'))[0]).split()[0])
         n = uint('guardianCount()')
@@ -833,6 +910,8 @@ def verify(plan, rec, rpc, block_tag, source_rpc=None):
         refuse(guard == sv['guard'], f'vault guardians/pause policy {guard} differ from the config {sv["guard"]}')
         result['sourceVault'] = {'address': sv['address'], 'codeHash': sv['codeHash'], 'routeId': route, 'cap': cap,
                                  'guard': guard}
+        if held:
+            result['sourceVault']['asset'] = held
         if plan['contract']['name'] == STABLE_V3['contract']:
             # The mint chain only means something over a mode-1 ProvenanceSourceVault whose deposit chain starts where the
             # token's does: the token's head after mintCount credits must equal the vault's head after as many deposits.
