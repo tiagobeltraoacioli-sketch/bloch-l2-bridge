@@ -10,7 +10,7 @@
       "line": "operator-pkg",
       "path": "docs/OPERATOR-PACKAGES.md",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "935bda7acf78160f5e2adb529e27d2f9296ab17f",
+      "blob": "188cba1de0ea90f6236af8f109b96eaa339c9a2f",
       "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
@@ -18,7 +18,7 @@
       "line": "operator-pkg",
       "path": "ops/rehearse_containers.py",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "0b9bf3c3eda549036b2cd71a1a3a19bf71a4755f",
+      "blob": "6f62cf9757fcdcf3e96eed7bb8a82116fa66368d",
       "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
@@ -26,7 +26,7 @@
       "line": "operator-pkg",
       "path": "ops/routes.json",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "e3b70c5b48d0d5f1d96357e3440a8874ef682dd7",
+      "blob": "5b8b158b031b8430acab0113fac71a016aa65f3c",
       "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
@@ -34,7 +34,7 @@
       "line": "operator-pkg",
       "path": "ops/test_bundle.py",
       "lineTip": "c4b35cf99a5fadeee7f724286f436d5cea32be60",
-      "blob": "c52bc0107170567ee833a64a90578f174949e61e",
+      "blob": "d99a1edfc5b8368ee0beb9c637ec2b2488c42591",
       "mode": "100644",
       "decision": "l2-repin-and-queue-bound-2026-11-19"
     },
