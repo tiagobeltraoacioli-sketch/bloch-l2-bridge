@@ -543,6 +543,8 @@ class EveryMainnetConfigNamesTheCurrentSet(unittest.TestCase):
         man = json.loads((ROOT / 'ops/routes.json').read_text())
         daemons = [f'tools/signatario-stable/{n}' for n in ('l2_finality.py', 'signatario.py', 'vigia.py', 'preflight_signer.py', 'eth_half.py',
                                                              'l2_pins_check.py', 'verify_l2_release_signature.py')]
+        # the registry and the launch rules the daemons read at start (anchor settings, launch status), shipped with them
+        daemons += ['tools/evm-nets/launch.py', 'tools/evm-nets/networks.json']
         self.assertEqual(sorted(man['routes']), ['arbitrum-one', 'ethereum', 'linea', 'op-mainnet'])
         for route, spec in man['routes'].items():
             rev = spec['source_rev']

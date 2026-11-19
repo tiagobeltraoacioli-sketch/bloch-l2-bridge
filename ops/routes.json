@@ -65,7 +65,7 @@
     "ethereum": {
       "asset": "bUSDC (Ethereum USDC vault -> BridgedStablecoinV3 on the L2 700770)",
       "launch_status": "launch revision candidate, UNAUDITED (round 20: the daemons with the L2 pins of the live release, mainnet-v3, and the operator templates of the fee schedule; until 2026-11-19 this was the audit candidate main cc2511a, whose daemons pin the L2 release of 2026-11-03); not deployed",
-      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
+      "source_rev": "20e7d4b28e786bd92b0061ff7655e8a8a0b0b15f",
       "roles": {
         "signer": {
           "summary": "One of the 7 automatic signers: vigia.py sign (signatario.py + eth_half.py) and its read-only signature feed.",
@@ -650,7 +650,7 @@
     "arbitrum-one": {
       "asset": "bUSDC.arb (Arbitrum One USDC vault -> BridgedStablecoinV3 on the L2 700770)",
       "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
-      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
+      "source_rev": "20e7d4b28e786bd92b0061ff7655e8a8a0b0b15f",
       "inherit": "ethereum",
       "substitute": [
         [
@@ -762,7 +762,7 @@
     "op-mainnet": {
       "asset": "bUSDC.op (OP Mainnet USDC vault -> BridgedStablecoinV3 on the L2 700770)",
       "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
-      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
+      "source_rev": "20e7d4b28e786bd92b0061ff7655e8a8a0b0b15f",
       "inherit": "ethereum",
       "substitute": [
         [
@@ -874,7 +874,7 @@
     "linea": {
       "asset": "bUSDC.linea (Linea USDC vault -> BridgedStablecoinV3 on the L2 700770)",
       "launch_status": "launchable per tools/evm-nets/networks.json; launch revision candidate, UNAUDITED (round 20: L2 pins mainnet-v3; until 2026-11-19 the audit line 9187656); not deployed",
-      "source_rev": "fa632006528ebd2ead305b58ddf750a0f3418f7c",
+      "source_rev": "20e7d4b28e786bd92b0061ff7655e8a8a0b0b15f",
       "inherit": "ethereum",
       "substitute": [
         [

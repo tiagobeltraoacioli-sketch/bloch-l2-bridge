@@ -22,8 +22,8 @@ file, a journald drop-in, and a manifest with the SHA-256 and mode of every file
 
 | Route | Source revision | Roles packaged | State |
 |---|---|---|---|
-| `ethereum` (bUSDC) | `fa63200` since round 20 (agent 421): the daemons with the L2 pins of the live L2 release (`mainnet-v3`) and the templates of the fee schedule; UNAUDITED; it becomes the launch revision of `main` before any operator installs. Until 2026-11-19: `cc2511a` (main, the audit candidate), which sections 4 to 8 below were run with | signer, relayer, guardian (guardiao + optional sombra), reserves | rehearsed under systemd (section 8) |
-| `arbitrum-one` (bUSDC.arb), `op-mainnet` (bUSDC.op), `linea` (bUSDC.linea) | `fa63200` since round 20, as Ethereum. Until 2026-11-19: `9187656` (audit line `codex/bridge-evm-nets-r17-audit-20261117`) | signer, relayer, guardian (guardiao), reserves | built and checked offline; same daemons as Ethereum; not rehearsed in containers |
+| `ethereum` (bUSDC) | `20e7d4b` since round 20 (agent 421): the daemons with the L2 pins of the live L2 release (`mainnet-v3`) and the templates of the fee schedule; UNAUDITED; it becomes the launch revision of `main` before any operator installs. Until 2026-11-19: `cc2511a` (main, the audit candidate), which sections 4 to 8 below were run with | signer, relayer, guardian (guardiao + optional sombra), reserves | rehearsed under systemd (section 8) |
+| `arbitrum-one` (bUSDC.arb), `op-mainnet` (bUSDC.op), `linea` (bUSDC.linea) | `20e7d4b` since round 20, as Ethereum. Until 2026-11-19: `9187656` (audit line `codex/bridge-evm-nets-r17-audit-20261117`) | signer, relayer, guardian (guardiao), reserves | built and checked offline; same daemons as Ethereum; not rehearsed in containers |
 | `base`, `bnb` | none | none | refused by the route's own launch status (Base held, BNB Smart Chain out of v1) |
 | `bitcoin`, `tron`, `solana`, `stellar` | none | none | not packaged: see section 9 |
 
