@@ -224,10 +224,11 @@ class Files(unittest.TestCase):
                 self.assertIn(text, note, (name, text))
 
     def test_the_minimums_and_fees_are_what_they_were(self):
-        # The limits decision changed no minimum and no fee. Later the same day (agent 421, finding F410-1) the coordinator
-        # raised ONE of these values: the minimum deposit of Arbitrum One and OP Mainnet, 21 -> 25 USDC, because with the
-        # 25,000 bucket the 21 USDC minimum broke the mint queue bound (test_queue_bound_r20). Everything else is what it was.
-        want = {'ethereum': (101, 100, 5, 10), 'arbitrum-one': (25, 20, 5, 5), 'op-mainnet': (25, 20, 5, 5), 'linea': (601, 600, 5, 15)}
+        # The limits decision changed no minimum and no fee. Later the same day (agent 421; finding F410-1 and review 420
+        # R420-4) the coordinator gave Arbitrum One and OP Mainnet the Ethereum minimums, 21 / 20 -> 101 / 100 USDC: with
+        # the 25,000 bucket the 21 USDC minimum broke the mint queue bound, and the four routes together could ask the L2
+        # for twice its documented capacity (test_queue_bound_r20). The fees and everything else are what they were.
+        want = {'ethereum': (101, 100, 5, 10), 'arbitrum-one': (101, 100, 5, 5), 'op-mainnet': (101, 100, 5, 5), 'linea': (601, 600, 5, 15)}
         for name, (min_dep, min_burn, dep, rel) in want.items():
             v = json.loads(vault_file(name).read_text())['vault']
             t = json.loads(token_file(name).read_text())
@@ -254,8 +255,8 @@ class Files(unittest.TestCase):
     def test_the_queue_figures_in_the_token_notes_are_the_computed_ones(self):
         # (smallest mint, queued at most at the bucket rate, with one more 12 h delay of lag); MAX_PENDING is 2,048
         # Arbitrum One and OP Mainnet: (20_989_500, 1786, 2382) with the 21 USDC minimum of this file's first version, the
-        # third figure ABOVE MAX_PENDING (finding F410-1); with the 25 USDC minimum decided the same day, the figures below.
-        want = {'ethereum': (100_949_500, 742, 990), 'arbitrum-one': (24_987_500, 1500, 2000), 'op-mainnet': (24_987_500, 1500, 2000),
+        # third figure ABOVE MAX_PENDING (finding F410-1); with the 101 USDC minimum decided the same day, the figures below.
+        want = {'ethereum': (100_949_500, 742, 990), 'arbitrum-one': (100_949_500, 371, 495), 'op-mainnet': (100_949_500, 371, 495),
                 'linea': (600_699_500, 62, 83)}
         self.assertEqual(evm_nets.queue_figures(launch.limits(42161), 21 * U, 5, 43200), (20_989_500, 1786, 2382))
         src = (ROOT / 'contracts/stable/BridgedStablecoinV3.sol').read_text()
@@ -274,13 +275,64 @@ class Files(unittest.TestCase):
             self.assertEqual('ABOVE MAX_PENDING' in sentence, figures[2] > evm_nets.MAX_PENDING, name)
             self.assertEqual('under MAX_PENDING' in sentence, figures[2] <= evm_nets.MAX_PENDING, name)
         # With the 21 USDC minimum the note said so in words (F410-1), and the generator still would: the statement is kept
-        # for any future value that breaks the bound. The committed note of Arbitrum One now states the 25 USDC figures.
+        # for any future value that breaks the bound. The committed note of Arbitrum One now states the 101 USDC figures.
         was = evm_nets.queue_note(launch.limits(42161), 21 * U, 5, 43200)
         self.assertIn('ABOVE MAX_PENDING (2,048)', was)
         self.assertIn('lag by about 5.3 h', was)
         now = json.loads(token_file('arbitrum-one').read_text())['notes']['launchDesign']
         self.assertNotIn('lag by about', now)
-        self.assertIn('queues at most 1,500 mints, and 2,000 with one more delay of lag, under MAX_PENDING', now)
+        self.assertIn('queues at most 371 mints, and 495 with one more delay of lag, under MAX_PENDING', now)
+
+
+class FailClosed(unittest.TestCase):
+    """Review R420-2: without tools/evm-nets/launch.py (missing, or raising ImportError) the limit rule failed OPEN: the
+    vault tool and the token tool accepted any cap on mainnet. Now a mainnet config is refused and a rehearsal is not."""
+
+    def test_the_vault_tool_refuses_a_mainnet_config_without_the_launch_module(self):
+        for name in DECIDED:
+            for cap in (None, 5_000_000 * U, 100_000 * U, 700_000 * U):
+                cfg = a_vault(name)
+                if cap is not None:
+                    cfg['vault']['cap'] = cap
+                    cfg['vault']['policy']['windowLimit'] = cap // 10
+                with mock.patch.object(vp, 'launch', None):
+                    with self.assertRaises(vp.Refused, msg=(name, cap)) as e:
+                        vp.validate(cfg, False)
+                self.assertIn('tools/evm-nets/launch.py is missing or cannot be imported', str(e.exception), (name, cap))
+        vp.validate(a_vault('ethereum'), False)   # control: with the module the decided config validates
+
+    def test_the_token_tool_refuses_a_mainnet_config_without_the_launch_module(self):
+        for name in DECIDED:
+            for cap in (None, 5_000_000 * U, 100_000 * U):
+                cfg = a_token(name)
+                if cap is not None:
+                    cfg['limits'].update(supplyCap=cap, bucketCapacity=cap // 10, refillPerSecond=cap // 10 // DAY)
+                    cfg['ethereum']['vaultCap'] = cap
+                with mock.patch.object(dp, 'evm_launch', lambda: None):
+                    with self.assertRaises(dp.Refused, msg=(name, cap)) as e:
+                        dp.validate(cfg, False)
+                self.assertIn('tools/evm-nets/launch.py is missing or cannot be imported', str(e.exception), (name, cap))
+        dp.validate(a_token('ethereum'), False)
+
+    def test_a_missing_file_and_an_import_error_both_give_no_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(dp, 'ROOT', Path(tmp)):
+                self.assertIsNone(dp.evm_launch())
+        real_import = __import__
+
+        def failing(name, *a, **k):
+            if name == 'launch':
+                raise ImportError('broken on purpose')
+            return real_import(name, *a, **k)
+        saved = sys.modules.pop('launch')
+        try:
+            with mock.patch('builtins.__import__', failing):
+                self.assertIsNone(dp.evm_launch())
+                with self.assertRaises(dp.Refused):
+                    dp.require_launch('the launch limits')
+        finally:
+            sys.modules['launch'] = saved
+        self.assertIsNotNone(dp.evm_launch())
 
 
 class Tools(unittest.TestCase):

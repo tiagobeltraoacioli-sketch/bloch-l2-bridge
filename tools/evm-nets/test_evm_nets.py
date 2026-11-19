@@ -187,7 +187,7 @@ class Generated(unittest.TestCase):
             self.assertEqual(v['transferMode'], eth['transferMode'], name)
             # the window length and the switch are the Ethereum ones; cap and window are the network's own launch limits
             # (decided 2026-11-19), the minimums and the fee rates the network's own fee schedule (2026-11-17): all from
-            # tools/evm-nets/networks.json. The Ethereum route's own limits are pinned in test_launch_r17.LaunchLimits.
+            # tools/evm-nets/networks.json. The Ethereum route's own limits are pinned in test_limits_r20 (classes Records, Files, Tools).
             self.assertEqual((v['cap'], v['policy']['windowLimit']), (spec['limits']['cap'], spec['limits']['windowLimit']), name)
             self.assertEqual(v['cap'], 10 * v['policy']['windowLimit'], name)
             for key in ('windowSeconds', 'switchThreshold', 'switchDelay'):

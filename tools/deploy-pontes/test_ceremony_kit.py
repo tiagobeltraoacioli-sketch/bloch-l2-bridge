@@ -208,6 +208,84 @@ def main():
         check(f'ethereum: a verified vault whose cap is {cap} (not the decided 500,000 USDC) is refused',
               refused(lambda: ck.ethereum(t, {'decision': 'verified', 'busdcEthereum': {**be, 'vaultCap': cap}}), why))
     check('ethereum: an unverified vault is refused', refused(lambda: ck.ethereum(t, {'decision': 'refused'}), 'verified'))
+    # Review R420-9 (K1): the vault cap and the token supply cap EQUAL and both not the decided ones. The older rule
+    # (cap >= supply cap) passes; only the decided-cap rule refuses.
+    t600 = copy.deepcopy(t)
+    t600['limits']['supplyCap'] = 600_000 * 10**6
+    check('ethereum (R420-9): a verified vault cap equal to the supply cap, both 600,000 (not the decided 500,000), is refused',
+          refused(lambda: ck.ethereum(t600, {'decision': 'verified', 'busdcEthereum': {**be, 'vaultCap': 600_000 * 10**6}}),
+                  'must both be the'))
+
+    # onchain (review R420-9, K2 to K4; the read-back had no offline test): a stubbed RPC answers every call with the
+    # value the configs and the decision give; then one value at a time is wrong ON CHAIN.
+    vault_a, token_a = key()[1], key()[1]
+    vo = copy.deepcopy(v)
+    vo['vault']['token'] = vo['vault']['token'] if str(vo['vault'].get('token', '')).startswith('0x') else '0x' + 'a0' * 20
+    fees = vo['vault']['provenance']['fees']
+    fees['recipient'] = ck.SCHEDULE['feeRecipient']
+    chain_values = {
+        'feeRecipient()': int(ck.SCHEDULE['feeRecipient'], 16), 'depositFeeBps()': 5, 'releaseFeeBps()': 10, 'minDeposit()': 101_000_000,
+        'l2MinBurn()': 100_000_000, 'cap()': 500_000 * 10**6, 'windowLimit()': 50_000 * 10**6, 'windowSeconds()': 86400,
+        'threshold()': vo['vault']['signers']['threshold'], 'switchThreshold()': vo['vault']['policy']['switchThreshold'],
+        'signerCount()': len(vo['vault']['signers']['set']), 'guardianCount()': len(vo['vault']['guard']['guardians']),
+        'token()': int(vo['vault']['token'], 16), 'minBurn()': 100_000_000, 'supplyCap()': 500_000 * 10**6, 'refillPerSecond()': 578703,
+        'largeMintThreshold()': 0, 'largeMintDelay()': t['limits']['largeMintDelay'], 'bucketCapacity()': 50_000 * 10**6,
+        'sourceVault()': int(vault_a, 16), 'sourceChainId()': vo['ethereum']['chainId']}
+    token_values = {'threshold()': t['signers']['threshold']}
+
+    def stub(values_now):
+        selectors = {'0x' + ck.bridge_feed.keccak256(sig.encode()).hex()[:8]: sig for sig in chain_values}
+
+        def rpc(url, method, params):
+            if method == 'eth_getBlockByNumber':
+                return {'number': '0x10', 'hash': '0x' + '77' * 32}
+            assert method == 'eth_call', method
+            sig = selectors[params[0]['data']]
+            value = token_values[sig] if params[0]['to'] == token_a and sig in token_values else values_now[sig]
+            return '0x' + format(value, '064x')
+        return rpc
+
+    def onchain_with(**wrong):
+        saved, ck.rpc = ck.rpc, stub({**chain_values, **wrong})
+        try:
+            return ck.onchain(t, vo, ['http://eth-a.invalid', 'http://eth-b.invalid'], ['http://l2-a.invalid'], vault_a, token_a)
+        finally:
+            ck.rpc = saved
+    ok = onchain_with()
+    check('onchain (R420-9): a deployment with the decided values reads back onchain-ok and names what it checked',
+          ok['decision'] == 'onchain-ok' and all(n in ok['checked'] for n in (
+              'vault cap() is the decided cap', 'vault windowLimit() is the decided window', 'vault windowSeconds()',
+              'token supplyCap() is the decided cap', 'token refillPerSecond()', 'token bucketCapacity() is the decided window')), ok)
+    # a wrong cap that the CONFIG carries too: only the decided-cap row can refuse it
+    v_wrong = copy.deepcopy(vo)
+    v_wrong['vault']['cap'] = 600_000 * 10**6
+
+    def cap_case():
+        saved, ck.rpc = ck.rpc, stub({**chain_values, 'cap()': 600_000 * 10**6})
+        try:
+            return ck.onchain(t, v_wrong, ['http://eth-a.invalid'], ['http://l2-a.invalid'], vault_a, token_a)
+        finally:
+            ck.rpc = saved
+    check('onchain (R420-9): a vault cap of 600,000 on chain AND in the config is refused by the decided cap',
+          refused(cap_case, 'vault cap() is the decided cap'))
+    check('onchain (R420-9): a 12 hour window on chain is refused', refused(lambda: onchain_with(**{'windowSeconds()': 43200}), 'vault windowSeconds()'))
+    check('onchain (R420-9): a faster refill on chain is refused', refused(lambda: onchain_with(**{'refillPerSecond()': 578704}), 'token refillPerSecond()'))
+    check('onchain: a smaller on-chain minimum deposit is refused', refused(lambda: onchain_with(**{'minDeposit()': 11_000_000}), 'vault minDeposit()'))
+
+    # vault-run (review R420-2): the kit holds the limits to its own record before anything else, whatever
+    # vault_pontes.validate would say (it is replaced here by a stand-in that accepts everything)
+    saved_validate = ck.vault_pontes.validate
+    ck.vault_pontes.validate = lambda *a, **k: {}
+    try:
+        for name, mutate in (('a cap of 5,000,000 with a window of 500,000', lambda tt, vv: (vv['vault'].update(cap=5_000_000 * 10**6), vv['vault']['policy'].update(windowLimit=500_000 * 10**6))),
+                             ('the supply cap before the decision', lambda tt, vv: tt['limits'].update(supplyCap=100_000 * 10**6)),
+                             ('a refill one unit faster', lambda tt, vv: tt['limits'].update(refillPerSecond=578704))):
+            tt, vv = copy.deepcopy(t), copy.deepcopy(v)
+            mutate(tt, vv)
+            check(f'vault-run (R420-2): {name} is refused by the kit itself, before the vault tool is asked',
+                  refused(lambda: ck.vault_run(vv, tt, 'http://127.0.0.1:9', 1, False, None, None, []), 'launch limits decided on 2026-11-19'))
+    finally:
+        ck.vault_pontes.validate = saved_validate
     check('ethereum: a second vault over a filled token config is refused',
           refused(lambda: ck.ethereum(te, {'decision': 'verified', 'busdcEthereum': {**be, 'vault': key()[1]}}), 'already holds'))
 

@@ -121,6 +121,14 @@ class Registry(unittest.TestCase):
             self.assertTrue(any(e.startswith('C9 ') for e in errs), (what, errs))
         self.assertEqual(self.mutated(lambda o: None), [])
 
+    def test_c9_a_window_length_that_is_not_an_integer_and_a_chain_without_limits_are_refused(self):
+        # review R420-9 (R1, R2): the two branches of C9 that no test reached
+        for bad in (86400.0, '86400', True, None):
+            errs = self.mutated(lambda o, bad=bad: o['linea']['limits'].__setitem__('windowSeconds', bad))
+            self.assertTrue(any(e.startswith('C9 linea: cap, window, windowSeconds') for e in errs), (bad, errs))
+        errs = self.mutated(lambda o: o['linea']['network'].__setitem__('chainId', 31337))   # an EVM chain with no limits record
+        self.assertTrue(any(e.startswith('C9 linea: no launch limits are recorded for chain 31337') for e in errs), errs)
+
     def test_c9_other_kinds_of_route_are_not_held_to_the_evm_limits(self):
         # Bitcoin, TRON, Solana and Stellar keep their own limits (not part of the decision): C9 does not read them
         errs = self.mutated(lambda o: [o[n]['limits'].update(cap='1') for n in ('bitcoin', 'tron', 'solana', 'stellar')])

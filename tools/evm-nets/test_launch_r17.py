@@ -310,9 +310,10 @@ class DeployGate(unittest.TestCase):
 
     # ── the fee schedule of 2026-11-17 (coordinator; agents/347-fee-economics-r17.md) ──
     def test_the_decided_schedule_is_in_the_registry_and_in_every_generated_file(self):
-        # Round 20 (agent 421, F410-1): the minimum deposit of Arbitrum One and OP Mainnet is 25 since 2026-11-19 (the mint
-        # queue bound with the 25,000 bucket; test_queue_bound_r20). Base (held) keeps 21; every burn minimum is unchanged.
-        want = {'arbitrum-one': (5, 5, 25, 20, 0.5), 'op-mainnet': (5, 5, 25, 20, 0.5), 'base': (5, 5, 21, 20, 0.5), 'linea': (5, 15, 601, 600, 2)}
+        # Round 20 (agent 421; F410-1 and review 420 R420-4): Arbitrum One and OP Mainnet take the Ethereum minimums, 101 /
+        # 100, since 2026-11-19 (the mint queue bound and the bridge's load on the L2; test_queue_bound_r20). Base (held)
+        # keeps 21 / 20 and Linea 601 / 600.
+        want = {'arbitrum-one': (5, 5, 101, 100, 0.5), 'op-mainnet': (5, 5, 101, 100, 0.5), 'base': (5, 5, 21, 20, 0.5), 'linea': (5, 15, 601, 600, 2)}
         for name, (dep, rel, min_dep, min_burn, ceiling) in want.items():
             spec = NETS[name]
             self.assertEqual((spec['feeBps']['deposit'], spec['feeBps']['release'], spec['minDeposit'], spec['l2MinBurn'],
@@ -339,7 +340,7 @@ class DeployGate(unittest.TestCase):
                          (5, 10, 101_000_000, 100_000_000, 100_000_000, 2))
         self.assertEqual((e['feeBps'], e['minDeposit'], e['l2MinBurn'], e['gasCeilingGwei']),
                          ({'deposit': 5, 'release': 10}, 101_000_000, 100_000_000, 2))
-        # windows and caps are NOT part of this schedule: they were decided on 2026-11-19 (class LaunchLimits below)
+        # windows and caps are NOT part of this schedule: they were decided on 2026-11-19 (test_limits_r20.py)
         self.assertEqual((eth_v['cap'], eth_v['policy']['windowLimit']), (500_000_000_000, 50_000_000_000))
 
     def test_the_minimum_burn_floor_is_the_stated_formula(self):
