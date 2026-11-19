@@ -60,9 +60,12 @@ decisions), `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` (daily operation), `docs/SIG-TR
    is live.** `tools/signatario-stable/l2_finality.py` `MAINNET_V2` (operator key `l2_pins: mainnet-v2`) pins the
    release of 2026-11-03 (follower `cdf5da5c…`, producer `e3f1a290…`, settled RPC `53e88565…`); the L2 went live with
    the release of 2026-11-17 (`bloch-l2-2026-11-17-launch-native-906336fd`: follower `d4d2b99a…`, producer `598873ae…`
-   by the L2 review record). A signer started with other binaries than the pinned ones refuses to sign anything for
-   chain 700770, so no mint and no release could be certified. The pins are changed only by a reviewed commit (as in
-   round 11); that commit does not exist yet (finding F410-2 of round 20, not part of this kit).
+   by the L2 review record; the binaries on the L2 hosts were not read for this document). A signer started with
+   other binaries than the pinned ones refuses to sign anything for chain 700770, so no mint and no release could be
+   certified. The named pin set `mainnet-v2` changes only by a reviewed commit (as in round 11); that commit does not
+   exist yet (finding F410-2 of round 20, not part of this kit). The code also accepts a full pins object typed into
+   an operator file, a form meant for rehearsals: seven operators typing hashes by hand is not a reviewed path and
+   must not be how the launch is done.
 
 ## 1. Who generates which key, where
 

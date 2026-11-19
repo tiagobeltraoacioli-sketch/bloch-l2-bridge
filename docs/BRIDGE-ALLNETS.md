@@ -187,6 +187,10 @@ nothing of the bridge is deployed.
 
 - No external audit. No real key, nothing deployed, nothing sent to a public network.
 - F410-1 is open (a decision on the minimum deposit of Arbitrum One and OP Mainnet).
+- F410-2 is open (found on the way, not caused by the limits): the signers' L2 build pins (`l2_pins: mainnet-v2`,
+  `tools/signatario-stable/l2_finality.py`) name the L2 release of 2026-11-03, while the L2 went live with the release
+  of 2026-11-17; until a reviewed commit re-pins them no mint and no release can be certified on mainnet
+  (`docs/BRIDGE-OWNER-CEREMONY.md` section 0, item 5).
 - The DEX repository still pins the earlier limits (row above).
 - The held routes' limits were not reviewed against the new aggregate exposure; they are unchanged.
 
