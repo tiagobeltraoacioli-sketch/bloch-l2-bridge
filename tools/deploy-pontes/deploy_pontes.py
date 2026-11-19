@@ -172,6 +172,10 @@ def check_source_asset(plan, eth):
     USDT vault of its chain, bUSDT over the USDC vault. Returns the vault's asset when the check ran. A vault over a
     token that is no route's asset on that chain is not this check's business (the mainnet path rehearsed on a local
     chain with a stand-in token; before round 20 the tool never read the vault's asset): the vault tool pins it."""
+    if 'chain' not in plan or 'expected' not in plan:
+        # A caller that asks only whether the vault is unused, with the vault's identity and nothing else (the Solana
+        # route's `source` command): no token is named, so there is nothing to compare.
+        return None
     if plan['chain'].get('rehearsal'):
         return None
     chain = plan['sourceVault']['chainId']

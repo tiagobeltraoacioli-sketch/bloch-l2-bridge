@@ -528,6 +528,24 @@ class VaultAsset(unittest.TestCase):
         self.assertEqual(self.verdict(self.plan(31337, 'Any', 'x'), USDT_ETH), (None, []))
         self.assertEqual(self.verdict(self.plan(728126428, 'Bloch Bridged USDT (Tron)', 'bUSDT.trx'), USDT_ETH), (None, []))
 
+    def test_a_caller_that_names_no_token_is_asked_nothing(self):
+        """tools/signatario-solana/sol_deploy_token.py `source` calls unused_vault with the vault's identity alone."""
+        partial = {'sourceVault': {'chainId': 1, 'address': self.VAULT, 'codeHash': '0x' + 'c0' * 32}}
+        self.assertEqual(self.verdict(partial, USDT_ETH), (None, []))
+        self.assertEqual(self.verdict({**partial, 'chain': {'rehearsal': False}}, USDT_ETH), (None, []))
+
+        class Node:
+            def __call__(self, method, params):
+                return {'eth_chainId': '0x1', 'eth_getCode': '0x6001'}[method]
+
+            def call(self, to, sig, *args, block='latest', returns=None):
+                assert sig != 'token()', 'a partial plan must not reach the asset read'
+                return json.dumps(['0'])
+        code_hash = deploy_pontes.code_hash('0x6001')
+        with mock.patch.object(deploy_pontes, 'Rpc', lambda url: Node()):
+            got = deploy_pontes.unused_vault({'sourceVault': {'chainId': 1, 'address': self.VAULT, 'codeHash': code_hash}}, 'http://unused')
+        self.assertEqual(got, {'vaultUnused': {'depositCount': 0, 'totalLocked': 0, 'controlNonce': 0}})
+
     def test_the_assets_known_on_each_chain(self):
         self.assertEqual(deploy_pontes.route_assets(1), {USDC[1].lower(), USDT_ETH.lower()})
         self.assertEqual(deploy_pontes.route_assets(42161), {USDC[42161].lower(), '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9'})
