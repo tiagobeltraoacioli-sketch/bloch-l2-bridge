@@ -8,12 +8,12 @@ A2	1409	1137	1056	cdbb81d0236d2958250c8f33d77d3f00a87c5cb78e4d0f5bac593c31db17ef
 A2	2013	1579	1484	2c531351c28ac2ea1e0dd718ef5041133eb4cfcf8b6929cfe9de3d0c13fc7c87	tools/signatario-stable/vigia.py
 A2	994	789	705	877c6fa9bba7cf030635116a92ef516f89bc6a3b02dace622959b65802ac55ef	tools/signatario-stable/signatario.py
 A2	494	408	366	c7e9804663a3c1ab582d3c4829f65989da64489062dde3f8ad91328708ce245c	tools/signatario-stable/release_submission.py
-A2	949	758	648	04cfd26aa38b72c7c7c58aa64b4335bf64051dbf93bd20ca8ec2f01aba4e7642	tools/deploy-pontes/deploy_pontes.py
+A2	949	758	648	5154d552ca58dffb290fb00f5a7022d19f56ad706e3a2133f9a703a2010d6af2	tools/deploy-pontes/deploy_pontes.py
 A2	517	421	412	6b6c15a7ced5a7414024502e12a360b61aaedf155a03ffb68005df32299cdce5	tools/signatario-stable/sigfeed.py
 A2	445	360	325	a0a76c46c0400a1161b273eb15339346481b1cff3360cbac98ae66fd4f1dd3b4	tools/signatario-stable/bridge_feed.py
 A2	589	452	402	7811a428daf9b8b40645260f51664ee012bf00c5a0bf4f6d0d81590461d3cdfd	tools/signatario-stable/eth_half.py
 A2	411	312	289	67c34ffe77a6529175de002ccbce2bdcd6398d7dc2d9336c54c1f6553e2a3340	tools/guardiao/sombra.py
-A2	489	382	300	c5de35233ec4aabdeca87d31ad66308e1add17dcc2b79c9b269392ff727a52cf	tools/deploy-pontes/vault_pontes.py
+A2	493	383	301	0f32871076c0d183b2fb469f4ff0a3463e33ecdec7889295fd7e851a8a351125	tools/deploy-pontes/vault_pontes.py
 A2	88	58	35	4a644faa54cb82e1cc9c0357c6dc4dc38ef7da352f38c27fa02b486d1ab0375e	tools/deploy-pontes/legacy_digests.py
 A2	326	235	222	d8134b7c9839677dc604e3fdeeed2a68547a6eb6b04e6504e44aaa8afc1fe08e	tools/reservas/reservas.py
 A2	306	214	175	afcb3a4de0eead4e8ee9f0cfa8651c48de3883e0cacc5e60acd061f4abbe2553	tools/signatario-stable/l2_finality.py
@@ -32,6 +32,6 @@ A-cfg	19	-	-	4ef22fb2d9894091811dd74be8214ff0b2e2901806a2b5249f56991f922dd421	de
 A-cfg	17	-	-	c67b74d0f470513b7aa0c4a1cdd75edbe3aaeee4d9ce2d5665d864841aa6ce22	deployments/mainnet/busdc-ops/reservas.template.json
 A-cfg	34	-	-	f4aaef5e83a8d4d8b17bdcbb9d586ec992570e1ec6cda20c205f8cc8f956d85c	deployments/mainnet/lc-verifier.review.json
 # total A1	2289	1715	1500
-# total A2	9131	7152	6466
+# total A2	9135	7153	6467
 # total A2opt	1608	1229	1024
 # total A-cfg	808	0	0
