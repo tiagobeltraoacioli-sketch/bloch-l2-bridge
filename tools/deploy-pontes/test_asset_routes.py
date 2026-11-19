@@ -439,6 +439,89 @@ class Lifted(unittest.TestCase):
         self.assertIsNone(ex(728126428, 'Bloch Bridged USDT (Tron)', 'bUSDT.trx'))
 
 
+class RouteFiles(unittest.TestCase):
+    """The route's bridge.network.json: what the DEX bridge page reads (schema bloch.bridge.network.v1 + `route`)."""
+    def setUp(self):
+        import network_json
+        self.nj = network_json
+
+    def placed(self, doc, directory):
+        """The checker's verdict on `doc` written as deployments/<directory>/bridge.network.json of a scratch tree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / directory / 'bridge.network.json'
+            path.parent.mkdir()
+            path.write_text(json.dumps(doc))
+            return self.nj.check(path)
+
+    def doc(self, rid):
+        return json.loads((ROOT / 'deployments' / rid / 'bridge.network.json').read_text())
+
+    def test_the_three_committed_files_are_valid_and_say_held(self):
+        for rid in ROUTES:
+            d = self.doc(rid)
+            spec = AR.registry()['routes'][rid]
+            with self.subTest(route=rid):
+                self.assertEqual(self.nj.check(ROOT / 'deployments' / rid / 'bridge.network.json'), [])
+                self.assertEqual(d['route'], {'id': rid, 'asset': 'usdt'})
+                self.assertEqual((d['network']['id'], d['network']['chainId']), (spec['network'], str(spec['chainId'])))
+                self.assertEqual((d['launch']['v1'], d['launch']['state']), (False, 'held'))
+                self.assertEqual(d['asset']['id'], spec['asset']['address'])
+                self.assertEqual(d['custody']['contract'], spec['vault']['contract'])
+                self.assertEqual((d['l2']['symbol'], d['l2']['name']), (spec['l2']['symbol'], spec['l2']['name']))
+                self.assertEqual(d['custody']['address'], 'TBD-deploy')
+                self.assertTrue(d['notes'][0].startswith('NOT LAUNCHABLE IN V1 (held)'))
+
+    def test_the_page_is_told_how_each_token_deviates(self):
+        eth, arb, op = (self.doc(r) for r in ROUTES)
+        self.assertEqual((eth['asset']['behaviour']['returnsNoValue'], eth['asset']['behaviour']['approveZeroFirst']), (True, True))
+        self.assertIn('approve(vault, 0)', eth['deposit']['steps'][0])
+        self.assertIn('return no data', eth['deposit']['steps'][1])
+        for d in (arb, op):
+            self.assertEqual((d['asset']['behaviour']['returnsNoValue'], d['asset']['behaviour']['approveZeroFirst']), (False, False))
+            self.assertNotIn('approve(vault, 0)', ' '.join(d['deposit']['steps']))
+        self.assertEqual(len(arb['asset']['behaviour']['recipientRefusals']), 1)
+        self.assertTrue(any('never name the token contract itself' in n for n in arb['release']['notes']))
+        self.assertEqual(arb['asset']['symbol'], 'USD\u20ae0')
+        self.assertFalse(arb['asset']['issuerNative'] or op['asset']['issuerNative'])
+        self.assertTrue(eth['asset']['issuerNative'])
+        for d in (eth, arb, op):
+            self.assertIn('admin', d['asset'])
+            self.assertIn('contractIs', d['asset'])
+            self.assertEqual(len(d['asset']['verified']), 2)
+
+    def test_the_directory_of_a_file_with_a_route_block_is_its_route_id(self):
+        d = self.doc('ethereum-usdt')
+        self.assertEqual(self.placed(d, 'ethereum-usdt'), [])
+        self.assertTrue(any('directory = route.id' in e for e in self.placed(d, 'ethereum')))
+        self.assertTrue(any('directory = route.id' in e for e in self.placed(d, 'usdt')))
+
+    def test_a_route_id_must_be_the_network_id_and_the_asset_key(self):
+        for edit in (lambda d: d['route'].__setitem__('id', 'ethereum-tether'), lambda d: d['route'].__setitem__('asset', 'usdc'),
+                     lambda d: d['network'].__setitem__('id', 'mainnet'), lambda d: d['route'].__setitem__('id', 'Ethereum-usdt'),
+                     lambda d: d['route'].__setitem__('asset', 'USDT')):
+            d = self.doc('ethereum-usdt')
+            edit(d)
+            found = self.placed(d, d['route']['id'].lower() if d['route']['id'] != 'Ethereum-usdt' else 'ethereum-usdt')
+            self.assertTrue(found, d['route'])
+
+    def test_an_unknown_or_incomplete_route_or_behaviour_block_is_refused(self):
+        for edit in (lambda d: d['route'].__setitem__('launch', True), lambda d: d['route'].pop('asset'),
+                     lambda d: d.__setitem__('route', 'ethereum-usdt'), lambda d: d['asset']['behaviour'].pop('approveZeroFirst'),
+                     lambda d: d['asset']['behaviour'].__setitem__('approveZeroFirst', 'yes'),
+                     lambda d: d['asset']['behaviour'].__setitem__('extra', 1),
+                     lambda d: d['asset']['behaviour'].__setitem__('recipientRefusals', 'none')):
+            d = self.doc('ethereum-usdt')
+            edit(d)
+            self.assertTrue(self.placed(d, 'ethereum-usdt'), 'accepted a malformed file')
+
+    def test_a_file_without_a_route_block_keeps_the_old_rule(self):
+        d = json.loads((ROOT / 'deployments/arbitrum-one/bridge.network.json').read_text())
+        self.assertNotIn('route', d)
+        self.assertEqual(self.placed(d, 'arbitrum-one'), [])
+        self.assertTrue(any('directory = network.id' in e for e in self.placed(d, 'arbitrum-one-usdt')))
+        self.assertTrue(any('directory = network.id' in e for e in self.placed(d, 'arbitrum')))
+
+
 class FirstRoutesUnmoved(unittest.TestCase):
     def test_the_committed_usdc_configs_validate_as_before(self):
         tok = fx.filled()
