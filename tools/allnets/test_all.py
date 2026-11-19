@@ -20,6 +20,8 @@ never silently skipped and never counted as a pass):
   tron          the private-TVM rehearsal (needs `tronUrl` and `tronUsdtGetcontract`: a private java-tron the caller runs)
   stellar       the local-network rehearsal (needs `stellarRpc`, `stellarCli`, `stellarWasm`)
   scripts       scripts/tests (Rust verifiers of the custody line; needs `cargoTargetDir`)
+  nativeether   the native-ether route ethereum-eth (round 20): vault diff and build pins, generated route files, launch
+                status held, the mutant table of the vault, the rehearsal on a local fork of Ethereum (needs out/)
 TOOLS.json keys: foundryBin (default ~/.foundry/bin), and the ones named above; optional `cargoHome` (a CARGO_HOME
 whose registry holds every crate of Cargo.lock: the custody verifiers of scripts/tests build with `--offline`, so on a
 host whose registry lacks them three test classes stop in setUpClass; fill one, on an online host, with
@@ -40,7 +42,8 @@ import time
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-STAGES = ('integration', 'forge', 'artifacts', 'offline', 'ethereum', 'evmnets', 'forks', 'bitcoin', 'solana', 'tron', 'stellar', 'scripts')
+STAGES = ('integration', 'forge', 'artifacts', 'offline', 'ethereum', 'evmnets', 'forks', 'bitcoin', 'solana', 'tron', 'stellar', 'scripts',
+          'nativeether')
 # Paths a route line owns: in the merged tree they must be byte-identical to the line's merged tip (the merge brought
 # them whole). Shared files (signatario-stable, deploy-pontes, the schema) are checked by mergecheck instead.
 OWNED = {
@@ -302,6 +305,26 @@ def stage_stellar(r):
     r.suite('stellar', 'rehearse_stellar', py('tools/signatario-stellar/rehearse_stellar.py', '--run-dir', str(r.out / 'xlm-work'),
             '--stellar-rpc', r.tools['stellarRpc'], '--anvil-port', str(r.base + 95), '--wasm', r.tools['stellarWasm'],
             '--artifacts', str(ROOT / 'out')), env={'PATH': f'{Path(r.tools["stellarCli"]).parent}:{r.env["PATH"]}'}, retry_busy=False)
+
+
+def stage_nativeether(r):
+    """Round 20 (agent 412): the native-ether route `ethereum-eth` (bETH). Its forge suites run in the forge stage and
+    its tool test modules in the offline stage (found there by name: deploy-pontes/test_native_ether,
+    deploy-pontes/test_ceremony_kit_native_ether, native-ether/test_bundle_native_ether); here: the pins, the
+    generated files, the launch status, the mutant table and the rehearsal on a local fork of Ethereum (a public read-only RPC is
+    the fork source, as in the forks stage). Needs out/ of this tree (run the forge stage first)."""
+    r.suite('nativeether', 'vault-diff-pin', py('scripts/eth/vault_diff.py'))
+    r.suite('nativeether', 'route-files-check', py('tools/native-ether/route_files.py', 'check'))
+    r.suite('nativeether', 'launch-status-held', py('tools/signatario-stable/native_ether.py', 'status'),
+            expect=lambda t, c: '"decision": "refused"' in t and '"state": "held"' in t)
+    if not (ROOT / 'out/NativeEtherSourceVault.sol').is_dir():
+        r.not_run('nativeether', 'build-pin+mutants+rehearsal', 'no out/ of this tree (run the forge stage first)')
+        return
+    r.suite('nativeether', 'vault-build-pin', py('scripts/eth/vault_build_pin.py', 'check'))
+    r.suite('nativeether', 'mutants', py('scripts/eth/mutants.py', str(r.out / 'eth-mutants')), retry_busy=False,
+            expect=lambda t, c: '"notKilled": 0' in t)
+    r.suite('nativeether', 'rehearse_fork', py('tools/native-ether/rehearse_fork.py', '--port', str(r.base + 96),
+                                               '--evidence', str(r.out / 'nativeether-rehearsal.json')))
 
 
 def stage_scripts(r):

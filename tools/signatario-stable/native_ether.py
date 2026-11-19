@@ -54,9 +54,12 @@ LAUNCH = {'v1': False, 'state': 'held'}
 
 # Measured relayer cost of one release, gas (private anvil, Shanghai, 2026-11-19; the fork rehearsal re-measures it).
 RELAY = {
-    'releaseGasPlain': 166_966,      # an existing account
-    'releaseGasNewAccount': 191_966,  # an empty account (25,000 for the new account)
-    'releaseGasWorst': 227_000,      # a recipient that burns PUSH_GAS and whose claim slot is new
+    'releaseGasPlain': 162_275,      # an existing account
+    'releaseGasNewAccount': 187_203,  # an empty account (25,000 for the new account)
+    # a recipient that burns PUSH_GAS and whose claim slot is new: 222,402 measured in every state of the vault (fees
+    # just swept or not, a claim outstanding or not: ETH-10 keeps both sums out of empty slots), rounded up for the
+    # few hundred gas by which the calldata of two certificates differs
+    'releaseGasWorst': 223_000,
     'gasCeilingGwei': 30,
 }
 # Decided values of the vault config (units). The tools refuse a non-rehearsal config that differs.
@@ -64,7 +67,7 @@ LIMITS = {
     'cap': 280 * UNITS_PER_ETHER,          # 280 ETH
     'windowLimit': 28 * UNITS_PER_ETHER,   # 28 ETH per 86,400 s
     'windowSeconds': 86_400,
-    'l2MinBurn': 7 * UNITS_PER_ETHER,      # 7 ETH
+    'l2MinBurn': 7 * UNITS_PER_ETHER,      # 7 ETH (floor 6.69 ETH: min_burn_floor)
     'minDeposit': 7_004_000,               # 7.004 ETH: nets 7.000498 ETH after the 5 bps deposit fee, rounded up
 }
 # The price the limits were sized from (USD rule of 2026-11-19: cap 500,000 USD, window 50,000 USD per 24 h).

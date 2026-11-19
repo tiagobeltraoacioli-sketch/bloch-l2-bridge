@@ -101,6 +101,12 @@ MUTANTS = [
             releaseBucket += amount;
             claimable[recipient] += paid;''')],
      ['test_release_revertingRecipientDoesNotBlockTheQueue', 'test_claim_notHeldByPauseControlsOrWindow']),
+    ('M19', 'the sum of claims has a storage slot of its own that can be empty (ETH-10 flag removed)',
+     [('    bool private claimSlotInUse = true;\n', '')],
+     ['test_release_costDoesNotDependOnSweptFeesOrOutstandingClaims']),
+    ('M20', 'the accrued fees have a storage slot of their own, empty after every sweep (ETH-10 placement undone)',
+     [('    uint64 public releaseBucketUpdatedAt;\n', '    uint64 public releaseBucketUpdatedAt;\n    address private mutantSlotBreak;\n')],
+     ['test_release_costDoesNotDependOnSweptFeesOrOutstandingClaims']),
 ]
 
 

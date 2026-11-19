@@ -40,6 +40,10 @@ import {IProvenanceReleaseVerifier, IMintVerifier} from "../usdt/ProvenanceSourc
 ///              controls do not apply to it.
 ///      ETH-9   `sweepFees` pays the accrued fees in ether to the immutable `feeRecipient` (all gas forwarded); if
 ///              the recipient refuses, the sweep reverts and the fees stay accrued. Backing is never touched.
+///      ETH-10  storage placement only, to bound what a release costs its relayer: `feesAccrued` is declared beside
+///              the release bucket (one slot with the reentrancy flag), so that booking a fee costs no storage slot
+///              of its own; and `totalClaimable` shares its slot with a flag that is always set, so that slot is
+///              never empty. No value, rule or event changes.
 ///      Everything else, including every digest, id, tag and event (two added), is the Ethereum vault's. Where the
 ///      text below, which is the Ethereum vault's own, speaks of a token, of `transferFrom` or of fees rounded down,
 ///      the ETH-n changes above take precedence.
@@ -149,6 +153,11 @@ contract NativeEtherSourceVault {
     /// Bucket level at `releaseBucketUpdatedAt`; `availableToRelease()` adds the refill.
     uint64 public releaseBucket;
     uint64 public releaseBucketUpdatedAt;
+    /// Fees held by this vault that are not backing: never released to bridge users, only swept to `feeRecipient`.
+    /// ETH-10: declared here, in the storage slot of the reentrancy flag and the release bucket, which every deposit
+    /// and release writes anyway: a fee is then booked without a second slot and never into an empty one (after a
+    /// sweep that write would cost a relayer 17,100 gas more, at anyone's will).
+    uint64 public feesAccrued;
     /// Light-client switch state: proposal (verifier, its code hash, earliest
     /// activation), replay nonce, and the active verifier (zero = committee mode).
     address public proposedVerifier;
@@ -184,11 +193,12 @@ contract NativeEtherSourceVault {
     address public immutable feeRecipient;
     uint16 public immutable depositFeeBps;
     uint16 public immutable releaseFeeBps;
-    /// Fees held by this vault that are not backing: never released to bridge users, only swept to `feeRecipient`.
-    uint64 public feesAccrued;
     /// ETH-7: payments of completed releases that their recipient could not receive, in units, per recipient; and
     /// their sum. Outside `totalLocked` and `feesAccrued`; only `claim` and `claimFor` pay them.
     mapping(address => uint64) public claimable;
+    /// ETH-10: always true. It shares the storage slot of `totalClaimable`, so that the sum is never written into
+    /// an empty slot (17,100 gas more for the relayer whenever no claim is outstanding, which a burner could arrange).
+    bool private claimSlotInUse = true;
     uint64 public totalClaimable;
     /// mode 1: chain head after n deposits (n >= 1; n = 0 is `mintChainGenesis()`).
     mapping(uint64 => bytes32) public depositHead;

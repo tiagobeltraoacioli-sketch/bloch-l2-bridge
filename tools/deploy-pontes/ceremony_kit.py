@@ -82,6 +82,44 @@ SCHEDULE = {
 }
 PLACEHOLDER = re.compile(r'^TBD')
 
+# Round 20 (agent 412): the native-ether route `ethereum-eth` (bETH; docs/BRIDGE-ETH.md). Same ceremony, same keys; its
+# own vault contract, schedule and creation-code pin. The route is HELD: `vault-run` refuses it at its first step
+# (vault_pontes.validate) until both launch records are lifted. Amounts in units of 1e12 wei (6 decimals).
+import native_ether  # noqa: E402
+NATIVE_SCHEDULE = {
+    'feeRecipient': native_ether.FEE_RECIPIENT,
+    'depositBps': native_ether.FEE_BPS['deposit'],
+    'releaseBps': native_ether.FEE_BPS['release'],
+    'minDeposit': native_ether.LIMITS['minDeposit'],
+    'l2MinBurn': native_ether.LIMITS['l2MinBurn'],
+    'tokenMinBurn': native_ether.LIMITS['l2MinBurn'],
+    'largeMintThreshold': 0,
+    'relayerEthCeilingGwei': native_ether.RELAY['gasCeilingGwei'],
+}
+NATIVE_PIN = HERE.parent.parent / 'deployments/ethereum-eth/vault-build.pin.json'
+
+
+def is_native(vault_cfg):
+    return native_ether.is_native_contract((vault_cfg.get('vault') or {}).get('contract'))
+
+
+def schedule_of(vault_cfg):
+    """The decided schedule of the route a vault config belongs to: the Ethereum USDC route's, or the native-ether one."""
+    return NATIVE_SCHEDULE if is_native(vault_cfg) else SCHEDULE
+
+
+def vault_identity(contract):
+    """The creation-code keccak a vault creation must have: the audit freeze for ProvenanceSourceVault, the committed
+    build pin for NativeEtherSourceVault; any other contract is refused."""
+    if contract == vault_pontes.PROVENANCE_CONTRACT:
+        return VAULT_CREATION_KECCAK
+    if native_ether.is_native_contract(contract):
+        pin = load(NATIVE_PIN)
+        refuse(pin.get('contract') == contract and re.fullmatch(r'0x[0-9a-f]{64}', str((pin.get('forge') or {}).get('creationCodeKeccak'))),
+               f'{NATIVE_PIN.name}: no creation-code pin for {contract}')
+        return pin['forge']['creationCodeKeccak']
+    raise Refused(f'{contract}: the launch design is ProvenanceSourceVault')
+
 
 class Refused(Exception):
     pass
@@ -215,6 +253,8 @@ def schedule(token_cfg, vault_cfg, relayer=None):
     }
     if relayer is not None:
         got['relayerEthCeilingGwei'] = relayer.get('eth_max_gas_price_gwei')
+    if is_native(vault_cfg):
+        return native_schedule(token_cfg, vault_cfg, got)
     diff = {k: {'config': got[k], 'decided': SCHEDULE[k]} for k in got if got[k] != SCHEDULE[k]}
     refuse(not diff, f'the configs differ from the decided fee schedule: {json.dumps(diff)}')
     net = SCHEDULE['minDeposit'] - SCHEDULE['minDeposit'] * SCHEDULE['depositBps'] // 10_000
@@ -228,6 +268,37 @@ def schedule(token_cfg, vault_cfg, relayer=None):
             'vaultCap': v['cap'], 'windowLimit': v['policy']['windowLimit'], 'windowSeconds': v['policy']['windowSeconds'],
             'tokenSupplyCap': token_cfg['limits']['supplyCap'], 'tokenBucketCapacity': token_cfg['limits']['bucketCapacity'],
             'note': 'bridge windows and caps are unchanged and still an open owner decision (BRIEF-ROUND18.md)'},
+    }
+
+
+def native_schedule(token_cfg, vault_cfg, got):
+    """`schedule` for the native-ether route: fees, minimums and the relayer ceiling against NATIVE_SCHEDULE; the
+    limits against the decided ether amounts; fees rounded UP, as that vault rounds them."""
+    S, v, lim = NATIVE_SCHEDULE, vault_cfg['vault'], token_cfg['limits']
+    diff = {k: {'config': got[k], 'decided': S[k]} for k in got if got[k] != S[k]}
+    refuse(not diff, f'the configs differ from the decided fee schedule of the {native_ether.ROUTE_ID} route: {json.dumps(diff)}')
+    bad = native_ether.vault_policy_errors(v)
+    refuse(not bad, f'the {native_ether.ROUTE_ID} route: ' + '; '.join(bad))
+    refuse((lim.get('supplyCap'), lim.get('bucketCapacity')) == (v['cap'], v['policy']['windowLimit']),
+           'the L2 supply cap and bucket differ from the vault cap and window')
+    net = native_ether.net_of(S['minDeposit'])
+    refuse(net >= S['l2MinBurn'], 'the smallest deposit nets below the minimum burn')
+    floor = native_ether.min_burn_floor()
+    refuse(S['l2MinBurn'] >= floor, f'the minimum burn is below {floor}: its release fee would not pay the relayer at the ceiling')
+    return {
+        'decision': 'schedule-ok',
+        'route': native_ether.ROUTE_ID,
+        'checked': got,
+        'unitWei': native_ether.UNIT_WEI,
+        'smallestDepositNet': net,
+        'smallestExitPaid': native_ether.paid(S['l2MinBurn']),
+        'minBurnFloor': floor,
+        'relayerCostGasWorstCase': native_ether.RELAY['releaseGasWorst'],
+        'decidedLimits': {
+            'vaultCap': v['cap'], 'windowLimit': v['policy']['windowLimit'], 'windowSeconds': v['policy']['windowSeconds'],
+            'tokenSupplyCap': lim['supplyCap'], 'tokenBucketCapacity': lim['bucketCapacity'],
+            'note': 'ether amounts sized from the USD rule of 2026-11-19 at the price recorded in native_ether.PRICE; they '
+                    'float in USD with the price of ether'},
     }
 
 
@@ -311,6 +382,8 @@ def onchain(token_cfg, vault_cfg, eth_urls, l2_urls, vault, token):
     lim = token_cfg['limits']
     e = lambda sig: call_uint(eth_urls, eb, vault, sig)  # noqa: E731
     t = lambda sig: call_uint(l2_urls, lb, token, sig)  # noqa: E731
+    SCHEDULE = schedule_of(vault_cfg)  # noqa: N806  (the route's own schedule, under the name the table below uses)
+    token_label = 'vault token() is the native-ether marker' if is_native(vault_cfg) else 'vault token() is USDC'
     want = [
         ('vault feeRecipient()', e('feeRecipient()'), int(SCHEDULE['feeRecipient'], 16)),
         ('vault depositFeeBps()', e('depositFeeBps()'), SCHEDULE['depositBps']),
@@ -323,7 +396,7 @@ def onchain(token_cfg, vault_cfg, eth_urls, l2_urls, vault, token):
         ('vault switchThreshold()', e('switchThreshold()'), v['policy']['switchThreshold']),
         ('vault signerCount()', e('signerCount()'), len(v['signers']['set'])),
         ('vault guardianCount()', e('guardianCount()'), len(v['guard']['guardians'])),
-        ('vault token() is USDC', e('token()'), int(v['token'], 16)),
+        (token_label, e('token()'), int(v['token'], 16)),
         ('token minBurn()', t('minBurn()'), SCHEDULE['tokenMinBurn']),
         ('token supplyCap()', t('supplyCap()'), lim['supplyCap']),
         ('token largeMintThreshold()', t('largeMintThreshold()'), SCHEDULE['largeMintThreshold']),
@@ -333,6 +406,9 @@ def onchain(token_cfg, vault_cfg, eth_urls, l2_urls, vault, token):
         ('token sourceVault() is the vault', t('sourceVault()'), int(vault, 16)),
         ('token sourceChainId()', t('sourceChainId()'), vault_cfg['ethereum']['chainId']),
     ]
+    if is_native(vault_cfg):
+        want += [('vault UNIT()', e('UNIT()'), native_ether.UNIT_WEI), ('vault PUSH_GAS()', e('PUSH_GAS()'), native_ether.PUSH_GAS),
+                 ('vault totalClaimable()', e('totalClaimable()'), 0)]
     bad = [{'what': w, 'chain': g, 'expected': x} for w, g, x in want if g != x]
     refuse(not bad, f'on-chain values differ: {json.dumps(bad)}')
     return {'decision': 'onchain-ok', 'ethereumBlock': [int(eb, 16), ebh], 'l2Block': [int(lb, 16), lbh],
@@ -357,11 +433,11 @@ def vault_run(vault_cfg, token_cfg, url, max_gwei, broadcast, confirm, write, wa
     try:
         deploy_pontes.git_revision_check(rev)
         contract = vault_cfg['vault']['contract']
-        refuse(contract == vault_pontes.PROVENANCE_CONTRACT, f'{contract}: the launch design is ProvenanceSourceVault')
+        pinned = vault_identity(contract)
         code = deploy_pontes.sh([deploy_pontes.FORGE, 'inspect', '--root', str(deploy_pontes.ROOT), contract, 'bytecode'],
                                 'forge inspect').lower()
-        refuse(deploy_pontes.keccak_hex(code) == VAULT_CREATION_KECCAK,
-               f'the vault creation code keccak is {deploy_pontes.keccak_hex(code)}, the audit freeze is {VAULT_CREATION_KECCAK}')
+        refuse(deploy_pontes.keccak_hex(code) == pinned,
+               f'the vault creation code keccak is {deploy_pontes.keccak_hex(code)}, the audit freeze is {pinned}')
         abi = json.loads(deploy_pontes.sh([deploy_pontes.FORGE, 'inspect', '--root', str(deploy_pontes.ROOT), contract, 'abi',
                                            '--json'], 'forge inspect abi'))
         ctor_abi = next(x for x in abi if x.get('type') == 'constructor')
@@ -391,7 +467,7 @@ def vault_run(vault_cfg, token_cfg, url, max_gwei, broadcast, confirm, write, wa
         refuse(isinstance(runtime, str) and len(runtime) > 2, 'the simulated creation returned no code (it reverts)')
         est = int(rpcx('eth_estimateGas', [{'from': deployer, 'data': init}]), 16)
         refuse(est <= VAULT_GAS_LIMIT, f'the creation needs {est} gas, above {VAULT_GAS_LIMIT}')
-        out = {'configSha256': sha, 'contract': contract, 'creationCodeKeccak': VAULT_CREATION_KECCAK,
+        out = {'configSha256': sha, 'contract': contract, 'creationCodeKeccak': pinned,
                'initCodeHash': deploy_pontes.keccak_hex(init), 'plannedAddress': planned, 'deployer': deployer,
                'chainId': chain, 'simulatedRuntimeCodeHash': deploy_pontes.keccak_hex(runtime), 'estimatedGas': est,
                'gasPrice': price, 'balance': balance, 'constructorArgs': args}
@@ -430,7 +506,9 @@ def handover(token_cfg, vault_cfg, vverify, trecord, tplan, vault_block):
         'vaultGuardians': sorted(s['address'].lower() for s in vault_cfg['vault']['guard']['guardians']),
         'thresholds': {'mint': token_cfg['signers']['threshold'], 'release': vault_cfg['vault']['signers']['threshold'],
                        'switch': vault_cfg['vault']['policy']['switchThreshold']},
-        'feeRecipient': SCHEDULE['feeRecipient'],
+        'feeRecipient': schedule_of(vault_cfg)['feeRecipient'],
+        **({'route': native_ether.ROUTE_ID, 'unitWei': native_ether.UNIT_WEI,
+            'templates': 'deployments/ethereum-eth/beth-ops/'} if is_native(vault_cfg) else {}),
     }
 
 

@@ -491,6 +491,39 @@ contract NativeEtherVaultTest is NativeEtherVaultBase {
         checkBooks();
     }
 
+    /// ETH-10: what a release costs its relayer does not depend on states anyone can arrange. Booking the fee right
+    /// after a sweep (accrued fees zero) and booking the first claim (no claim outstanding) cost what they cost at any
+    /// other time: neither sum is ever written into an empty storage slot (which would be 17,100 gas more).
+    function test_release_costDoesNotDependOnSweptFeesOrOutstandingClaims() public {
+        seed();
+        releaseGasTo(address(0xE0A)); // (a first release pays once for every slot this test touches for the first time)
+        (uint256 firstClaim,) = releaseGasTo(address(new EthReverter())); // no claim outstanding before it
+        (uint256 laterClaim,) = releaseGasTo(address(new EthReverter())); // a claim outstanding, a new claim slot too
+        require(firstClaim < laterClaim + 3_000, "the first claim of the vault cost its relayer an empty storage slot");
+        releaseGasTo(address(0xE0A));
+        (uint256 plain,) = releaseGasTo(address(0xE0A));
+        sweep();
+        require(vault.feesAccrued() == 0, "control: the fees were swept");
+        (uint256 afterSweep,) = releaseGasTo(address(0xE0A));
+        require(afterSweep < plain + 3_000, "a release right after a fee sweep cost its relayer an empty storage slot");
+        // and when every claim was paid out again, the next first claim costs the same as well
+        // (on a second vault: the reverting recipients above can never be paid, so the first vault's sum stays above zero)
+        checkBooks();
+        EthToggle gate = new EthToggle();
+        vault = newVault();
+        delete deps;
+        (sumNet, sumReleased, feesTaken, feesSwept, sumDeferred, sumClaimed) = (0, 0, 0, 0, 0, 0);
+        seed();
+        releaseGasTo(address(0xE0A));
+        releaseGasTo(address(gate));
+        gate.open();
+        claimFor(address(gate));
+        require(vault.totalClaimable() == 0, "control: no claim outstanding again");
+        (uint256 again,) = releaseGasTo(address(new EthReverter()));
+        require(again < laterClaim + 3_000, "a claim booked after all claims were paid cost an empty storage slot");
+        checkBooks();
+    }
+
     /// Return data is never copied: a recipient answering with as much data as its gas buys costs the relayer no more
     /// than one that burns its gas; and one answering with a small payload is simply paid.
     function test_release_returnDataIsNeverCopied() public {

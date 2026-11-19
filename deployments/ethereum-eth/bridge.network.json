@@ -30,7 +30,7 @@
     "issuerPowers": [],
     "verified": [
       {
-        "source": "the asset is the network's native currency: no contract, no issuer. The vault's token() is the marker 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE (no code; eth_getCode read on a local fork of Ethereum in tools/native-ether/rehearse_fork.py)",
+        "source": "the asset is the network's native currency: no contract, no issuer. The vault's token() is the marker 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE (no code: eth_getCode on a local fork of Ethereum, tools/native-ether/rehearse_fork.py)",
         "date": "2026-11-19"
       },
       {
@@ -128,7 +128,7 @@
       "if sourceRecipient refuses ether or needs more gas, the release still completes and the payment waits in the vault: anyone calls claimFor(sourceRecipient) (all gas forwarded, paid to sourceRecipient only), or sourceRecipient itself calls claim(to) to send it to another address. The event ReleaseDeferred(id, recipient, amount) says so; a page must show it and offer the claim",
       "a contract that can neither receive ether nor call claim(to) can never take its payment: do not name one. The burn names the recipient and cannot be redirected by anyone else",
       "the relayer pays at most 30 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
-      "the smallest exit is l2MinBurn (7 ETH): its 0.1% fee pays the relayer's worst-case release (227,000 gas) at the 30 gwei ceiling (docs/ETH-VAULT-DIFF.md section 5)"
+      "the smallest exit is l2MinBurn (7 ETH): its 0.1% fee pays the relayer's worst-case release (223,000 gas) at the 30 gwei ceiling (docs/BRIDGE-ETH.md section 4)"
     ]
   },
   "explorers": {
@@ -144,7 +144,7 @@
   },
   "notes": [
     "NOT LAUNCHABLE IN V1 (held): Held (coordinator, 2026-11-19): independent review, external audit and the owner's key ceremony are pending for this route. No tool accepts it for deployment, signing or relaying. A page, a pool builder or the DEX gate must not offer this route; every bridge tool refuses it (tools/signatario-stable/native_ether.py). The network's USDC route is another route with its own launch block.",
-    "UNAUDITED. Nothing is deployed. A further route of Ethereum: the network's first route is USDC (deployments/mainnet/). The custody contract is NativeEtherSourceVault (the Ethereum vault plus nine marked changes, docs/ETH-VAULT-DIFF.md); the L2 token is the frozen BridgedStablecoinV3, byte-identical.",
+    "UNAUDITED. Nothing is deployed. A further route of Ethereum: the network's first route is USDC (deployments/mainnet/). The custody contract is NativeEtherSourceVault (the Ethereum vault plus ten marked changes, docs/ETH-VAULT-DIFF.md); the L2 token is the frozen BridgedStablecoinV3, byte-identical.",
     "bETH has SIX decimals: 1 bETH = 1 ETH, the smallest amount is 0.000001 ETH. Integrators must read decimals(); a pool or a page that assumes 18 decimals for an ether token misprices it by 1e12.",
     "Limits are ether amounts sized on 2026-11-19 from the USD rule of that day for Ethereum USDC (cap 500,000 USD, window 50,000 USD per 24 h) at 1,777 USD per ETH (Coinbase 1,777.015 and Kraken 1,778.76, 03:32 UTC): cap 280 ETH, window 28 ETH per 24 h. They are immutable and float in USD with the price of ether: at twice the price the cap is 995,120 USD and the window 99,512 USD a day.",
     "The vault's ether balance can exceed the cap by payments waiting for their recipients (totalClaimable) and by ether forced into it (surplusWei); neither is backing, neither is within the committee's reach."

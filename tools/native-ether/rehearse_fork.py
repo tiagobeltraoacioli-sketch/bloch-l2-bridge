@@ -247,16 +247,7 @@ class EthRig(rf.Rig):
         check('[vault] a minimum deposit that nets one unit below the minimum burn (fee rounded up) is refused by the tool',
               rc == 1 and 'rounded up' in r.get('reason', ''), r)
 
-        # 2. open the vault (5 of 7)
-        vu = str(int(time.time()) + 3600)
-        d = self.vview('controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
-        four = self.cert(d, [key for _, key, _ in self.signers[:4]])
-        check('[vault] 4 of 7 cannot open the vault', selector('InvalidCertificate()')[2:] in self.reverts(
-            self.eth, self.addr['deployer'], self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu, four))
-        self.send(self.eth, 'deployer', self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu,
-                  self.cert(d, [key for _, key, _ in self.signers[:5]]))
-
-        # 3. the L2 token, through deploy_pontes.py (rehearsal chain 700771)
+        # 2. the L2 token, through deploy_pontes.py (rehearsal chain 700771), over the UNUSED vault
         (self.work / 'dpw').write_text('rehearsal-password\n')
         sh(CAST, 'wallet', 'import', 'l2-deployer', '--private-key', self.key['l2deployer'], '--keystore-dir', self.work,
            '--unsafe-password', 'rehearsal-password')
@@ -310,10 +301,21 @@ class EthRig(rf.Rig):
         check('[token] deploy_pontes.py verify at finalized, with the source vault read on the fork (code hash, route, cap)',
               rc == 0 and r.get('decision') == 'verified', r)
         check('[token] bETH: the frozen bytecode, 6 decimals, its mint chain starts at this vault\'s genesis',
-              self.tview('symbol()(string)').strip('"') == 'bETH' and self.tview('name()(string)').strip('"') == 'Bloch Bridged Ether'
+              self.tview('symbol()(string)').strip('"') == 'bETH'
+              and out(CAST, 'call', self.token, 'name()(string)', '--rpc-url', self.l2).strip('"') == 'Bloch Bridged Ether'
               and self.tview('decimals()(uint8)') == '6'
               and self.tview('mintHead()(bytes32)').lower() == self.vview('mintChainGenesis()(bytes32)').lower()
               and int(self.tview('supplyCap()(uint256)')) == CAP and int(self.tview('bucketCapacity()(uint256)')) == WINDOW)
+        # 3. open the vault (5 of 7): only now, because the deploy tool refuses a token over a vault whose controls ever
+        # changed (a used vault)
+        vu = str(int(time.time()) + 3600)
+        d = self.vview('controlDigest(bool,bool,uint64,uint256)(bytes32)', 'true', 'true', '0', vu)
+        four = self.cert(d, [key for _, key, _ in self.signers[:4]])
+        check('[vault] 4 of 7 cannot open the vault', selector('InvalidCertificate()')[2:] in self.reverts(
+            self.eth, self.addr['deployer'], self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu, four))
+        self.send(self.eth, 'deployer', self.vault, 'setControls(bool,bool,uint64,uint256,bytes[])', 'true', 'true', '0', vu,
+                  self.cert(d, [key for _, key, _ in self.signers[:5]]))
+
         # hostile and real recipients
         self.rec = {n: self.create_at(self.eth, 'deployer', f'{HARNESS}:{c}', *a) for n, c, a in (
             ('reverter', 'EthReverter', ()), ('burner', 'EthGasBurner', ()), ('redirect', 'EthClaimRedirect', ()),
@@ -522,12 +524,16 @@ def flow(rig):
     check('6 provenance: a burn under a mint chain the deposits do not back is refused (ProvenanceMismatch)',
           selector('ProvenanceMismatch()')[2:] in rig.reverts(rig.eth, A['mallory'], rig.vault, rsig, unbacked, ctx,
                                                              rig.cert(rig.vview(dsig, unbacked, ctx), [k for _, k, _ in rig.signers[:5]])))
-    # a valid certificate with too little gas: refused as a whole, never booked as a claim
-    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [
-        {'from': A['mallory'], 'to': rig.vault, 'gas': hex(150_000), 'data': out(CAST, 'calldata', rsig, item, ctx, five)}, 'latest']})
-    low = json.loads(out('curl', '-s', '-H', 'content-type: application/json', '-d', body, rig.eth))
-    check('6 gas: a valid release sent with too little gas for the push reverts as a whole (InsufficientGas): a relayer cannot '
-          'turn a payable release into a claim', selector('InsufficientGas()')[2:] in json.dumps(low).lower(), low)
+    # a valid certificate with too little gas: refused as a whole, never booked as a claim. (A plain release needs
+    # about 152,000 gas to reach the push and the vault then wants 70,476 more in hand: between the two it refuses.)
+    def simulate(gas_limit):
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [
+            {'from': A['mallory'], 'to': rig.vault, 'gas': hex(gas_limit), 'data': out(CAST, 'calldata', rsig, item, ctx, five)}, 'latest']})
+        return json.loads(out('curl', '-s', '-H', 'content-type: application/json', '-d', body, rig.eth))
+    low, enough = simulate(190_000), simulate(400_000)
+    check('6 gas: a valid release sent with too little gas for the push reverts as a whole (InsufficientGas), and the same '
+          'release with enough gas does not: a relayer cannot turn a payable release into a claim',
+          selector('InsufficientGas()')[2:] in json.dumps(low).lower() and 'error' not in enough, (low, enough))
 
     # 7. ether forced into the vault
     forced = 3 * 10**18 + 1
@@ -538,9 +544,17 @@ def flow(rig):
           after['balanceWei'] == before['balanceWei'] + forced and (after['locked'], after['fees'], after['claims'], after['owedWei'])
           == (before['locked'], before['fees'], before['claims'], before['owedWei']) and rig.exact(forced), (before, after))
     rc, lines = rig.reserves()
-    line = next((l for l in lines if l.get('kind') == 'reserves' or 'status' in l), {})
-    check('7 forced ether: the reserves monitor reads ether (not a token balance): status ok, the surplus reported apart',
-          rc == 0 and line.get('status') == 'ok' and json.dumps(lines).count(str(forced)) >= 1, lines[-3:])
+    line = next((l for l in lines if l.get('kind') == 'reserves'), {})
+    check('7 reserves before finality: the monitor reads the FINALIZED Ethereum block, where the releases are not yet: it '
+          'reports backing above liabilities (a soft alert), never a deficit, and no forced ether yet',
+          line.get('status') == 'surplus' and line.get('surplus_wei') == 0 and line.get('total_locked') == net(20 * ETH) + net(odd), lines[-3:])
+    rig.finalize_source()
+    rc, lines = rig.reserves()
+    line = next((l for l in lines if l.get('kind') == 'reserves'), {})
+    check('7 forced ether: once final, the reserves monitor reads ether (not a token balance): status ok, backing == supply, the '
+          'forced ether reported apart as surplus_wei, the waiting payments as total_claimable',
+          rc == 0 and line.get('status') == 'ok' and line.get('surplus_wei') == forced and line.get('backing') == line.get('total_supply')
+          and line.get('total_claimable') == rig.books()['claims'] and line.get('unit_wei') == UNIT, lines[-3:])
     d3 = rig.deposit(2 * ETH)
     gas['deposit (later)'] = int(d3['gasUsed'], 16)
     check('7 forced ether: a deposit still works and the cap room is unchanged by the forced ether',
@@ -586,11 +600,13 @@ def flow(rig):
     gas['release: existing account'] = got.get(A['bob'], {}).get('gasUsed')
 
     # 9. the monitors at the end: reserves and guardian
+    rig.finalize_source()
     rc, lines = rig.reserves()
-    line = next((l for l in lines if 'status' in l), {})
+    line = next((l for l in lines if l.get('kind') == 'reserves'), {})
     b = rig.books()
     check('9 reserves: ok; backing = ether held beyond fees and waiting payments, never more than totalLocked; supply covered',
-          rc == 0 and line.get('status') == 'ok' and int(rig.tview('totalSupply()(uint256)')) == b['locked'], lines[-2:])
+          rc == 0 and line.get('status') == 'ok' and int(rig.tview('totalSupply()(uint256)')) == b['locked']
+          and line.get('backing') == b['locked'] and line.get('surplus_wei') == forced, lines[-2:])
     grc, glines, gerr = rig.guardian('g-end')
     alerts = [l for l in glines if l.get('kind') == 'alert']
     check('9 guardian: reads the ether backing; no finding (every release matches a finalized L2 burn, deferred ones included)',

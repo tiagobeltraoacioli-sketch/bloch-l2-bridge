@@ -173,9 +173,9 @@ class LaunchGate(unittest.TestCase):
 class Numbers(unittest.TestCase):
     def test_minimum_burn_pays_the_worst_release_at_the_ceiling(self):
         gas, gwei, bps = ne.RELAY['releaseGasWorst'], ne.RELAY['gasCeilingGwei'], ne.FEE_BPS['release']
-        self.assertEqual((gas, gwei, bps), (227_000, 30, 10))
+        self.assertEqual((gas, gwei, bps), (223_000, 30, 10))
         floor = ne.min_burn_floor()
-        self.assertEqual(floor, 6_810_000)  # 6.81 ETH
+        self.assertEqual(floor, 6_690_000)  # 6.69 ETH
         cost_wei = gas * gwei * 10**9
         self.assertGreaterEqual(ne.fee_up(floor, bps) * ne.UNIT_WEI, cost_wei)        # the fee pays the relayer
         self.assertLess(ne.fee_up(floor - 1000, bps) * ne.UNIT_WEI, cost_wei)         # and a smaller exit would not
@@ -303,6 +303,32 @@ class Files(unittest.TestCase):
         self.assertIsNotNone(token_verdict(self.token))
 
 
+class Generated(unittest.TestCase):
+    def test_the_committed_files_are_what_the_values_generate(self):
+        sys.path.insert(0, str(ROOT / 'tools/native-ether'))
+        import route_files
+        self.assertEqual(route_files.stale(), [])
+        self.assertEqual(sorted(route_files.files()), ['beth-ops/eth-half.template.json', 'beth-ops/relayer.template.json',
+                                                       'beth-ops/route.ops.json', 'beth-ops/signer.template.json',
+                                                       'beth-token.config.json', 'beth-vault.config.json', 'bridge.network.json'])
+
+    def test_the_templates_differ_from_the_usdc_routes_only_where_stated(self):
+        usdc, mine = ROOT / 'deployments/mainnet/busdc-ops', ROUTE / 'beth-ops'
+        for name, allowed in (('eth-half.template.json', {'_about', 'keystore', 'password_file', 'db'}),
+                              ('relayer.template.json', {'_about', '_about_gas_ceilings', '_about_relayer_keys', 'eth_max_gas_price_gwei',
+                                                         'shared_dir', 'db', 'feed', 'l2_relayer_keystore', 'eth_relayer_keystore',
+                                                         'scan_state_dir'}),
+                              ('signer.template.json', {'_about', 'token', 'work_dir', 'db', 'keystore', 'password_file', 'eth_half_deposit',
+                                                        'eth_half_release', 'shared_dir', 'feed'})):
+            a, b = json.loads((usdc / name).read_text()), json.loads((mine / name).read_text())
+            self.assertEqual(set(a), set(b), name)
+            changed = {k for k in a if a[k] != b[k]}
+            self.assertLessEqual(changed, allowed, name)
+        relayer = json.loads((mine / 'relayer.template.json').read_text())
+        self.assertEqual(relayer['eth_max_gas_price_gwei'], ne.RELAY['gasCeilingGwei'])
+        self.assertEqual((relayer['eth_chain_id'], relayer['source_chain_id'], relayer['l2_chain_id'], relayer['provenance']), (1, 1, 700770, True))
+
+
 class VaultTool(unittest.TestCase):
     def test_a_filled_mainnet_config_is_refused_while_held(self):
         why = vault_verdict(filled_vault())
@@ -348,9 +374,9 @@ class VaultTool(unittest.TestCase):
 
     def test_a_minimum_burn_below_the_relayer_floor_is_named(self):
         v = filled_vault()['vault']
-        v['policy'].update(l2MinBurn=6_809_000)
+        v['policy'].update(l2MinBurn=6_689_000)
         self.assertTrue(any('would not pay the relayer' in b for b in ne.vault_policy_errors(v)))
-        v['policy'].update(l2MinBurn=6_810_000)
+        v['policy'].update(l2MinBurn=6_690_000)
         self.assertFalse(any('would not pay the relayer' in b for b in ne.vault_policy_errors(v)))
 
     def test_rehearsal_configs_validate_and_keep_the_contract_rules(self):
