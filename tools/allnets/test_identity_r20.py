@@ -378,7 +378,7 @@ class ThisTree(unittest.TestCase):
         was['facts']['values'] = {('mainnet-v3' if k == 'mainnet-v2' else k): (manifest['facts']['values']['mainnet-v3'] if k == 'mainnet-v2' else v)
                                   for k, v in was['facts']['values'].items()}
         self.assertEqual(manifest, was)   # every unit, credential, port, hardening line and role is what the line shipped
-        self.assertEqual(len(changed('ops/test_bundle.py')), 21)           # the pin name (2), the relayer ceiling (1 + 6), the registry payload test (12)
+        self.assertEqual(len(changed('ops/test_bundle.py')), 22)           # the pin name (2), the relayer ceiling (1 + 6), the registry payload test (13)
         self.assertEqual(len(changed('ops/rehearse_containers.py')), 18)   # the F381-1 control (2 + 11), the registry module staged (1 + 4)
         for path in by_line['evm-nets']:
             self.assertTrue(path.startswith(('tools/evm-nets/', 'deployments/arbitrum-one/', 'deployments/op-mainnet/',
