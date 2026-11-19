@@ -33,5 +33,5 @@
 100644 dc97ca294435c2c20b525e55dd0d55b962ca6515 evm-nets deployments/arbitrum-one/ops/signer.template.json
 100644 e9a63b333e83c21be44118b830aba878190bbed0 evm-nets tools/evm-nets/test_queue_bound_r20.py
 100644 efaf1a25372b9bc8ae919618c6c1f11205f8e49f ceremony docs/BRIDGE-OWNER-CEREMONY.md
-100644 f3510e10d38e070b2867c25e1582b9d16a116750 ceremony tools/deploy-pontes/test_ceremony_kit.py
+100644 dda44f8d4ae63b6d35268900543b46cf5a33d97c ceremony tools/deploy-pontes/test_ceremony_kit.py
 100644 f6f95631071ba4d4bb1f5a65158ab641c957bb33 evm-nets deployments/op-mainnet/bridge.network.json
