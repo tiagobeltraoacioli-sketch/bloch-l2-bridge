@@ -21,7 +21,7 @@ unchanged but for the three balance reads and the held gate of round 20. Checks,
 failure: deployment through the tools and their refusals; deposits (exact value, plain transfer refused, a deposit
 from a contract crediting the address it names); no attestation before finality; credit only after the delay; burn
 and release in ether to the wei; the fee to the owner's address; a reverting recipient, a gas-burning recipient and a
-contract without a receive function (the queue goes on, the payment waits, claimFor and claim(to)); a Safe 1.4.1 proxy
+contract without a receive function (the queue goes on, the payment waits, claimFor and claimTo(to)); a Safe 1.4.1 proxy
 and an ERC-4337 SimpleAccount created from the canonical factories on the fork (paid by the push); ether forced into
 the vault by SELFDESTRUCT (books, reserves monitor, guardian, cap, deposits and releases unaffected); guardian pause
 and 6-of-7 unpause (a claim is not held by the pause); replay and forged certificates; the measured gas of every kind
@@ -494,10 +494,10 @@ def flow(rig):
     check('5 claim: claimFor a recipient that still refuses reverts as a whole (PaymentFailed); the claim stays',
           pf in rig.reverts(rig.eth, A['mallory'], rig.vault, 'claimFor(address)', R['reverter']) and claim('reverter') == paid(ETH + 1))
     check('5 claim: nobody else can take it (NothingToClaim for a stranger)',
-          selector('NothingToClaim()')[2:] in rig.reverts(rig.eth, A['mallory'], rig.vault, 'claim(address)', A['mallory']))
+          selector('NothingToClaim()')[2:] in rig.reverts(rig.eth, A['mallory'], rig.vault, 'claimTo(address)', A['mallory']))
     dave_before = rig.wei(A['dave'])
     rig.send(rig.eth, 'mallory', R['redirect'], 'redirect(address,address)', rig.vault, A['dave'])
-    check('5 claim(to): the contract that cannot receive sends its payment to an address it names',
+    check('5 claimTo(to): the contract that cannot receive sends its payment to an address it names',
           rig.wei(A['dave']) == dave_before + paid(ETH) * UNIT and claim('redirect') == 0 and rig.exact())
 
     # 6. replay and forged certificates (simulated calls)

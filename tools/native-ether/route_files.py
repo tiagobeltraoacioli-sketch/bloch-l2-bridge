@@ -108,9 +108,9 @@ def network_file():
                               'smart-contract wallet whose receive function fits in that gas are paid at once',
                               'if sourceRecipient refuses ether or needs more gas, the release still completes and the payment waits in '
                               'the vault: anyone calls claimFor(sourceRecipient) (all gas forwarded, paid to sourceRecipient only), or '
-                              'sourceRecipient itself calls claim(to) to send it to another address. The event ReleaseDeferred(id, '
+                              'sourceRecipient itself calls claimTo(to) to send it to another address. The event ReleaseDeferred(id, '
                               'recipient, amount) says so; a page must show it and offer the claim',
-                              'a contract that can neither receive ether nor call claim(to) can never take its payment: do not name one. '
+                              'a contract that can neither receive ether nor call claimTo(to) can never take its payment: do not name one. '
                               'The burn names the recipient and cannot be redirected by anyone else',
                               f'the relayer pays at most {R["gasCeilingGwei"]} gwei per gas: while the network\'s gas price is above that '
                               'ceiling a release waits (it is not lost) and is paid when the price falls',

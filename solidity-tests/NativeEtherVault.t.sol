@@ -431,7 +431,7 @@ contract NativeEtherVaultTest is NativeEtherVaultBase {
         (bool ok, bytes memory ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimFor, (MALLORY)));
         require(!ok && err(ret) == NativeEtherSourceVault.NothingToClaim.selector, "a claim on the surplus");
         vm.prank(MALLORY);
-        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claim, (MALLORY)));
+        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimTo, (MALLORY)));
         require(!ok && err(ret) == NativeEtherSourceVault.NothingToClaim.selector, "a claim on the surplus");
         require(address(vault).balance == 3 ether + 5, "the surplus moved");
         checkBooks();
@@ -572,7 +572,7 @@ contract NativeEtherVaultTest is NativeEtherVaultBase {
         Snap memory s = snap();
         // the gate redirects its claim to the attacker, whose receive re-enters with all gas
         vm.prank(address(gate));
-        uint64 got = vault.claim(address(attacker));
+        uint64 got = vault.claimTo(address(attacker));
         sumClaimed += got;
         require(got == 2 * ONE - relFee(2 * ONE), "claim amount");
         require(attacker.seenCount() == 6 && attacker.allRefused(), "a re-entry was not refused with Reentrancy()");
@@ -667,7 +667,7 @@ contract NativeEtherVaultTest is NativeEtherVaultBase {
         require(vault.claimable(address(gate)) == owed && vault.totalClaimable() == owed, "claims accumulate");
         // nobody else's claim; nothing for a stranger
         vm.prank(MALLORY);
-        (bool ok, bytes memory ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claim, (MALLORY)));
+        (bool ok, bytes memory ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimTo, (MALLORY)));
         require(!ok && err(ret) == NativeEtherSourceVault.NothingToClaim.selector, "a stranger claimed");
         // claimFor while the recipient still refuses: the whole call reverts, the claim stays
         (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimFor, (address(gate))));
@@ -675,10 +675,10 @@ contract NativeEtherVaultTest is NativeEtherVaultBase {
         require(vault.claimable(address(gate)) == owed, "a failed claim lost the claim");
         // the recipient may not burn its claim by mistake, nor send it into the vault
         vm.prank(address(gate));
-        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claim, (address(0))));
+        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimTo, (address(0))));
         require(!ok && err(ret) == NativeEtherSourceVault.InvalidTransfer.selector, "a claim to the zero address");
         vm.prank(address(gate));
-        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claim, (address(vault))));
+        (ok, ret) = address(vault).call(abi.encodeCall(NativeEtherSourceVault.claimTo, (address(vault))));
         require(!ok && err(ret) == NativeEtherSourceVault.InvalidTransfer.selector, "a claim to the vault");
         // once the recipient accepts, anyone can deliver it, to the recipient only
         gate.open();

@@ -34,7 +34,7 @@ import {IProvenanceReleaseVerifier, IMintVerifier} from "../usdt/ProvenanceSourc
 ///              the release STILL completes: nonce, burn and bucket are consumed, `Released` is emitted, and the
 ///              payment becomes a claim (`claimable[recipient]`, `ReleaseDeferred`). One recipient can therefore
 ///              never block the queue, and no burn loses its payment.
-///      ETH-8   `claim(to)`: the recipient of deferred payments takes them, to any address it names; `claimFor(r)`:
+///      ETH-8   `claimTo(to)`: the recipient of deferred payments takes them, to any address it names; `claimFor(r)`:
 ///              anyone pays them to `r` itself. Both forward all gas and revert as a whole when the payment fails.
 ///              A claim is a release already made: a guardian pause, the release window and the committee's
 ///              controls do not apply to it.
@@ -194,7 +194,7 @@ contract NativeEtherSourceVault {
     uint16 public immutable depositFeeBps;
     uint16 public immutable releaseFeeBps;
     /// ETH-7: payments of completed releases that their recipient could not receive, in units, per recipient; and
-    /// their sum. Outside `totalLocked` and `feesAccrued`; only `claim` and `claimFor` pay them.
+    /// their sum. Outside `totalLocked` and `feesAccrued`; only `claimTo` and `claimFor` pay them.
     mapping(address => uint64) public claimable;
     /// ETH-10: always true. It shares the storage slot of `totalClaimable`, so that the sum is never written into
     /// an empty slot (17,100 gas more for the relayer whenever no claim is outstanding, which a burner could arrange).
@@ -688,7 +688,7 @@ contract NativeEtherSourceVault {
     }
 
     /// @notice ETH-8: the recipient of deferred release payments takes all of them, to the address it names.
-    function claim(address to) external nonReentrant returns (uint64 amount) {
+    function claimTo(address to) external nonReentrant returns (uint64 amount) {
         return _claim(msg.sender, to);
     }
 

@@ -16,7 +16,7 @@ This document is a DELTA on the Ethereum USDC bridge: `docs/BUSDC-MAINNET-V2.md`
 | Custody | `ProvenanceSourceVault` holds the token | `NativeEtherSourceVault` holds the ether itself (not WETH): the Ethereum vault plus ten marked changes, `docs/ETH-VAULT-DIFF.md` |
 | L2 token | `BridgedStablecoinV3` "Bloch Bridged USDC" (`bUSDC`), 6 decimals | the SAME frozen `BridgedStablecoinV3` bytecode (creation keccak `0xe560441f…1de7`), its own deployment, "Bloch Bridged Ether" (`bETH`), 6 decimals, 1 unit = 1e12 wei |
 | Deposit | `approve`, then `deposit(amount, l2Recipient)` | `deposit(amount, l2Recipient)` with `value = amount x 1e12` wei exactly; no approval; plain transfers refused |
-| Release | the vault transfers the token; a recipient the issuer blocked is not paid until unblocked | the vault pushes ether with 30,000 gas; a recipient that does not take it gets a claim (`claimFor`, `claim(to)`) and the queue goes on |
+| Release | the vault transfers the token; a recipient the issuer blocked is not paid until unblocked | the vault pushes ether with 30,000 gas; a recipient that does not take it gets a claim (`claimFor`, `claimTo(to)`) and the queue goes on |
 | Chains | deposit hash chain bound to the L2 mint chain (mode 1) | the same, unchanged |
 | Committee | 7 secp256k1 release keys, threshold 5; 6 of 7 to unpause or switch; 3 pause-only guardians, 259,200 s | the same keys and shape |
 | L2 controls | T = 0, 12 h delay, guardian cancel, 6-of-7 unpause, bucket = window | the same |
@@ -187,7 +187,7 @@ the DEX gate offer nothing. What a page must implement before the route is ever 
 - the L2 recipient is always stated, also for a smart-contract wallet;
 - `bETH` has six decimals;
 - a release may complete as a claim: watch `ReleaseDeferred(id, recipient, amount)` and offer `claimFor(recipient)`
-  (or, to the recipient contract's owner, `claim(to)`);
+  (or, to the recipient contract's owner, `claimTo(to)`);
 - warn before a burn that names a contract address as the recipient.
 
 ## 8. Rehearsal
@@ -197,7 +197,7 @@ Ethereum mainnet under the rehearsal chain id 31337, a local L2 replica (chain 7
 for the signer's gate. Both contracts are deployed THROUGH the deploy tools; the daemons are the real ones. It
 covers: deposit (exact value, plain transfer refused, a deposit made by a contract for a stated address), finality,
 quorum, the 12 h delay, mint, burn, release to the wei, the fee to the owner's address, a reverting recipient, a
-gas-burning recipient and a contract without a receive function (the queue goes on; `claimFor`, `claim(to)`), a Safe
+gas-burning recipient and a contract without a receive function (the queue goes on; `claimFor`, `claimTo(to)`), a Safe
 1.4.1 proxy and an ERC-4337 SimpleAccount created from the canonical factories on the fork, ether forced in by
 SELFDESTRUCT (books, reserves monitor, guardian, cap, deposit and release unaffected), guardian pause and 6-of-7
 unpause (a claim is not held), replay, forged and under-quorum certificates, too little gas, the measured gas

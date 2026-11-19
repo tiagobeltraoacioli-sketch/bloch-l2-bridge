@@ -125,8 +125,8 @@
     "paysAsset": "ether, the burned amount less 0.1% (rounded up to the unit), amount x 1e12 wei",
     "notes": [
       "the vault pays by sending ether to sourceRecipient with 30,000 gas: a plain account and a smart-contract wallet whose receive function fits in that gas are paid at once",
-      "if sourceRecipient refuses ether or needs more gas, the release still completes and the payment waits in the vault: anyone calls claimFor(sourceRecipient) (all gas forwarded, paid to sourceRecipient only), or sourceRecipient itself calls claim(to) to send it to another address. The event ReleaseDeferred(id, recipient, amount) says so; a page must show it and offer the claim",
-      "a contract that can neither receive ether nor call claim(to) can never take its payment: do not name one. The burn names the recipient and cannot be redirected by anyone else",
+      "if sourceRecipient refuses ether or needs more gas, the release still completes and the payment waits in the vault: anyone calls claimFor(sourceRecipient) (all gas forwarded, paid to sourceRecipient only), or sourceRecipient itself calls claimTo(to) to send it to another address. The event ReleaseDeferred(id, recipient, amount) says so; a page must show it and offer the claim",
+      "a contract that can neither receive ether nor call claimTo(to) can never take its payment: do not name one. The burn names the recipient and cannot be redirected by anyone else",
       "the relayer pays at most 30 gwei per gas: while the network's gas price is above that ceiling a release waits (it is not lost) and is paid when the price falls",
       "the smallest exit is l2MinBurn (7 ETH): its 0.1% fee pays the relayer's worst-case release (223,000 gas) at the 30 gwei ceiling (docs/BRIDGE-ETH.md section 4)"
     ]

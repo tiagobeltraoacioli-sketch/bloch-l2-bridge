@@ -84,7 +84,7 @@ contract EthToggle {
 
 contract EthClaimRedirect {
     function redirect(NativeEtherSourceVault vault, address to) external returns (uint64) {
-        return vault.claim(to);
+        return vault.claimTo(to);
     }
 }
 
@@ -113,7 +113,7 @@ contract EthReentrant {
     }
 
     function claimTo(address to) external returns (uint64) {
-        return vault.claim(to);
+        return vault.claimTo(to);
     }
 
     function _try(bytes memory data, uint256 value) private returns (bytes4 e) {
@@ -128,7 +128,7 @@ contract EthReentrant {
         if (!deep) {
             require(_try(abi.encodeCall(NativeEtherSourceVault.claimFor, (address(this))), 0) == want, "claimFor");
             require(_try(abi.encodeCall(NativeEtherSourceVault.sweepFees, ()), 0) == want, "sweepFees");
-            require(_try(abi.encodeCall(NativeEtherSourceVault.claim, (address(this))), 0) == want, "claim");
+            require(_try(abi.encodeCall(NativeEtherSourceVault.claimTo, (address(this))), 0) == want, "claimTo");
             require(_try(abi.encodeCall(NativeEtherSourceVault.guardianPause, ()), 0) == want, "guardianPause");
             return;
         }
@@ -136,7 +136,7 @@ contract EthReentrant {
         seen.push(_try(preparedRelease, 0));
         seen.push(_try(abi.encodeCall(NativeEtherSourceVault.deposit, (20_000, bytes32(uint256(1)))), 20_000 * 1e12));
         seen.push(_try(abi.encodeCall(NativeEtherSourceVault.claimFor, (address(this))), 0));
-        seen.push(_try(abi.encodeCall(NativeEtherSourceVault.claim, (address(this))), 0));
+        seen.push(_try(abi.encodeCall(NativeEtherSourceVault.claimTo, (address(this))), 0));
         seen.push(_try(abi.encodeCall(NativeEtherSourceVault.sweepFees, ()), 0));
         seen.push(_try(abi.encodeCall(NativeEtherSourceVault.executeRelease, (bytes32(uint256(1)))), 0));
         bool all = true;

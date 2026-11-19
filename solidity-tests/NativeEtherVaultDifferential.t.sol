@@ -64,7 +64,7 @@ contract DiffToken {
 /// both fee rates are exact and rounding up (ETH-5) equals rounding down; recipients are plain accounts, so the push
 /// always pays (ETH-7); value always equals the stated amount (ETH-4). Those differences have their own suite
 /// (NativeEtherVault.t.sol). Anything else that differed here would be an unintended change of the port.
-contract NativeEtherVaultDifferentialTest {
+abstract contract NativeEtherVaultDifferentialBase {
     DiffVm constant vm = DiffVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint256 constant UNIT = 1e12;
     uint64 constant STEP = 10_000;
@@ -107,7 +107,25 @@ contract NativeEtherVaultDifferentialTest {
     uint256 nSweep;
     uint256 nControls;
 
-    function setUp() public {
+    /// Deposits as made, for the mint-claim steps of the delayed suite: (sender, net amount, L2 recipient word).
+    struct Made {
+        address sender;
+        uint64 net;
+        bytes32 to;
+    }
+
+    Made[] made;
+
+    /// The shape under test: the launch shape (no release delay, no mint verifier) unless a suite overrides it.
+    function releaseDelay_() internal view virtual returns (uint64) {
+        return 0;
+    }
+
+    function mintVerifier_() internal view virtual returns (address) {
+        return address(0);
+    }
+
+    function setUp() public virtual {
         vm.warp(1_800_000_000);
         vm.roll(24_000_000);
         keys = new uint256[](7);
@@ -131,13 +149,13 @@ contract NativeEtherVaultDifferentialTest {
             keccak256("ethereum-mainnet"), keccak256("bloch-l2-700770"), keccak256("USDC"), address(token), CAP, 0, signers, 5,
             ProvenanceSourceVault.Policy(BUCKET, 86_400, 6, 14 days, MIN_DEPOSIT, MIN_BURN),
             ProvenanceSourceVault.Guard(guards, 72 hours, 72 hours),
-            ProvenanceSourceVault.Provenance(1, 0, address(0), ProvenanceSourceVault.Fees(TREASURY, 5, 10))
+            ProvenanceSourceVault.Provenance(1, releaseDelay_(), mintVerifier_(), ProvenanceSourceVault.Fees(TREASURY, 5, 10))
         );
         nat = new NativeEtherSourceVault(
             keccak256("ethereum-mainnet"), keccak256("bloch-l2-700770"), keccak256("ETH"), NATIVE_ETHER, CAP, 0, signers, 5,
             NativeEtherSourceVault.Policy(BUCKET, 86_400, 6, 14 days, MIN_DEPOSIT, MIN_BURN),
             NativeEtherSourceVault.Guard(guards, 72 hours, 72 hours),
-            NativeEtherSourceVault.Provenance(1, 0, address(0), NativeEtherSourceVault.Fees(TREASURY, 5, 10))
+            NativeEtherSourceVault.Provenance(1, releaseDelay_(), mintVerifier_(), NativeEtherSourceVault.Fees(TREASURY, 5, 10))
         );
         for (uint256 i; i < 3; ++i) {
             vm.prank(users[i]);
@@ -208,6 +226,12 @@ contract NativeEtherVaultDifferentialTest {
         require(eth.controlNonce() == nat.controlNonce(), "controlNonce");
         require(eth.depositsEnabled() == nat.depositsEnabled() && eth.releasesEnabled() == nat.releasesEnabled(), "controls");
         require(nat.totalClaimable() == 0, "a plain recipient was deferred");
+        // the one-way switch and the forgery latch
+        require(eth.verifier() == nat.verifier() && eth.proposedVerifier() == nat.proposedVerifier(), "verifier");
+        require(eth.proposedVerifierCodehash() == nat.proposedVerifierCodehash(), "verifier code hash");
+        require(eth.verifierActivatesAt() == nat.verifierActivatesAt() && eth.switchNonce() == nat.switchNonce(), "switch");
+        require(eth.verifierProposalLive() == nat.verifierProposalLive(), "proposal live");
+        require(eth.forgeryProvenAt() == nat.forgeryProvenAt(), "forgery latch");
         // what each party holds: token units on one side, wei / UNIT on the other, and no wei beside whole units
         require(token.balanceOf(address(eth)) * UNIT == address(nat).balance, "vault holdings");
         require(address(nat).balance == nat.owedWei() && nat.surplusWei() == 0, "native books");
@@ -266,8 +290,12 @@ contract NativeEtherVaultDifferentialTest {
             abi.encodeCall(NativeEtherSourceVault.deposit, (amount, to)),
             uint256(amount) * UNIT
         );
-        if (ok) ++nDeposit;
-        else ++nDepositRefused;
+        if (ok) {
+            ++nDeposit;
+            made.push(Made(user, amount - uint64(uint256(amount) * 5 / 10_000), to)); // fee-exact amounts: no rounding
+        } else {
+            ++nDepositRefused;
+        }
     }
 
     function ctx() internal returns (uint256 until, uint256 number, bytes32 hash) {
@@ -279,16 +307,24 @@ contract NativeEtherVaultDifferentialTest {
 
     /// The same burn presented to both vaults, each under its own route and chain head. `headKind` 1: a head the
     /// deposits do not back. `certKind` 0: 5 of 7; 1: 4 of 7; 2: five signatures over another digest.
-    function sendRelease(Burn memory b, uint256 headKind, uint256 certKind) internal returns (bool) {
-        (uint256 until, uint256 number, bytes32 hash) = ctx();
-        ProvenanceSourceVault.Release memory e = ProvenanceSourceVault.Release(
+    function items(Burn memory b, uint256 headKind)
+        internal
+        view
+        returns (ProvenanceSourceVault.Release memory e, NativeEtherSourceVault.Release memory n)
+    {
+        e = ProvenanceSourceVault.Release(
             eth.routeId(), b.nonce, b.to, b.amount, b.burn, b.count, 0,
             headKind == 1 ? keccak256("foreign chain") : eth.chainHeadAt(b.count)
         );
-        NativeEtherSourceVault.Release memory n = NativeEtherSourceVault.Release(
+        n = NativeEtherSourceVault.Release(
             nat.routeId(), b.nonce, b.to, b.amount, b.burn, b.count, 0,
             headKind == 1 ? keccak256("foreign chain") : nat.chainHeadAt(b.count)
         );
+    }
+
+    function sendRelease(Burn memory b, uint256 headKind, uint256 certKind) internal returns (bool) {
+        (uint256 until, uint256 number, bytes32 hash) = ctx();
+        (ProvenanceSourceVault.Release memory e, NativeEtherSourceVault.Release memory n) = items(b, headKind);
         ProvenanceSourceVault.ReleaseContext memory ce = ProvenanceSourceVault.ReleaseContext(until, number, hash, 7, keccak256("l2"));
         NativeEtherSourceVault.ReleaseContext memory cn = NativeEtherSourceVault.ReleaseContext(until, number, hash, 7, keccak256("l2"));
         bytes32 de = eth.releaseDigest(e, ce);
@@ -381,23 +417,40 @@ contract NativeEtherVaultDifferentialTest {
         if (controls(r % 4 != 0, (r >> 2) % 4 != 0, (r >> 8) % 5 == 0 ? 4 : 5)) ++nControls;
     }
 
+    /// A new pair of vaults (and a new token) for a coverage run that needs several: every ether balance the old
+    /// pair paid out is emptied, since the new token starts from nothing.
+    function freshPair() internal {
+        for (uint256 i; i < 3; ++i) vm.deal(recipients[i], 0);
+        vm.deal(TREASURY, 0);
+        delete paid;
+        delete held;
+        delete made;
+        setUp();
+    }
+
+    /// One step of the shared mixture, `a` in [0, 100).
+    function step(uint256 a, uint256 x) internal {
+        if (a < 34) stepDeposit(x);
+        else if (a < 64) stepRelease(x);
+        else if (a < 70) stepRetry(x);
+        else if (a < 75) stepReplay(x);
+        else if (a < 77) stepPause(x);
+        else if (a < 82) stepUnpause(x);
+        else if (a < 86) stepSweep();
+        else if (a < 89) stepControls(x);
+        else vm.warp(block.timestamp + x % (x % 3 == 0 ? 4 days : 5 hours));
+    }
+
     function drive(uint256 seed, uint256 steps) internal {
         for (uint256 i; i < steps; ++i) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
-            uint256 a = r % 100;
-            uint256 x = r >> 8;
-            if (a < 34) stepDeposit(x);
-            else if (a < 64) stepRelease(x);
-            else if (a < 70) stepRetry(x);
-            else if (a < 75) stepReplay(x);
-            else if (a < 77) stepPause(x);
-            else if (a < 82) stepUnpause(x);
-            else if (a < 86) stepSweep();
-            else if (a < 89) stepControls(x);
-            else vm.warp(block.timestamp + x % (x % 3 == 0 ? 4 days : 5 hours));
+            step(r % 100, r >> 8);
         }
     }
+}
 
+/// The launch shape: no release delay, committee releases.
+contract NativeEtherVaultDifferentialTest is NativeEtherVaultDifferentialBase {
     // ---------------------------------------------------------------- tests
 
     /// The two vaults were given one configuration; their identities differ where they must.

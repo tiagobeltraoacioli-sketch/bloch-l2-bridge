@@ -80,8 +80,8 @@ MUTANTS = [
        '        if (!_send(feeRecipient, address(this).balance - (uint256(totalLocked) + totalClaimable) * UNIT, gasleft())) revert PaymentFailed(); // ETH-9')],
      ['test_forced_selfdestructBreaksNothing', 'test_forced_surplusIsNeverPaidOut']),
     ('M14', 'a claim can be taken by anyone to any address',
-     [('''    function claim(address to) external nonReentrant returns (uint64 amount) {
-        return _claim(msg.sender, to);''', '''    function claim(address to) external nonReentrant returns (uint64 amount) {
+     [('''    function claimTo(address to) external nonReentrant returns (uint64 amount) {
+        return _claim(msg.sender, to);''', '''    function claimTo(address to) external nonReentrant returns (uint64 amount) {
         return _claim(to, msg.sender);''')],
      ['test_claim_paths', 'test_claim_recipientRedirects']),
     ('M15', 'a failed claim is swallowed (the claim is cleared without payment)',
