@@ -527,7 +527,8 @@ under the contract's 30 bps ceiling). Windows and caps are NOT part of it (an ow
 |---|---|---|---|---|
 | Ethereum (`deployments/mainnet/`) | 5 bps | **10 bps** | **101 / 100** USDC | **2 gwei** |
 | Linea | 5 bps | **15 bps** | **601 / 600** | **2 gwei** |
-| Arbitrum One, OP Mainnet (Base, refused) | 5 bps | 5 bps | **21 / 20** | **0.5 gwei** |
+| Arbitrum One, OP Mainnet | 5 bps | 5 bps | **25 / 20** (21 / 20 until 2026-11-19: raised for the mint queue bound with the 25,000 window, finding F410-1) | **0.5 gwei** |
+| Base (refused) | 5 bps | 5 bps | 21 / 20 | 0.5 gwei |
 
 All of it is in `tools/evm-nets/networks.json` (`feeBps`, `minDeposit`, `l2MinBurn`, `relay`; Ethereum under
 `relayCost.ethereum`) and from there in every generated config, operator template and `bridge.network.json`.

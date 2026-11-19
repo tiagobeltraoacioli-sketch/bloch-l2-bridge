@@ -2,7 +2,7 @@
   "_about": "One per signer operator (7). signatario.py + vigia.py sign. Values marked TBD-owner come from the owner's decisions and the deployment records (docs/BUSDC-MAINNET-V2.md). Paths follow the follower-rpc package (install.sh). Round 17, OP Mainnet: one signer daemon per network, with its own files, feed and source node. The keys from `anchor_policy` down are this network's (tools/evm-nets/networks.json); vigia.py takes the anchor keys by chain id and refuses a file that contradicts them.",
   "signer": "TBD-owner (1..7)",
   "signer_name": "TBD-owner (operator name, unique)",
-  "l2_pins": "mainnet-v2",
+  "l2_pins": "mainnet-v3",
   "l2_chain_id": 700770,
   "l2_source": "rebuild",
   "l2_rpc": "TBD-owner (an L2 RPC for mint pre-checks at latest; release never trusts it)",

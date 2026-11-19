@@ -110,7 +110,7 @@
         "releaseBps": 5
       },
       "limits": {
-        "minDeposit": "21000000",
+        "minDeposit": "25000000",
         "l2MinBurn": "20000000",
         "cap": "250000000000",
         "window": "25000000000",
@@ -462,7 +462,7 @@
         "releaseBps": 5
       },
       "limits": {
-        "minDeposit": "21000000",
+        "minDeposit": "25000000",
         "l2MinBurn": "20000000",
         "cap": "250000000000",
         "window": "25000000000",

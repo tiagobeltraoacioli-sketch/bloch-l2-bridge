@@ -480,7 +480,7 @@ class S9TestMode(Base):
     """`l2_source: "rpc"` is documented as tests only, yet a mainnet-pinned config accepts it."""
 
     def test_mainnet_pins_refuse_the_rpc_trusting_source(self):
-        cfg = {'l2_pins': 'mainnet-v2', 'l2_source': 'rpc', 'l2_chain_id': 700770, 'token': ts.TOKEN, 'source_chain_id': 1,
+        cfg = {'l2_pins': 'mainnet-v3', 'l2_source': 'rpc', 'l2_chain_id': 700770, 'token': ts.TOKEN, 'source_chain_id': 1,
                'source_vault': ts.VAULT, 'source_route': ts.ROUTE, 'db': str(self.d / 'db.json'),
                'l2_rpc': 'http://127.0.0.1:25709'}
         path = self.d / 'cfg.json'

@@ -274,6 +274,19 @@ def validate(cfg, rehearsal, token_cfg=None):
         refuse(v['cap'] == decided['windows_per_cap'] * pol['windowLimit'],
                f'vault.cap must be {decided["windows_per_cap"]} x windowLimit (the rate-limited path then needs '
                f'{decided["windows_per_cap"]} windows to empty a full vault)')
+        # Mint queue bound (round 20, finding F410-1; tools/evm-nets/launch.py `_check_queue`): the frozen L2 token holds at
+        # most MAX_PENDING queued mints, so the minimum deposit and the bucket must keep the honest queue, with one more
+        # mint delay of execution lag, within it. The registry holds its own values to the rule; this holds the config's.
+        try:
+            fee_bps = v['provenance']['fees']['depositBps'] if provenance else 0
+            q = launch.queue_figures(decided['bucket_capacity'], decided['refill_per_second'], pol['minDeposit'], fee_bps)
+            least = launch.queue_bound(eth['chainId'])['min_deposit_floor'] if fee_bps == launch.fee_schedule(eth['chainId'])['deposit_bps'] else None
+        except launch.LaunchError as e:
+            refuse(False, f'the mint queue bound cannot be checked: {e}')
+        refuse(q[2] <= launch.MAX_PENDING,
+               f'vault.policy.minDeposit {pol["minDeposit"]} is too small for the bucket of {decided["bucket_capacity"]}: honest mints '
+               f'at the bucket rate would queue {q[2]} with one more mint delay of execution lag, above MAX_PENDING '
+               f'({launch.MAX_PENDING}) of the frozen L2 token' + (f'; the least minimum deposit that fits is {least}' if least else ''))
 
     gd = v['guard']
     exact_keys(gd, ['guardians', 'pauseDuration', 'pauseCooldown'], 'vault.guard')
@@ -333,6 +346,18 @@ def validate(cfg, rehearsal, token_cfg=None):
                    f'(the bucket refills in the vault\'s window); the token config has {lim.get("refillPerSecond")}')
         refuse(lim.get('minBurn') == pol['l2MinBurn'],
                'vault l2MinBurn differs from the L2 minBurn (the constructor can only compare minDeposit with this declared value)')
+        if launch and not rehearsal:
+            # The same bound with the token's own bucket, refill and mint delay (a longer delay queues more).
+            try:
+                fee_bps = v['provenance']['fees']['depositBps'] if provenance else 0
+                q = launch.queue_figures(lim.get('bucketCapacity'), lim.get('refillPerSecond'), pol['minDeposit'], fee_bps,
+                                         delay=lim.get('largeMintDelay'))
+            except launch.LaunchError as e:
+                refuse(False, f'the mint queue bound of the pair cannot be checked: {e}')
+            refuse(q[2] <= launch.MAX_PENDING,
+                   f'the pair breaks the mint queue bound: minimum deposit {pol["minDeposit"]}, L2 bucket {lim.get("bucketCapacity")}, '
+                   f'refill {lim.get("refillPerSecond")} and mint delay {lim.get("largeMintDelay")} s queue {q[2]} honest mints with one '
+                   f'more delay of execution lag, above MAX_PENDING ({launch.MAX_PENDING}) of the frozen L2 token')
         vg = te.get('vaultGuard') or {}
         refuse([str(a).lower() for a in (vg.get('guardians') or [])] == sorted(guardians, key=lambda a: int(a, 16))
                and vg.get('pauseDuration') == gd['pauseDuration'] and vg.get('pauseCooldown') == gd['pauseCooldown'],

@@ -224,7 +224,10 @@ class Files(unittest.TestCase):
                 self.assertIn(text, note, (name, text))
 
     def test_the_minimums_and_fees_are_what_they_were(self):
-        want = {'ethereum': (101, 100, 5, 10), 'arbitrum-one': (21, 20, 5, 5), 'op-mainnet': (21, 20, 5, 5), 'linea': (601, 600, 5, 15)}
+        # The limits decision changed no minimum and no fee. Later the same day (agent 421, finding F410-1) the coordinator
+        # raised ONE of these values: the minimum deposit of Arbitrum One and OP Mainnet, 21 -> 25 USDC, because with the
+        # 25,000 bucket the 21 USDC minimum broke the mint queue bound (test_queue_bound_r20). Everything else is what it was.
+        want = {'ethereum': (101, 100, 5, 10), 'arbitrum-one': (25, 20, 5, 5), 'op-mainnet': (25, 20, 5, 5), 'linea': (601, 600, 5, 15)}
         for name, (min_dep, min_burn, dep, rel) in want.items():
             v = json.loads(vault_file(name).read_text())['vault']
             t = json.loads(token_file(name).read_text())
@@ -250,8 +253,11 @@ class Files(unittest.TestCase):
 
     def test_the_queue_figures_in_the_token_notes_are_the_computed_ones(self):
         # (smallest mint, queued at most at the bucket rate, with one more 12 h delay of lag); MAX_PENDING is 2,048
-        want = {'ethereum': (100_949_500, 742, 990), 'arbitrum-one': (20_989_500, 1786, 2382), 'op-mainnet': (20_989_500, 1786, 2382),
+        # Arbitrum One and OP Mainnet: (20_989_500, 1786, 2382) with the 21 USDC minimum of this file's first version, the
+        # third figure ABOVE MAX_PENDING (finding F410-1); with the 25 USDC minimum decided the same day, the figures below.
+        want = {'ethereum': (100_949_500, 742, 990), 'arbitrum-one': (24_987_500, 1500, 2000), 'op-mainnet': (24_987_500, 1500, 2000),
                 'linea': (600_699_500, 62, 83)}
+        self.assertEqual(evm_nets.queue_figures(launch.limits(42161), 21 * U, 5, 43200), (20_989_500, 1786, 2382))
         src = (ROOT / 'contracts/stable/BridgedStablecoinV3.sol').read_text()
         self.assertIn(f'uint256 public constant MAX_PENDING = {evm_nets.MAX_PENDING};', src)
         for name, figures in want.items():
@@ -267,7 +273,14 @@ class Files(unittest.TestCase):
             self.assertLess(figures[1], evm_nets.MAX_PENDING, name)
             self.assertEqual('ABOVE MAX_PENDING' in sentence, figures[2] > evm_nets.MAX_PENDING, name)
             self.assertEqual('under MAX_PENDING' in sentence, figures[2] <= evm_nets.MAX_PENDING, name)
-        self.assertIn('lag by about 5.3 h', json.loads(token_file('arbitrum-one').read_text())['notes']['launchDesign'])
+        # With the 21 USDC minimum the note said so in words (F410-1), and the generator still would: the statement is kept
+        # for any future value that breaks the bound. The committed note of Arbitrum One now states the 25 USDC figures.
+        was = evm_nets.queue_note(launch.limits(42161), 21 * U, 5, 43200)
+        self.assertIn('ABOVE MAX_PENDING (2,048)', was)
+        self.assertIn('lag by about 5.3 h', was)
+        now = json.loads(token_file('arbitrum-one').read_text())['notes']['launchDesign']
+        self.assertNotIn('lag by about', now)
+        self.assertIn('queues at most 1,500 mints, and 2,000 with one more delay of lag, under MAX_PENDING', now)
 
 
 class Tools(unittest.TestCase):

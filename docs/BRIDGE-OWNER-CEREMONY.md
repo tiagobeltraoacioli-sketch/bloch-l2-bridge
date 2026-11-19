@@ -16,7 +16,8 @@ real-key rehearsal. So this kit now runs BEFORE any external audit, from the rev
 Round 20 (agent 410, 2026-11-19) changed in this document: the audit wording (this paragraph, sections 0, 2, 11, 16 and
 "Not done"), the decided windows and caps, the state of the L2 (section 0, item 2), the numbers of the rehearsal run
 with the new limits (sections 8 and 17), and one prerequisite found on the way (section 0, item 5). No command block
-changed.
+changed. Round 20 (agent 421, 2026-11-19) changed: section 0 item 5 and the matching "Not done" lines (the signers' L2
+pins now name the live release). No command block changed.
 
 How to read the blocks:
 
@@ -56,16 +57,20 @@ decisions), `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` (daily operation), `docs/SIG-TR
 4. Every holder has Foundry 1.7.1 (`cast --version` shows commit `4072e487`), Python 3.9 or newer and a checkout of
    the launch revision of this repository (item 1) at `/opt/bloch-bridge` (operators) or in the owner's working
    directory.
-5. **Before section 11 (not before the keys or the vault): the signers' L2 build pins must name the L2 release that
-   is live.** `tools/signatario-stable/l2_finality.py` `MAINNET_V2` (operator key `l2_pins: mainnet-v2`) pins the
-   release of 2026-11-03 (follower `cdf5da5c…`, producer `e3f1a290…`, settled RPC `53e88565…`); the L2 went live with
-   the release of 2026-11-17 (`bloch-l2-2026-11-17-launch-native-906336fd`: follower `d4d2b99a…`, producer `598873ae…`
-   by the L2 review record; the binaries on the L2 hosts were not read for this document). A signer started with
-   other binaries than the pinned ones refuses to sign anything for chain 700770, so no mint and no release could be
-   certified. The named pin set `mainnet-v2` changes only by a reviewed commit (as in round 11); that commit does not
-   exist yet (finding F410-2 of round 20, not part of this kit). The code also accepts a full pins object typed into
-   an operator file, a form meant for rehearsals: seven operators typing hashes by hand is not a reviewed path and
-   must not be how the launch is done.
+5. **The signers' L2 build pins name the L2 release that is live (closed in round 20, agent 421; was finding
+   F410-2).** The operator files carry `"l2_pins": "mainnet-v3"`: `tools/signatario-stable/l2_finality.py`
+   `MAINNET_V3`, the release `bloch-l2-2026-11-17-launch-native-906336fd` the owner signed on 2026-11-17 with the Bloch
+   release key `1A5D96A5C4955EF7` (`SHA256SUMS` `4039f26a…f0cb`): follower `d4d2b99a…fe96`, producer `598873ae…37db`,
+   settled RPC `53e88565…bb0d`. The signature and the three hashes were verified for this revision (the signed
+   `SHA256SUMS` is committed and checked by `test_l2_pins_r20`), and four public L1 RPCs reported on 2026-11-19 an
+   accepted settlement of exactly the pinned L2 program. The earlier set `mainnet-v2` (the release of 2026-11-03, which
+   never went live) is kept as a record and refused by every tool. Operators install the three binaries only from
+   the signed release folder; `preflight_signer.py` (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3) refuses any other build, and from this
+   revision on it also reads the operator's L1 RPCs and fails with `STALE` if the L1 accepts another L2 program than
+   the pinned one. The pins must be made again at every later L2 release or program change (the December fork
+   candidate is the first): `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a has the procedure and the checks that make
+   a stale pin loud. The code also accepts a full pins object typed into an operator file, a form meant for
+   rehearsals: seven operators typing hashes by hand is not a reviewed path and must not be how the launch is done.
 
 ## 1. Who generates which key, where
 
@@ -940,9 +945,9 @@ The rehearsal had to stand in for these things, and only these:
 - No real key, no hardware wallet, no public network: everything above is rehearsed on loopback stand-ins only.
 - The L2: its first settlement was accepted on L1 on 2026-11-19 (section 0, item 2); that it is in a finalized L1
   block and that the L2 keeps settling was not established here. Section 9 onwards needs it.
-- The signers' L2 build pins name the release of 2026-11-03, not the release the L2 went live with (section 0, item 5):
-  section 11 onwards cannot work on mainnet until a reviewed commit re-pins them.
-- The signer daemons on the real L2 path (`l2_pins: mainnet-v2`, the rebuild, the feeds) are not part of this
+- The signers' L2 build pins were re-pinned to the release the L2 went live with (section 0, item 5; round 20, agent
+  421). No signer host exists yet: the first `preflight_signer.py` on a real signer host is still the owner's run.
+- The signer daemons on the real L2 path (`l2_pins: mainnet-v3`, the rebuild, the feeds) are not part of this
   rehearsal; their own suites and agent 381's bundles cover them.
 - Safe creation, Safe owner checks and the deployer balance sweep are not rehearsed.
 - The other routes (section 16) are pointers to their own documents and lines, not rehearsed here.

@@ -736,7 +736,7 @@ class Rounds(Base):
 
     def test_a_mainnet_config_refuses_a_bare_shared_dir(self):
         cfg = self.d / 'c.json'
-        cfg.write_text(json.dumps({**CFG, 'threshold': 5, 'shared_dir': str(self.d), 'l2_pins': 'mainnet-v2'}))
+        cfg.write_text(json.dumps({**CFG, 'threshold': 5, 'shared_dir': str(self.d), 'l2_pins': 'mainnet-v3'}))
         with self.assertRaises(SystemExit):
             vigia_mod.Vigia(cfg)
 

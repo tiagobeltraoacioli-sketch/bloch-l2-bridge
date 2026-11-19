@@ -362,6 +362,10 @@ It is in scope only for the correctness of what it tells users.
 14. **Signer pins (closed by agent 230).** `l2_finality.MAINNET_V2` names the final L2 launch build `926d2cf`
     (follower `cdf5da5c…`, produce-dev `e3f1a290…`, settled-rpc `53e88565…`, signing target `6d3bd628…`);
     `SETTLED_RPC_PIN_PROVISIONAL` is `False`. Constants and text only; the one allowed post-freeze delta.
+    **Update 2026-11-19 (round 20, agent 421):** the L2 went live with the release of 2026-11-17, not this build. The
+    signers now use the pin set `mainnet-v3` (follower `d4d2b99a…`, produce-dev `598873ae…`, the same settled-rpc);
+    `MAINNET_V2` is unchanged and refused by name. This delta is code (a pin-set registry, an L1 program check, a
+    preflight check, a tool), not constants only: `docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a.
 12. **Config note.** Fixed on this branch (`cf4d0dc`): `notes.launchDesign` in `busdc-mainnet.config.json` now says a forged mint is cancelled before it credits only while 2 of 3 guardians live **and** the forger queues fewer candidates than the guardians cancel, and states limit 2.
 
 ## 7. Prior findings and their fixes

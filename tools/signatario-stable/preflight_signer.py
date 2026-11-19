@@ -17,15 +17,21 @@ check failed (each is listed). Exit 2: usage or an unreadable config. Exit 3: ev
 
 Checks:
   config     no TBD-owner value is left; the decided values (chain ids 700770 and 1, thresholds 5 and 5, l2_pins
-             mainnet-v2, l2_source rebuild, provenance true; eth-half: provenance true, release_hold false);
+             mainnet-v3 = l2_finality.CURRENT_MAINNET_PINS, l2_source rebuild, provenance true; eth-half: provenance
+             true, release_hold false);
              at least two L1 RPC URLs; 6 feed peers and 7 + 7 feed signers.
   files      the configs, keystores and password files exist, belong to this user and are closed to group and others;
              the work, signature, scan and database directories exist and are writable.
   ethereum   eth_rpc is this operator's own node: a loopback or private address (BR-7). --allow-remote-eth-rpc turns
              this into a warning.
-  binaries   follower, produce-dev and settled-rpc are the pinned launch build (sha256, l2_finality.MAINNET_V2).
+  binaries   follower, produce-dev and settled-rpc are the pinned build of the live L2 (sha256, l2_finality.MAINNET_V3:
+             the release the owner signed on 2026-11-17).
+  l2-live    (round 20) every L1 RPC of `l1_rpc_urls` reports an accepted L2 settlement of exactly the pinned L2 program
+             (l2_finality.l1_cross_check). A failure that says STALE means the L2 release or program changed after
+             these pins were made: sign nothing, see the runbook section "When the L2 release or program changes".
+             This check reads the configured L1 RPCs and is never skipped for a named pin set.
   relayer    (with --relayer-config) the decided values (chain ids 700770 and 1, thresholds 5 and 5, l2_pins
-             mainnet-v2, provenance true); relay_role primary or backup, a backup index 1 to 6, six other relayers'
+             mainnet-v3, provenance true); relay_role primary or backup, a backup index 1 to 6, six other relayers'
              gas addresses, gas ceilings at most 50 gwei (L2) and 300 gwei (Ethereum), encrypted keystores; the
              release journal directory (relayer_submission_dir, default .relayer-submissions beside shared_dir) is
              outside shared_dir, on a disk that survives a reboot (not tmpfs), and private if it exists already.
@@ -41,6 +47,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
@@ -49,10 +56,12 @@ import l2_finality  # noqa: E402
 
 DRY_BURN = '0x' + '00' * 31 + '01'
 DRY_REASON = 'the burn transaction is not in this L2'
+# `l2_pins` is the current pin set of l2_finality.py (round 20: "mainnet-v3", the L2 release that is live). A config that
+# still names a superseded set fails here AND in every daemon (l2_finality.named_pins).
 DECIDED_SIGNER = {'l2_chain_id': 700770, 'source_chain_id': 1, 'eth_chain_id': 1, 'threshold': 5, 'vault_threshold': 5,
-                  'l2_pins': 'mainnet-v2', 'l2_source': 'rebuild', 'provenance': True}
+                  'l2_pins': l2_finality.CURRENT_MAINNET_PINS, 'l2_source': 'rebuild', 'provenance': True}
 DECIDED_RELAYER = {'l2_chain_id': 700770, 'source_chain_id': 1, 'eth_chain_id': 1, 'threshold': 5, 'vault_threshold': 5,
-                   'l2_pins': 'mainnet-v2', 'provenance': True}
+                   'l2_pins': l2_finality.CURRENT_MAINNET_PINS, 'provenance': True}
 VOLATILE_FS = {'tmpfs', 'ramfs', 'devtmpfs'}
 DECIDED_ETH_HALF = {'eth_chain_id': 1, 'provenance': True, 'release_hold': False}
 MAX_L2_GWEI, MAX_ETH_GWEI = 50, 300
@@ -205,7 +214,28 @@ def check_signer(report, cfg, cfg_path, allow_remote, skip_binaries, rehearsal_p
                                     'settled_rpc': cfg.get('settled_rpc')}, pins)
         report.add('binaries', 'follower, produce-dev and settled-rpc are the pinned launch build', True, pins.get('name', ''))
     except (l2_finality.NotFinal, OSError, KeyError, TypeError, ValueError) as e:  # each is a failed check, with its reason
-        report.add('binaries', 'follower, produce-dev and settled-rpc are the pinned launch build', False, str(e)[:300])
+        report.add('binaries', 'follower, produce-dev and settled-rpc are the pinned launch build', False,
+                   str(e)[:300] + ('  ' + str(e.detail.get('hint', '')) if isinstance(e, l2_finality.NotFinal) else ''))
+
+
+def check_l2_live(report, cfg, fetch=l2_finality.l1_rpc, now=None):
+    """Round 20 (F410-2): the L1 RPCs of this signer report an accepted settlement of the pinned L2 program. A pin set
+    that went stale (a new L2 release with another program, a superseded name) fails here, before any daemon starts.
+    Rehearsal pins (an object) name no L2 program: a warning, as their `l2_pins` row is."""
+    name = 'the L1 RPCs report an accepted settlement of the pinned L2 program (the pins are not stale)'
+    try:
+        pins = l2_finality.pins_from_config(cfg)
+        if pins is None or pins.get('l2_program') is None:
+            rehearsal = isinstance(cfg.get('l2_pins'), dict)
+            report.add('l2-live', name, rehearsal, 'the pins name no L2 program (rehearsal pins): not checked' if rehearsal
+                       else 'no l2_pins: nothing names the L2 program this signer would certify', warning=rehearsal)
+            return
+        seen = l2_finality.l1_cross_check(cfg.get('l1_rpc_urls'), pins, time.time() if now is None else now, fetch=fetch)
+        report.add('l2-live', name, True, f'{len(seen)} L1 RPC(s); accepted settlement {seen[0].get("accepted")}; {pins.get("name", "")}')
+    except l2_finality.NotFinal as e:
+        report.add('l2-live', name, False, (e.reason + '  ' + json.dumps(e.detail, sort_keys=True, default=str))[:900])
+    except (KeyError, TypeError, ValueError, IndexError) as e:
+        report.add('l2-live', name, False, f'{type(e).__name__}: {e}'[:300])
 
 
 def check_eth_half(report, cfg, cfg_path, signer_cfg, allow_remote, chain=1):
@@ -328,7 +358,7 @@ def load(path):
     return cfg
 
 
-def run(argv, signatario=HERE / 'signatario.py'):
+def run(argv, signatario=HERE / 'signatario.py', l1_fetch=l2_finality.l1_rpc):
     def opt(name):
         return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
     cfg_path = opt('--config')
@@ -345,14 +375,15 @@ def run(argv, signatario=HERE / 'signatario.py'):
         if chain is None:
             return report  # not launchable or unknown: nothing else is checked, and the outcome is `fail`
     check_signer(report, cfg, cfg_path, allow_remote, '--skip-binaries' in argv, rehearsal_pins, chain)
+    check_l2_live(report, cfg, fetch=l1_fetch)
     if opt('--eth-half-config'):
         check_eth_half(report, load(opt('--eth-half-config')), opt('--eth-half-config'), cfg, allow_remote, chain)
     if opt('--relayer-config'):
         check_relayer(report, load(opt('--relayer-config')), opt('--relayer-config'), rehearsal_pins, chain)
     if '--skip-dry-release' in argv:
         report.add('dry', 'dry release', True, 'skipped (--skip-dry-release)', warning=True)
-    elif any(r['group'] in ('config', 'files', 'binaries') for r in report.failed):
-        report.add('dry', 'dry release', False, 'not run: fix the failed config, file and binary checks first')
+    elif any(r['group'] in ('config', 'files', 'binaries', 'l2-live') for r in report.failed):
+        report.add('dry', 'dry release', False, 'not run: fix the failed config, file, binary and L2 program checks first')
     else:
         dry_release(report, cfg_path, signatario)
     return report

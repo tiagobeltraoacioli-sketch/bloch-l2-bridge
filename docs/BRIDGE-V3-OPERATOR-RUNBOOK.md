@@ -150,12 +150,15 @@ python3 /opt/bloch-bridge/tools/signatario-stable/preflight_signer.py --config /
 It must end with `OK: N of N checks passed` and exit 0. It is read-only: it signs nothing and sends nothing. It checks:
 
 - no `TBD-owner` value is left in the three configs;
-- the decided values: chains 700770 and 1, thresholds 5 and 5, `l2_pins` `mainnet-v2`, `l2_source` `rebuild`,
+- the decided values: chains 700770 and 1, thresholds 5 and 5, `l2_pins` `mainnet-v3` (the current pin set of
+  `l2_finality.py`; the earlier `mainnet-v2` is refused, section 3a), `l2_source` `rebuild`,
   `provenance` true, `release_hold` false, two L1 RPC URLs, 6 feed peers, 7 + 7 feed signers;
 - configs, keystores and password files exist, belong to the service user and are closed to group and others; the mint
   key and the release key are different files; the working directories are writable;
 - `eth_rpc` is the operator's own node (2.1);
-- the three L2 binaries are the pinned launch build (sha256);
+- the three L2 binaries are the pinned build of the L2 release that is live (sha256; section 3a);
+- **`l2-live` (round 20)**: every L1 RPC of `l1_rpc_urls` reports an accepted L2 settlement of exactly the pinned L2
+  program. No flag skips this check for a named pin set. A failure that says `STALE` is section 3a;
 - the relayer rules of 2.2 and 2.3;
 - the **dry release**: it runs
 
@@ -174,13 +177,13 @@ turns an `l2_pins` object (private-net pins) into a warning so the dry release r
 `--rehearsal-pins` never ends `OK` or exits 0**: a clean one prints `REHEARSAL (not a go-live result; ...)` and exits
 3, whatever the chain id (second-pass review R310-2P-3). The go-live result is only the command above, without it.
 
-Tests: `python3 -m unittest test_preflight_signer` (17, offline, including the real `signatario.py` refusing at the
-binary pins).
+Tests: `python3 -m unittest test_preflight_signer` (22, offline, including the real `signatario.py` refusing at the
+binary pins and a loopback L1 stand-in for the `l2-live` check).
 
 Run on a private net in round 15 (item 281, host 209.250.236.240, proofless, 4 validators): with private pins and
 `--rehearsal-pins`, 66 of 66 checks passed (at that time still printed as `OK`) and the dry release refused with exactly the expected reason, against a
 follower and a producer built from the launch source for a private L1 and the **released** settled RPC `53e88565…`.
-With `mainnet-v2` pins and the three released binaries the binaries check passed and the dry release refused with
+With `mainnet-v2` pins (the pin set of that date, the release of 2026-11-03; superseded in round 20, section 3a) and the three released binaries the binaries check passed and the dry release refused with
 "the follower verifies another network", as it must on a private net. **The released follower `cdf5da5c…` refuses
 any private net ("a funded manifest must be the Genesis-4 mainnet"), so the full check with mainnet pins can only
 pass on the real hosts against mainnet L1**: that is the owner's run at go-live. The run found and fixed two defects
@@ -188,6 +191,93 @@ pass on the real hosts against mainnet L1**: that is the owner's run at go-live.
 
 Guardian hosts: `python3 tools/guardiao/guardiao.py --config guardiao.json check --dry-run` and the health monitor, as in
 `tools/guardiao/README.md`. There is no guardian preflight script yet.
+
+## 3a. When the L2 release or program changes (stale pins)
+
+The signers certify a burn only on an L2 they rebuilt themselves with three pinned binaries. The pins are one named
+set in `tools/signatario-stable/l2_finality.py`; every signer and relayer template of the four launchable routes names
+it (`"l2_pins": "mainnet-v3"`). The held Bitcoin route's mint-signer template (`deployments/bitcoin/bbtc-ops`, a file
+of that route's own line) still carries `mainnet-v2` and is therefore refused: that line takes the current name before
+the route can sign anything. **The pins follow the L2, not the other way round**: when the L2 moves and the pins do not,
+the bridge stops certifying. That happened once without anyone noticing: `mainnet-v2` named the L2 release of
+2026-11-03 while the L2 went live with the release the owner signed on 2026-11-17 (finding F410-2, round 20). What
+makes a stale pin loud now:
+
+| Where | What it compares | What a stale pin looks like |
+| --- | --- | --- |
+| every `signatario.py` call (mint, release, combine) | the name in `l2_pins` against `CURRENT_MAINNET_PINS` | refused: `the L2 pin set "mainnet-v2" is superseded by "mainnet-v3"` |
+| every release certificate (`l1_cross_check`) | the statement tag, the seven program identities and the chain id of the settlement the signer's own L1 RPCs report as accepted, against `l2_program` | refused: `the L1 has accepted a settlement of another L2 program than the pinned one: the L2 pins are STALE`, with the identity that moved (guest ELF, verifying key, configuration, ...) |
+| every release certificate (`check_status`) | the follower's `settlement_policy` against the pinned one | refused: `the follower verifies another L2 settlement policy than the pinned one` |
+| every release certificate and the preflight (`check_binaries`) | SHA-256 of follower, producer, settled RPC | refused: `the <role> binary is not the pinned build`, with the hint to read this section |
+| `preflight_signer.py`, group `l2-live` | the same L1 reading, before any daemon starts; never skipped for a named set | `FAIL ... the L2 pins are STALE` and the dry release is not run |
+| `l2_pins_check.py release DIR` | a release folder signed by the Bloch release key against the pins | exit 1, `STALE PINS: the owner signed the L2 release ...`, every differing value |
+| `l2_pins_check.py live URL ...` | the L1 reading, from anywhere, with no config | exit 1, `STALE OR DIFFERENT` |
+| `python3 -m unittest test_l2_pins_r20` (in the table) | the pins against the committed copy of the owner-signed `SHA256SUMS` and against the L1 answers recorded on 2026-11-19; the daemons and templates at every operator bundle's `source_rev` against this tree | a failing test |
+| `ops/bundle.py build` | the pin name in the templates of the bundle's source revision against the one name in `ops/routes.json` `facts` | `BuildError: signer.json:l2_pins: 'mainnet-v2' is neither TBD-owner, a layout path nor a listed public fact` |
+
+The operator's two read-only commands (nothing is signed or sent; the first needs the signed release folder the
+binaries were installed from, its path in `L2_RELEASE_DIR`; the second the operator's L1 RPCs):
+
+```
+python3 /opt/bloch-bridge/tools/signatario-stable/l2_pins_check.py release "$L2_RELEASE_DIR" --files
+```
+
+```
+python3 /opt/bloch-bridge/tools/signatario-stable/l2_pins_check.py live http://80.240.16.185:8080 http://199.247.22.8:8080
+```
+
+Each must end with `CURRENT`. Exit 2 (`NO EVIDENCE`) means the folder is not a release signed by the Bloch release
+key, or an RPC did not answer: it says nothing about the pins.
+
+**If anything above says STALE: sign nothing, start no daemon, and do not install another build to make the check
+pass.** Do not type a pins object into an operator file either (that form exists for rehearsals; `preflight_signer.py`
+never ends `OK` with it). Tell the coordinator; the fix is the procedure below, in a reviewed commit, and a new
+operator bundle built from it.
+
+### Re-pin procedure (the next L2 release; the December fork candidate is the first known case)
+
+It applies to **every** new L2 release the owner signs, also one that changes only the follower or the producer (as
+2026-11-03 -> 2026-11-17 did: the program identities stayed, two binaries moved), and to every L2 program change
+(new settlement guest, verifying key, execution configuration, statement version, or an L2 fork activated on L1).
+
+1. Take the signed release folder (`SHA256SUMS`, `SHA256SUMS.minisig`, `release.json`, the three binaries). Run
+   `l2_pins_check.py release DIR --files`: it must print `STALE PINS` with the differences (that is the evidence that
+   the folder is owner-signed and newer). `NO EVIDENCE` stops here: nothing unsigned is ever pinned.
+2. Read the live L1 with `l2_pins_check.py live` on at least two L1 RPCs and record the answers
+   (`getl2settlement`, `getchaininfo`) as a new file under `tools/signatario-stable/testdata/`. Before the new L2
+   program is accepted on L1 the reading still shows the old program: then the new pin set is prepared on a branch and
+   merged only once the L1 has accepted a settlement of the new program (the cross-check refuses until then, which is
+   correct: there is nothing of the new program to certify).
+3. Add a NEW pin set (`MAINNET_V4`, ...) to `l2_finality.py`: never edit an earlier one. Every value gets its
+   `verified` statement saying where it was read at its source on that day; a value that could only be quoted from a
+   report is written `UNVERIFIED: ...`, and `named_pins` then refuses the whole set until somebody verifies it.
+   Move `CURRENT_MAINNET_PINS`, add the old name to `SUPERSEDED` with the reason.
+4. Tests first: copy the three public files of the signed release into `testdata/l2-release-<date>/`, point
+   `test_l2_pins_r20` (or its successor) at the new set and see it fail before the pins move.
+5. Change the name in the templates of `deployments/mainnet/busdc-ops`, in `ops/routes.json` (`facts`) and
+   `ops/test_bundle.py`; after the commit that holds the new daemons and templates, move every route's `source_rev` in
+   `ops/routes.json` to it (a bundle ships the daemons of `source_rev`, not of the tree it is built in: without this
+   step the re-pin never reaches an operator; `test_l2_pins_r20` fails until it is done); run `python3 tools/evm-nets/evm_nets.py write`, update `notes.l2Build` of
+   `deployments/mainnet/busdc-mainnet.config.json`, and record the line-owned files with
+   `python3 tools/allnets/test_all.py --identity-record <decision>`.
+6. Run the released follower and producer on mainnet L1 history up to a finalized settlement and the real
+   `signatario.py release` dry run against it (`preflight_signer.py` on a signer host does exactly this): the one
+   refusal must be "the burn transaction is not in this L2".
+7. Operators: new bundle, binaries from the signed folder, `preflight_signer.py` again. During the window in which
+   some signers are on the old set and some on the new one, fewer than five may be able to certify: schedule the
+   change with the L2 fork, not after it.
+
+The December fork candidate, as read on 2026-11-19 (not final; the L2 line itself says so): bloch-sis-pow `main`
+`c8a088cb` carries a `PROGRAM_NEXT` whose execution configuration, guest ELF and both verifying keys differ from the
+live program (`PROGRAM_NEXT_FINAL` is `false`), and the December build of bloch-l2-evm (`b48fd55`: follower
+`f6a01ba0…`, producer `45bd6ac4…`, settled RPC `83e6e725…`) changes all three binaries. So at that fork every check of
+the table above fires on a signer that still carries `mainnet-v3`: the binaries, and, from the first settlement of the
+new program accepted on L1, the program identities. Steps 1 to 7 must be finished for that release before its L1
+activation epoch.
+
+What this does not cover: an L2 release that keeps the three binaries and the program byte-identical needs no re-pin
+(the release name in the pins is then only a label; `l2_pins_check.py release` still reports it as STALE, which is the
+safe direction). A change of the L1 node software alone does not touch these pins.
 
 ## 4. Key ceremony: what closes each line
 

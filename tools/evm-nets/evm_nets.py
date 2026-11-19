@@ -60,6 +60,8 @@ def vault_config(name, spec, registry, template):
     n['minDeposit'] = (f'{spec["minDeposit"] / 1e6:g} units, l2MinBurn {spec["l2MinBurn"] / 1e6:g} (fee schedule of 2026-11-17, coordinator, '
                        'agents/347-fee-economics-r17.md): immutable. The deploy tool refuses an l2MinBurn below the relayer cost of a '
                        'release at the gas ceiling divided by (1 - releaseBps / 10000) (tools/evm-nets/networks.json relayCost.formula).')
+    if spec.get('minDepositDecision'):  # round 20 (F410-1): a minimum deposit decided after the fee schedule, with its reason
+        n['minDeposit'] += ' minDeposit: ' + spec['minDepositDecision']
     n['network'] = (f'{spec["name"]} (chain {spec["chainId"]}). In this file the key `ethereum` names the SOURCE network, to keep '
                     'one config format and one tool for every EVM source. Same committee keys as the Ethereum bridge; this '
                     'network\'s own limits (2026-11-19) and fee schedule (2026-11-17), both from tools/evm-nets/networks.json; '
@@ -106,15 +108,14 @@ def limit_notes(spec, lim, registry):
     return cap, window
 
 
-MAX_PENDING = 2048  # BridgedStablecoinV3.MAX_PENDING (the frozen token)
+MAX_PENDING = launch.MAX_PENDING  # BridgedStablecoinV3.MAX_PENDING (the frozen token); one record, in launch.py
 
 
 def queue_figures(lim, min_deposit, deposit_bps, delay):
     """(smallest mint, mints queued at most by honest flow at the bucket rate, the same with one more delay of lag): the
-    bucket admits its capacity plus the refill of one mint delay, and every mint waits that delay (T = 0)."""
-    smallest = min_deposit - min_deposit * deposit_bps // 10_000
-    per_delay = lim['refill_per_second'] * delay
-    return smallest, (lim['bucket_capacity'] + per_delay) // smallest, (lim['bucket_capacity'] + 2 * per_delay) // smallest
+    bucket admits its capacity plus the refill of one mint delay, and every mint waits that delay (T = 0). The
+    arithmetic is launch.queue_figures (round 20: the bound is a rule of the registry, launch._check_queue)."""
+    return launch.queue_figures(lim['bucket_capacity'], lim['refill_per_second'], min_deposit, deposit_bps, delay)
 
 
 def queue_note(lim, min_deposit, deposit_bps, delay):

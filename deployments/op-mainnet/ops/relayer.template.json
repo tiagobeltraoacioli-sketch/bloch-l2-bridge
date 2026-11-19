@@ -8,7 +8,7 @@
   "l2_rpc": "TBD-owner",
   "l2_tx_rpc": "https://l2rpc.blochl1.com",
   "l2_chain_id": 700770,
-  "l2_pins": "mainnet-v2",
+  "l2_pins": "mainnet-v3",
   "eth_rpc": "TBD-owner (an RPC of OP Mainnet)",
   "eth_chain_id": 10,
   "source_chain_id": 10,

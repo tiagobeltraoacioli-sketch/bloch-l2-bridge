@@ -75,6 +75,16 @@ LIMITS = {
 # empty a full vault, against a guardian pause of three days.
 WINDOWS_PER_CAP = 10
 WINDOW_SECONDS = 86400
+# The honest mint queue (round 20, agent 421; finding F410-1). The frozen L2 token holds at most MAX_PENDING mints that
+# are queued and not yet executed, and with T = 0 every mint waits MINT_DELAY (`largeMintDelay` of every launch token
+# config). Its own comment gives the design point: mints at the bucket rate queue (bucket + refill x delay) / smallest
+# mint, and (bucket + 2 x refill x delay) / smallest mint once executions lag by one more delay; that second figure
+# must fit MAX_PENDING. The limits of 2026-11-19 broke it on Arbitrum One and OP Mainnet (2,382 with the 21 USDC
+# minimum); the coordinator's decision of the same day is a minimum deposit of 25 USDC there (2,000). The bound is a
+# rule of the registry: a launchable route that breaks it makes the registry untrusted, as an edited limit does.
+MAX_PENDING = 2048       # BridgedStablecoinV3.MAX_PENDING
+MINT_DELAY = 43200       # largeMintDelay of the launch token configs, seconds
+QUEUE_LAG_DELAYS = 1     # delays of execution lag the queue must absorb: the design point of the frozen token
 # Keys of the signer's source half (eth_half.py) and of the daemon (vigia.py) that every signer of one network must
 # share. `anchor_depth` exists only with the probe policy.
 ANCHOR_KEYS = ('anchor_policy', 'anchor_depth', 'anchor_max_age', 'finalized_margin')
@@ -111,6 +121,7 @@ def _load(path=None):
         if missing:
             raise LaunchError(f'networks.json lacks the decided chain ids {missing}')
         _check_limits(reg, seen)
+        _check_queue(reg, seen)
         return reg
     except LaunchError:
         raise
@@ -160,8 +171,81 @@ def _check_limits(reg, seen):
             raise LaunchError(f'{name} (chain {chain}): cap {cap} is not {WINDOWS_PER_CAP} x windowLimit {window}')
 
 
+def _is_count(v, lo=0):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= lo
+
+
+def queue_figures(bucket, refill, min_deposit, deposit_bps, delay=MINT_DELAY, lag_delays=QUEUE_LAG_DELAYS):
+    """(smallest mint, mints queued at most by honest flow at the bucket rate, the same with `lag_delays` more delays of
+    execution lag). The bucket admits its capacity plus the refill of the time it looks back on, and every mint waits
+    `delay` (T = 0); the smallest mint is the minimum deposit less the deposit fee, rounded as the vault rounds it.
+    Integers only: anything else is a LaunchError, never a guess."""
+    if not (_is_count(bucket, 1) and _is_count(refill, 1) and _is_count(min_deposit, 1) and _is_count(deposit_bps)
+            and _is_count(delay, 1) and _is_count(lag_delays)) or deposit_bps >= 10_000:
+        raise LaunchError(f'the mint queue cannot be computed from bucket {bucket!r}, refill {refill!r}, minimum deposit '
+                          f'{min_deposit!r}, deposit fee {deposit_bps!r} bps, delay {delay!r}, lag {lag_delays!r}')
+    smallest = min_deposit - min_deposit * deposit_bps // 10_000
+    if smallest < 1:
+        raise LaunchError(f'the smallest mint of a minimum deposit of {min_deposit} at {deposit_bps} bps is zero')
+    per_delay = refill * delay
+    return smallest, (bucket + per_delay) // smallest, (bucket + (1 + lag_delays) * per_delay) // smallest
+
+
+def _queue(bucket, refill, min_deposit, deposit_bps, delay=MINT_DELAY):
+    smallest, queued, lagged = queue_figures(bucket, refill, min_deposit, deposit_bps, delay)
+    total = bucket + (1 + QUEUE_LAG_DELAYS) * refill * delay
+    # the least minimum deposit whose lagged queue fits: the smallest mint must exceed total / (MAX_PENDING + 1)
+    need = total // (MAX_PENDING + 1) + 1
+    floor = -(-need * 10_000 // (10_000 - deposit_bps))
+    while queue_figures(bucket, refill, floor, deposit_bps, delay)[2] > MAX_PENDING:
+        floor += 1
+    while floor > 1 and queue_figures(bucket, refill, floor - 1, deposit_bps, delay)[2] <= MAX_PENDING:
+        floor -= 1
+    return {'smallest_mint': smallest, 'queued': queued, 'queued_lagged': lagged, 'max_pending': MAX_PENDING, 'mint_delay': delay,
+            'lag_delays': QUEUE_LAG_DELAYS, 'bucket_capacity': bucket, 'refill_per_second': refill, 'min_deposit': min_deposit,
+            'deposit_bps': deposit_bps, 'ok': lagged <= MAX_PENDING, 'min_deposit_floor': floor,
+            # seconds of execution lag (beyond the mint delay itself) after which a full-rate stream of smallest
+            # deposits fills the queue
+            'lag_to_fill_s': max(0, (MAX_PENDING - queued) * smallest // refill)}
+
+
+def _queue_of(reg, chain, name):
+    spec = reg['relayCost']['ethereum'] if chain == ETHEREUM else reg['networks'][name]
+    lim = reg['limits']['ethereum'] if chain == ETHEREUM else spec['limits']
+    window = lim['windowLimit']
+    return _queue(window, window // reg['limits']['windowSeconds'], spec['minDeposit'], spec['feeBps']['deposit'])
+
+
+def _check_queue(reg, seen):
+    """Chain 1 and every launchable network: the honest mint queue with one more delay of execution lag fits MAX_PENDING
+    (see the constants). A held or out network is not judged until its launch status changes. Raises LaunchError, so
+    every network is refused and no limit or fee is read from a registry that breaks the bound."""
+    for chain, name in [(ETHEREUM, 'ethereum')] + sorted(seen.items()):
+        if chain != ETHEREUM and not reg['networks'][name]['launch']['v1']:
+            continue
+        q = _queue_of(reg, chain, name)
+        if not q['ok']:
+            raise LaunchError(
+                f'{name} (chain {chain}): with a minimum deposit of {q["min_deposit"]} (smallest mint {q["smallest_mint"]}) and a '
+                f'bucket of {q["bucket_capacity"]}, honest mints at the bucket rate queue {q["queued_lagged"]} with one more mint '
+                f'delay ({MINT_DELAY} s) of execution lag, above MAX_PENDING ({MAX_PENDING}) of the frozen L2 token; the least '
+                f'minimum deposit that fits is {q["min_deposit_floor"]}')
+
+
+def queue_bound(chain_id, path=None):
+    """The mint queue figures of a route (see `_queue`), or None for a rehearsal chain. `ok` is the bound itself; a
+    launchable route never returns `ok` false, because a registry that breaks the bound does not load."""
+    if isinstance(chain_id, bool) or not isinstance(chain_id, int):
+        raise LaunchError(f'chain id {chain_id!r} is not an integer')
+    reg = _load(path)
+    if chain_id == ETHEREUM:
+        return _queue_of(reg, ETHEREUM, 'ethereum')
+    net = network_of(chain_id, path)
+    return None if net is None else _queue_of(reg, chain_id, net[0])
+
+
 def registry(path=None):
-    """networks.json, only if it agrees with DECIDED and LIMITS. Raises LaunchError otherwise."""
+    """networks.json, only if it agrees with DECIDED and LIMITS and keeps the mint queue bound. Raises LaunchError otherwise."""
     return _load(path)
 
 

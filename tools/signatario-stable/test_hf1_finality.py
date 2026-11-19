@@ -79,14 +79,24 @@ def unit():
         s.update(over)
         return s
 
-    check('unit: mainnet-v2 pins are the final launch build and chain 700770',
-          lf.pins_from_config({'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770})['binaries']['settled_rpc'].startswith('53e88565')
+    # Round 20 (agent 421, F410-2): the L2 went live with the release of 2026-11-17, pin set "mainnet-v3". The record of the
+    # 2026-11-03 build (MAINNET_V2) keeps every value this check always held, and its name is refused (test_l2_pins_r20).
+    check('unit: the mainnet-v2 record is the 2026-11-03 launch build and chain 700770 (kept unchanged)',
+          lf.MAINNET_V2['binaries']['settled_rpc'].startswith('53e88565')
           and lf.MAINNET_V2['binaries']['follower'].startswith('cdf5da5c')
           and lf.MAINNET_V2['binaries']['produce'].startswith('e3f1a290')
           and lf.SETTLED_RPC_PIN_PROVISIONAL is False
           and lf.MAINNET_V2['l2_genesis_hash'].startswith('632e45ae') and lf.MAINNET_V2['hf1_claim_finality_epoch'] == 7180)
+    live = lf.pins_from_config({'l2_pins': lf.CURRENT_MAINNET_PINS, 'l2_chain_id': 700770})
+    check('unit: the current pins (mainnet-v3) are the release that is live and chain 700770',
+          lf.CURRENT_MAINNET_PINS == 'mainnet-v3' and live['binaries']['settled_rpc'].startswith('53e88565')
+          and live['binaries']['follower'].startswith('d4d2b99a') and live['binaries']['produce'].startswith('598873ae')
+          and live['l2_genesis_hash'].startswith('632e45ae') and live['hf1_claim_finality_epoch'] == 7180
+          and live['l2_chain_id'] == 700770)
+    check('unit: the superseded name mainnet-v2 is refused',
+          'superseded' in (refused(lf.pins_from_config, {'l2_pins': 'mainnet-v2', 'l2_chain_id': 700770}) or ''))
     check('unit: pins refuse another L2 chain id',
-          refused(lf.pins_from_config, {'l2_pins': 'mainnet-v2', 'l2_chain_id': 700771}) is not None)
+          'differs from the L2 pins' in (refused(lf.pins_from_config, {'l2_pins': lf.CURRENT_MAINNET_PINS, 'l2_chain_id': 700771}) or ''))
     check('unit: no l2_pins = legacy devnet mode', lf.pins_from_config({'l2_chain_id': 700771}) is None)
     check('unit: chain 700770 refuses no l2_pins', refused(lf.pins_from_config, {'l2_chain_id': 700770}) is not None)
     check('unit: a v2 status passes', refused(lf.check_status, status(), pins, now, 600) is None)
@@ -439,6 +449,41 @@ def integration(project):
         check('release: signer 3 joins with an L1 cross-check on its own chain', rc == 0
               and c3.get('digest') == c1.get('digest')
               and c3['l2']['finality']['l1_rpc'][0]['finalized_checkpoint']['own_root'] == 'ab' * 32, c3)
+
+        # Round 20 (agent 421, F410-2): pins that name the L2 program and the follower's settlement policy, as the named
+        # set of the live L2 does. The signer reads from its own L1 RPCs which program the L1 accepts.
+        ids = [NETWORK, '02' * 32, lf.MAINNET_V3['l2_network_args'][3], '04' * 32, '05' * 32, '06' * 32, '07' * 32]
+        tag = lf.MAINNET_V3['l2_program']['statement_tag']
+
+        def statement(identities, tag=tag, chain=L2_CHAIN):
+            return (tag.encode() + b''.join(bytes.fromhex(i) for i in identities) + bytes(32) + chain.to_bytes(8, 'big')
+                    + (1).to_bytes(8, 'big') + bytes(64)).hex()
+        live = {**past, 'l2_program': {'statement_tag': tag, 'identities': ids}, 'settlement_policy': 'ee' * 32}
+        view = {'network': NETWORK, 'chain_id': L2_CHAIN, 'withdrawals': {'finalized_checkpoint': fc}}
+        l1.view = {**view, 'accepted': {'commitment': 'c0' * 32, 'statement': statement(ids)}}
+        rc, r = release(1, 'x', pins=live, l1_rpc_urls=[l1.url])
+        check('release (round 20): certified when the L1 accepts the pinned L2 program and the follower has the pinned policy',
+              rc == 0 and r.get('signed') and r['l2']['finality']['l1_rpc'][0].get('accepted') == 'c0' * 32, r)
+        rc, r = release(1, 'x', pins=live)
+        check('release (round 20): refuses with program pins and no L1 RPC configured', rc == 1
+              and 'no L1 RPC is configured' in r.get('reason', ''), r)
+        l1.view = {**view, 'accepted': None}
+        rc, r = release(1, 'x', pins=live, l1_rpc_urls=[l1.url])
+        check('release (round 20): refuses an L1 RPC that reports no accepted settlement', rc == 1
+              and 'no accepted L2 settlement' in r.get('reason', ''), r)
+        for name, other in (('another guest ELF', statement(ids[:4] + ['55' * 32] + ids[5:])),
+                            ('another verifying key', statement(ids[:6] + ['77' * 32])),
+                            ('another statement version', statement(ids, tag=tag[:-1] + '4')),
+                            ('another chain id', statement(ids, chain=L2_CHAIN + 1))):
+            l1.view = {**view, 'accepted': {'commitment': 'c1' * 32, 'statement': other}}
+            rc, r = release(1, 'x', pins=live, l1_rpc_urls=[l1.url])
+            check(f'release (round 20): refuses a stale pin, the L1 accepts {name}', rc == 1
+                  and 'the L2 pins are STALE' in r.get('reason', '') and 'hint' in r, r)
+        l1.view = {**view, 'accepted': {'commitment': 'c0' * 32, 'statement': statement(ids)}}
+        rc, r = release(1, 'x', pins={**live, 'settlement_policy': 'e1' * 32}, l1_rpc_urls=[l1.url])
+        check('release (round 20): refuses a follower with another settlement policy than the pinned one', rc == 1
+              and 'another L2 settlement policy' in r.get('reason', ''), r)
+        l1.view = view
 
         rc, comb = signer(0, 'combine', '--sig', work / 'c3.json', '--sig', work / 'c1.json',
                           '--out', work / 'release.json')

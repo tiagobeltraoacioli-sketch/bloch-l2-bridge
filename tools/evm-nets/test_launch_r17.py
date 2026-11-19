@@ -310,7 +310,9 @@ class DeployGate(unittest.TestCase):
 
     # ── the fee schedule of 2026-11-17 (coordinator; agents/347-fee-economics-r17.md) ──
     def test_the_decided_schedule_is_in_the_registry_and_in_every_generated_file(self):
-        want = {'arbitrum-one': (5, 5, 21, 20, 0.5), 'op-mainnet': (5, 5, 21, 20, 0.5), 'base': (5, 5, 21, 20, 0.5), 'linea': (5, 15, 601, 600, 2)}
+        # Round 20 (agent 421, F410-1): the minimum deposit of Arbitrum One and OP Mainnet is 25 since 2026-11-19 (the mint
+        # queue bound with the 25,000 bucket; test_queue_bound_r20). Base (held) keeps 21; every burn minimum is unchanged.
+        want = {'arbitrum-one': (5, 5, 25, 20, 0.5), 'op-mainnet': (5, 5, 25, 20, 0.5), 'base': (5, 5, 21, 20, 0.5), 'linea': (5, 15, 601, 600, 2)}
         for name, (dep, rel, min_dep, min_burn, ceiling) in want.items():
             spec = NETS[name]
             self.assertEqual((spec['feeBps']['deposit'], spec['feeBps']['release'], spec['minDeposit'], spec['l2MinBurn'],
@@ -362,7 +364,11 @@ class DeployGate(unittest.TestCase):
             floor = launch.min_burn_floor(spec['chainId'], spec['feeBps']['release'])
             for burn, ok in ((floor - 1, False), (floor, True)):
                 c = filled_vault(name)
-                c['vault']['policy'].update(l2MinBurn=burn, minDeposit=burn + 1000)
+                # Round 20 (agent 421): the minimum deposit stays the network's decided one. Before, this fixture lowered it
+                # with the burn (burn + 1000 units, under 1 USDC), which the mint queue bound now refuses on its own
+                # (test_queue_bound_r20); the rule under test here is the burn floor, and it is tested unchanged.
+                c['vault']['policy'].update(l2MinBurn=burn)
+                self.assertGreater(c['vault']['policy']['minDeposit'], burn + 1000)
                 rc, r = self.vault(c)
                 self.assertEqual(rc == 0, ok, (name, burn, r))
                 if not ok:
@@ -383,10 +389,17 @@ class DeployGate(unittest.TestCase):
         v = launch_fixture.filled_vault(launch_fixture.filled())
         self.assertEqual(self.vault(v)[1].get('decision'), 'config-valid')
         v['vault']['policy'].update(l2MinBurn=floor - 1, minDeposit=floor + 1000)
-        self.assertIn(f'is below {floor}', self.vault(v)[1]['reason'])
+        self.assertIn(f'is below {floor}', self.vault(v)[1]['reason'])    # the older burn rule answers before the queue bound
         v = launch_fixture.filled_vault(launch_fixture.filled())
-        v['vault']['policy'].update(l2MinBurn=10_000_000, minDeposit=11_000_000)   # the values before the schedule still pass the FLOOR
+        v['vault']['policy'].update(l2MinBurn=10_000_000)                          # the burn before the schedule still passes the FLOOR
         self.assertEqual(self.vault(v)[1].get('decision'), 'config-valid')         # (it is a floor, not the schedule: chain 1 is not pinned)
+        # Round 20 (agent 421, F410-1): the minimum DEPOSIT before the schedule (11 USDC) no longer passes on chain 1: with the
+        # 50,000 bucket of 2026-11-19 it would queue 9,095 honest mints with one more delay of lag, above MAX_PENDING.
+        v['vault']['policy'].update(l2MinBurn=10_000_000, minDeposit=11_000_000)
+        r = self.vault(v)[1]
+        self.assertEqual(r.get('decision'), 'refused')
+        self.assertIn('MAX_PENDING', r['reason'])
+        self.assertIn('9095', r['reason'])
 
     def test_no_flag_or_environment_variable_lifts_the_vault_tool(self):
         c = filled_vault('base')
@@ -830,7 +843,7 @@ class Generator(unittest.TestCase):
             for c in (signer, relayer):
                 self.assertEqual((c['source_chain_id'], c['eth_chain_id']), (spec['chainId'], spec['chainId']))
                 self.assertEqual(launch.config_conflicts(spec['chainId'], c, 'vigia'), [])
-                self.assertEqual((c['l2_chain_id'], c['l2_pins'], c['provenance']), (700770, 'mainnet-v2', True))
+                self.assertEqual((c['l2_chain_id'], c['l2_pins'], c['provenance']), (700770, 'mainnet-v3', True))
             self.assertEqual(launch.config_conflicts(spec['chainId'], half, 'eth_half'), [])
             self.assertEqual(signer['l2_source'], 'rebuild')
             self.assertEqual((signer['max_release_signs_per_hour'], signer['refused_retry']),
@@ -861,27 +874,38 @@ class Generator(unittest.TestCase):
 
     def test_preflight_refuses_a_network_that_is_not_launchable_and_a_contradicting_file(self):
         import preflight_signer
+
+        def l1_fetch(url, method, params=(), timeout=30):
+            # Round 20: the preflight reads the config's L1 RPCs for the accepted L2 program. No test reads a public
+            # endpoint: the answer is the reading recorded on 2026-11-19 (tools/signatario-stable/testdata).
+            asked.append(url)
+            return copy.deepcopy(l1_view)
+        asked = []
+        l1_view = next(iter(json.loads((ROOT / 'tools/signatario-stable/testdata/l1-readings-2026-11-19.json').read_text())['getl2settlement'].values()))
         with tempfile.TemporaryDirectory() as tmp:
             signer = json.loads((ROOT / 'deployments/op-mainnet/ops/signer.template.json').read_text())
             (Path(tmp) / 's.json').write_text(json.dumps(signer))
             for name in ('base', 'bnb', 'nowhere'):
-                report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', name, '--skip-dry-release', '--skip-binaries'])
+                report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', name, '--skip-dry-release', '--skip-binaries'], l1_fetch=l1_fetch)
                 self.assertEqual(preflight_signer.outcome(report, False), (1, 'fail'), name)
                 self.assertEqual({r['group'] for r in report.failed}, {'network'}, name)
-            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'])
+            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'], l1_fetch=l1_fetch)
             names = [r['check'] for r in report.failed]
             self.assertFalse(any('chain_id' in n for n in names), names)   # chain 10 is the decided value for this network
             self.assertFalse(any(r['group'] == 'network' for r in report.failed))
             signer['anchor_policy'] = 'finalized'
             (Path(tmp) / 's.json').write_text(json.dumps(signer))
-            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'])
+            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'], l1_fetch=l1_fetch)
             self.assertTrue(any(r['group'] == 'network' and 'anchor_policy' in r['detail'] for r in report.failed))
             # Round 18: a file that omits a key the registry sets fails the preflight too, as the daemons refuse it at start.
             del signer['anchor_policy']
             (Path(tmp) / 's.json').write_text(json.dumps(signer))
-            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'])
+            report = preflight_signer.run(['--config', str(Path(tmp) / 's.json'), '--network', 'op-mainnet', '--skip-dry-release', '--skip-binaries'], l1_fetch=l1_fetch)
             self.assertTrue(any(r['group'] == 'network' and 'states every anchor setting' in r['check'] and 'anchor_policy' in r['detail']
                                 for r in report.failed), [r for r in report.failed if r['group'] == 'network'])
+            self.assertEqual(set(asked), set(signer['l1_rpc_urls']))
+            self.assertTrue(all(r['result'] == 'pass' for r in report.rows if r['group'] == 'l2-live'))
+            self.assertEqual(sum(r['group'] == 'l2-live' for r in report.rows), 1)
 
 
 if __name__ == '__main__':

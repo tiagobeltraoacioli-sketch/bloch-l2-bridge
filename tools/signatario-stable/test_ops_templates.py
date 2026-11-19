@@ -5,7 +5,7 @@
 
 `signatario.py` builds its context through `l2_finality.pins_from_config`, which refuses chain 700770 without `l2_pins`. The
 relayer runs `signatario.py combine` for every mint and release, so a relayer template without the pins relays nothing.
-Checks: the signer and relayer templates carry "mainnet-v2" pins and `provenance: true` (the V3 launch design), the pins
+Checks: the signer and relayer templates carry the current pins ("mainnet-v3" since round 20; "mainnet-v2" is refused) and `provenance: true` (the V3 launch design), the pins
 load, and a copy without them is refused (the control). `deploy_pontes.py validate` also refuses mainnet configs while a template lacks them.
 """
 import copy
@@ -29,13 +29,21 @@ def check(name, cond, detail=''):
 ops = ROOT / 'deployments/mainnet/busdc-ops'
 for name in ('signer.template.json', 'relayer.template.json'):
     t = json.loads((ops / name).read_text())
-    check(f'{name}: chain 700770 with "l2_pins": "mainnet-v2"', t.get('l2_chain_id') == 700770 and t.get('l2_pins') == 'mainnet-v2', t.get('l2_pins'))
+    check(f'{name}: chain 700770 with "l2_pins": "{l2_finality.CURRENT_MAINNET_PINS}" (the current pin set; round 20: mainnet-v3)',
+          t.get('l2_chain_id') == 700770 and t.get('l2_pins') == l2_finality.CURRENT_MAINNET_PINS == 'mainnet-v3', t.get('l2_pins'))
     check(f'{name}: provenance true (V3 launch design)', t.get('provenance') is True)
     try:
         pins = l2_finality.pins_from_config(t)
         check(f'{name}: the pins load as signatario.py loads them', pins is not None and pins.get('l2_chain_id') == 700770)
     except l2_finality.NotFinal as e:
         check(f'{name}: the pins load as signatario.py loads them', False, e.reason)
+    old = copy.deepcopy(t)
+    old['l2_pins'] = 'mainnet-v2'
+    try:
+        l2_finality.pins_from_config(old)
+        check(f'control, {name} with the superseded "mainnet-v2": refused', False)
+    except l2_finality.NotFinal as e:
+        check(f'control, {name} with the superseded "mainnet-v2": refused', 'superseded' in e.reason, e.reason)
     bare = copy.deepcopy(t)
     bare.pop('l2_pins', None)
     try:

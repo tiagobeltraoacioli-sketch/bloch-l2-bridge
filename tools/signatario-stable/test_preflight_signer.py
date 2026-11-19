@@ -27,6 +27,37 @@ def addr(i):
     return '0x' + format(0xA306_0000 + i, '040x')
 
 
+L1_VIEW = next(iter(json.loads((HERE / 'testdata/l1-readings-2026-11-19.json').read_text())['getl2settlement'].values()))
+_L1_STAND_IN = []
+
+
+def l1_stand_in():
+    """Round 20: one loopback L1 RPC stand-in for the whole run (the command-line tests start preflight_signer.py as a
+    process, which reads the `l1_rpc_urls` of its config). It answers getl2settlement with what a public L1 RPC reported on
+    2026-11-19. No test reads a public endpoint: every signer config of these tests names only this stand-in."""
+    if not _L1_STAND_IN:
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                ask = json.loads(self.rfile.read(int(self.headers.get('content-length', 0))))
+                body = json.dumps({'jsonrpc': '2.0', 'id': ask.get('id'),
+                                   **({'result': L1_VIEW} if ask.get('method') == 'getl2settlement' else {'error': 'no such method'})}).encode()
+                self.send_response(200)
+                self.send_header('content-type', 'application/json')
+                self.send_header('content-length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        _L1_STAND_IN.append(server.server_address[1])
+    return [f'http://127.0.0.1:{_L1_STAND_IN[0]}', f'http://localhost:{_L1_STAND_IN[0]}']
+
+
 class Host:
     """A filled signer host in a temporary directory, every file private, the three binaries stand-ins."""
 
@@ -39,7 +70,7 @@ class Host:
             p = self.root / 'bin' / role
             p.write_bytes(f'stand-in {role}'.encode())
             self.bins[role] = p
-        pins = dict(l2_finality.MAINNET_V2)
+        pins = dict(l2_finality.MAINNET_V3)  # the current named set (round 20), with the stand-in binaries below
         pins['binaries'] = {r: hashlib.sha256(p.read_bytes()).hexdigest() for r, p in self.bins.items()}
         self.signer = json.loads((TEMPLATES / 'signer.template.json').read_text())
         self.signer.update(
@@ -49,7 +80,7 @@ class Host:
             db=str(self.root / 'work/db.json'), token=addr(1), token_code_keccak='0x' + '11' * 32, token_from_block=1,
             source_vault=addr(2), source_route='0x' + '22' * 32, vault_from_block=1,
             keystore=self.private('etc/l2-mint.keystore'), password_file=self.private('etc/l2-mint.password'),
-            eth_signer=addr(3), shared_dir=str(self.root / 'signatures'))
+            eth_signer=addr(3), shared_dir=str(self.root / 'signatures'), l1_rpc_urls=l1_stand_in())
         self.signer['feed'].update(publish_dir=str(self.root / 'publish'), status_file=str(self.root / 'work/feed.json'),
                                    peers=[f'http://192.0.2.{i}:8787' for i in range(1, 7)],
                                    mint_signers=[addr(10 + i) for i in range(7)],
@@ -71,6 +102,14 @@ class Host:
                                     release_signers=[addr(20 + i) for i in range(7)])
         self.signatario = self.root / 'bin/signatario-stand-in.py'
         self.answer(pf.DRY_REASON)
+        # Round 20: the preflight reads the L1 RPCs of the config for the accepted L2 program. The stand-in answers with
+        # what four public L1 RPCs reported on 2026-11-19 (testdata/l1-readings-2026-11-19.json); no test opens a socket.
+        self.l1_view = copy.deepcopy(L1_VIEW)
+        self.l1_asked = []
+
+    def l1_fetch(self, url, method, params=(), timeout=30):
+        self.l1_asked.append((url, method))
+        return copy.deepcopy(self.l1_view)
 
     def private(self, rel, text='x'):
         p = self.root / rel
@@ -93,7 +132,7 @@ raise SystemExit({code})
     def write(self, pinned=True):
         s = copy.deepcopy(self.signer)
         if pinned:
-            s['l2_pins'] = 'mainnet-v2'
+            s['l2_pins'] = getattr(self, 'pin_name', l2_finality.CURRENT_MAINNET_PINS)
         paths = {}
         for name, cfg in (('signer', s), ('eth-half', self.eth_half), ('relayer', self.relayer)):
             paths[name] = self.private(f'etc/{name}.json', json.dumps(cfg))
@@ -106,13 +145,13 @@ raise SystemExit({code})
             argv += ['--eth-half-config', paths['eth-half']]
         if relayer:
             argv += ['--relayer-config', paths['relayer']]
-        saved = dict(l2_finality.MAINNET_V2)
-        l2_finality.MAINNET_V2.update(self.pins)  # the stand-in binaries are "the pinned build" for this run
+        saved = dict(l2_finality.MAINNET_V3)
+        l2_finality.MAINNET_V3.update(self.pins)  # the stand-in binaries are "the pinned build" for this run
         try:
-            return pf.run(argv, signatario=self.signatario)
+            return pf.run(argv, signatario=self.signatario, l1_fetch=self.l1_fetch)
         finally:
-            l2_finality.MAINNET_V2.clear()
-            l2_finality.MAINNET_V2.update(saved)
+            l2_finality.MAINNET_V3.clear()
+            l2_finality.MAINNET_V3.update(saved)
 
 
 class PreflightSigner(unittest.TestCase):
@@ -135,8 +174,60 @@ class PreflightSigner(unittest.TestCase):
         self.assertFalse(any(r['result'] == 'warn' and (Path('/proc/mounts').exists() or 'survives a reboot' not in r['check'])
                              for r in report.rows))
 
+    def test_round20_the_l1_rpcs_are_asked_which_l2_program_the_l1_accepts(self):
+        report = self.host.run()
+        row = next(r for r in report.rows if r['group'] == 'l2-live')
+        self.assertEqual(row['result'], 'pass', row)
+        self.assertIn('bloch-l2-2026-11-17-launch-native-906336fd', row['detail'])
+        self.assertEqual(self.host.l1_asked, [(u, 'getl2settlement') for u in self.host.signer['l1_rpc_urls']])
+        self.assertEqual(len(self.host.l1_asked), 2)
+
+    def test_round20_a_stale_pin_fails_and_the_dry_release_is_not_run(self):
+        raw = bytearray(bytes.fromhex(self.host.l1_view['accepted']['statement']))
+        raw[l2_finality.STATEMENT_TAG_BYTES + 32 * 4] ^= 1  # the L1 has accepted a settlement of another guest program
+        self.host.l1_view['accepted']['statement'] = raw.hex()
+        report = self.host.run()
+        self.assertFails(report, 'the pins are not stale')
+        row = next(r for r in report.rows if r['group'] == 'l2-live')
+        self.assertIn('the L2 pins are STALE', row['detail'])
+        self.assertIn('guest ELF', row['detail'])
+        dry = next(r for r in report.rows if r['group'] == 'dry')
+        self.assertEqual((dry['result'], dry['detail'][:8]), ('FAIL', 'not run:'))
+        self.assertEqual(pf.outcome(report, False), (1, 'fail'))
+
+    def test_round20_no_flag_skips_the_l2_program_check(self):
+        self.host.l1_view['accepted'] = None
+        for flags in (('--skip-binaries',), ('--skip-dry-release',), ('--skip-binaries', '--skip-dry-release', '--allow-remote-eth-rpc')):
+            self.assertFails(self.host.run(*flags), 'the pins are not stale')
+        self.host.signer['l1_rpc_urls'] = []
+        self.assertFails(self.host.run('--skip-dry-release'), 'the pins are not stale')
+
+    def test_round20_the_command_line_reads_the_l1_rpcs_of_the_config(self):
+        paths = self.host.write()
+        done = subprocess.run([sys.executable, str(HERE / 'preflight_signer.py'), '--config', paths['signer'], '--json',
+                               '--skip-dry-release', '--skip-binaries'], capture_output=True, text=True)
+        rows = [r for r in json.loads(done.stdout)['checks'] if r['group'] == 'l2-live']
+        self.assertEqual([r['result'] for r in rows], ['pass'], rows)
+        self.assertIn('2 L1 RPC(s); accepted settlement e8a5ffa7', rows[0]['detail'])
+        closed = copy.deepcopy(self.host.signer)
+        closed['l1_rpc_urls'] = ['http://127.0.0.1:9', 'http://localhost:9']  # nothing listens: no reading, no pass
+        closed['l2_pins'] = l2_finality.CURRENT_MAINNET_PINS
+        path = self.host.private('etc/closed.json', json.dumps(closed))
+        done = subprocess.run([sys.executable, str(HERE / 'preflight_signer.py'), '--config', path, '--json', '--skip-dry-release',
+                               '--skip-binaries'], capture_output=True, text=True)
+        rows = [r for r in json.loads(done.stdout)['checks'] if r['group'] == 'l2-live']
+        self.assertEqual((done.returncode, [r['result'] for r in rows]), (1, ['FAIL']), rows)
+        self.assertIn('unreachable', rows[0]['detail'])
+
+    def test_round20_the_superseded_pin_name_fails_three_checks(self):
+        self.host.pin_name = 'mainnet-v2'
+        report = self.host.run()
+        for needle in ("signer l2_pins is 'mainnet-v3'", 'pinned launch build', 'the pins are not stale', 'dry release'):
+            self.assertFails(report, needle)
+        self.assertIn('superseded', next(r['detail'] for r in report.rows if r['group'] == 'l2-live'))
+
     def test_the_committed_templates_fail_on_every_tbd_value(self):
-        self.host.signer = json.loads((TEMPLATES / 'signer.template.json').read_text())
+        self.host.signer = {**json.loads((TEMPLATES / 'signer.template.json').read_text()), 'l1_rpc_urls': l1_stand_in()}
         self.host.eth_half = json.loads((TEMPLATES / 'eth-half.template.json').read_text())
         self.host.relayer = json.loads((TEMPLATES / 'relayer.template.json').read_text())
         report = self.host.run()

@@ -37,7 +37,8 @@ tools/signatario-gnb):
      rebuilt one; the code pin and the source fields are checked at finalized; the Burned log (selected by
      --burn-id when one transaction holds several, e.g. a smart wallet batch) is decoded and its burnId
      recomputed;
-  3b. with `l2_pins` (the v2 L2 build; "mainnet-v2" for chain 700770, l2_finality.py): the follower,
+  3b. with `l2_pins` (the v2 L2 build; for chain 700770 the current named set of l2_finality.py, "mainnet-v3" since
+     round 20: the L2 release that is live; the superseded "mainnet-v2" is refused): the follower,
      produce and settled-RPC binaries are the pinned v2 build (SHA-256); the follower status is the v2
      schema for the pinned network, chain and L2 genesis; the rebuild runs with the pinned network rules
      and timestamp rule, yields the pinned L2 genesis and reproduces every finalized settlement; the burn

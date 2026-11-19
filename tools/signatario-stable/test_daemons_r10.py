@@ -31,6 +31,17 @@ class R10S1SignerPins(unittest.TestCase):
     def test_the_mainnet_pins_name_the_launch_build(self):
         self.assertEqual(l2_finality.MAINNET_V2['binaries'], LAUNCH_BUILD)
 
+    def test_round20_the_template_pins_name_the_build_that_is_live(self):
+        """Round 20 (agent 421, F410-2): the same finding again, one release later. The template named the 2026-11-03 build
+        while the L2 went live with the release of 2026-11-17 (follower d4d2b99a, producer 598873ae). The template now names
+        the current pin set, which is that release; MAINNET_V2 above stays as the record of the earlier build."""
+        import json
+        template = json.loads((Path(__file__).resolve().parents[2] / 'deployments/mainnet/busdc-ops/signer.template.json').read_text())
+        self.assertEqual(l2_finality.pins_from_config(template)['binaries'], {
+            'follower': 'd4d2b99a20f6093cbaf2b9cebead41b3c6b4bf5aad37f2a091752746a659fe96',
+            'produce': '598873aef6770002297a710387969218dd7d684ea8e9d8bdcf067d43123b37db',
+            'settled_rpc': '53e88565c2a322f369c5f07d01fa00b11e1ef56fdb7b58c9e7af88c685eabb0d'})
+
     def test_control_the_binary_check_refuses_another_build(self):
         d = Path(tempfile.mkdtemp(prefix='a173-s-'))
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)

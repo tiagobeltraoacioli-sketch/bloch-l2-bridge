@@ -118,7 +118,8 @@ nothing of the bridge is deployed.
    | Base (held), BNB Smart Chain (out), Bitcoin, TRON, Solana, Stellar (held) | unchanged | unchanged | unchanged | not part of the decision |
 
    `refillPerSecond` is `floor(window / 86400)`, the rounding of the earlier value (10,000e6 / 86400 was stored as
-   115740). Unchanged: `windowSeconds` (24 h), thresholds (5 of 7, 6 of 7), 3 + 3 guardians, fees, minimum deposit and
+   115740). Unchanged: `windowSeconds` (24 h), thresholds (5 of 7, 6 of 7), 3 + 3 guardians, fees, minimum deposit (except
+   on Arbitrum One and OP Mainnet: 25 USDC, decided later the same day for the mint queue bound, section 7.3) and
    burn, pause times (72 h), T = 0, the 12 h mint delay. The largest single deposit and the largest single burn are the
    window (the contracts' own rule), so they rise with it.
 
@@ -171,7 +172,7 @@ nothing of the bridge is deployed.
 | Release quorum (5 of 7 Ethereum keys) compromised: what leaves before a pause | bucket 10,000, then 10,000 a day | Ethereum: 50,000, then 50,000 a day (1,562 USDC per 45 min of guardian grace); the three networks: 25,000, then 25,000 a day | bound by the bucket as before; five times (2.5 times) larger. This is the stated price of the decision |
 | The same over one 72 h cooldown gap (guardian chain ended) | 10,000 + 30,000 | Ethereum 50,000 + 150,000; networks 25,000 + 75,000 | 40% of the cap, as before (the ratio is unchanged) |
 | Time for the rate-limited path to empty a full vault | 10 days | 10 days | unchanged (cap = 10 windows); `switchDelay` 14 d still covers it (`vault_pontes.py`) |
-| `MAX_PENDING` 2,048: honest queue at the bucket rate / with one more 12 h delay of lag | 1,500 / 2,000 (10 USDC mints, contract comment); with the 2026-11-17 minimums: Ethereum 148 / 198, Arbitrum One and OP Mainnet 714 / 952, Linea 24 / 33 | Ethereum **742 / 990**; Arbitrum One and OP Mainnet **1,786 / 2,382**; Linea 62 / 83 | Ethereum and Linea fit. **F410-1 (Low, liveness): on Arbitrum One and OP Mainnet the queue fits at the bucket rate but not with one more delay of lag**: a full-rate stream of 21 USDC deposits fills it once executions lag about 5.3 h; `vigia.py` then sends no mint until executions free room (alert `mint-queue-full`; deposits wait, nothing is lost, nothing forged credits). Filling the queue costs the same capital as emptying the bucket (37,500 USDC in 21 USDC deposits), which already delays honest mints. Closed only by a higher minimum deposit on those two networks (25 USDC gives 2,000 with lag) or a smaller window: a fee-schedule decision, not taken here |
+| `MAX_PENDING` 2,048: honest queue at the bucket rate / with one more 12 h delay of lag | 1,500 / 2,000 (10 USDC mints, contract comment); with the 2026-11-17 minimums: Ethereum 148 / 198, Arbitrum One and OP Mainnet 714 / 952, Linea 24 / 33 | Ethereum **742 / 990**; Arbitrum One and OP Mainnet **1,500 / 2,000** with the minimum deposit of 25 USDC decided on 2026-11-19 (with the earlier 21 USDC: 1,786 / 2,382); Linea 62 / 83 | All four fit. **F410-1 (Low, liveness) is CLOSED (round 20, agent 421):** with 21 USDC the queue of Arbitrum One and OP Mainnet fitted at the bucket rate but not with one more delay of lag. Coordinator decision of 2026-11-19: minimum deposit **25 USDC** on those two networks; the minimum burn stays 20 (no rule of the repository ties the two beyond `l2MinBurn` <= minimum deposit less its fee). 25 puts the two networks exactly on the design point stated in the frozen token's comment (1,500 / 2,000 of 2,048), not far inside it: the least value the rule allows is 24.414319 USDC, a full-rate stream of smallest deposits fills the queue once executions lag 13.1 h beyond the mint delay (Ethereum: 63 h), and a second whole delay of lag would need 2,501 places. `vigia.py` then sends no mint until executions free room (alert `mint-queue-full`; deposits wait, nothing is lost, nothing forged credits). **The bound is now a rule under test**: `launch.py` `_check_queue` (chain 1 and every launchable network: bucket, refill, 12 h delay, minimum deposit less its fee, `MAX_PENDING`) makes the registry untrusted when it is broken, `vault_pontes.py validate` refuses a mainnet vault config or a vault and token pair that breaks it, and `tools/evm-nets/test_queue_bound_r20.py` (15 tests) holds the figures, the constants against the frozen contract, and the refusals |
 | Guardian cancel rate needed against a forger holding the mint quorum | 2.84 a minute (`MAX_PENDING` / 12 h); measured about 25 | the same | independent of the limits. Each forged candidate can now carry up to the bucket (50,000 / 25,000) |
 | Large-mint delay, T = 0 | every mint waits 12 h | the same | unchanged; a single mint is at most the window |
 | Releases a day at the smallest burn (window / `l2MinBurn`) | Ethereum 100; Arbitrum One, OP Mainnet 500; Linea 16 | Ethereum 500; Arbitrum One, OP Mainnet 1,250; Linea 41 | the signers' budget `max_release_signs_per_hour` is per burn, not per day: unaffected |
@@ -186,11 +187,13 @@ nothing of the bridge is deployed.
 ### 7.4 Not done / not proven
 
 - No external audit. No real key, nothing deployed, nothing sent to a public network.
-- F410-1 is open (a decision on the minimum deposit of Arbitrum One and OP Mainnet).
-- F410-2 is open (found on the way, not caused by the limits): the signers' L2 build pins (`l2_pins: mainnet-v2`,
-  `tools/signatario-stable/l2_finality.py`) name the L2 release of 2026-11-03, while the L2 went live with the release
-  of 2026-11-17; until a reviewed commit re-pins them no mint and no release can be certified on mainnet
-  (`docs/BRIDGE-OWNER-CEREMONY.md` section 0, item 5).
+- F410-1 is closed (round 20, agent 421: minimum deposit 25 USDC on Arbitrum One and OP Mainnet, and the queue bound as a
+  rule of the registry and of the vault tool; row above). Base keeps 21 USDC (held; its file is unchanged; with its
+  10,000 bucket the figures are 714 / 952).
+- F410-2 (found on the way, not caused by the limits) is CLOSED in round 20 by agent 421: the signers' L2 build pins
+  named the L2 release of 2026-11-03 (`l2_pins: mainnet-v2`) while the L2 went live with the release of 2026-11-17. The
+  current pin set is `mainnet-v3` (`tools/signatario-stable/l2_finality.py`), verified against the owner-signed release
+  and the live L1; `mainnet-v2` is refused; a stale pin is loud (`docs/BRIDGE-V3-OPERATOR-RUNBOOK.md` section 3a).
 - The DEX repository still pins the earlier limits (row above).
 - The held routes' limits were not reviewed against the new aggregate exposure; they are unchanged.
 

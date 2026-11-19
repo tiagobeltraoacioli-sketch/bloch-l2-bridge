@@ -448,7 +448,7 @@ is never counted as paid, is payable exactly once, and that no encoding of the m
    proofs): binaries checked, L2 rebuilt from L1 data, a real `Burned` log of the same token bytecode returned with
    its settled-finality facts, the token read at the finalized block; seven refusals (13 checks). Still not
    exercised: a bBTC burn on such an L2 (none exists; it needs new settled L2 blocks), so the vault-specific steps
-   after the finality path ran on anvil only; and the `mainnet-v2` pins, which pass only on signer hosts against
+   after the finality path ran on anvil only; and the mainnet pins (`mainnet-v3` since round 20; `mainnet-v2` at the time of this run), which pass only on signer hosts against
    mainnet L1. The regtest rehearsal still uses anvil's `finalized` tag. A mainnet vault config is refused without
    the pins.
 7. The guardian pause is read from the configured RPC for sweeps and refunds, and additionally from the verified L2

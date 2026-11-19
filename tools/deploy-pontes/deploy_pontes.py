@@ -97,6 +97,16 @@ class Refused(Exception):
     pass
 
 
+def current_l2_pins():
+    """The name of the signers' current L2 pin set (tools/signatario-stable/l2_finality.py): the one name a mainnet
+    operator template may carry. One source: the deploy tool does not keep a second copy of the name."""
+    tools = str(HERE.parent / 'signatario-stable')  # beside this file, whatever ROOT a caller points the templates at
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import l2_finality
+    return l2_finality.CURRENT_MAINNET_PINS
+
+
 def evm_launch():
     """tools/evm-nets/launch.py (the launch status and names of the other EVM source networks), or None in a tree without
     it. Loaded only for a source chain id other than 1: an Ethereum config never reaches it."""
@@ -473,7 +483,9 @@ def validate(cfg, rehearsal):
                 t = json.loads((ops / name).read_text())
             except (OSError, ValueError) as e:
                 refuse(False, f'{name}: unreadable ({e})')
-            refuse(t.get('l2_pins') == 'mainnet-v2', f'{name}: chain 700770 needs "l2_pins": "mainnet-v2" (signatario.py refuses without it)')
+            refuse(t.get('l2_pins') == current_l2_pins(),  # l2_finality.CURRENT_MAINNET_PINS
+                   f'{name}: chain 700770 needs "l2_pins": "{current_l2_pins()}", the pin set of the L2 release that is '
+                   'live (signatario.py refuses without it, and refuses a superseded set)')
             refuse(bool(t.get('provenance')) == (tok['contract'] == STABLE_V3['contract']),
                    f'{name}: "provenance" must be {str(tok["contract"] == STABLE_V3["contract"]).lower()} for {tok["contract"]}')
         # Owner decision 2026-11-02 (agent 175): guardians pause the vault on an evidenced forged mint, signers do not hold releases.
