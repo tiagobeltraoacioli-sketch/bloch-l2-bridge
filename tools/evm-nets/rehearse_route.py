@@ -36,6 +36,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import urllib.request
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -136,7 +137,9 @@ def probe(rig, token, actor, sig, *args):
     """(reverts?, bytes of return data) of a call as `actor`, then the same call sent: its status."""
     data = out(CAST, 'calldata', sig, *args)
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'from': actor, 'to': token, 'data': data}, 'latest']})
-    r = json.loads(out('curl', '-s', '-H', 'content-type: application/json', '-d', body, rig.eth))
+    req = urllib.request.Request(rig.eth, body.encode(), {'content-type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=300) as h:
+        r = json.loads(h.read())
     simulated = ('revert', 0) if 'error' in r else ('ok', (len(r['result']) - 2) // 2, r['result'][-2:] if len(r['result']) > 2 else '')
     sh(CAST, 'rpc', 'anvil_setBalance', actor, hex(10**20), '--rpc-url', rig.eth)
     sh(CAST, 'rpc', 'anvil_impersonateAccount', actor, '--rpc-url', rig.eth)
