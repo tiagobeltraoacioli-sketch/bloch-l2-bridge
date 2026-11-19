@@ -93,6 +93,15 @@ FOUNDRY = Path(os.environ.get('FOUNDRY_BIN', str(Path.home() / '.foundry/bin')))
 CAST, FORGE = str(FOUNDRY / 'cast'), str(FOUNDRY / 'forge')
 
 
+def native_ether():
+    """tools/signatario-stable/native_ether.py: the launch status and names of the native-ether route `ethereum-eth`
+    (round 20, agent 412). Loaded only for a config that names its L2 token (bETH)."""
+    if str(ROOT / 'tools/signatario-stable') not in sys.path:
+        sys.path.insert(0, str(ROOT / 'tools/signatario-stable'))
+    import native_ether as module
+    return module
+
+
 class Refused(Exception):
     pass
 
@@ -111,15 +120,6 @@ def evm_launch():
 def refuse(cond, message):
     if not cond:
         raise Refused(message)
-
-
-def native_ether():
-    """tools/signatario-stable/native_ether.py: the launch status and names of the native-ether route `ethereum-eth`
-    (round 20, agent 412). Loaded only for a config that names its L2 token (bETH)."""
-    if str(ROOT / 'tools/signatario-stable') not in sys.path:
-        sys.path.insert(0, str(ROOT / 'tools/signatario-stable'))
-    import native_ether as module
-    return module
 
 
 # ── small helpers ───────────────────────────────────────────────────────────
