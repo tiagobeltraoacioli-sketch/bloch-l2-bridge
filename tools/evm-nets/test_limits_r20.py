@@ -290,6 +290,7 @@ class Tools(unittest.TestCase):
         vp.validate(launch_fixture.filled_vault(tok), False, tok)  # the pair, as the ceremony validates it
 
     def test_the_vault_tool_refuses_every_other_cap_and_window(self):
+        older = newer = 0
         for name, (cap, window) in DECIDED.items():
             others = {
                 'the values before the decision': (100_000 * U, 10_000 * U, DAY),
@@ -311,8 +312,18 @@ class Tools(unittest.TestCase):
                 cfg['vault']['policy'].update(windowLimit=w, windowSeconds=s)
                 with self.assertRaises(vp.Refused, msg=(name, what)) as e:
                     vp.validate(cfg, False)
-                self.assertIn(f'launch limits of chain {CHAIN[name]} (decided 2026-11-19', str(e.exception), (name, what))
-                self.assertIn(f'cap {cap * U}, windowLimit {window * U}, windowSeconds {DAY}', str(e.exception), (name, what))
+                # Every one is refused. The older rule answers first where it applies (a cap that needs more than the
+                # 14 day switch delay to leave through the window); every other case is refused by the launch limits.
+                if -(-c // w) * s > cfg['vault']['policy']['switchDelay']:
+                    self.assertIn('switchDelay is too short for holders to exit', str(e.exception), (name, what))
+                    older += 1
+                else:
+                    self.assertIn(f'launch limits of chain {CHAIN[name]} (decided 2026-11-19', str(e.exception), (name, what))
+                    self.assertIn(f'cap {cap * U}, windowLimit {window * U}, windowSeconds {DAY}', str(e.exception), (name, what))
+                    newer += 1
+        # older rule: per route ten times the cap, half the window and a 48 hour window (20 or 100 days of exit), and on
+        # the three networks the Ethereum cap over their window (20 days): 4 x 3 + 3
+        self.assertEqual((older, newer), (15, 29))
 
     def test_the_token_tool_refuses_every_other_supply_cap_bucket_and_refill(self):
         for name, (cap, window) in DECIDED.items():
@@ -366,7 +377,7 @@ class Tools(unittest.TestCase):
         source = (HERE / 'launch.py').read_text()
         self.assertFalse('os.environ' in source or 'getenv' in source or 'import os' in source)
         cfg = a_vault('ethereum')
-        cfg['vault']['cap'] = 5_000_000 * U
+        cfg['vault']['cap'] = 600_000 * U
         with mock.patch.dict(os.environ, {'BLOCH_LIMITS': 'free', 'LAUNCH_OVERRIDE': '1', 'FORCE': '1', 'REHEARSAL': '1'}):
             self.refused(lambda: vp.validate(cfg, False), 'launch limits of chain 1')
         cfg['vault']['limitsOverride'] = True
